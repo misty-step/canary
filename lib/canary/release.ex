@@ -26,6 +26,7 @@ defmodule Canary.Release do
   defp run_migrations do
     path = Application.app_dir(:canary, "priv/repo/migrations")
     Ecto.Migrator.run(Canary.Repo, path, :up, all: true)
+
   rescue
     e -> Logger.warning("Migration skipped: #{inspect(e)}")
   end
