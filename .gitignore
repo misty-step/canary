@@ -1,0 +1,18 @@
+/_build/
+/deps/
+*.db
+*.db-shm
+*.db-wal
+/cover/
+erl_crash.dump
+*.ez
+*.beam
+/tmp/
+.env
+*.secret
+
+# Thinktank research outputs (not part of the project)
+/gentle-working-tundra/
+/polished-marching-river/
+/sunlit-moving-walnut/
+thinktank.log

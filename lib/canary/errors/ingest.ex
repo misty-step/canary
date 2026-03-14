@@ -1,0 +1,189 @@
+defmodule Canary.Errors.Ingest do
+  @moduledoc """
+  Error ingest pipeline: validate → group → persist → webhook.
+  Deep module: single public function, complex internal machinery.
+  """
+
+  alias Canary.{Repo, ID}
+  alias Canary.Schemas.{Error, ErrorGroup}
+  alias Canary.Errors.{Grouping, DedupCache}
+
+  @max_context_size 8_192
+  @max_fingerprint_elements 5
+  @max_fingerprint_element_len 256
+
+  @spec ingest(map()) :: {:ok, map()} | {:error, atom(), term()}
+  def ingest(attrs) do
+    with :ok <- validate_required(attrs),
+         :ok <- validate_context(attrs),
+         :ok <- validate_fingerprint(attrs) do
+      {group_hash, template} = Grouping.compute_group_hash(attrs)
+      now = DateTime.utc_now() |> DateTime.to_iso8601()
+      error_id = ID.error_id()
+
+      error_attrs = %{
+        service: attrs["service"],
+        error_class: attrs["error_class"],
+        message: String.slice(attrs["message"], 0, 4_096),
+        message_template: template,
+        stack_trace: truncate(attrs["stack_trace"], 32_768),
+        context: truncate_context(attrs["context"]),
+        severity: attrs["severity"] || "error",
+        environment: attrs["environment"] || "production",
+        group_hash: group_hash,
+        fingerprint: encode_fingerprint(attrs["fingerprint"]),
+        region: attrs["region"],
+        created_at: now
+      }
+
+      Repo.transaction(fn ->
+        {:ok, error} =
+          %Error{id: error_id}
+          |> Error.changeset(error_attrs)
+          |> Repo.insert()
+
+        {is_new, is_regression} = upsert_group(error, group_hash, template, now)
+
+        maybe_enqueue_webhooks(error, group_hash, is_new, is_regression)
+
+        %{
+          id: error.id,
+          group_hash: group_hash,
+          is_new_class: is_new
+        }
+      end)
+    end
+  end
+
+  defp validate_required(attrs) do
+    required = ~w(service error_class message)
+
+    missing =
+      Enum.filter(required, fn k ->
+        val = attrs[k]
+        is_nil(val) or val == ""
+      end)
+
+    case missing do
+      [] -> :ok
+      fields -> {:error, :validation_error, Enum.map(fields, &{&1, ["can't be blank"]})}
+    end
+  end
+
+  defp validate_context(%{"context" => ctx}) when is_map(ctx) do
+    json = Jason.encode!(ctx)
+
+    if byte_size(json) > @max_context_size do
+      {:error, :payload_too_large, "context exceeds #{@max_context_size} bytes"}
+    else
+      :ok
+    end
+  end
+
+  defp validate_context(_), do: :ok
+
+  defp validate_fingerprint(%{"fingerprint" => fp}) when is_list(fp) do
+    cond do
+      length(fp) > @max_fingerprint_elements ->
+        {:error, :validation_error, %{"fingerprint" => ["max #{@max_fingerprint_elements} elements"]}}
+
+      Enum.any?(fp, &(String.length(&1) > @max_fingerprint_element_len)) ->
+        {:error, :validation_error, %{"fingerprint" => ["elements max #{@max_fingerprint_element_len} chars"]}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_fingerprint(_), do: :ok
+
+  defp upsert_group(error, group_hash, template, now) do
+    case Repo.get(ErrorGroup, group_hash) do
+      nil ->
+        %ErrorGroup{group_hash: group_hash}
+        |> ErrorGroup.changeset(%{
+          service: error.service,
+          error_class: error.error_class,
+          message_template: template,
+          severity: error.severity,
+          first_seen_at: now,
+          last_seen_at: now,
+          total_count: 1,
+          last_error_id: error.id
+        })
+        |> Repo.insert!()
+
+        {true, false}
+
+      group ->
+        last_seen = group.last_seen_at
+        is_regression = regression?(last_seen, now)
+
+        group
+        |> ErrorGroup.changeset(%{
+          last_seen_at: now,
+          total_count: group.total_count + 1,
+          last_error_id: error.id
+        })
+        |> Repo.update!()
+
+        {false, is_regression}
+    end
+  end
+
+  defp regression?(last_seen, now) do
+    with {:ok, last_dt, _} <- DateTime.from_iso8601(last_seen),
+         {:ok, now_dt, _} <- DateTime.from_iso8601(now) do
+      DateTime.diff(now_dt, last_dt, :hour) >= 24
+    else
+      _ -> false
+    end
+  end
+
+  defp maybe_enqueue_webhooks(error, group_hash, is_new, is_regression) do
+    cond do
+      is_new and not DedupCache.seen_recently?(group_hash) ->
+        DedupCache.mark(group_hash)
+        enqueue_error_webhook("error.new_class", error, group_hash)
+
+      is_regression ->
+        enqueue_error_webhook("error.regression", error, group_hash)
+
+      true ->
+        :ok
+    end
+  end
+
+  defp enqueue_error_webhook(event, error, group_hash) do
+    payload = %{
+      event: event,
+      error: %{
+        id: error.id,
+        service: error.service,
+        error_class: error.error_class,
+        message: error.message,
+        severity: error.severity,
+        group_hash: group_hash
+      },
+      timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
+    }
+
+    Canary.Workers.WebhookDelivery.enqueue_for_event(event, payload)
+  end
+
+  defp truncate(nil, _max), do: nil
+  defp truncate(str, max), do: String.slice(str, 0, max)
+
+  defp truncate_context(nil), do: nil
+
+  defp truncate_context(ctx) when is_map(ctx) do
+    json = Jason.encode!(ctx)
+    if byte_size(json) <= @max_context_size, do: json, else: nil
+  end
+
+  defp truncate_context(ctx) when is_binary(ctx), do: ctx
+
+  defp encode_fingerprint(nil), do: nil
+  defp encode_fingerprint(fp) when is_list(fp), do: Jason.encode!(fp)
+  defp encode_fingerprint(fp) when is_binary(fp), do: fp
+end

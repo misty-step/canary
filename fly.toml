@@ -1,0 +1,35 @@
+app = "canary-obs"
+primary_region = "iad"
+kill_signal = "SIGTERM"
+kill_timeout = "30s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[mounts]
+  source = "canary_data"
+  destination = "/data"
+
+[env]
+  CANARY_DB_PATH = "/data/canary.db"
+  PHX_HOST = "canary-obs.fly.dev"
+  PORT = "4000"
+  PHX_SERVER = "true"
+
+[http_service]
+  internal_port = 4000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "15s"
+    interval = "30s"
+    method = "GET"
+    path = "/healthz"
+    timeout = "5s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
