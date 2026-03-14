@@ -89,7 +89,7 @@ defmodule Canary.Workers.WebhookDelivery do
 
         %{webhook_id: webhook.id, payload: payload, event: event}
         |> __MODULE__.new()
-        |> Oban.insert!()
+        |> Oban.insert()
       end
     end)
 
