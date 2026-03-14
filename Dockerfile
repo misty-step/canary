@@ -1,12 +1,5 @@
-ARG ELIXIR_VERSION=1.17.3
-ARG OTP_VERSION=27.1.2
-ARG DEBIAN_VERSION=bookworm-20240904-slim
-
-ARG BUILDER_IMAGE="hexpm/elixir:${ELIXIR_VERSION}-erlang-${OTP_VERSION}-debian-${DEBIAN_VERSION}"
-ARG RUNNER_IMAGE="debian:${DEBIAN_VERSION}"
-
-# --- Build stage ---
-FROM ${BUILDER_IMAGE} AS build
+# Use the official Elixir image for build
+FROM elixir:1.17-slim AS build
 
 RUN apt-get update -y && apt-get install -y build-essential git && rm -rf /var/lib/apt/lists/*
 
@@ -27,10 +20,10 @@ RUN mix compile
 RUN mix release
 
 # --- Runtime stage ---
-FROM ${RUNNER_IMAGE}
+FROM debian:bookworm-slim
 
 RUN apt-get update -y && \
-    apt-get install -y libstdc++6 openssl libncurses5 locales ca-certificates curl && \
+    apt-get install -y libstdc++6 openssl libncurses6 locales ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
 RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
