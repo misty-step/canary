@@ -57,6 +57,11 @@ defmodule Canary.Health.Manager do
     end)
 
     {:noreply, state}
+  rescue
+    e ->
+      Logger.warning("Health manager boot failed: #{inspect(e)}, retrying in 5s")
+      Process.send_after(self(), :boot, 5_000)
+      {:noreply, state}
   end
 
   @impl true

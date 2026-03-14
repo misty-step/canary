@@ -17,6 +17,8 @@ config :canary, CanaryWeb.Endpoint,
 
 config :canary, Oban, testing: :inline
 
+config :canary, run_migrations: false
+
 config :bcrypt_elixir, :log_rounds, 4
 
 config :logger, level: :warning
