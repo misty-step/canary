@@ -1,67 +1,39 @@
-# CLAUDE.md
+# CLAUDE
 
-## What This Is
+Self-hosted observability for agent-driven infrastructure. Elixir/Phoenix + SQLite.
 
-Canary — self-hosted observability for agent-driven infrastructure. Elixir/Phoenix + SQLite.
+## Footguns
 
-## Commands
+- **Ecto primary keys.** Custom string PKs (`ERR-nanoid`) must be set on the struct, not cast: `%Error{id: id} |> changeset(attrs)`. Casting silently drops the `id` field because it's not in the `@required`/`@optional` lists. (6 bugs in initial build.)
+- **Oban Lite tables.** Oban's SQLite engine does NOT auto-create its tables. The `Release` GenServer creates them via raw SQL before Oban starts. `Oban.Migrations.SQLite` exists but `Ecto.Migrator.run` can't invoke it (different migration behaviour). **KNOWN BUG:** The current raw SQL creation races with Oban startup — the `Release` GenServer's `Repo.query!` contends with the pool_size:1 connection that Ecto migrations are using. Needs fix: either bump pool_size during boot or create tables outside the Ecto pool.
+- **Req + Finch.** Cannot pass both `:finch` and `:connect_options` to `Req.request/1`. The `:finch` option implies connection management — use `:receive_timeout` for timeouts.
+- **ReadRepo is not in `ecto_repos`.** Only `Canary.Repo` runs migrations. Adding `ReadRepo` to `ecto_repos` makes `mix ecto.migrate` look for `priv/read_repo/migrations/` which doesn't exist.
+- **Fly.io port binding.** The prod endpoint config must explicitly include `port:` in the `http:` keyword list. A second `config :canary, CanaryWeb.Endpoint` block in `runtime.exs` replaces (not merges) the `http:` key — omitting `port:` causes random port binding.
+- **Health.Manager boot resilience.** Uses `rescue` in `handle_info(:boot)` to retry in 5s if DB isn't ready. Required because in test mode (Ecto sandbox) and during production boot races, the targets table may not exist yet.
 
-```bash
-mix setup                    # deps.get + ecto.create + ecto.migrate
-mix phx.server               # start on localhost:4000
-mix test                     # run all tests
-mix compile --warnings-as-errors  # strict compile
-```
+## Invariants
 
-## Architecture
+- `Canary.Repo` pool_size: 1. SQLite single-writer. All writes through this.
+- `StateMachine.transition/4` is pure. No side effects. Table-driven tests.
+- Summary generation is deterministic templates. No LLM on request path.
+- RFC 9457 Problem Details for all error responses.
+- No service names hardcoded. Targets/webhooks configured at runtime via API.
+- Seeds only create a bootstrap API key. No hardcoded targets.
 
-Single OTP application. Three subsystems:
-
-1. **Health checking** — GenServer-per-target under DynamicSupervisor. State machine: unknown → up → degraded → down. SSRF-guarded probes via shared Finch pool.
-2. **Error ingestion** — POST → validate → group (3 strategies: fingerprint, stack trace, message template) → persist (errors + error_groups upsert) → webhook.
-3. **Webhook broadcasting** — Oban workers with HMAC signing, circuit breaker, cooldown. At-least-once delivery.
-
-## Key Invariants
-
-- `Canary.Repo` pool_size: 1 (SQLite single-writer). All writes go through this.
-- `Canary.ReadRepo` pool_size: 4. All query API reads go through this.
-- `StateMachine.transition/4` is a pure function. No side effects. Test it with table-driven tests.
-- Summary generation is deterministic template strings. No LLM calls.
-- All error responses use RFC 9457 Problem Details.
-
-## File Organization
-
-- `lib/canary/health/` — health checking (GenServers, state machine, probes, SSRF)
-- `lib/canary/errors/` — error ingest (grouping, rate limiting, dedup)
-- `lib/canary/alerter/` — webhook delivery (signing, circuit breaker, cooldown)
-- `lib/canary/workers/` — Oban background jobs
-- `lib/canary/schemas/` — Ecto schemas
-- `lib/canary_web/` — Phoenix router, plugs, controllers
-
-## Testing
-
-```bash
-mix test                           # all 54 tests
-mix test test/canary/health/       # health subsystem
-mix test test/canary/errors/       # error subsystem
-```
-
-- Pure function tests (StateMachine, Grouping, Summary) are async
-- DB tests (Auth, Ingest) use Ecto sandbox, sync
-- Health.Manager retries gracefully in test (sandbox ownership)
-
-## Deployment
-
-Fly.io app: `canary-obs`, region: `iad`. SQLite at `/data/canary.db`.
+## Deploy
 
 ```bash
 flyctl deploy --app canary-obs --remote-only
+flyctl ssh console --app canary-obs -C "rm -f /data/canary.db*"  # nuclear reset
 flyctl logs --app canary-obs --no-tail
 ```
 
-## Conventions
+Bootstrap API key logged on first boot — grep for `"Bootstrap API key:"`. Store it; it won't be shown again.
 
-- IDs: `ERR-<nanoid>`, `TGT-<nanoid>`, `WHK-<nanoid>`, `KEY-<nanoid>`
-- Timestamps: ISO 8601 strings (SQLite TEXT columns)
-- Primary keys: set on struct (`%Error{id: id}`), not via changeset cast
-- Config: DB is canonical runtime config. Seeds bootstrap on first boot only.
+After deploy: re-register health targets and webhooks via API (they're in the DB that was just created fresh).
+
+## canary-watch
+
+Companion service at `misty-step/canary-watch`. Receives Canary webhooks, synthesizes GitHub issues via Gemini Flash structured output. Deployed at `canary-watch.fly.dev`.
+
+Webhook secret from Canary registration must match `CANARY_WEBHOOK_SECRET` in canary-watch. Rotate both together.
