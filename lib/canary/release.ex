@@ -27,6 +27,8 @@ defmodule Canary.Release do
     path = Application.app_dir(:canary, "priv/repo/migrations")
     Ecto.Migrator.run(Canary.Repo, path, :up, all: true)
 
+    # Oban Lite tables — use Oban's own migration, not hand-written SQL
+    Ecto.Migrator.run(Canary.Repo, [{0, Oban.Migrations.SQLite}], :up, all: true)
   rescue
     e -> Logger.warning("Migration skipped: #{inspect(e)}")
   end
