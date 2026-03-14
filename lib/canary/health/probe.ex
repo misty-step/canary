@@ -25,7 +25,6 @@ defmodule Canary.Health.Probe do
       url: target.url,
       headers: headers,
       receive_timeout: target.timeout_ms,
-      connect_options: [timeout: target.timeout_ms],
       redirect: true,
       max_redirects: 3,
       retry: false,
