@@ -57,7 +57,8 @@ defmodule Canary.Application do
 
   defp run_migrations do
     if Application.get_env(:canary, :run_migrations, true) do
-      Ecto.Migrator.run(Canary.Repo, :up, all: true)
+      path = Application.app_dir(:canary, "priv/repo/migrations")
+      Ecto.Migrator.run(Canary.Repo, path, :up, all: true)
     end
   rescue
     e -> require Logger; Logger.warning("Migration skipped: #{inspect(e)}")
