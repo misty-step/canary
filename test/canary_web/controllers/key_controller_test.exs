@@ -29,7 +29,7 @@ defmodule CanaryWeb.KeyControllerTest do
       body = json_response(conn, 200)
 
       assert is_list(body["keys"])
-      assert length(body["keys"]) >= 1
+      assert length(body["keys"]) >= 2
 
       Enum.each(body["keys"], fn k ->
         assert k["key_prefix"]

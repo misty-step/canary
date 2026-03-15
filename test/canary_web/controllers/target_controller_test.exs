@@ -23,7 +23,7 @@ defmodule CanaryWeb.TargetControllerTest do
       assert created["url"] == "https://example.com"
       assert created["active"] == true
 
-      # List
+      # List — sandbox preserves seeded targets, so check membership
       list_conn = get(conn, "/api/v1/targets")
       body = json_response(list_conn, 200)
       assert Enum.any?(body["targets"], &(&1["id"] == created["id"]))

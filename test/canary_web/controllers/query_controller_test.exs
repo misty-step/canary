@@ -19,13 +19,26 @@ defmodule CanaryWeb.QueryControllerTest do
       conn = get(conn, "/api/v1/query?service=query-test")
       body = json_response(conn, 200)
       assert body["service"] == "query-test"
-      assert is_list(body["groups"])
+      assert [group] = body["groups"]
+      assert group["error_class"] == "TestError"
+      assert group["count"] == 1
     end
 
     test "returns errors by class", %{conn: conn} do
+      # Seed errors across two services with distinct classes
+      for {svc, cls} <- [{"svc-a", "FooError"}, {"svc-b", "BarError"}] do
+        post(conn, "/api/v1/errors", %{
+          "service" => svc,
+          "error_class" => cls,
+          "message" => "msg"
+        })
+      end
+
       conn = get(conn, "/api/v1/query?group_by=error_class")
       body = json_response(conn, 200)
-      assert is_list(body["groups"])
+      classes = Enum.map(body["groups"], & &1["error_class"])
+      assert "FooError" in classes
+      assert "BarError" in classes
     end
 
     test "422 when no service or group_by", %{conn: conn} do

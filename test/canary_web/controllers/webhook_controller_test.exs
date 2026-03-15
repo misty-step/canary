@@ -32,6 +32,10 @@ defmodule CanaryWeb.WebhookControllerTest do
       # Delete
       delete_conn = delete(conn, "/api/v1/webhooks/#{created["id"]}")
       assert response(delete_conn, 204)
+
+      # Verify deleted
+      list_conn2 = get(conn, "/api/v1/webhooks")
+      assert json_response(list_conn2, 200)["webhooks"] == []
     end
 
     test "create rejects invalid event types", %{conn: conn} do

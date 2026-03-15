@@ -11,9 +11,10 @@ defmodule CanaryWeb.ErrorControllerTest do
     test "401 with RFC 9457 body when no auth header", %{conn: conn} do
       conn = post(conn, "/api/v1/errors", @valid_payload)
 
-      assert json_response(conn, 401)["code"] == "invalid_api_key"
-      assert json_response(conn, 401)["status"] == 401
-      assert json_response(conn, 401)["type"] =~ "invalid-api-key"
+      body = json_response(conn, 401)
+      assert body["code"] == "invalid_api_key"
+      assert body["status"] == 401
+      assert body["type"] =~ "invalid-api-key"
     end
 
     test "201 with error ID on valid payload", %{conn: conn} do
