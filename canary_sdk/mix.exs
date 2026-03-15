@@ -33,7 +33,7 @@ defmodule CanarySdk.MixProject do
     [
       licenses: ["MIT"],
       links: %{"GitHub" => @source_url},
-      files: ~w(lib mix.exs LICENSE)
+      files: ~w(lib mix.exs LICENSE .formatter.exs)
     ]
   end
 end

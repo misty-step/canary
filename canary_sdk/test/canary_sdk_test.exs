@@ -117,7 +117,7 @@ defmodule CanarySdkTest do
   end
 
   describe "self-referential loop prevention" do
-    test "drops errors originating from CanarySdk modules" do
+    test "drops errors originating from CanarySdk modules (class-name check)" do
       bypass = Bypass.open()
 
       Bypass.stub(bypass, "POST", "/api/v1/errors", fn conn ->
@@ -137,9 +137,63 @@ defmodule CanarySdkTest do
         service: "s"
       )
 
-      # Simulate an error from within the SDK
       Logger.error("** (CanarySdk.Client) connection refused")
       Process.sleep(200)
+    end
+
+    test "drops errors from sending process via process metadata flag" do
+      bypass = Bypass.open()
+
+      Bypass.stub(bypass, "POST", "/api/v1/errors", fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        payload = Jason.decode!(body)
+
+        if payload["message"] =~ "from sending task" do
+          flunk("Should not report errors from sending process")
+        end
+
+        Plug.Conn.resp(conn, 201, ~s({}))
+      end)
+
+      CanarySdk.attach(
+        endpoint: "http://localhost:#{bypass.port}",
+        api_key: "k",
+        service: "s"
+      )
+
+      # Simulate error from a process that has the sending flag set
+      Logger.metadata(canary_sdk_sending: true)
+      Logger.error("from sending task: ArgumentError")
+      Logger.metadata(canary_sdk_sending: nil)
+      Process.sleep(200)
+    end
+  end
+
+  describe "structured exception extraction" do
+    test "extracts error class and message from meta[:exception]" do
+      bypass = Bypass.open()
+      test_pid = self()
+
+      Bypass.expect_once(bypass, "POST", "/api/v1/errors", fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        payload = Jason.decode!(body)
+        send(test_pid, {:captured, payload})
+        Plug.Conn.resp(conn, 201, ~s({}))
+      end)
+
+      CanarySdk.attach(
+        endpoint: "http://localhost:#{bypass.port}",
+        api_key: "k",
+        service: "s"
+      )
+
+      exception = %RuntimeError{message: "structured boom"}
+
+      Logger.error("something", exception: exception, stacktrace: [])
+
+      assert_receive {:captured, payload}, 1_000
+      assert payload["error_class"] == "RuntimeError"
+      assert payload["message"] == "structured boom"
     end
   end
 end
