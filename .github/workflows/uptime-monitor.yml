@@ -5,6 +5,10 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
+concurrency:
+  group: uptime-monitor
+  cancel-in-progress: false
+
 jobs:
   healthcheck:
     runs-on: ubuntu-latest
@@ -18,15 +22,22 @@ jobs:
       - name: Check healthz
         id: check
         run: |
-          STATUS=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$TARGET_URL" || echo "000")
+          set +e
+          RESPONSE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$TARGET_URL")
+          CURL_EXIT=$?
+          set -e
 
-          if [ "$STATUS" != "200" ]; then
-            echo "First check failed ($STATUS), retrying in 15s..."
+          if [ "$RESPONSE" != "200" ]; then
+            echo "First check failed (HTTP $RESPONSE, curl exit $CURL_EXIT), retrying in 15s..."
             sleep 15
-            STATUS=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$TARGET_URL" || echo "000")
+            set +e
+            RESPONSE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$TARGET_URL")
+            CURL_EXIT=$?
+            set -e
           fi
 
-          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "status=$RESPONSE" >> "$GITHUB_OUTPUT"
+          echo "curl_exit=$CURL_EXIT" >> "$GITHUB_OUTPUT"
 
       - name: Find existing incident issue
         id: find
@@ -41,6 +52,16 @@ jobs:
             --jq '.[0].number // empty')
           echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
 
+      - name: Ensure label exists
+        if: steps.check.outputs.status != '200' && steps.find.outputs.issue == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create "$ISSUE_LABEL" \
+            --repo "${{ github.repository }}" \
+            --description "Automated: Canary healthz unreachable" \
+            --color "B60205" 2>/dev/null || true
+
       - name: Open incident issue
         if: steps.check.outputs.status != '200' && steps.find.outputs.issue == ''
         env:
@@ -53,6 +74,7 @@ jobs:
           The uptime monitor failed to reach \`${TARGET_URL}\`.
 
           **HTTP status:** ${{ steps.check.outputs.status }}
+          **curl exit code:** ${{ steps.check.outputs.curl_exit }}
           **Detected at:** ${DETECTED_AT}
 
           ### Runbook
@@ -78,4 +100,5 @@ jobs:
         run: |
           gh issue close "${{ steps.find.outputs.issue }}" \
             --repo "${{ github.repository }}" \
-            --comment "Canary is back up. Recovered at $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+            --comment "Canary is back up. Recovered at $(date -u +%Y-%m-%dT%H:%M:%SZ)." \
+            || true
