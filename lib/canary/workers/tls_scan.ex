@@ -6,7 +6,6 @@ defmodule Canary.Workers.TlsScan do
 
   use Oban.Worker, queue: :maintenance, max_attempts: 2
 
-  alias Canary.ReadRepo
   alias Canary.Schemas.{Target, TargetCheck}
   import Ecto.Query
 
@@ -18,7 +17,7 @@ defmodule Canary.Workers.TlsScan do
   def perform(_job) do
     targets =
       from(t in Target, where: t.active == 1 and like(t.url, "https://%"))
-      |> ReadRepo.all()
+      |> Canary.read_repo().all()
 
     Enum.each(targets, &check_tls_expiry/1)
     :ok
@@ -31,7 +30,7 @@ defmodule Canary.Workers.TlsScan do
         order_by: [desc: c.checked_at],
         limit: 1
       )
-      |> ReadRepo.one()
+      |> Canary.read_repo().one()
 
     case latest_check do
       %{tls_expires_at: expiry} when is_binary(expiry) ->

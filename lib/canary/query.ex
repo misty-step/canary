@@ -4,7 +4,6 @@ defmodule Canary.Query do
   All responses include deterministic summary strings.
   """
 
-  alias Canary.ReadRepo
   alias Canary.Schemas.{Error, ErrorGroup, Target, TargetCheck, TargetState}
   import Ecto.Query
 
@@ -21,7 +20,7 @@ defmodule Canary.Query do
         )
 
       query = apply_cursor(query, cursor)
-      groups = ReadRepo.all(query)
+      groups = Canary.read_repo().all(query)
 
       total = Enum.reduce(groups, 0, &(&1.total_count + &2))
 
@@ -76,21 +75,21 @@ defmodule Canary.Query do
           order_by: [desc: sum(g.total_count)],
           limit: 50
         )
-        |> ReadRepo.all()
+        |> Canary.read_repo().all()
 
       {:ok, %{window: window, groups: groups}}
     end
   end
 
   def error_detail(error_id) do
-    case ReadRepo.get(Error, error_id) do
+    case Canary.read_repo().get(Error, error_id) do
       nil -> {:error, :not_found}
       error -> {:ok, build_error_detail(error)}
     end
   end
 
   defp build_error_detail(error) do
-    group = ReadRepo.get(ErrorGroup, error.group_hash)
+    group = Canary.read_repo().get(ErrorGroup, error.group_hash)
 
     summary =
       Canary.Summary.error_detail(%{
@@ -130,7 +129,7 @@ defmodule Canary.Query do
   end
 
   def health_status do
-    targets = from(t in Target, order_by: t.name) |> ReadRepo.all()
+    targets = from(t in Target, order_by: t.name) |> Canary.read_repo().all()
     enriched = Enum.map(targets, &enrich_target/1)
     summary = Canary.Summary.health_status(%{targets: enriched})
 
@@ -138,7 +137,7 @@ defmodule Canary.Query do
   end
 
   defp enrich_target(target) do
-    state = ReadRepo.get(TargetState, target.id)
+    state = Canary.read_repo().get(TargetState, target.id)
 
     recent_checks =
       from(c in TargetCheck,
@@ -146,7 +145,7 @@ defmodule Canary.Query do
         order_by: [desc: c.checked_at],
         limit: 5
       )
-      |> ReadRepo.all()
+      |> Canary.read_repo().all()
 
     %{
       id: target.id,
@@ -181,7 +180,7 @@ defmodule Canary.Query do
           order_by: [desc: c.checked_at],
           limit: 500
         )
-        |> ReadRepo.all()
+        |> Canary.read_repo().all()
 
       {:ok, checks}
     end
