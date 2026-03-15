@@ -25,8 +25,7 @@ defmodule Canary.Health.Probe do
       url: target.url,
       headers: headers,
       receive_timeout: target.timeout_ms,
-      redirect: true,
-      max_redirects: 3,
+      redirect: false,
       retry: false,
       finch: Canary.Finch
     ]
@@ -89,6 +88,9 @@ defmodule Canary.Health.Probe do
 
   defp evaluate_response(status, body, target) do
     cond do
+      status in 300..399 ->
+        "redirect_not_followed"
+
       not status_matches?(status, target.expected_status) ->
         "status_mismatch"
 
