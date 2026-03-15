@@ -21,7 +21,7 @@ defmodule Canary.Workers.WebhookDelivery do
   def perform(%Oban.Job{
         args: %{"webhook_id" => webhook_id, "payload" => payload, "event" => event}
       }) do
-    case Canary.read_repo().get(Webhook, webhook_id) do
+    case Canary.Repos.read_repo().get(Webhook, webhook_id) do
       nil ->
         Logger.warning("Webhook #{webhook_id} not found, discarding")
         :ok
@@ -81,7 +81,7 @@ defmodule Canary.Workers.WebhookDelivery do
   def enqueue_for_event(event, payload) do
     webhooks =
       from(w in Webhook, where: w.active == 1)
-      |> Canary.read_repo().all()
+      |> Canary.Repos.read_repo().all()
       |> Enum.filter(&Webhook.subscribes_to?(&1, event))
 
     Enum.each(webhooks, fn webhook ->

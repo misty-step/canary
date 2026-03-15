@@ -35,7 +35,7 @@ defmodule Canary.Health.Manager do
 
   def list_targets do
     from(t in Target, order_by: t.name)
-    |> Canary.read_repo().all()
+    |> Canary.Repos.read_repo().all()
   end
 
   # --- Callbacks ---

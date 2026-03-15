@@ -20,7 +20,7 @@ defmodule Canary.Query do
         )
 
       query = apply_cursor(query, cursor)
-      groups = Canary.read_repo().all(query)
+      groups = Canary.Repos.read_repo().all(query)
 
       total = Enum.reduce(groups, 0, &(&1.total_count + &2))
 
@@ -75,21 +75,21 @@ defmodule Canary.Query do
           order_by: [desc: sum(g.total_count)],
           limit: 50
         )
-        |> Canary.read_repo().all()
+        |> Canary.Repos.read_repo().all()
 
       {:ok, %{window: window, groups: groups}}
     end
   end
 
   def error_detail(error_id) do
-    case Canary.read_repo().get(Error, error_id) do
+    case Canary.Repos.read_repo().get(Error, error_id) do
       nil -> {:error, :not_found}
       error -> {:ok, build_error_detail(error)}
     end
   end
 
   defp build_error_detail(error) do
-    group = Canary.read_repo().get(ErrorGroup, error.group_hash)
+    group = Canary.Repos.read_repo().get(ErrorGroup, error.group_hash)
 
     summary =
       Canary.Summary.error_detail(%{
@@ -129,7 +129,7 @@ defmodule Canary.Query do
   end
 
   def health_status do
-    targets = from(t in Target, order_by: t.name) |> Canary.read_repo().all()
+    targets = from(t in Target, order_by: t.name) |> Canary.Repos.read_repo().all()
     enriched = Enum.map(targets, &enrich_target/1)
     summary = Canary.Summary.health_status(%{targets: enriched})
 
@@ -137,7 +137,7 @@ defmodule Canary.Query do
   end
 
   defp enrich_target(target) do
-    state = Canary.read_repo().get(TargetState, target.id)
+    state = Canary.Repos.read_repo().get(TargetState, target.id)
 
     recent_checks =
       from(c in TargetCheck,
@@ -145,7 +145,7 @@ defmodule Canary.Query do
         order_by: [desc: c.checked_at],
         limit: 5
       )
-      |> Canary.read_repo().all()
+      |> Canary.Repos.read_repo().all()
 
     %{
       id: target.id,
@@ -180,7 +180,7 @@ defmodule Canary.Query do
           order_by: [desc: c.checked_at],
           limit: 500
         )
-        |> Canary.read_repo().all()
+        |> Canary.Repos.read_repo().all()
 
       {:ok, checks}
     end

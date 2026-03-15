@@ -11,7 +11,7 @@ defmodule CanaryWeb.WebhookController do
   )
 
   def index(conn, _params) do
-    webhooks = from(w in Webhook, order_by: w.created_at) |> Canary.read_repo().all()
+    webhooks = from(w in Webhook, order_by: w.created_at) |> Canary.Repos.read_repo().all()
 
     json(conn, %{
       webhooks:
@@ -92,7 +92,7 @@ defmodule CanaryWeb.WebhookController do
   end
 
   def test(conn, %{"id" => id}) do
-    case Canary.read_repo().get(Webhook, id) do
+    case Canary.Repos.read_repo().get(Webhook, id) do
       nil ->
         CanaryWeb.Plugs.ProblemDetails.render_error(
           conn,
