@@ -6,7 +6,7 @@ defmodule Canary.Health.Manager do
 
   use GenServer
 
-  alias Canary.{ID, ReadRepo, Repo}
+  alias Canary.{ID, Repo}
   alias Canary.Schemas.{Target, TargetState}
   alias Canary.Health.Supervisor, as: HealthSup
   import Ecto.Query
@@ -35,7 +35,7 @@ defmodule Canary.Health.Manager do
 
   def list_targets do
     from(t in Target, order_by: t.name)
-    |> ReadRepo.all()
+    |> Canary.Repos.read_repo().all()
   end
 
   # --- Callbacks ---

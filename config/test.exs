@@ -19,6 +19,10 @@ config :canary, Oban, testing: :inline
 
 config :canary, run_migrations: false
 
+# Route reads through write Repo in test for sandbox compatibility.
+# SQLite can't share transactions across separate repo pools.
+config :canary, :read_repo, Canary.Repo
+
 config :bcrypt_elixir, :log_rounds, 4
 
 config :logger, level: :warning
