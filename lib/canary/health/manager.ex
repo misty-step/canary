@@ -6,7 +6,7 @@ defmodule Canary.Health.Manager do
 
   use GenServer
 
-  alias Canary.{Repo, ReadRepo, ID}
+  alias Canary.{ID, ReadRepo, Repo}
   alias Canary.Schemas.{Target, TargetState}
   alias Canary.Health.Supervisor, as: HealthSup
   import Ecto.Query
@@ -83,6 +83,7 @@ defmodule Canary.Health.Manager do
 
     atom_attrs = atomize_keys(attrs)
     id = atom_attrs[:id] || attrs["id"]
+
     case %Target{id: id} |> Target.changeset(Map.drop(atom_attrs, [:id])) |> Repo.insert() do
       {:ok, target} ->
         ensure_target_state(target.id)

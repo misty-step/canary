@@ -4,7 +4,7 @@ defmodule Canary.Auth do
   Keys use format sk_<env>_<nanoid>. Stored as (prefix, bcrypt_hash).
   """
 
-  alias Canary.{Repo, ID}
+  alias Canary.{ID, Repo}
   alias Canary.Schemas.ApiKey
   import Ecto.Query
 
@@ -41,13 +41,17 @@ defmodule Canary.Auth do
         {:error, :invalid}
 
       candidates ->
-        Enum.find_value(candidates, fn key ->
-          if Bcrypt.verify_pass(raw_key, key.key_hash), do: {:ok, key}
-        end) || {:error, :invalid}
+        find_matching_key(candidates, raw_key)
     end
   end
 
   def verify_key(_), do: {:error, :invalid}
+
+  defp find_matching_key(candidates, raw_key) do
+    Enum.find_value(candidates, fn key ->
+      if Bcrypt.verify_pass(raw_key, key.key_hash), do: {:ok, key}
+    end) || {:error, :invalid}
+  end
 
   def list_keys do
     from(k in ApiKey, order_by: [desc: k.created_at])

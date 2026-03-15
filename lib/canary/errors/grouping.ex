@@ -11,7 +11,8 @@ defmodule Canary.Errors.Grouping do
     # 1. UUIDs
     {~r/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i, "<uuid>"},
     # 2. ISO 8601 timestamps
-    {~r/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:?\d{2})?\b/, "<timestamp>"},
+    {~r/\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:?\d{2})?\b/,
+     "<timestamp>"},
     # 3. Email addresses
     {~r/\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b/, "<email>"},
     # 4. File paths (Unix)
@@ -66,8 +67,7 @@ defmodule Canary.Errors.Grouping do
       fp =
         frames
         |> Enum.take(5)
-        |> Enum.map(&strip_line_number/1)
-        |> Enum.join("|")
+        |> Enum.map_join("|", &strip_line_number/1)
 
       sha256(attrs["service"] <> attrs["error_class"] <> fp)
     else
@@ -76,7 +76,7 @@ defmodule Canary.Errors.Grouping do
   end
 
   defp template_hash(service, error_class, template) do
-    sha256((service || "") <> (error_class || "") <> (template || ""))
+    sha256(to_string(service) <> to_string(error_class) <> to_string(template))
   end
 
   defp extract_in_project_frames(stack_trace, _attrs) do

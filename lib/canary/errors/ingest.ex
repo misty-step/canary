@@ -4,9 +4,9 @@ defmodule Canary.Errors.Ingest do
   Deep module: single public function, complex internal machinery.
   """
 
-  alias Canary.{Repo, ID}
+  alias Canary.Errors.{DedupCache, Grouping}
+  alias Canary.{ID, Repo}
   alias Canary.Schemas.{Error, ErrorGroup}
-  alias Canary.Errors.{Grouping, DedupCache}
 
   @max_context_size 8_192
   @max_fingerprint_elements 5
@@ -85,14 +85,23 @@ defmodule Canary.Errors.Ingest do
   defp validate_fingerprint(%{"fingerprint" => fp}) when is_list(fp) do
     cond do
       length(fp) > @max_fingerprint_elements ->
-        {:error, :validation_error, %{"fingerprint" => ["max #{@max_fingerprint_elements} elements"]}}
+        {:error, :validation_error,
+         %{"fingerprint" => ["max #{@max_fingerprint_elements} elements"]}}
+
+      Enum.any?(fp, &(not is_binary(&1))) ->
+        {:error, :validation_error, %{"fingerprint" => ["elements must be strings"]}}
 
       Enum.any?(fp, &(String.length(&1) > @max_fingerprint_element_len)) ->
-        {:error, :validation_error, %{"fingerprint" => ["elements max #{@max_fingerprint_element_len} chars"]}}
+        {:error, :validation_error,
+         %{"fingerprint" => ["elements max #{@max_fingerprint_element_len} chars"]}}
 
       true ->
         :ok
     end
+  end
+
+  defp validate_fingerprint(%{"fingerprint" => _}) do
+    {:error, :validation_error, %{"fingerprint" => ["must be a list of strings"]}}
   end
 
   defp validate_fingerprint(_), do: :ok
@@ -185,5 +194,4 @@ defmodule Canary.Errors.Ingest do
 
   defp encode_fingerprint(nil), do: nil
   defp encode_fingerprint(fp) when is_list(fp), do: Jason.encode!(fp)
-  defp encode_fingerprint(fp) when is_binary(fp), do: fp
 end

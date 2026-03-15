@@ -36,7 +36,9 @@ defmodule Canary.Errors.GroupingTest do
     end
 
     test "full example from spec" do
-      input = "user 123456 failed at <path> on 2026-03-14T18:00:00Z request 4a8f9c1d-1111-2222-3333-abcdefabcdef"
+      input =
+        "user 123456 failed at <path> on 2026-03-14T18:00:00Z request 4a8f9c1d-1111-2222-3333-abcdefabcdef"
+
       result = Grouping.strip_template(input)
       assert result =~ "<int>"
       assert result =~ "<timestamp>"
@@ -50,8 +52,19 @@ defmodule Canary.Errors.GroupingTest do
 
   describe "compute_group_hash/1" do
     test "uses fingerprint when provided" do
-      attrs1 = %{"service" => "svc", "error_class" => "E", "message" => "m", "fingerprint" => ["a", "b"]}
-      attrs2 = %{"service" => "svc", "error_class" => "E", "message" => "different", "fingerprint" => ["a", "b"]}
+      attrs1 = %{
+        "service" => "svc",
+        "error_class" => "E",
+        "message" => "m",
+        "fingerprint" => ["a", "b"]
+      }
+
+      attrs2 = %{
+        "service" => "svc",
+        "error_class" => "E",
+        "message" => "different",
+        "fingerprint" => ["a", "b"]
+      }
 
       {hash1, _} = Grouping.compute_group_hash(attrs1)
       {hash2, _} = Grouping.compute_group_hash(attrs2)
@@ -60,8 +73,19 @@ defmodule Canary.Errors.GroupingTest do
     end
 
     test "different fingerprints produce different hashes" do
-      attrs1 = %{"service" => "svc", "error_class" => "E", "message" => "m", "fingerprint" => ["a"]}
-      attrs2 = %{"service" => "svc", "error_class" => "E", "message" => "m", "fingerprint" => ["b"]}
+      attrs1 = %{
+        "service" => "svc",
+        "error_class" => "E",
+        "message" => "m",
+        "fingerprint" => ["a"]
+      }
+
+      attrs2 = %{
+        "service" => "svc",
+        "error_class" => "E",
+        "message" => "m",
+        "fingerprint" => ["b"]
+      }
 
       {hash1, _} = Grouping.compute_group_hash(attrs1)
       {hash2, _} = Grouping.compute_group_hash(attrs2)

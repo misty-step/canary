@@ -13,26 +13,36 @@ defmodule CanaryWeb.ErrorController do
 
         {:error, :validation_error, errors} when is_list(errors) ->
           CanaryWeb.Plugs.ProblemDetails.render_error(
-            conn, 422, "validation_error",
+            conn,
+            422,
+            "validation_error",
             "Request body has invalid fields.",
             %{errors: Map.new(errors)}
           )
 
         {:error, :validation_error, errors} when is_map(errors) ->
           CanaryWeb.Plugs.ProblemDetails.render_error(
-            conn, 422, "validation_error",
+            conn,
+            422,
+            "validation_error",
             "Request body has invalid fields.",
             %{errors: errors}
           )
 
         {:error, :payload_too_large, detail} ->
           CanaryWeb.Plugs.ProblemDetails.render_error(
-            conn, 413, "payload_too_large", detail
+            conn,
+            413,
+            "payload_too_large",
+            detail
           )
 
-        {:error, _} ->
+        _ ->
           CanaryWeb.Plugs.ProblemDetails.render_error(
-            conn, 500, "internal_error", "An unexpected error occurred."
+            conn,
+            500,
+            "internal_error",
+            "An unexpected error occurred."
           )
       end
     end
@@ -43,7 +53,10 @@ defmodule CanaryWeb.ErrorController do
       [len] ->
         if String.to_integer(len) > @max_body_size do
           CanaryWeb.Plugs.ProblemDetails.render_error(
-            conn, 413, "payload_too_large", "Request body exceeds 100KB limit."
+            conn,
+            413,
+            "payload_too_large",
+            "Request body exceeds 100KB limit."
           )
         else
           :ok

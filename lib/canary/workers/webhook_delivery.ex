@@ -9,9 +9,9 @@ defmodule Canary.Workers.WebhookDelivery do
     max_attempts: 4,
     priority: 1
 
+  alias Canary.Alerter.{CircuitBreaker, Cooldown, Signer}
   alias Canary.ReadRepo
   alias Canary.Schemas.Webhook
-  alias Canary.Alerter.{Signer, CircuitBreaker, Cooldown}
   import Ecto.Query
 
   require Logger
@@ -19,7 +19,9 @@ defmodule Canary.Workers.WebhookDelivery do
   @delivery_timeout 10_000
 
   @impl Oban.Worker
-  def perform(%Oban.Job{args: %{"webhook_id" => webhook_id, "payload" => payload, "event" => event}}) do
+  def perform(%Oban.Job{
+        args: %{"webhook_id" => webhook_id, "payload" => payload, "event" => event}
+      }) do
     case ReadRepo.get(Webhook, webhook_id) do
       nil ->
         Logger.warning("Webhook #{webhook_id} not found, discarding")

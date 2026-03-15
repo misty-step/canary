@@ -6,7 +6,8 @@ config :canary, CanaryWeb.Endpoint,
     exclude: [paths: ["/healthz", "/readyz"]]
   ]
 
-config :logger, level: :info,
+config :logger,
+  level: :info,
   default_formatter: [
     format: {Canary.JSONLogger, :format},
     metadata: [:request_id, :service, :target, :event]

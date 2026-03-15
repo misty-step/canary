@@ -10,61 +10,83 @@ defmodule CanaryWeb.TargetController do
   end
 
   def create(conn, params) do
-    allow_private = params["allow_private"] == true or
-                    Application.get_env(:canary, :allow_private_targets, false)
+    allow_private =
+      params["allow_private"] == true or
+        Application.get_env(:canary, :allow_private_targets, false)
 
-    with :ok <- SSRFGuard.validate_url(params["url"], allow_private) do
-      headers = if params["headers"], do: Jason.encode!(params["headers"]), else: nil
+    case SSRFGuard.validate_url(params["url"], allow_private) do
+      :ok ->
+        headers = if params["headers"], do: Jason.encode!(params["headers"]), else: nil
 
-      attrs =
-        params
-        |> Map.put("headers", headers)
+        attrs =
+          params
+          |> Map.put("headers", headers)
 
-      case Manager.add_target(attrs) do
-        {:ok, target} ->
-          conn |> put_status(201) |> json(target_json(target))
+        case Manager.add_target(attrs) do
+          {:ok, target} ->
+            conn |> put_status(201) |> json(target_json(target))
 
-        {:error, changeset} ->
-          CanaryWeb.Plugs.ProblemDetails.render_error(
-            conn, 422, "validation_error",
-            "Invalid target configuration.",
-            %{errors: format_errors(changeset)}
-          )
-      end
-    else
+          {:error, changeset} ->
+            CanaryWeb.Plugs.ProblemDetails.render_error(
+              conn,
+              422,
+              "validation_error",
+              "Invalid target configuration.",
+              %{errors: format_errors(changeset)}
+            )
+        end
+
       {:error, reason} ->
         CanaryWeb.Plugs.ProblemDetails.render_error(
-          conn, 422, "validation_error", "Invalid URL: #{reason}"
+          conn,
+          422,
+          "validation_error",
+          "Invalid URL: #{reason}"
         )
     end
   end
 
   def delete(conn, %{"id" => id}) do
     case Manager.remove_target(id) do
-      {:ok, _} -> conn |> put_status(204) |> text("")
+      {:ok, _} ->
+        conn |> put_status(204) |> text("")
+
       {:error, :not_found} ->
         CanaryWeb.Plugs.ProblemDetails.render_error(
-          conn, 404, "not_found", "Target not found."
+          conn,
+          404,
+          "not_found",
+          "Target not found."
         )
     end
   end
 
   def pause(conn, %{"id" => id}) do
     case Manager.pause_target(id) do
-      :ok -> json(conn, %{status: "paused"})
+      :ok ->
+        json(conn, %{status: "paused"})
+
       {:error, :not_found} ->
         CanaryWeb.Plugs.ProblemDetails.render_error(
-          conn, 404, "not_found", "Target not found."
+          conn,
+          404,
+          "not_found",
+          "Target not found."
         )
     end
   end
 
   def resume(conn, %{"id" => id}) do
     case Manager.resume_target(id) do
-      :ok -> json(conn, %{status: "resumed"})
+      :ok ->
+        json(conn, %{status: "resumed"})
+
       {:error, :not_found} ->
         CanaryWeb.Plugs.ProblemDetails.render_error(
-          conn, 404, "not_found", "Target not found."
+          conn,
+          404,
+          "not_found",
+          "Target not found."
         )
     end
   end

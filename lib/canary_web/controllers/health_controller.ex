@@ -30,7 +30,10 @@ defmodule CanaryWeb.HealthController do
 
       {:error, :invalid_window} ->
         CanaryWeb.Plugs.ProblemDetails.render_error(
-          conn, 422, "validation_error", "Invalid window."
+          conn,
+          422,
+          "validation_error",
+          "Invalid window."
         )
     end
   end

@@ -84,85 +84,93 @@ defmodule Canary.Query do
 
   def error_detail(error_id) do
     case ReadRepo.get(Error, error_id) do
-      nil ->
-        {:error, :not_found}
-
-      error ->
-        group = ReadRepo.get(ErrorGroup, error.group_hash)
-
-        summary =
-          Canary.Summary.error_detail(%{
-            error_class: error.error_class,
-            service: error.service,
-            count: (group && group.total_count) || 1,
-            first_seen: (group && group.first_seen_at) || error.created_at,
-            last_seen: (group && group.last_seen_at) || error.created_at
-          })
-
-        {:ok,
-         %{
-           summary: summary,
-           id: error.id,
-           service: error.service,
-           error_class: error.error_class,
-           message: error.message,
-           message_template: error.message_template,
-           stack_trace: error.stack_trace,
-           context: safe_decode_json(error.context),
-           severity: error.severity,
-           environment: error.environment,
-           group_hash: error.group_hash,
-           created_at: error.created_at,
-           group: group && %{
-             total_count: group.total_count,
-             first_seen_at: group.first_seen_at,
-             last_seen_at: group.last_seen_at,
-             status: group.status
-           }
-         }}
+      nil -> {:error, :not_found}
+      error -> {:ok, build_error_detail(error)}
     end
+  end
+
+  defp build_error_detail(error) do
+    group = ReadRepo.get(ErrorGroup, error.group_hash)
+
+    summary =
+      Canary.Summary.error_detail(%{
+        error_class: error.error_class,
+        service: error.service,
+        count: (group && group.total_count) || 1,
+        first_seen: (group && group.first_seen_at) || error.created_at,
+        last_seen: (group && group.last_seen_at) || error.created_at
+      })
+
+    %{
+      summary: summary,
+      id: error.id,
+      service: error.service,
+      error_class: error.error_class,
+      message: error.message,
+      message_template: error.message_template,
+      stack_trace: error.stack_trace,
+      context: safe_decode_json(error.context),
+      severity: error.severity,
+      environment: error.environment,
+      group_hash: error.group_hash,
+      created_at: error.created_at,
+      group: group_summary(group)
+    }
+  end
+
+  defp group_summary(nil), do: nil
+
+  defp group_summary(group) do
+    %{
+      total_count: group.total_count,
+      first_seen_at: group.first_seen_at,
+      last_seen_at: group.last_seen_at,
+      status: group.status
+    }
   end
 
   def health_status do
     targets = from(t in Target, order_by: t.name) |> ReadRepo.all()
-
-    enriched =
-      Enum.map(targets, fn target ->
-        state = ReadRepo.get(TargetState, target.id)
-
-        recent_checks =
-          from(c in TargetCheck,
-            where: c.target_id == ^target.id,
-            order_by: [desc: c.checked_at],
-            limit: 5
-          )
-          |> ReadRepo.all()
-
-        %{
-          id: target.id,
-          name: target.name,
-          url: target.url,
-          state: (state && state.state) || "unknown",
-          consecutive_failures: (state && state.consecutive_failures) || 0,
-          last_checked_at: state && state.last_checked_at,
-          last_success_at: state && state.last_success_at,
-          latency_ms: recent_checks |> List.first() |> then(&(&1 && &1.latency_ms)),
-          tls_expires_at: recent_checks |> Enum.find(&(&1 && &1.tls_expires_at)) |> then(&(&1 && &1.tls_expires_at)),
-          recent_checks:
-            Enum.map(recent_checks, fn c ->
-              %{
-                checked_at: c.checked_at,
-                result: c.result,
-                status_code: c.status_code,
-                latency_ms: c.latency_ms
-              }
-            end)
-        }
-      end)
-
+    enriched = Enum.map(targets, &enrich_target/1)
     summary = Canary.Summary.health_status(%{targets: enriched})
 
     %{summary: summary, targets: enriched}
+  end
+
+  defp enrich_target(target) do
+    state = ReadRepo.get(TargetState, target.id)
+
+    recent_checks =
+      from(c in TargetCheck,
+        where: c.target_id == ^target.id,
+        order_by: [desc: c.checked_at],
+        limit: 5
+      )
+      |> ReadRepo.all()
+
+    %{
+      id: target.id,
+      name: target.name,
+      url: target.url,
+      state: (state && state.state) || "unknown",
+      consecutive_failures: (state && state.consecutive_failures) || 0,
+      last_checked_at: state && state.last_checked_at,
+      last_success_at: state && state.last_success_at,
+      latency_ms: recent_checks |> List.first() |> then(&(&1 && &1.latency_ms)),
+      tls_expires_at:
+        recent_checks
+        |> Enum.find(&(&1 && &1.tls_expires_at))
+        |> then(&(&1 && &1.tls_expires_at)),
+      recent_checks:
+        Enum.map(recent_checks, fn c ->
+          %{
+            checked_at: c.checked_at,
+            result: c.result,
+            status_code: c.status_code,
+            latency_ms: c.latency_ms
+          }
+        end)
+    }
   end
 
   def target_checks(target_id, window) do
@@ -214,11 +222,13 @@ defmodule Canary.Query do
   end
 
   defp safe_decode_json(nil), do: nil
+
   defp safe_decode_json(json) when is_binary(json) do
     case Jason.decode(json) do
       {:ok, decoded} -> decoded
       _ -> json
     end
   end
+
   defp safe_decode_json(other), do: other
 end

@@ -7,9 +7,9 @@ defmodule Canary.Health.Checker do
 
   use GenServer, restart: :transient
 
+  alias Canary.Health.{Probe, SSRFGuard, StateMachine}
   alias Canary.Repo
   alias Canary.Schemas.{Target, TargetCheck, TargetState}
-  alias Canary.Health.{StateMachine, Probe, SSRFGuard}
 
   require Logger
 
@@ -73,8 +73,13 @@ defmodule Canary.Health.Checker do
   # --- Internal ---
 
   defp do_check(target, s) do
-    case SSRFGuard.validate_url(target.url, Application.get_env(:canary, :allow_private_targets, false)) do
-      :ok -> execute_probe(target, s)
+    case SSRFGuard.validate_url(
+           target.url,
+           Application.get_env(:canary, :allow_private_targets, false)
+         ) do
+      :ok ->
+        execute_probe(target, s)
+
       {:error, reason} ->
         Logger.warning("SSRF blocked: #{reason}", target: target.name)
         record_failure(target, s, "connection_error", reason)

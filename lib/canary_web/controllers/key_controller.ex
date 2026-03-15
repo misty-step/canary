@@ -39,17 +39,25 @@ defmodule CanaryWeb.KeyController do
 
       {:error, _} ->
         CanaryWeb.Plugs.ProblemDetails.render_error(
-          conn, 500, "internal_error", "Failed to generate API key."
+          conn,
+          500,
+          "internal_error",
+          "Failed to generate API key."
         )
     end
   end
 
   def revoke(conn, %{"id" => id}) do
     case Auth.revoke_key(id) do
-      {:ok, _} -> json(conn, %{status: "revoked"})
+      {:ok, _} ->
+        json(conn, %{status: "revoked"})
+
       {:error, :not_found} ->
         CanaryWeb.Plugs.ProblemDetails.render_error(
-          conn, 404, "not_found", "API key not found."
+          conn,
+          404,
+          "not_found",
+          "API key not found."
         )
     end
   end

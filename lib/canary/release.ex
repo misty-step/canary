@@ -31,7 +31,9 @@ defmodule Canary.Release do
   end
 
   defp run_seeds do
-    case Canary.Repo.query("SELECT seed_name FROM seed_runs WHERE seed_name = 'initial_config_v1'") do
+    case Canary.Repo.query(
+           "SELECT seed_name FROM seed_runs WHERE seed_name = 'initial_config_v1'"
+         ) do
       {:ok, %{rows: []}} ->
         Canary.Seeds.run()
 

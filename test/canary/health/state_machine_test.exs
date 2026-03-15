@@ -86,19 +86,31 @@ defmodule Canary.Health.StateMachineTest do
     test "recovered webhook on transition to up" do
       counters = %{initial() | consecutive_successes: 1}
       {_state, _c, effects} = StateMachine.transition(:down, :success, @defaults, counters)
-      assert Enum.any?(effects, fn {:webhook, :health_check_recovered, _} -> true; _ -> false end)
+
+      assert Enum.any?(effects, fn
+               {:webhook, :health_check_recovered, _} -> true
+               _ -> false
+             end)
     end
 
     test "degraded webhook on transition to degraded" do
       counters = %{initial() | consecutive_failures: 1}
       {_state, _c, effects} = StateMachine.transition(:up, :failure, @defaults, counters)
-      assert Enum.any?(effects, fn {:webhook, :health_check_degraded, _} -> true; _ -> false end)
+
+      assert Enum.any?(effects, fn
+               {:webhook, :health_check_degraded, _} -> true
+               _ -> false
+             end)
     end
 
     test "down webhook on transition to down" do
       counters = %{initial() | consecutive_failures: 3}
       {_state, _c, effects} = StateMachine.transition(:degraded, :failure, @defaults, counters)
-      assert Enum.any?(effects, fn {:webhook, :health_check_down, _} -> true; _ -> false end)
+
+      assert Enum.any?(effects, fn
+               {:webhook, :health_check_down, _} -> true
+               _ -> false
+             end)
     end
   end
 

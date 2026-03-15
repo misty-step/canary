@@ -19,13 +19,19 @@ defmodule CanaryWeb.Plugs.Auth do
             RateLimiter.check(ip, :auth_fail)
 
             CanaryWeb.Plugs.ProblemDetails.render_error(
-              conn, 401, "invalid_api_key", "Invalid or revoked API key."
+              conn,
+              401,
+              "invalid_api_key",
+              "Invalid or revoked API key."
             )
         end
 
       :error ->
         CanaryWeb.Plugs.ProblemDetails.render_error(
-          conn, 401, "invalid_api_key", "Missing Authorization header. Use: Bearer sk_..."
+          conn,
+          401,
+          "invalid_api_key",
+          "Missing Authorization header. Use: Bearer sk_..."
         )
     end
   end

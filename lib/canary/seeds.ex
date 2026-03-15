@@ -4,7 +4,7 @@ defmodule Canary.Seeds do
   Targets and webhooks are configured at runtime via API — not hardcoded.
   """
 
-  alias Canary.{Repo, Auth}
+  alias Canary.{Auth, Repo}
 
   require Logger
 
