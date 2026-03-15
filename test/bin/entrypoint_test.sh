@@ -9,24 +9,28 @@ FAIL=0
 TMPDIR_TEST=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_TEST"' EXIT
 
-# Stub: override exec and litestream so entrypoint doesn't actually launch anything
+reset_env() {
+  unset LITESTREAM_S3_BUCKET
+  unset LITESTREAM_ACCESS_KEY_ID
+  unset LITESTREAM_SECRET_ACCESS_KEY
+  unset LITESTREAM_S3_REGION
+}
+
 setup_stubs() {
   export PATH="$TMPDIR_TEST/bin:$PATH"
   mkdir -p "$TMPDIR_TEST/bin"
-  # exec replacement — just exit cleanly
   cat > "$TMPDIR_TEST/bin/litestream" << 'STUB'
 #!/bin/bash
-exit 0
+exit "${LITESTREAM_STUB_EXIT:-0}"
 STUB
   chmod +x "$TMPDIR_TEST/bin/litestream"
-  # Fake DB path so restore is skipped
   export CANARY_DB_PATH="$TMPDIR_TEST/canary.db"
   touch "$CANARY_DB_PATH"
 }
 
 run_entrypoint() {
-  # Run in subshell, capture stderr, override exec to just exit
-  bash -c "exec() { exit 0; }; source '$ENTRYPOINT'" 2>&1
+  # Override exec to echo what would run, then exit
+  bash -c "exec() { echo \"EXEC:\$*\"; exit 0; }; source '$ENTRYPOINT'" 2>&1
 }
 
 assert_contains() {
@@ -57,22 +61,19 @@ assert_not_contains() {
 
 # --- Test 1: No bucket → warn about missing replication ---
 echo "Test 1: LITESTREAM_S3_BUCKET unset"
+reset_env
 setup_stubs
-unset LITESTREAM_S3_BUCKET
-unset LITESTREAM_ACCESS_KEY_ID
-unset LITESTREAM_SECRET_ACCESS_KEY
-unset LITESTREAM_S3_REGION
 OUTPUT=$(run_entrypoint)
 assert_contains "$OUTPUT" "Litestream replication NOT configured — running without backups" \
   "warns about missing replication"
 
 # --- Test 2: Bucket set, creds missing → warn about missing vars ---
 echo "Test 2: LITESTREAM_S3_BUCKET set, ACCESS_KEY_ID missing"
+reset_env
 setup_stubs
 export LITESTREAM_S3_BUCKET="my-bucket"
 export LITESTREAM_SECRET_ACCESS_KEY="secret"
 export LITESTREAM_S3_REGION="us-east-1"
-unset LITESTREAM_ACCESS_KEY_ID
 OUTPUT=$(run_entrypoint)
 assert_contains "$OUTPUT" "LITESTREAM_ACCESS_KEY_ID" \
   "identifies missing ACCESS_KEY_ID"
@@ -81,6 +82,7 @@ assert_not_contains "$OUTPUT" "NOT configured" \
 
 # --- Test 3: All vars set → no warnings ---
 echo "Test 3: All Litestream vars set"
+reset_env
 setup_stubs
 export LITESTREAM_S3_BUCKET="my-bucket"
 export LITESTREAM_ACCESS_KEY_ID="key"
@@ -92,11 +94,9 @@ assert_not_contains "$OUTPUT" "WARNING" \
 
 # --- Test 4: Bucket set, multiple creds missing ---
 echo "Test 4: LITESTREAM_S3_BUCKET set, multiple vars missing"
+reset_env
 setup_stubs
 export LITESTREAM_S3_BUCKET="my-bucket"
-unset LITESTREAM_ACCESS_KEY_ID
-unset LITESTREAM_SECRET_ACCESS_KEY
-unset LITESTREAM_S3_REGION
 OUTPUT=$(run_entrypoint)
 assert_contains "$OUTPUT" "LITESTREAM_ACCESS_KEY_ID" \
   "identifies missing ACCESS_KEY_ID"
@@ -104,6 +104,29 @@ assert_contains "$OUTPUT" "LITESTREAM_SECRET_ACCESS_KEY" \
   "identifies missing SECRET_ACCESS_KEY"
 assert_contains "$OUTPUT" "LITESTREAM_S3_REGION" \
   "identifies missing S3_REGION"
+
+# --- Test 5: Missing creds → app starts directly, not via litestream ---
+echo "Test 5: Missing creds do not block startup"
+reset_env
+setup_stubs
+export LITESTREAM_S3_BUCKET="my-bucket"
+OUTPUT=$(run_entrypoint)
+assert_contains "$OUTPUT" "EXEC:/app/bin/canary start" \
+  "starts app directly when creds missing"
+assert_not_contains "$OUTPUT" "litestream replicate" \
+  "does not run litestream replicate when creds missing"
+
+# --- Test 6: All vars set → starts via litestream ---
+echo "Test 6: Full config starts via litestream"
+reset_env
+setup_stubs
+export LITESTREAM_S3_BUCKET="my-bucket"
+export LITESTREAM_ACCESS_KEY_ID="key"
+export LITESTREAM_SECRET_ACCESS_KEY="secret"
+export LITESTREAM_S3_REGION="us-east-1"
+OUTPUT=$(run_entrypoint)
+assert_contains "$OUTPUT" "EXEC:litestream replicate" \
+  "starts via litestream when fully configured"
 
 # --- Summary ---
 echo ""
