@@ -101,6 +101,21 @@ defmodule CanaryTriage.DispatchTest do
     end
   end
 
+  describe "unhandled health check events" do
+    test "tls_expiring falls through to unhandled (no crash)" do
+      payload = %{
+        "event" => "health_check.tls_expiring",
+        "target" => %{"name" => "canary-triage", "url" => "https://canary-triage.fly.dev"},
+        "tls_expires_at" => "2026-03-20T00:00:00Z",
+        "days_until_expiry" => 5,
+        "timestamp" => "2026-03-15T10:00:00Z"
+      }
+
+      body = Jason.encode!(payload)
+      assert {:error, {:unhandled_event, "health_check.tls_expiring"}} = Dispatch.handle(body, payload, sign(body))
+    end
+  end
+
   describe "signature verification" do
     test "rejects invalid signature" do
       payload = health_payload("health_check.degraded", "degraded")
