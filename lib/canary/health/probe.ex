@@ -89,9 +89,14 @@ defmodule Canary.Health.Probe do
 
   defp evaluate_response(status, body, target) do
     cond do
-      not status_matches?(status, target.expected_status) -> "status_mismatch"
-      target.body_contains && not String.contains?(body || "", target.body_contains) -> "body_mismatch"
-      true -> "success"
+      not status_matches?(status, target.expected_status) ->
+        "status_mismatch"
+
+      target.body_contains && not String.contains?(body || "", target.body_contains) ->
+        "body_mismatch"
+
+      true ->
+        "success"
     end
   end
 
@@ -103,7 +108,11 @@ defmodule Canary.Health.Probe do
         status >= lo and status <= hi
 
       String.contains?(expected, ",") ->
-        codes = String.split(expected, ",") |> Enum.map(&String.trim/1) |> Enum.map(&String.to_integer/1)
+        codes =
+          String.split(expected, ",")
+          |> Enum.map(&String.trim/1)
+          |> Enum.map(&String.to_integer/1)
+
         status in codes
 
       true ->

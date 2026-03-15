@@ -45,11 +45,19 @@ defmodule Canary.Health.StateMachine do
   end
 
   defp update_counters(counters, :success) do
-    %{counters | consecutive_successes: counters.consecutive_successes + 1, consecutive_failures: 0}
+    %{
+      counters
+      | consecutive_successes: counters.consecutive_successes + 1,
+        consecutive_failures: 0
+    }
   end
 
   defp update_counters(counters, :failure) do
-    %{counters | consecutive_failures: counters.consecutive_failures + 1, consecutive_successes: 0}
+    %{
+      counters
+      | consecutive_failures: counters.consecutive_failures + 1,
+        consecutive_successes: 0
+    }
   end
 
   defp compute_next_state(:unknown, :success, _t, c), do: {:up, c}

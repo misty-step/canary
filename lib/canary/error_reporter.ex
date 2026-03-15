@@ -13,8 +13,12 @@ defmodule Canary.ErrorReporter do
   @spec attach() :: :ok
   def attach do
     case :logger.add_handler(:canary_self_reporter, __MODULE__, %{}) do
-      :ok -> :ok
-      {:error, {:already_exist, _}} -> :ok
+      :ok ->
+        :ok
+
+      {:error, {:already_exist, _}} ->
+        :ok
+
       {:error, reason} ->
         Logger.warning("Failed to attach error reporter: #{inspect(reason)}")
         :ok
@@ -24,32 +28,30 @@ defmodule Canary.ErrorReporter do
   # :logger handler callback
   def log(%{level: level, msg: msg, meta: meta}, _config)
       when level in [:error, :emergency, :alert, :critical] do
-    try do
-      {error_class, message, stacktrace} = extract_error(msg, meta)
+    {error_class, message, stacktrace} = extract_error(msg, meta)
 
-      # Skip if this looks like our own reporting (prevent loops)
-      unless self_referential?(error_class) do
-        attrs = %{
-          "service" => "canary",
-          "error_class" => error_class,
-          "message" => String.slice(message, 0, 4_096),
-          "severity" => to_string(level),
-          "environment" => environment(),
-          "stack_trace" => stacktrace,
-          "context" => %{
-            "source" => "self_reporter",
-            "pid" => inspect(meta[:pid]),
-            "module" => inspect(meta[:mfa] && elem(meta[:mfa], 0))
-          }
+    # Skip if this looks like our own reporting (prevent loops)
+    unless self_referential?(error_class) do
+      attrs = %{
+        "service" => "canary",
+        "error_class" => error_class,
+        "message" => String.slice(message, 0, 4_096),
+        "severity" => to_string(level),
+        "environment" => environment(),
+        "stack_trace" => stacktrace,
+        "context" => %{
+          "source" => "self_reporter",
+          "pid" => inspect(meta[:pid]),
+          "module" => inspect(meta[:mfa] && elem(meta[:mfa], 0))
         }
+      }
 
-        # Direct ingest — no HTTP. We ARE the server.
-        Canary.Errors.Ingest.ingest(attrs)
-      end
-    rescue
-      # Never crash from error reporting
-      _ -> :ok
+      # Direct ingest — no HTTP. We ARE the server.
+      Canary.Errors.Ingest.ingest(attrs)
     end
+  rescue
+    # Never crash from error reporting
+    _ -> :ok
   end
 
   def log(_event, _config), do: :ok

@@ -36,8 +36,7 @@ defmodule Canary.Summary do
       if degraded > 0 do
         degraded_names =
           (by_state["degraded"] || [])
-          |> Enum.map(& &1.name)
-          |> Enum.join(", ")
+          |> Enum.map_join(", ", & &1.name)
 
         parts ++ [", #{degraded} degraded (#{degraded_names})"]
       else
@@ -48,8 +47,7 @@ defmodule Canary.Summary do
       if down > 0 do
         down_names =
           (by_state["down"] || [])
-          |> Enum.map(& &1.name)
-          |> Enum.join(", ")
+          |> Enum.map_join(", ", & &1.name)
 
         parts ++ [", #{down} down (#{down_names})"]
       else
@@ -60,7 +58,13 @@ defmodule Canary.Summary do
   end
 
   @spec error_detail(map()) :: String.t()
-  def error_detail(%{error_class: error_class, service: service, count: count, first_seen: first_seen, last_seen: last_seen}) do
+  def error_detail(%{
+        error_class: error_class,
+        service: service,
+        count: count,
+        first_seen: first_seen,
+        last_seen: last_seen
+      }) do
     "#{error_class} in #{service}. Seen #{count} times since #{first_seen}. Last occurrence: #{last_seen}."
   end
 end

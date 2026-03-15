@@ -37,7 +37,12 @@ defmodule Canary.Errors.IngestTest do
       attrs = Map.put(@valid_attrs, "fingerprint", ["custom-group"])
       {:ok, r1} = Ingest.ingest(attrs)
 
-      attrs2 = Map.merge(@valid_attrs, %{"message" => "totally different", "fingerprint" => ["custom-group"]})
+      attrs2 =
+        Map.merge(@valid_attrs, %{
+          "message" => "totally different",
+          "fingerprint" => ["custom-group"]
+        })
+
       {:ok, r2} = Ingest.ingest(attrs2)
 
       assert r1.group_hash == r2.group_hash

@@ -2,6 +2,8 @@ defmodule Canary.Schemas.Target do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @type t :: %__MODULE__{}
+
   @primary_key {:id, :string, autogenerate: false}
   schema "targets" do
     field :url, :string

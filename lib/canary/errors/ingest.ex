@@ -4,15 +4,15 @@ defmodule Canary.Errors.Ingest do
   Deep module: single public function, complex internal machinery.
   """
 
-  alias Canary.{Repo, ID}
+  alias Canary.Errors.{DedupCache, Grouping}
+  alias Canary.{ID, Repo}
   alias Canary.Schemas.{Error, ErrorGroup}
-  alias Canary.Errors.{Grouping, DedupCache}
 
   @max_context_size 8_192
   @max_fingerprint_elements 5
   @max_fingerprint_element_len 256
 
-  @spec ingest(map()) :: {:ok, map()} | {:error, atom(), term()}
+  @spec ingest(map()) :: {:ok, map()} | {:error, atom(), term()} | {:error, term()}
   def ingest(attrs) do
     with :ok <- validate_required(attrs),
          :ok <- validate_context(attrs),
@@ -85,10 +85,12 @@ defmodule Canary.Errors.Ingest do
   defp validate_fingerprint(%{"fingerprint" => fp}) when is_list(fp) do
     cond do
       length(fp) > @max_fingerprint_elements ->
-        {:error, :validation_error, %{"fingerprint" => ["max #{@max_fingerprint_elements} elements"]}}
+        {:error, :validation_error,
+         %{"fingerprint" => ["max #{@max_fingerprint_elements} elements"]}}
 
       Enum.any?(fp, &(String.length(&1) > @max_fingerprint_element_len)) ->
-        {:error, :validation_error, %{"fingerprint" => ["elements max #{@max_fingerprint_element_len} chars"]}}
+        {:error, :validation_error,
+         %{"fingerprint" => ["elements max #{@max_fingerprint_element_len} chars"]}}
 
       true ->
         :ok

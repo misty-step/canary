@@ -5,15 +5,16 @@ defmodule Canary.SummaryTest do
 
   describe "error_query/1" do
     test "generates summary with groups" do
-      result = Summary.error_query(%{
-        total: 5,
-        service: "cadence",
-        window: "1h",
-        groups: [
-          %{error_class: "Ecto.NoResultsError", total_count: 3},
-          %{error_class: "RuntimeError", total_count: 2}
-        ]
-      })
+      result =
+        Summary.error_query(%{
+          total: 5,
+          service: "cadence",
+          window: "1h",
+          groups: [
+            %{error_class: "Ecto.NoResultsError", total_count: 3},
+            %{error_class: "RuntimeError", total_count: 2}
+          ]
+        })
 
       assert result =~ "5 errors in cadence"
       assert result =~ "1h"
@@ -22,12 +23,13 @@ defmodule Canary.SummaryTest do
     end
 
     test "handles empty groups" do
-      result = Summary.error_query(%{
-        total: 0,
-        service: "cadence",
-        window: "1h",
-        groups: []
-      })
+      result =
+        Summary.error_query(%{
+          total: 0,
+          service: "cadence",
+          window: "1h",
+          groups: []
+        })
 
       assert result =~ "0 errors"
       assert result =~ "0 unique classes"
@@ -36,14 +38,15 @@ defmodule Canary.SummaryTest do
 
   describe "health_status/1" do
     test "generates summary with mixed states" do
-      result = Summary.health_status(%{
-        targets: [
-          %{name: "api", state: "up"},
-          %{name: "web", state: "up"},
-          %{name: "db", state: "degraded"},
-          %{name: "cache", state: "down"}
-        ]
-      })
+      result =
+        Summary.health_status(%{
+          targets: [
+            %{name: "api", state: "up"},
+            %{name: "web", state: "up"},
+            %{name: "db", state: "degraded"},
+            %{name: "cache", state: "down"}
+          ]
+        })
 
       assert result =~ "4 targets monitored"
       assert result =~ "2 up"
@@ -52,12 +55,13 @@ defmodule Canary.SummaryTest do
     end
 
     test "all up" do
-      result = Summary.health_status(%{
-        targets: [
-          %{name: "api", state: "up"},
-          %{name: "web", state: "up"}
-        ]
-      })
+      result =
+        Summary.health_status(%{
+          targets: [
+            %{name: "api", state: "up"},
+            %{name: "web", state: "up"}
+          ]
+        })
 
       assert result =~ "2 targets monitored. 2 up."
       refute result =~ "degraded"
@@ -67,13 +71,14 @@ defmodule Canary.SummaryTest do
 
   describe "error_detail/1" do
     test "generates detail summary" do
-      result = Summary.error_detail(%{
-        error_class: "RuntimeError",
-        service: "cadence",
-        count: 42,
-        first_seen: "2026-03-14T10:00:00Z",
-        last_seen: "2026-03-14T18:00:00Z"
-      })
+      result =
+        Summary.error_detail(%{
+          error_class: "RuntimeError",
+          service: "cadence",
+          count: 42,
+          first_seen: "2026-03-14T10:00:00Z",
+          last_seen: "2026-03-14T18:00:00Z"
+        })
 
       assert result =~ "RuntimeError in cadence"
       assert result =~ "42 times"

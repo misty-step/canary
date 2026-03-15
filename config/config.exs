@@ -9,11 +9,9 @@ config :canary,
   in_project_module_prefixes: [],
   in_project_path_prefixes: []
 
-config :canary, Canary.Repo,
-  adapter: Ecto.Adapters.SQLite3
+config :canary, Canary.Repo, adapter: Ecto.Adapters.SQLite3
 
-config :canary, Canary.ReadRepo,
-  adapter: Ecto.Adapters.SQLite3
+config :canary, Canary.ReadRepo, adapter: Ecto.Adapters.SQLite3
 
 config :canary, CanaryWeb.Endpoint,
   url: [host: "localhost"],
@@ -38,7 +36,7 @@ config :canary, Oban,
 
 config :logger, :default_formatter,
   format: "$time $metadata[$level] $message\n",
-  metadata: [:request_id]
+  metadata: [:request_id, :target, :event]
 
 config :phoenix, :json_library, Jason
 

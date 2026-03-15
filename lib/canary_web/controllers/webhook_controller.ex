@@ -1,7 +1,7 @@
 defmodule CanaryWeb.WebhookController do
   use CanaryWeb, :controller
 
-  alias Canary.{Repo, ReadRepo, ID}
+  alias Canary.{ID, ReadRepo, Repo}
   alias Canary.Schemas.Webhook
   import Ecto.Query
 
@@ -34,7 +34,9 @@ defmodule CanaryWeb.WebhookController do
 
     if invalid != [] do
       CanaryWeb.Plugs.ProblemDetails.render_error(
-        conn, 422, "validation_error",
+        conn,
+        422,
+        "validation_error",
         "Invalid event types: #{Enum.join(invalid, ", ")}"
       )
     else
@@ -42,6 +44,7 @@ defmodule CanaryWeb.WebhookController do
       now = DateTime.utc_now() |> DateTime.to_iso8601()
 
       wh_id = ID.webhook_id()
+
       attrs = %{
         url: params["url"],
         events: Jason.encode!(events),
@@ -63,7 +66,10 @@ defmodule CanaryWeb.WebhookController do
 
         {:error, _cs} ->
           CanaryWeb.Plugs.ProblemDetails.render_error(
-            conn, 422, "validation_error", "Invalid webhook configuration."
+            conn,
+            422,
+            "validation_error",
+            "Invalid webhook configuration."
           )
       end
     end
@@ -73,7 +79,10 @@ defmodule CanaryWeb.WebhookController do
     case Repo.get(Webhook, id) do
       nil ->
         CanaryWeb.Plugs.ProblemDetails.render_error(
-          conn, 404, "not_found", "Webhook not found."
+          conn,
+          404,
+          "not_found",
+          "Webhook not found."
         )
 
       webhook ->
@@ -86,7 +95,10 @@ defmodule CanaryWeb.WebhookController do
     case ReadRepo.get(Webhook, id) do
       nil ->
         CanaryWeb.Plugs.ProblemDetails.render_error(
-          conn, 404, "not_found", "Webhook not found."
+          conn,
+          404,
+          "not_found",
+          "Webhook not found."
         )
 
       webhook ->

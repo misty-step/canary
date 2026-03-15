@@ -3,6 +3,7 @@ defmodule CanaryWeb.Router do
 
   pipeline :api do
     plug :accepts, ["json"]
+
     plug Plug.Parsers,
       parsers: [:json],
       pass: ["application/json"],

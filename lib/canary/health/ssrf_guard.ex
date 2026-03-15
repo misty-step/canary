@@ -24,9 +24,8 @@ defmodule Canary.Health.SSRFGuard do
   @spec validate_url(String.t(), boolean()) :: :ok | {:error, String.t()}
   def validate_url(url, allow_private \\ false) do
     with {:ok, uri} <- parse_uri(url),
-         :ok <- validate_scheme(uri),
-         :ok <- validate_host(uri, allow_private) do
-      :ok
+         :ok <- validate_scheme(uri) do
+      validate_host(uri, allow_private)
     end
   end
 
@@ -85,7 +84,7 @@ defmodule Canary.Health.SSRFGuard do
 
   defp ip_blocked?(ip, false) when tuple_size(ip) == 8 do
     ip == {0, 0, 0, 0, 0, 0, 0, 1} or
-      (elem(ip, 0) == 0xFE80)
+      elem(ip, 0) == 0xFE80
   end
 
   defp ip_blocked?(_, _), do: false
