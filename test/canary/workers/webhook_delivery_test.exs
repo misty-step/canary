@@ -55,15 +55,23 @@ defmodule Canary.Workers.WebhookDeliveryTest do
       assert :ok = WebhookDelivery.perform(job)
     end
 
-    test "skips when circuit breaker is open", %{webhook_id: wid} do
+    test "skips when circuit breaker is open", %{bypass: bypass, webhook_id: wid} do
       for _ <- 1..10, do: CircuitBreaker.record_failure(wid)
       assert CircuitBreaker.open?(wid)
+
+      test_pid = self()
+
+      Bypass.stub(bypass, "POST", "/hook", fn conn ->
+        send(test_pid, :webhook_delivered)
+        Plug.Conn.resp(conn, 200, "ok")
+      end)
 
       job = %Oban.Job{
         args: %{"webhook_id" => wid, "payload" => %{}, "event" => "error.new_class"}
       }
 
       assert :ok = WebhookDelivery.perform(job)
+      refute_received :webhook_delivered
     end
 
     test "returns error on non-2xx response", %{bypass: bypass, webhook_id: wid} do
@@ -96,16 +104,24 @@ defmodule Canary.Workers.WebhookDeliveryTest do
       assert :ok = WebhookDelivery.perform(job)
     end
 
-    test "skips when webhook inactive", %{webhook_id: wid} do
+    test "skips when webhook inactive", %{bypass: bypass, webhook_id: wid} do
       Repo.get!(Webhook, wid)
       |> Webhook.changeset(%{active: 0})
       |> Repo.update!()
+
+      test_pid = self()
+
+      Bypass.stub(bypass, "POST", "/hook", fn conn ->
+        send(test_pid, :webhook_delivered)
+        Plug.Conn.resp(conn, 200, "ok")
+      end)
 
       job = %Oban.Job{
         args: %{"webhook_id" => wid, "payload" => %{}, "event" => "error.new_class"}
       }
 
       assert :ok = WebhookDelivery.perform(job)
+      refute_received :webhook_delivered
     end
   end
 
@@ -113,8 +129,10 @@ defmodule Canary.Workers.WebhookDeliveryTest do
     test "skips delivery when cooldown active", %{bypass: bypass, webhook_id: wid} do
       Cooldown.mark("#{wid}:error.new_class")
 
+      test_pid = self()
+
       Bypass.stub(bypass, "POST", "/hook", fn conn ->
-        send(self(), :webhook_delivered)
+        send(test_pid, :webhook_delivered)
         Plug.Conn.resp(conn, 200, "ok")
       end)
 
@@ -131,8 +149,10 @@ defmodule Canary.Workers.WebhookDeliveryTest do
     end
 
     test "skips webhooks not subscribed to event", %{bypass: bypass} do
+      test_pid = self()
+
       Bypass.stub(bypass, "POST", "/hook", fn conn ->
-        send(self(), :webhook_delivered)
+        send(test_pid, :webhook_delivered)
         Plug.Conn.resp(conn, 200, "ok")
       end)
 
