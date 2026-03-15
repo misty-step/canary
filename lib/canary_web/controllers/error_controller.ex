@@ -37,7 +37,7 @@ defmodule CanaryWeb.ErrorController do
             detail
           )
 
-        {:error, _} ->
+        {:error, _, _} ->
           CanaryWeb.Plugs.ProblemDetails.render_error(
             conn,
             500,

@@ -70,5 +70,11 @@ defmodule Canary.Errors.IngestTest do
 
       assert error.severity == "warning"
     end
+
+    test "rejects non-string fingerprint elements" do
+      attrs = Map.put(@valid_attrs, "fingerprint", ["ok", 123])
+      {:error, :validation_error, errors} = Ingest.ingest(attrs)
+      assert errors == %{"fingerprint" => ["elements must be strings"]}
+    end
   end
 end

@@ -12,7 +12,7 @@ defmodule Canary.Errors.Ingest do
   @max_fingerprint_elements 5
   @max_fingerprint_element_len 256
 
-  @spec ingest(map()) :: {:ok, map()} | {:error, atom(), term()} | {:error, term()}
+  @spec ingest(map()) :: {:ok, map()} | {:error, atom(), term()}
   def ingest(attrs) do
     with :ok <- validate_required(attrs),
          :ok <- validate_context(attrs),
@@ -87,6 +87,9 @@ defmodule Canary.Errors.Ingest do
       length(fp) > @max_fingerprint_elements ->
         {:error, :validation_error,
          %{"fingerprint" => ["max #{@max_fingerprint_elements} elements"]}}
+
+      Enum.any?(fp, &(not is_binary(&1))) ->
+        {:error, :validation_error, %{"fingerprint" => ["elements must be strings"]}}
 
       Enum.any?(fp, &(String.length(&1) > @max_fingerprint_element_len)) ->
         {:error, :validation_error,

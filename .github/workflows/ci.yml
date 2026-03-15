@@ -16,9 +16,9 @@ jobs:
     env:
       MIX_ENV: test
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: erlef/setup-beam@v1
+      - uses: actions/checkout@v4 # v4
+        # Pin first-party actions to tag; pin third-party to SHA
+      - uses: erlef/setup-beam@ee09b1e59bb240681c382eb1f0abc6a04af72764 # v1
         id: beam
         with:
           otp-version: "27"
