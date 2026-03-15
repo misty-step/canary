@@ -59,6 +59,7 @@ jobs:
         with:
           path: _build/dev/dialyxir_*.plt
           key: plt-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
+          restore-keys: plt-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
 
       - name: Build PLT
         if: steps.plt-cache.outputs.cache-hit != 'true'
