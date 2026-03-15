@@ -1,0 +1,22 @@
+# Cerberus AI Code Review
+# https://github.com/misty-step/cerberus
+name: Cerberus
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+
+concurrency:
+  group: cerberus-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    uses: misty-step/cerberus/.github/workflows/cerberus.yml@master
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      context: "Self-hosted observability service (Elixir/Phoenix + SQLite). Monorepo: core service at root, triage/ companion service. Both deploy to Fly.io. Oban Lite for async jobs. No frontend."
+    secrets:
+      api-key: ${{ secrets.CERBERUS_OPENROUTER_API_KEY }}

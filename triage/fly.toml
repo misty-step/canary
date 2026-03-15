@@ -1,0 +1,32 @@
+app = "canary-triage"
+primary_region = "iad"
+kill_signal = "SIGTERM"
+kill_timeout = "10s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PHX_HOST = "canary-triage.fly.dev"
+  PORT = "4001"
+  PHX_SERVER = "true"
+  GITHUB_ORG = "misty-step"
+  CANARY_ENDPOINT = "https://canary-obs.fly.dev"
+
+[http_service]
+  internal_port = 4001
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    path = "/healthz"
+    timeout = "5s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

@@ -27,7 +27,14 @@ defmodule Canary.Application do
         CanaryWeb.Endpoint
       ]
 
-    Supervisor.start_link(children, strategy: :one_for_one, name: Canary.Supervisor)
+    case Supervisor.start_link(children, strategy: :one_for_one, name: Canary.Supervisor) do
+      {:ok, pid} ->
+        Canary.ErrorReporter.attach()
+        {:ok, pid}
+
+      error ->
+        error
+    end
   end
 
   @impl true
