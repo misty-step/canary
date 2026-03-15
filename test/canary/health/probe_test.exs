@@ -19,10 +19,13 @@ defmodule Canary.Health.ProbeTest do
   end
 
   describe "SSRF redirect protection" do
-    test "rejects redirect to loopback (127.0.0.1)" do
+    setup do
       bypass = Bypass.open()
       target = build_target("http://localhost:#{bypass.port}/health")
+      {:ok, bypass: bypass, target: target}
+    end
 
+    test "rejects redirect to loopback (127.0.0.1)", %{bypass: bypass, target: target} do
       Bypass.expect_once(bypass, "GET", "/health", fn conn ->
         conn
         |> Plug.Conn.put_resp_header("location", "http://127.0.0.1/secret")
@@ -34,10 +37,7 @@ defmodule Canary.Health.ProbeTest do
       assert result.status_code == 302
     end
 
-    test "rejects redirect to cloud metadata (169.254.169.254)" do
-      bypass = Bypass.open()
-      target = build_target("http://localhost:#{bypass.port}/health")
-
+    test "rejects redirect to cloud metadata (169.254.169.254)", %{bypass: bypass, target: target} do
       Bypass.expect_once(bypass, "GET", "/health", fn conn ->
         conn
         |> Plug.Conn.put_resp_header("location", "http://169.254.169.254/latest/meta-data/")
@@ -49,17 +49,13 @@ defmodule Canary.Health.ProbeTest do
       assert result.status_code == 302
     end
 
-    test "treats redirect to valid public URL as redirect_not_followed (redirects disabled)" do
-      bypass = Bypass.open()
-      target = build_target("http://localhost:#{bypass.port}/health")
-
+    test "does not follow redirect to public URL", %{bypass: bypass, target: target} do
       Bypass.expect_once(bypass, "GET", "/health", fn conn ->
         conn
         |> Plug.Conn.put_resp_header("location", "https://example.com/ok")
         |> Plug.Conn.send_resp(302, "")
       end)
 
-      # With redirects disabled, ANY redirect is not followed
       assert {:error, result} = Probe.check(target)
       assert result.result == "redirect_not_followed"
       assert result.status_code == 302
