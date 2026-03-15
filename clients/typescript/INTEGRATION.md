@@ -1,87 +1,144 @@
-# Integrating Canary into Volume
+# Integrating Canary into a Next.js app
 
-Surgical integration: dual-write to Sentry + Canary during parallel period, then remove Sentry.
-
-## Step 1: Copy client into Volume
+## Step 1: Install
 
 ```bash
-cp clients/typescript/canary.ts ~/Development/volume/src/lib/canary.ts
+npm install @canary-obs/sdk
 ```
 
-## Step 2: Add env var
+## Step 2: Add env vars
 
-In `.env.local` and Vercel environment variables:
-```
+In `.env.local` and your deployment platform:
+```dotenv
 CANARY_API_KEY=sk_live_...
+CANARY_ENDPOINT=https://canary-obs.fly.dev
 NEXT_PUBLIC_CANARY_ENDPOINT=https://canary-obs.fly.dev
+NEXT_PUBLIC_CANARY_API_KEY=sk_live_...
 ```
 
-Note: API key is server-only (no `NEXT_PUBLIC_` prefix) to avoid exposing it in client bundles.
+`CANARY_API_KEY` is for server-side. `NEXT_PUBLIC_` variants are for client-side
+error boundaries (write-only key — safe to expose in browser bundles).
 
-## Step 3: Initialize Canary client
-
-Create `src/lib/canary-instance.ts`:
-
-```typescript
-import { Canary } from "./canary";
-
-// Server-side only — API key must not leak to client bundles
-export const canary = new Canary({
-  endpoint: process.env.NEXT_PUBLIC_CANARY_ENDPOINT ?? "https://canary-obs.fly.dev",
-  apiKey: process.env.CANARY_API_KEY ?? "",
-  service: "volume",
-  environment: process.env.NODE_ENV ?? "production",
-  enabled: !!process.env.CANARY_API_KEY,
-});
-```
-
-## Step 4: Dual-write in reportError
-
-In `src/lib/analytics.ts`, modify `reportError`:
+## Step 3: Initialize in `instrumentation.ts` (server-side)
 
 ```typescript
-import { canary } from "./canary-instance";
+import { initCanary } from "@canary-obs/sdk";
+export { onRequestError } from "@canary-obs/sdk/nextjs";
 
-export function reportError(
-  error: Error,
-  context?: Record<string, unknown>
-): void {
-  const sanitizedContext = context
-    ? sanitizeEventProperties(context)
-    : undefined;
-
-  // Sentry (existing)
-  if (isSentryEnabled()) {
-    try {
-      Sentry.captureException(error, { extra: sanitizedContext });
-    } catch {
-      // Never break user flow
-    }
-  }
-
-  // Canary (new — parallel write)
-  canary.capture(error, {
-    context: sanitizedContext,
+export function register() {
+  initCanary({
+    endpoint: process.env.CANARY_ENDPOINT ?? "https://canary-obs.fly.dev",
+    apiKey: process.env.CANARY_API_KEY ?? "",
+    service: "my-app",
+    environment: process.env.NODE_ENV ?? "production",
+    scrubPii: true,
   });
 }
 ```
 
-## Step 5: Verify
+This captures all server-side errors automatically via `onRequestError`.
 
-```bash
-# Check that errors flow to Canary
-curl -H "Authorization: Bearer $CANARY_API_KEY" \
-  "https://canary-obs.fly.dev/api/v1/query?service=volume&window=1h"
+## Step 4: Client-side error boundaries
+
+The SDK uses module-level state. Server-side `initCanary()` runs in a separate
+bundle from client components. Client-side capture requires a separate
+`initCanary()` call in the browser.
+
+### `app/providers.tsx`
+
+```typescript
+"use client";
+import { useEffect } from "react";
+import { initCanary } from "@canary-obs/sdk";
+
+export function CanaryProvider({ children }: { children: React.ReactNode }) {
+  useEffect(() => {
+    initCanary({
+      endpoint: process.env.NEXT_PUBLIC_CANARY_ENDPOINT ?? "",
+      apiKey: process.env.NEXT_PUBLIC_CANARY_API_KEY ?? "",
+      service: "my-app",
+    });
+  }, []);
+  return <>{children}</>;
+}
 ```
 
-## Step 6: After parallel period — remove Sentry
+Wrap your root layout with `<CanaryProvider>`.
 
-Once confident in Canary's error capture:
+### `app/global-error.tsx`
 
-1. Remove `@sentry/nextjs` and `@sentry/cli` from `package.json`
-2. Delete `sentry.client.config.ts`, `sentry.server.config.ts`, `sentry.edge.config.ts`
-3. Remove `withSentryConfig()` from `next.config.ts`
-4. Remove Sentry CSP entries
-5. Remove `src/lib/sentry.ts`
-6. Simplify `reportError` to only call `canary.capture()`
-7. Remove Sentry env vars from Vercel
+```typescript
+"use client";
+import { useEffect } from "react";
+import { captureException } from "@canary-obs/sdk";
+
+export default function GlobalError({ error }: { error: Error }) {
+  useEffect(() => {
+    captureException(error);
+  }, [error]);
+
+  return (
+    <html>
+      <body>
+        <h1>Something went wrong</h1>
+      </body>
+    </html>
+  );
+}
+```
+
+### `app/**/error.tsx`
+
+```typescript
+"use client";
+import { useEffect } from "react";
+import { captureException } from "@canary-obs/sdk";
+
+export default function Error({ error }: { error: Error }) {
+  useEffect(() => {
+    captureException(error);
+  }, [error]);
+
+  return <h1>Something went wrong</h1>;
+}
+```
+
+## Step 5: Manual capture (server-side)
+
+```typescript
+import { captureException, captureMessage } from "@canary-obs/sdk";
+
+try {
+  await riskyOperation();
+} catch (err) {
+  captureException(err, {
+    severity: "error",
+    context: { userId: user.id, route: "/api/sessions" },
+  });
+}
+
+captureMessage("deployment complete", { severity: "info" });
+```
+
+## Step 6: Verify
+
+```bash
+curl -H "Authorization: Bearer $CANARY_API_KEY" \
+  "$CANARY_ENDPOINT/api/v1/query?service=my-app&window=1h"
+```
+
+## Dual-write with Sentry
+
+During migration, call both:
+
+```typescript
+import { captureException } from "@canary-obs/sdk";
+import * as Sentry from "@sentry/nextjs";
+
+export function reportError(error: Error, context?: Record<string, unknown>) {
+  Sentry.captureException(error, { extra: context });
+  captureException(error, { context });
+}
+```
+
+Once confident, remove `@sentry/nextjs` and simplify to Canary only.
