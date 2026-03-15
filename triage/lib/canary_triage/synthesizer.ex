@@ -34,18 +34,8 @@ defmodule CanaryTriage.Synthesizer do
     | **State** | `#{state}` |
     | **Previous State** | `#{payload["previous_state"]}` |
     | **Target URL** | #{url} |
-    | **Consecutive Failures** | #{payload["consecutive_failures"]} |
     | **Timestamp** | #{payload["timestamp"]} |
     | **Last Success** | #{payload["last_success_at"] || "N/A"} |
-
-    <details>
-    <summary>Last Check Details</summary>
-
-    - **Result**: #{get_in(payload, ["last_check", "result"])}
-    - **Status Code**: #{get_in(payload, ["last_check", "status_code"])}
-    - **Latency**: #{get_in(payload, ["last_check", "latency_ms"])}ms
-
-    </details>
 
     ## Investigation Steps
 
@@ -73,10 +63,7 @@ defmodule CanaryTriage.Synthesizer do
     | Field | Value |
     |-------|-------|
     | **State** | `#{state}` |
-    | **Consecutive Failures** | #{payload["consecutive_failures"]} |
     | **Timestamp** | #{payload["timestamp"]} |
-    | **Last Check Status** | #{get_in(payload, ["last_check", "status_code"])} |
-    | **Last Check Latency** | #{get_in(payload, ["last_check", "latency_ms"])}ms |
     """
   end
 
@@ -94,7 +81,6 @@ defmodule CanaryTriage.Synthesizer do
     | **State** | `#{payload["state"]}` |
     | **Previous State** | `#{payload["previous_state"]}` |
     | **Timestamp** | #{payload["timestamp"]} |
-    | **Last Check Latency** | #{get_in(payload, ["last_check", "latency_ms"])}ms |
     """
   end
 
@@ -174,18 +160,6 @@ defmodule CanaryTriage.Synthesizer do
           Message: #{get_in(payload, ["error", "message"])}
           Service: #{service}
           Severity: #{get_in(payload, ["error", "severity"])}
-          """
-
-        {"health_check." <> _, _} ->
-          """
-          Target: #{get_in(payload, ["target", "name"])} (#{get_in(payload, ["target", "url"])})
-          State: #{payload["state"]}
-          Previous state: #{payload["previous_state"]}
-          Consecutive failures: #{payload["consecutive_failures"]}
-          Last success: #{payload["last_success_at"]}
-          Last check result: #{get_in(payload, ["last_check", "result"])}
-          Last check status: #{get_in(payload, ["last_check", "status_code"])}
-          Last check latency: #{get_in(payload, ["last_check", "latency_ms"])}ms
           """
 
         _ ->

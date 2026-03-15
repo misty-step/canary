@@ -11,8 +11,7 @@ defmodule CanaryTriage.SynthesizerTest do
       "timestamp" => "2026-03-15T10:00:00Z",
       "consecutive_failures" => 3,
       "last_success_at" => "2026-03-15T09:55:00Z",
-      "target" => %{"name" => "canary-triage", "url" => "https://canary-triage.fly.dev/healthz"},
-      "last_check" => %{"result" => "timeout", "status_code" => 0, "latency_ms" => 5000}
+      "target" => %{"name" => "canary-triage", "url" => "https://canary-triage.fly.dev/healthz"}
     }
   end
 
@@ -40,17 +39,16 @@ defmodule CanaryTriage.SynthesizerTest do
       assert issue["body"] =~ "canary-triage"
       assert issue["body"] =~ "canary-triage.fly.dev"
       assert issue["body"] =~ "flyctl status"
-      assert issue["body"] =~ "Consecutive Failures"
+      assert issue["body"] =~ "Last Success"
     end
   end
 
   describe "build_health_check_comment/1" do
-    test "includes state and check details" do
+    test "includes state and timestamp" do
       comment = Synthesizer.build_health_check_comment(health_payload("degraded"))
 
       assert comment =~ "Degraded"
-      assert comment =~ "5000"
-      assert comment =~ "3"
+      assert comment =~ "2026-03-15T10:00:00Z"
     end
   end
 
