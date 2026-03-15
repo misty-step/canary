@@ -36,7 +36,7 @@ defmodule CanaryTriage.GitHub do
            [params: [labels: "health-check", state: "open", per_page: 10]] ++ common_opts()
          ) do
       {:ok, %{status: 200, body: issues}} when is_list(issues) ->
-        case Enum.find(issues, &String.contains?(&1["title"], service)) do
+        case Enum.find(issues, &String.ends_with?(&1["title"], ": #{service}")) do
           nil -> :not_found
           issue -> {:ok, issue}
         end

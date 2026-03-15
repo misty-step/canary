@@ -170,8 +170,8 @@ defmodule CanaryTriage.DispatchTest do
     end
   end
 
-  describe "unhandled health check events" do
-    test "tls_expiring falls through to unhandled (no crash)" do
+  describe "non-lifecycle health check events" do
+    test "tls_expiring returns noop (no crash, no 500)" do
       payload = %{
         "event" => "health_check.tls_expiring",
         "target" => %{"name" => "canary-triage", "url" => "https://canary-triage.fly.dev"},
@@ -181,7 +181,7 @@ defmodule CanaryTriage.DispatchTest do
       }
 
       body = Jason.encode!(payload)
-      assert {:error, {:unhandled_event, "health_check.tls_expiring"}} = Dispatch.handle(body, payload, sign(body))
+      assert {:ok, :noop} = Dispatch.handle(body, payload, sign(body))
     end
   end
 

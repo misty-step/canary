@@ -38,6 +38,16 @@ defmodule CanaryTriage.GitHubTest do
       assert :not_found = GitHub.find_open_health_issue("my-service")
     end
 
+    test "does not match substring service names" do
+      stub_github(fn conn ->
+        Req.Test.json(conn, [
+          %{"number" => 1, "title" => "Health Check Degraded: my-service-api"}
+        ])
+      end)
+
+      assert :not_found = GitHub.find_open_health_issue("my-service")
+    end
+
     test "returns error on API failure" do
       stub_github(fn conn ->
         conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "Internal Server Error"})

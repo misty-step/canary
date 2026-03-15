@@ -29,6 +29,12 @@ defmodule CanaryTriage.Dispatch do
     handle_degradation(extract_service(payload), payload)
   end
 
+  # Non-lifecycle health events (tls_expiring, etc.) — acknowledge, don't act
+  defp dispatch(%{"event" => "health_check." <> _} = payload) do
+    Logger.info("Ignoring non-lifecycle health check event: #{payload["event"]}")
+    {:ok, :noop}
+  end
+
   # Error events: LLM synthesis -> create issue (unchanged)
   defp dispatch(%{"event" => "error." <> _} = payload) do
     service = extract_service(payload)
