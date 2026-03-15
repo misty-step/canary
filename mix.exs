@@ -40,7 +40,8 @@ defmodule Canary.MixProject do
       {:telemetry_poller, "~> 1.0"},
       {:dns_cluster, "~> 0.2.0"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:bypass, "~> 2.1", only: :test}
     ]
   end
 
