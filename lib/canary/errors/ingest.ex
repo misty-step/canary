@@ -194,5 +194,4 @@ defmodule Canary.Errors.Ingest do
 
   defp encode_fingerprint(nil), do: nil
   defp encode_fingerprint(fp) when is_list(fp), do: Jason.encode!(fp)
-  defp encode_fingerprint(fp) when is_binary(fp), do: fp
 end
