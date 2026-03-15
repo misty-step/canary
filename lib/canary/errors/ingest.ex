@@ -100,6 +100,10 @@ defmodule Canary.Errors.Ingest do
     end
   end
 
+  defp validate_fingerprint(%{"fingerprint" => _}) do
+    {:error, :validation_error, %{"fingerprint" => ["must be a list of strings"]}}
+  end
+
   defp validate_fingerprint(_), do: :ok
 
   defp upsert_group(error, group_hash, template, now) do
