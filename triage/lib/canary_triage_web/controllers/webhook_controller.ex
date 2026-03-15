@@ -11,9 +11,12 @@ defmodule CanaryTriageWeb.WebhookController do
     Logger.info("Received webhook: #{event}")
 
     case CanaryTriage.Dispatch.handle(raw_body, params, signature) do
+      {:ok, :noop} ->
+        json(conn, %{status: "ok"})
+
       {:ok, issue} ->
         json(conn, %{
-          status: "created",
+          status: "ok",
           issue_number: issue["number"],
           issue_url: issue["html_url"]
         })

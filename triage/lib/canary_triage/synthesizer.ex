@@ -1,10 +1,9 @@
 defmodule CanaryTriage.Synthesizer do
   @moduledoc """
-  LLM-powered incident -> GitHub issue synthesis via OpenRouter.
+  Webhook -> GitHub issue content.
 
-  Single call with JSON mode. The webhook payload + enriched detail
-  is sufficient context. The LLM decides priority, writes the narrative,
-  suggests investigation steps.
+  Health checks: deterministic templates (no LLM, no latency, no cost).
+  Errors: LLM synthesis via OpenRouter for narrative + investigation steps.
   """
 
   require Logger
@@ -15,6 +14,104 @@ defmodule CanaryTriage.Synthesizer do
   @type issue :: %{
           String.t() => String.t() | [String.t()]
         }
+
+  # --- Health check templates (deterministic, no LLM) ---
+
+  @spec build_health_check_issue(map()) :: {:ok, issue()}
+  def build_health_check_issue(payload) do
+    state = payload["state"]
+    service = get_in(payload, ["target", "name"]) || "unknown"
+    url = get_in(payload, ["target", "url"])
+
+    title = "Health Check #{format_state(state)}: #{service}"
+
+    body = """
+    ## Health Check #{format_state(state)}
+
+    | Field | Value |
+    |-------|-------|
+    | **Service** | `#{service}` |
+    | **State** | `#{state}` |
+    | **Previous State** | `#{payload["previous_state"]}` |
+    | **Target URL** | #{url} |
+    | **Consecutive Failures** | #{payload["consecutive_failures"]} |
+    | **Timestamp** | #{payload["timestamp"]} |
+    | **Last Success** | #{payload["last_success_at"] || "N/A"} |
+
+    <details>
+    <summary>Last Check Details</summary>
+
+    - **Result**: #{get_in(payload, ["last_check", "result"])}
+    - **Status Code**: #{get_in(payload, ["last_check", "status_code"])}
+    - **Latency**: #{get_in(payload, ["last_check", "latency_ms"])}ms
+
+    </details>
+
+    ## Investigation Steps
+
+    1. Check service health: `flyctl status --app #{service}`
+    2. Review recent deploys: `flyctl releases --app #{service}`
+    3. Check logs: `flyctl logs --app #{service}`
+    4. Verify endpoint: `curl -I #{url}`
+    """
+
+    {:ok, %{
+      "title" => title,
+      "body" => body,
+      "labels" => ["health-check", priority_label(state)],
+      "priority" => priority_from_state(state)
+    }}
+  end
+
+  @spec build_health_check_comment(map()) :: String.t()
+  def build_health_check_comment(payload) do
+    state = payload["state"]
+
+    """
+    ## Update: #{format_state(state)}
+
+    | Field | Value |
+    |-------|-------|
+    | **State** | `#{state}` |
+    | **Consecutive Failures** | #{payload["consecutive_failures"]} |
+    | **Timestamp** | #{payload["timestamp"]} |
+    | **Last Check Status** | #{get_in(payload, ["last_check", "status_code"])} |
+    | **Last Check Latency** | #{get_in(payload, ["last_check", "latency_ms"])}ms |
+    """
+  end
+
+  @spec build_recovery_comment(map()) :: String.t()
+  def build_recovery_comment(payload) do
+    service = get_in(payload, ["target", "name"]) || "unknown"
+
+    """
+    ## Recovered
+
+    `#{service}` has recovered.
+
+    | Field | Value |
+    |-------|-------|
+    | **State** | `#{payload["state"]}` |
+    | **Previous State** | `#{payload["previous_state"]}` |
+    | **Timestamp** | #{payload["timestamp"]} |
+    | **Last Check Latency** | #{get_in(payload, ["last_check", "latency_ms"])}ms |
+    """
+  end
+
+  defp format_state("degraded"), do: "Degraded"
+  defp format_state("down"), do: "Down"
+  defp format_state("healthy"), do: "Recovered"
+  defp format_state(state), do: String.capitalize(state)
+
+  defp priority_label("down"), do: "critical"
+  defp priority_label("degraded"), do: "high-priority"
+  defp priority_label(_), do: "medium-priority"
+
+  defp priority_from_state("down"), do: "critical"
+  defp priority_from_state("degraded"), do: "high"
+  defp priority_from_state(_), do: "medium"
+
+  # --- Error synthesis (LLM-powered) ---
 
   @spec synthesize(map(), map() | nil) :: {:ok, issue()} | {:error, term()}
   def synthesize(webhook_payload, enriched_detail \\ nil) do
