@@ -19,12 +19,10 @@ defmodule CanaryWeb.ConnCase do
 
   using do
     quote do
-      # The default endpoint for testing
       @endpoint CanaryWeb.Endpoint
 
       use CanaryWeb, :verified_routes
 
-      # Import conveniences for testing with connections
       import Plug.Conn
       import Phoenix.ConnTest
       import CanaryWeb.ConnCase
@@ -34,5 +32,16 @@ defmodule CanaryWeb.ConnCase do
   setup tags do
     Canary.DataCase.setup_sandbox(tags)
     {:ok, conn: Phoenix.ConnTest.build_conn()}
+  end
+
+  @doc "Creates an API key and returns {raw_key, api_key}."
+  def create_api_key(name \\ "test") do
+    {:ok, key, raw_key} = Canary.Auth.generate_key(name)
+    {raw_key, key}
+  end
+
+  @doc "Adds Bearer auth header with the given raw key."
+  def authenticate(conn, raw_key) do
+    Plug.Conn.put_req_header(conn, "authorization", "Bearer #{raw_key}")
   end
 end
