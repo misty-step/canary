@@ -48,7 +48,7 @@ defmodule CanaryTriage.SynthesizerTest do
     test "includes state and check details" do
       comment = Synthesizer.build_health_check_comment(health_payload("degraded"))
 
-      assert comment =~ "Still Degraded" || comment =~ "Degraded"
+      assert comment =~ "Degraded"
       assert comment =~ "5000"
       assert comment =~ "3"
     end

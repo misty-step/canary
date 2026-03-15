@@ -101,6 +101,75 @@ defmodule CanaryTriage.DispatchTest do
     end
   end
 
+  describe "GitHub API errors propagate" do
+    test "degraded: search failure propagates error" do
+      payload = health_payload("health_check.degraded", "degraded")
+      body = Jason.encode!(payload)
+
+      stub_github(fn conn ->
+        "GET" = conn.method
+        conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "Internal Server Error"})
+      end)
+
+      assert {:error, {:github, 500, _}} = Dispatch.handle(body, payload, sign(body))
+    end
+
+    test "degraded: create failure propagates error" do
+      payload = health_payload("health_check.degraded", "degraded")
+      body = Jason.encode!(payload)
+
+      stub_github(fn conn ->
+        case conn.method do
+          "GET" -> Req.Test.json(conn, [])
+          "POST" -> conn |> Plug.Conn.put_status(422) |> Req.Test.json(%{"message" => "Validation Failed"})
+        end
+      end)
+
+      assert {:error, {:github, 422, _}} = Dispatch.handle(body, payload, sign(body))
+    end
+
+    test "degraded: comment failure on existing issue propagates error" do
+      payload = health_payload("health_check.degraded", "degraded")
+      body = Jason.encode!(payload)
+
+      stub_github(fn conn ->
+        case conn.method do
+          "GET" ->
+            Req.Test.json(conn, [
+              %{"number" => 42, "title" => "Health Check Degraded: canary-triage", "html_url" => "url"}
+            ])
+
+          "POST" ->
+            conn |> Plug.Conn.put_status(403) |> Req.Test.json(%{"message" => "Forbidden"})
+        end
+      end)
+
+      assert {:error, {:github, 403, _}} = Dispatch.handle(body, payload, sign(body))
+    end
+
+    test "recovered: close failure propagates error" do
+      payload = health_payload("health_check.recovered", "healthy", "degraded")
+      body = Jason.encode!(payload)
+
+      stub_github(fn conn ->
+        case conn.method do
+          "GET" ->
+            Req.Test.json(conn, [
+              %{"number" => 42, "title" => "Health Check Degraded: canary-triage", "html_url" => "url"}
+            ])
+
+          "POST" ->
+            conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 1})
+
+          "PATCH" ->
+            conn |> Plug.Conn.put_status(422) |> Req.Test.json(%{"message" => "Validation Failed"})
+        end
+      end)
+
+      assert {:error, {:github, 422, _}} = Dispatch.handle(body, payload, sign(body))
+    end
+  end
+
   describe "unhandled health check events" do
     test "tls_expiring falls through to unhandled (no crash)" do
       payload = %{

@@ -37,6 +37,14 @@ defmodule CanaryTriage.GitHubTest do
 
       assert :not_found = GitHub.find_open_health_issue("my-service")
     end
+
+    test "returns error on API failure" do
+      stub_github(fn conn ->
+        conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "Internal Server Error"})
+      end)
+
+      assert {:error, {:github, 500, _}} = GitHub.find_open_health_issue("my-service")
+    end
   end
 
   describe "close_issue/3" do
@@ -56,6 +64,15 @@ defmodule CanaryTriage.GitHubTest do
       end)
 
       assert {:ok, %{"state" => "closed"}} = GitHub.close_issue("my-service", 42, "Closing")
+    end
+
+    test "aborts if comment fails" do
+      stub_github(fn conn ->
+        assert conn.method == "POST"
+        conn |> Plug.Conn.put_status(403) |> Req.Test.json(%{"message" => "Forbidden"})
+      end)
+
+      assert {:error, {:github, 403, _}} = GitHub.close_issue("my-service", 42, "Closing")
     end
   end
 

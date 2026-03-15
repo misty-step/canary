@@ -8,7 +8,7 @@ config :canary_triage, CanaryTriageWeb.Endpoint,
 config :canary_triage,
   webhook_secret: "test-secret",
   github_token: "test-token",
-  github_req_options: [plug: {Req.Test, CanaryTriage.GitHub}]
+  github_req_options: [plug: {Req.Test, CanaryTriage.GitHub}, retry: false]
 
 config :logger, level: :warning
 config :phoenix, :plug_init_mode, :runtime
