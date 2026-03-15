@@ -1,6 +1,7 @@
 import Config
 
 config :canary,
+  env: config_env(),
   ecto_repos: [Canary.Repo],
   error_retention_days: 30,
   check_retention_days: 7,

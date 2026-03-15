@@ -1,67 +1,63 @@
-# CLAUDE.md
+# CLAUDE
 
-## What This Is
+Self-hosted observability for agent-driven infrastructure. Elixir/Phoenix + SQLite.
 
-Canary — self-hosted observability for agent-driven infrastructure. Elixir/Phoenix + SQLite.
+## Monorepo Layout
 
-## Commands
+- Root: **Canary** core service (error ingestion, health checking, webhooks). Fly app: `canary-obs`.
+- `triage/`: **Canary Triage** companion (receives webhooks, LLM synthesis via OpenRouter, creates GitHub issues). Fly app: `canary-triage`.
 
-```bash
-mix setup                    # deps.get + ecto.create + ecto.migrate
-mix phx.server               # start on localhost:4000
-mix test                     # run all tests
-mix compile --warnings-as-errors  # strict compile
-```
+Deploy triage from `triage/` directory, not root. Wrong cwd = wrong Dockerfile = wrong service deployed.
 
-## Architecture
+## Footguns
 
-Single OTP application. Three subsystems:
+- **Ecto primary keys.** Custom string PKs (`ERR-nanoid`) must be set on the struct, not cast: `%Error{id: id} |> changeset(attrs)`. Casting silently drops the `id` field because it's not in the `@required`/`@optional` lists. (6 bugs in initial build.)
+- **Oban Lite tables.** Oban's SQLite engine does NOT auto-create its tables. `Oban.Migrations.SQLite` exists but `Ecto.Migrator.run` can't invoke it (different migration behaviour). Fixed: dedicated Ecto migration (`20260314230000_create_oban_jobs.exs`) with `execute` for raw SQL. Do NOT put this in a GenServer or Release module — `Repo.query!` races with pool_size:1 during Ecto migration.
+- **Req + Finch.** Cannot pass both `:finch` and `:connect_options` to `Req.request/1`. The `:finch` option implies connection management — use `:receive_timeout` for timeouts.
+- **ReadRepo is not in `ecto_repos`.** Only `Canary.Repo` runs migrations. Adding `ReadRepo` to `ecto_repos` makes `mix ecto.migrate` look for `priv/read_repo/migrations/` which doesn't exist.
+- **Fly.io port binding.** The prod endpoint config must explicitly include `port:` in the `http:` keyword list. A second `config :canary, CanaryWeb.Endpoint` block in `runtime.exs` replaces (not merges) the `http:` key — omitting `port:` causes random port binding.
+- **Health.Manager boot resilience.** Uses `rescue` in `handle_info(:boot)` to retry in 5s if DB isn't ready. Required because in test mode (Ecto sandbox) and during production boot races, the targets table may not exist yet.
+- **SQLite WAL and `rm -f`.** Deleting the DB while the app is running does nothing — SQLite WAL keeps the file handle open. Must stop the machine first, then SSH in to delete, then restart.
 
-1. **Health checking** — GenServer-per-target under DynamicSupervisor. State machine: unknown → up → degraded → down. SSRF-guarded probes via shared Finch pool.
-2. **Error ingestion** — POST → validate → group (3 strategies: fingerprint, stack trace, message template) → persist (errors + error_groups upsert) → webhook.
-3. **Webhook broadcasting** — Oban workers with HMAC signing, circuit breaker, cooldown. At-least-once delivery.
+## Invariants
 
-## Key Invariants
+- `Canary.Repo` pool_size: 1. SQLite single-writer. All writes through this.
+- `StateMachine.transition/4` is pure. No side effects. Table-driven tests.
+- Summary generation is deterministic templates. No LLM on request path.
+- RFC 9457 Problem Details for all error responses.
+- No service names hardcoded. Targets/webhooks configured at runtime via API.
+- Seeds only create a bootstrap API key. No hardcoded targets.
 
-- `Canary.Repo` pool_size: 1 (SQLite single-writer). All writes go through this.
-- `Canary.ReadRepo` pool_size: 4. All query API reads go through this.
-- `StateMachine.transition/4` is a pure function. No side effects. Test it with table-driven tests.
-- Summary generation is deterministic template strings. No LLM calls.
-- All error responses use RFC 9457 Problem Details.
-
-## File Organization
-
-- `lib/canary/health/` — health checking (GenServers, state machine, probes, SSRF)
-- `lib/canary/errors/` — error ingest (grouping, rate limiting, dedup)
-- `lib/canary/alerter/` — webhook delivery (signing, circuit breaker, cooldown)
-- `lib/canary/workers/` — Oban background jobs
-- `lib/canary/schemas/` — Ecto schemas
-- `lib/canary_web/` — Phoenix router, plugs, controllers
-
-## Testing
+## Deploy
 
 ```bash
-mix test                           # all 54 tests
-mix test test/canary/health/       # health subsystem
-mix test test/canary/errors/       # error subsystem
-```
-
-- Pure function tests (StateMachine, Grouping, Summary) are async
-- DB tests (Auth, Ingest) use Ecto sandbox, sync
-- Health.Manager retries gracefully in test (sandbox ownership)
-
-## Deployment
-
-Fly.io app: `canary-obs`, region: `iad`. SQLite at `/data/canary.db`.
-
-```bash
+# Core service (from repo root)
 flyctl deploy --app canary-obs --remote-only
-flyctl logs --app canary-obs --no-tail
+
+# Triage service (MUST cd into triage/)
+cd triage && flyctl deploy --app canary-triage --remote-only
+
+# Nuclear reset (stop first, then delete, then restart)
+flyctl machines stop <id> --app canary-obs
+flyctl machines start <id> --app canary-obs
+flyctl ssh console --app canary-obs -C "rm -f /data/canary.db /data/canary.db-wal /data/canary.db-shm"
+flyctl machines restart <id> --app canary-obs
 ```
 
-## Conventions
+Bootstrap API key logged on first boot — grep for `"Bootstrap API key:"`. Store it; it won't be shown again.
 
-- IDs: `ERR-<nanoid>`, `TGT-<nanoid>`, `WHK-<nanoid>`, `KEY-<nanoid>`
-- Timestamps: ISO 8601 strings (SQLite TEXT columns)
-- Primary keys: set on struct (`%Error{id: id}`), not via changeset cast
-- Config: DB is canonical runtime config. Seeds bootstrap on first boot only.
+## Canary Triage
+
+Lives in `triage/`. Receives Canary webhooks, synthesizes GitHub issues via OpenRouter (`google/gemini-3-flash-preview`). Deployed at `canary-triage.fly.dev`.
+
+- Webhook route is `/webhooks/canary` (plural). Canary sends to this path.
+- Webhook secret is generated BY Canary on registration, not set by caller. Must match `CANARY_WEBHOOK_SECRET` in triage.
+- GitHub token must have `issues:write` on target repos. Use `gh auth token` value, not OAuth tokens from `.secrets`.
+- `SERVICE_REPOS` env maps non-obvious service→repo: `{"canary-triage":"misty-step/canary"}`.
+- Circuit breaker opens after 10 failures, probes every 5 min. Cooldown is 5 min per webhook+event type. Restart canary-obs to reset ETS state.
+
+## Self-Monitoring
+
+Both services report errors to Canary via `:logger` handlers:
+- Core (`Canary.ErrorReporter`): direct ingest — no HTTP, calls `Canary.Errors.Ingest.ingest/1` directly.
+- Triage (`CanaryTriage.ErrorReporter`): HTTP to canary-obs via `Task.start/1` (fire and forget).
