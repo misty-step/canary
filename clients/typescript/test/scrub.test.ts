@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { scrub } from "../src/scrub";
+import { scrub, scrubObject } from "../src/scrub";
 
 describe("scrub", () => {
   it("redacts email addresses", () => {
@@ -50,5 +50,32 @@ describe("scrub", () => {
 
   it("handles undefined", () => {
     expect(scrub(undefined)).toBeUndefined();
+  });
+});
+
+describe("scrubObject", () => {
+  it("scrubs string values in flat objects", () => {
+    const input = { user: "alice@example.com", code: 500 };
+    expect(scrubObject(input)).toEqual({ user: "[EMAIL]", code: 500 });
+  });
+
+  it("scrubs nested objects recursively", () => {
+    const input = { meta: { email: "bob@test.org", count: 3 } };
+    expect(scrubObject(input)).toEqual({
+      meta: { email: "[EMAIL]", count: 3 },
+    });
+  });
+
+  it("scrubs arrays of strings", () => {
+    const input = { tags: ["alice@test.com", "safe-tag"] };
+    expect(scrubObject(input)).toEqual({
+      tags: ["[EMAIL]", "safe-tag"],
+    });
+  });
+
+  it("passes through non-object values unchanged", () => {
+    expect(scrubObject(42)).toBe(42);
+    expect(scrubObject(null)).toBeNull();
+    expect(scrubObject(undefined)).toBeUndefined();
   });
 });

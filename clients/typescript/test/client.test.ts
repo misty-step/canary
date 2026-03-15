@@ -92,26 +92,28 @@ describe("createClient", () => {
     });
   });
 
-  it("drops oldest when queue exceeds max", async () => {
+  it("returns null when inflight reaches maxQueue", async () => {
     // Never resolve — simulate slow network
-    let resolvers: Array<(v: Response) => void> = [];
     fetchSpy.mockImplementation(
-      () =>
-        new Promise<Response>((resolve) => {
-          resolvers.push(resolve);
-        })
+      () => new Promise<Response>(() => {})
     );
 
     const client = createClient({ ...opts, maxQueue: 3 });
 
-    // Fire 4 sends without awaiting
+    // Fire 3 sends to fill the queue
     client.send({ error_class: "E1", message: "1", severity: "error" });
     client.send({ error_class: "E2", message: "2", severity: "error" });
     client.send({ error_class: "E3", message: "3", severity: "error" });
-    client.send({ error_class: "E4", message: "4", severity: "error" });
 
-    // Queue should have capped at 3 pending
-    expect(client.pending).toBeLessThanOrEqual(3);
+    // 4th should be rejected
+    const overflow = client.send({
+      error_class: "E4",
+      message: "4",
+      severity: "error",
+    });
+
+    expect(client.pending).toBe(3);
+    await expect(overflow).resolves.toBeNull();
   });
 
   it("strips trailing slash from endpoint", async () => {

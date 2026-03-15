@@ -9,14 +9,17 @@ npm install @canary-obs/sdk
 ## Step 2: Add env vars
 
 In `.env.local` and your deployment platform:
-```
+```dotenv
 CANARY_API_KEY=sk_live_...
 CANARY_ENDPOINT=https://canary-obs.fly.dev
+NEXT_PUBLIC_CANARY_ENDPOINT=https://canary-obs.fly.dev
+NEXT_PUBLIC_CANARY_API_KEY=sk_live_...
 ```
 
-API key is server-only — no `NEXT_PUBLIC_` prefix.
+`CANARY_API_KEY` is for server-side. `NEXT_PUBLIC_` variants are for client-side
+error boundaries (write-only key — safe to expose in browser bundles).
 
-## Step 3: Initialize in `instrumentation.ts`
+## Step 3: Initialize in `instrumentation.ts` (server-side)
 
 ```typescript
 import { initCanary } from "@canary-obs/sdk";
@@ -37,19 +40,70 @@ This captures all server-side errors automatically via `onRequestError`.
 
 ## Step 4: Client-side error boundaries
 
-In `app/global-error.tsx` or any `error.tsx`:
+The SDK uses module-level state. Server-side `initCanary()` runs in a separate
+bundle from client components. Client-side capture requires a separate
+`initCanary()` call in the browser.
+
+### `app/providers.tsx`
 
 ```typescript
 "use client";
+import { useEffect } from "react";
+import { initCanary } from "@canary-obs/sdk";
+
+export function CanaryProvider({ children }: { children: React.ReactNode }) {
+  useEffect(() => {
+    initCanary({
+      endpoint: process.env.NEXT_PUBLIC_CANARY_ENDPOINT ?? "",
+      apiKey: process.env.NEXT_PUBLIC_CANARY_API_KEY ?? "",
+      service: "my-app",
+    });
+  }, []);
+  return <>{children}</>;
+}
+```
+
+Wrap your root layout with `<CanaryProvider>`.
+
+### `app/global-error.tsx`
+
+```typescript
+"use client";
+import { useEffect } from "react";
 import { captureException } from "@canary-obs/sdk";
 
 export default function GlobalError({ error }: { error: Error }) {
-  captureException(error);
+  useEffect(() => {
+    captureException(error);
+  }, [error]);
+
+  return (
+    <html>
+      <body>
+        <h1>Something went wrong</h1>
+      </body>
+    </html>
+  );
+}
+```
+
+### `app/**/error.tsx`
+
+```typescript
+"use client";
+import { useEffect } from "react";
+import { captureException } from "@canary-obs/sdk";
+
+export default function Error({ error }: { error: Error }) {
+  useEffect(() => {
+    captureException(error);
+  }, [error]);
+
   return <h1>Something went wrong</h1>;
 }
 ```
 
-## Step 5: Manual capture
+## Step 5: Manual capture (server-side)
 
 ```typescript
 import { captureException, captureMessage } from "@canary-obs/sdk";

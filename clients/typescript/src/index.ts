@@ -1,5 +1,5 @@
 import { createClient, type CanaryClient, type CanaryResponse } from "./client";
-import { scrub, type ScrubRule } from "./scrub";
+import { scrub, scrubObject, type ScrubRule } from "./scrub";
 
 export type { CanaryResponse, ScrubRule };
 
@@ -41,7 +41,7 @@ export async function captureException(
     message: scrubPii ? scrub(message, scrubRules)! : message,
     severity: opts.severity ?? "error",
     stack_trace: scrubPii ? scrub(stackTrace, scrubRules) : stackTrace,
-    context: opts.context,
+    context: scrubPii ? scrubObject(opts.context, scrubRules) : opts.context,
     fingerprint: opts.fingerprint,
   });
 }
@@ -56,7 +56,7 @@ export async function captureMessage(
     error_class: "Message",
     message: scrubPii ? scrub(message, scrubRules)! : message,
     severity: opts.severity ?? "info",
-    context: opts.context,
+    context: scrubPii ? scrubObject(opts.context, scrubRules) : opts.context,
     fingerprint: opts.fingerprint,
   });
 }

@@ -94,6 +94,23 @@ describe("initCanary + captureException", () => {
     expect(body.message).not.toContain("alice@example.com");
   });
 
+  it("scrubs PII in context when enabled", async () => {
+    initCanary({
+      endpoint: "https://canary.test",
+      apiKey: "sk_test_abc",
+      service: "test-svc",
+      scrubPii: true,
+    });
+
+    await captureException(new Error("oops"), {
+      context: { userEmail: "alice@example.com", count: 5 },
+    });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.context.userEmail).toBe("[EMAIL]");
+    expect(body.context.count).toBe(5);
+  });
+
   it("passes context and severity through", async () => {
     initCanary({
       endpoint: "https://canary.test",
