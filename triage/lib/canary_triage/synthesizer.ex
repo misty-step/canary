@@ -13,10 +13,7 @@ defmodule CanaryTriage.Synthesizer do
   @model "google/gemini-3-flash-preview"
 
   @type issue :: %{
-          title: String.t(),
-          body: String.t(),
-          labels: [String.t()],
-          priority: String.t()
+          String.t() => String.t() | [String.t()]
         }
 
   @spec synthesize(map(), map() | nil) :: {:ok, issue()} | {:error, term()}

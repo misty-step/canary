@@ -27,12 +27,14 @@ defmodule Canary.Application do
         CanaryWeb.Endpoint
       ]
 
-    result = Supervisor.start_link(children, strategy: :one_for_one, name: Canary.Supervisor)
+    case Supervisor.start_link(children, strategy: :one_for_one, name: Canary.Supervisor) do
+      {:ok, pid} ->
+        Canary.ErrorReporter.attach()
+        {:ok, pid}
 
-    # Attach self-monitoring after supervision tree is up
-    Canary.ErrorReporter.attach()
-
-    result
+      error ->
+        error
+    end
   end
 
   @impl true

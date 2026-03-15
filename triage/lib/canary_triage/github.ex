@@ -7,7 +7,8 @@ defmodule CanaryTriage.GitHub do
   require Logger
 
   @spec create_issue(String.t(), map()) :: {:ok, map()} | {:error, term()}
-  def create_issue(service, %{"title" => title, "body" => body, "labels" => labels} = _issue) do
+  def create_issue(service, %{"title" => title, "body" => body} = issue) do
+    labels = Map.get(issue, "labels", [])
     repo = resolve_repo(service)
     token = Application.get_env(:canary_triage, :github_token)
 

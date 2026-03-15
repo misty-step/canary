@@ -14,11 +14,15 @@ defmodule CanaryTriage.Application do
     ]
 
     opts = [strategy: :one_for_one, name: CanaryTriage.Supervisor]
-    result = Supervisor.start_link(children, opts)
 
-    CanaryTriage.ErrorReporter.attach()
+    case Supervisor.start_link(children, opts) do
+      {:ok, pid} ->
+        CanaryTriage.ErrorReporter.attach()
+        {:ok, pid}
 
-    result
+      error ->
+        error
+    end
   end
 
   @impl true

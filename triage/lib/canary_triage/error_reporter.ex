@@ -8,10 +8,10 @@ defmodule CanaryTriage.ErrorReporter do
 
   @spec attach() :: :ok
   def attach do
-    :logger.add_handler(:canary_triage_reporter, __MODULE__, %{})
-    :ok
-  rescue
-    _ -> :ok
+    case :logger.add_handler(:canary_triage_reporter, __MODULE__, %{}) do
+      :ok -> :ok
+      {:error, {:already_exist, _}} -> :ok
+    end
   end
 
   def log(%{level: level, msg: msg, meta: meta}, _config)

@@ -12,11 +12,10 @@ defmodule Canary.ErrorReporter do
 
   @spec attach() :: :ok
   def attach do
-    :logger.add_handler(:canary_self_reporter, __MODULE__, %{})
-    :ok
-  rescue
-    # Handler already attached (e.g., after hot reload)
-    _ -> :ok
+    case :logger.add_handler(:canary_self_reporter, __MODULE__, %{}) do
+      :ok -> :ok
+      {:error, {:already_exist, _}} -> :ok
+    end
   end
 
   # :logger handler callback
