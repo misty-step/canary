@@ -3,7 +3,8 @@ import Config
 config :canary_triage,
   service_repos: %{},
   canary_endpoint: "https://canary-obs.fly.dev",
-  github_org: "misty-step"
+  github_org: "misty-step",
+  github_req_options: [finch: CanaryTriage.Finch]
 
 config :canary_triage, CanaryTriageWeb.Endpoint,
   url: [host: "localhost"],
