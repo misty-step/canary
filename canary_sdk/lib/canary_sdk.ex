@@ -34,9 +34,7 @@ defmodule CanarySdk do
 
   @spec detach() :: :ok
   def detach do
-    :logger.remove_handler(@handler_id)
+    _ = :logger.remove_handler(@handler_id)
     :ok
-  rescue
-    _ -> :ok
   end
 end

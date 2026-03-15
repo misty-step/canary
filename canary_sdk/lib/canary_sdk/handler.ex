@@ -23,7 +23,14 @@ defmodule CanarySdk.Handler do
           }
         }
 
-        Task.start(fn -> CanarySdk.Client.send_error(config, body) end)
+        Task.start(fn ->
+          Req.post("#{config.endpoint}/api/v1/errors",
+            json: body,
+            headers: [{"authorization", "Bearer #{config.api_key}"}],
+            receive_timeout: 5_000,
+            retry: false
+          )
+        end)
       end
     rescue
       _ -> :ok
@@ -32,22 +39,22 @@ defmodule CanarySdk.Handler do
 
   def log(_event, _config), do: :ok
 
-  defp extract_error({:string, chars}, meta) do
+  defp extract_error({:string, chars}, _meta) do
     message = IO.chardata_to_string(chars)
-    extract_from_message(message, meta)
+    extract_from_message(message)
   end
 
   defp extract_error({:report, report}, _meta) when is_map(report) do
-    extract_from_message(to_string(Map.get(report, :message, inspect(report))), %{})
+    extract_from_message(to_string(Map.get(report, :message, inspect(report))))
   end
 
-  defp extract_error(msg, _meta), do: extract_from_message(inspect(msg), %{})
+  defp extract_error(msg, _meta), do: extract_from_message(inspect(msg))
 
-  defp extract_from_message(message, meta) do
+  defp extract_from_message(message) do
     error_class =
       case Regex.run(~r/\*\* \((\w+(?:\.\w+)*)\)/, message) do
         [_, class] -> class
-        _ -> meta[:error_class] || "OTPError"
+        _ -> "OTPError"
       end
 
     stacktrace =
