@@ -65,18 +65,15 @@ defmodule Canary.Status do
   defp compute_overall([], _errors), do: "warning"
 
   defp compute_overall(targets, error_summary) do
-    all_up = Enum.all?(targets, &(&1.state == "up"))
     has_down = Enum.any?(targets, &(&1.state == "down"))
-    has_degraded = Enum.any?(targets, &(&1.state == "degraded"))
     has_non_up = Enum.any?(targets, &(&1.state != "up"))
     has_errors = error_summary != []
 
     cond do
       has_down -> "unhealthy"
-      has_degraded -> "degraded"
       has_non_up -> "degraded"
       has_errors -> "warning"
-      all_up -> "healthy"
+      true -> "healthy"
     end
   end
 end
