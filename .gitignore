@@ -16,3 +16,6 @@ erl_crash.dump
 /polished-marching-river/
 /sunlit-moving-walnut/
 thinktank.log
+
+# Dependencies
+/node_modules/
