@@ -2,9 +2,9 @@ defmodule Canary.StatusTest do
   use Canary.DataCase
 
   alias Canary.Status
+  import Canary.Fixtures
 
   setup do
-    # Clear pre-existing data (Health.Manager boot) within sandbox
     Canary.Repo.delete_all(Canary.Schemas.TargetState)
     Canary.Repo.delete_all(Canary.Schemas.TargetCheck)
     Canary.Repo.delete_all(Canary.Schemas.Target)
@@ -14,10 +14,7 @@ defmodule Canary.StatusTest do
 
   describe "combined/0" do
     test "all healthy targets and no errors" do
-      # Create 3 healthy targets
-      for name <- ["alpha", "bravo", "charlie"] do
-        create_target_with_state(name, "up")
-      end
+      for name <- ["alpha", "bravo", "charlie"], do: create_target_with_state(name, "up")
 
       result = Status.combined()
 
@@ -25,16 +22,13 @@ defmodule Canary.StatusTest do
       assert length(result.targets) == 3
       assert Enum.all?(result.targets, &(&1.state == "up"))
       assert result.error_summary == []
-      assert is_binary(result.summary)
       assert result.summary =~ "All 3 targets healthy"
     end
 
     test "target down with errors for that service" do
       create_target_with_state("volume", "down")
       create_target_with_state("api", "up")
-
-      # Ingest errors for "volume" service
-      for _ <- 1..12, do: create_error("volume", "ConnectionError")
+      create_error_group("volume", "ConnectionError", 12)
 
       result = Status.combined()
 
@@ -46,7 +40,6 @@ defmodule Canary.StatusTest do
 
       volume_errors = Enum.find(result.error_summary, &(&1.service == "volume"))
       assert volume_errors.total_count == 12
-      assert is_binary(result.summary)
       assert result.summary =~ "volume"
     end
 
@@ -71,79 +64,29 @@ defmodule Canary.StatusTest do
 
     test "errors exist but all targets healthy" do
       create_target_with_state("api", "up")
-      for _ <- 1..5, do: create_error("api", "TimeoutError")
+      create_error_group("api", "TimeoutError", 5)
 
       result = Status.combined()
 
       assert result.overall == "warning"
       assert result.summary =~ "error"
     end
-  end
 
-  # --- Helpers ---
+    test "errors exist with no targets returns warning" do
+      create_error_group("orphan-svc", "CrashError", 3)
 
-  defp create_target_with_state(name, state) do
-    id = "TGT-#{name}"
-    now = DateTime.utc_now() |> DateTime.to_iso8601()
+      result = Status.combined()
 
-    Canary.Repo.insert!(%Canary.Schemas.Target{
-      id: id,
-      name: name,
-      url: "https://#{name}.example.com/healthz",
-      created_at: now
-    })
+      assert result.overall == "warning"
+      assert result.summary =~ "error"
+    end
 
-    Canary.Repo.insert!(%Canary.Schemas.TargetState{
-      target_id: id,
-      state: state,
-      consecutive_failures: if(state == "up", do: 0, else: 3),
-      last_checked_at: now,
-      last_success_at: if(state == "up", do: now, else: nil)
-    })
-  end
+    test "unknown target state treated as degraded" do
+      create_target_with_state("booting", "unknown")
 
-  defp create_error(service, error_class) do
-    id = "ERR-#{:crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false)}"
-    now = DateTime.utc_now() |> DateTime.to_iso8601()
-    group_hash = :crypto.hash(:sha256, "#{service}:#{error_class}") |> Base.encode16(case: :lower)
+      result = Status.combined()
 
-    Canary.Repo.insert!(
-      %Canary.Schemas.Error{
-        id: id,
-        service: service,
-        error_class: error_class,
-        message: "#{error_class}: something failed",
-        message_template: "#{error_class}: something failed",
-        severity: "error",
-        environment: "production",
-        group_hash: group_hash,
-        created_at: now
-      },
-      on_conflict: :nothing
-    )
-
-    # Upsert the error group
-    case Canary.Repos.read_repo().get(Canary.Schemas.ErrorGroup, group_hash) do
-      nil ->
-        Canary.Repo.insert!(%Canary.Schemas.ErrorGroup{
-          group_hash: group_hash,
-          service: service,
-          error_class: error_class,
-          severity: "error",
-          first_seen_at: now,
-          last_seen_at: now,
-          total_count: 1,
-          last_error_id: id
-        })
-
-      group ->
-        group
-        |> Ecto.Changeset.change(%{
-          total_count: group.total_count + 1,
-          last_seen_at: now,
-          last_error_id: id
-        })
-        |> Canary.Repo.update!()
+      assert result.overall == "degraded"
     end
   end
 end

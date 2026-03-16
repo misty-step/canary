@@ -70,29 +70,25 @@ defmodule Canary.Summary do
     degraded = by_state["degraded"] || []
     total_errors = Enum.reduce(error_summary, 0, &(&1.total_count + &2))
 
-    parts = ["#{length(targets)} targets monitored."]
-
-    parts =
+    down_part =
       if down != [] do
         names = Enum.map_join(down, ", ", & &1.name)
-        parts ++ [" #{length(down)} down (#{names})."]
-      else
-        parts
+        " #{length(down)} down (#{names})."
       end
 
-    parts =
+    degraded_part =
       if degraded != [] do
         names = Enum.map_join(degraded, ", ", & &1.name)
-        parts ++ [" #{length(degraded)} degraded (#{names})."]
-      else
-        parts
+        " #{length(degraded)} degraded (#{names})."
       end
 
-    if total_errors > 0 do
-      parts ++ [" #{total_errors} errors across #{length(error_summary)} services in the last hour."]
-    else
-      parts
-    end
+    errors_part =
+      if total_errors > 0 do
+        " #{total_errors} errors across #{length(error_summary)} services in the last hour."
+      end
+
+    ["#{length(targets)} targets monitored.", down_part, degraded_part, errors_part]
+    |> Enum.reject(&is_nil/1)
     |> Enum.join()
   end
 

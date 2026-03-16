@@ -1,8 +1,9 @@
 defmodule CanaryWeb.StatusControllerTest do
   use CanaryWeb.ConnCase
 
+  import Canary.Fixtures
+
   setup %{conn: conn} do
-    # Clear pre-existing data (Health.Manager boot) within sandbox
     Canary.Repo.delete_all(Canary.Schemas.TargetState)
     Canary.Repo.delete_all(Canary.Schemas.TargetCheck)
     Canary.Repo.delete_all(Canary.Schemas.Target)
@@ -15,27 +16,7 @@ defmodule CanaryWeb.StatusControllerTest do
 
   describe "GET /api/v1/status" do
     test "all healthy, no errors", %{conn: conn} do
-      # Create 3 healthy targets
-      now = DateTime.utc_now() |> DateTime.to_iso8601()
-
-      for name <- ["alpha", "bravo", "charlie"] do
-        id = "TGT-#{name}"
-
-        Canary.Repo.insert!(%Canary.Schemas.Target{
-          id: id,
-          name: name,
-          url: "https://#{name}.example.com/healthz",
-          created_at: now
-        })
-
-        Canary.Repo.insert!(%Canary.Schemas.TargetState{
-          target_id: id,
-          state: "up",
-          consecutive_failures: 0,
-          last_checked_at: now,
-          last_success_at: now
-        })
-      end
+      for name <- ["alpha", "bravo", "charlie"], do: create_target_with_state(name, "up")
 
       conn = get(conn, "/api/v1/status")
       body = json_response(conn, 200)
@@ -47,52 +28,8 @@ defmodule CanaryWeb.StatusControllerTest do
     end
 
     test "target down with errors", %{conn: conn} do
-      now = DateTime.utc_now() |> DateTime.to_iso8601()
-
-      Canary.Repo.insert!(%Canary.Schemas.Target{
-        id: "TGT-volume",
-        name: "volume",
-        url: "https://volume.example.com/healthz",
-        created_at: now
-      })
-
-      Canary.Repo.insert!(%Canary.Schemas.TargetState{
-        target_id: "TGT-volume",
-        state: "down",
-        consecutive_failures: 5,
-        last_checked_at: now
-      })
-
-      group_hash =
-        :crypto.hash(:sha256, "volume:ConnectionError") |> Base.encode16(case: :lower)
-
-      for i <- 1..12 do
-        Canary.Repo.insert!(
-          %Canary.Schemas.Error{
-            id: "ERR-vol-#{i}",
-            service: "volume",
-            error_class: "ConnectionError",
-            message: "connection refused",
-            message_template: "connection refused",
-            severity: "error",
-            environment: "production",
-            group_hash: group_hash,
-            created_at: now
-          },
-          on_conflict: :nothing
-        )
-      end
-
-      Canary.Repo.insert!(%Canary.Schemas.ErrorGroup{
-        group_hash: group_hash,
-        service: "volume",
-        error_class: "ConnectionError",
-        severity: "error",
-        first_seen_at: now,
-        last_seen_at: now,
-        total_count: 12,
-        last_error_id: "ERR-vol-12"
-      })
+      create_target_with_state("volume", "down")
+      create_error_group("volume", "ConnectionError", 12)
 
       conn = get(conn, "/api/v1/status")
       body = json_response(conn, 200)
