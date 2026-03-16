@@ -25,71 +25,35 @@ defmodule Canary.Summary do
   def health_status(%{targets: targets}) do
     total = length(targets)
     by_state = Enum.group_by(targets, & &1.state)
-
     up = length(by_state["up"] || [])
-    degraded = length(by_state["degraded"] || [])
-    down = length(by_state["down"] || [])
 
-    parts = ["#{total} targets monitored. #{up} up"]
-
-    parts =
-      if degraded > 0 do
-        degraded_names =
-          (by_state["degraded"] || [])
-          |> Enum.map_join(", ", & &1.name)
-
-        parts ++ [", #{degraded} degraded (#{degraded_names})"]
-      else
-        parts
-      end
-
-    parts =
-      if down > 0 do
-        down_names =
-          (by_state["down"] || [])
-          |> Enum.map_join(", ", & &1.name)
-
-        parts ++ [", #{down} down (#{down_names})"]
-      else
-        parts
-      end
-
-    Enum.join(parts) <> "."
+    [
+      "#{total} targets monitored. #{up} up",
+      describe_group(by_state["degraded"], "degraded"),
+      describe_group(by_state["down"], "down")
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(", ")
+    |> Kernel.<>(".")
   end
 
-  @spec combined_status(map()) :: String.t()
-  def combined_status(%{overall: "empty"}), do: "No services configured."
+  @spec combined_status(String.t(), list(), list()) :: String.t()
+  def combined_status("empty", _targets, _errors), do: "No services configured."
 
-  def combined_status(%{overall: "healthy", targets: targets}) do
+  def combined_status("healthy", targets, _errors) do
     "All #{length(targets)} targets healthy. No errors in the last hour."
   end
 
-  def combined_status(%{targets: targets, error_summary: error_summary}) do
+  def combined_status(_overall, targets, error_summary) do
     by_state = Enum.group_by(targets, & &1.state)
-    down = by_state["down"] || []
-    degraded = by_state["degraded"] || []
     total_errors = Enum.reduce(error_summary, 0, &(&1.total_count + &2))
 
-    down_part =
-      if down != [] do
-        names = Enum.map_join(down, ", ", & &1.name)
-        " #{length(down)} down (#{names})."
-      end
-
-    degraded_part =
-      if degraded != [] do
-        names = Enum.map_join(degraded, ", ", & &1.name)
-        " #{length(degraded)} degraded (#{names})."
-      end
-
-    errors_part =
-      if total_errors > 0 do
-        svc_count = length(error_summary)
-        svc_word = if svc_count == 1, do: "service", else: "services"
-        " #{total_errors} errors across #{svc_count} #{svc_word} in the last hour."
-      end
-
-    ["#{length(targets)} targets monitored.", down_part, degraded_part, errors_part]
+    [
+      "#{length(targets)} targets monitored.",
+      describe_group(by_state["down"], "down", " "),
+      describe_group(by_state["degraded"], "degraded", " "),
+      errors_part(total_errors, error_summary)
+    ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join()
   end
@@ -103,5 +67,31 @@ defmodule Canary.Summary do
         last_seen: last_seen
       }) do
     "#{error_class} in #{service}. Seen #{count} times since #{first_seen}. Last occurrence: #{last_seen}."
+  end
+
+  # --- Helpers ---
+
+  defp describe_group(nil, _label), do: nil
+  defp describe_group([], _label), do: nil
+
+  defp describe_group(targets, label) do
+    names = Enum.map_join(targets, ", ", & &1.name)
+    "#{length(targets)} #{label} (#{names})"
+  end
+
+  defp describe_group(nil, _label, _prefix), do: nil
+  defp describe_group([], _label, _prefix), do: nil
+
+  defp describe_group(targets, label, prefix) do
+    names = Enum.map_join(targets, ", ", & &1.name)
+    "#{prefix}#{length(targets)} #{label} (#{names})."
+  end
+
+  defp errors_part(0, _summary), do: nil
+
+  defp errors_part(total, error_summary) do
+    svc_count = length(error_summary)
+    svc_word = if svc_count == 1, do: "service", else: "services"
+    " #{total} errors across #{svc_count} #{svc_word} in the last hour."
   end
 end

@@ -15,10 +15,12 @@ defmodule Canary.Status do
     error_summary = fetch_error_summary()
     overall = compute_overall(targets, error_summary)
 
-    result = %{overall: overall, targets: targets, error_summary: error_summary}
-    summary = Canary.Summary.combined_status(result)
-
-    Map.put(result, :summary, summary)
+    %{
+      overall: overall,
+      summary: Canary.Summary.combined_status(overall, targets, error_summary),
+      targets: targets,
+      error_summary: error_summary
+    }
   end
 
   defp fetch_targets do

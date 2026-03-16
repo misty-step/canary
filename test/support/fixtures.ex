@@ -1,6 +1,13 @@
 defmodule Canary.Fixtures do
   @moduledoc "Shared test data builders."
 
+  def clean_status_tables do
+    Canary.Repo.delete_all(Canary.Schemas.TargetState)
+    Canary.Repo.delete_all(Canary.Schemas.TargetCheck)
+    Canary.Repo.delete_all(Canary.Schemas.Target)
+    Canary.Repo.delete_all(Canary.Schemas.ErrorGroup)
+  end
+
   def create_target_with_state(name, state) do
     id = "TGT-#{name}"
     now = DateTime.utc_now() |> DateTime.to_iso8601()
@@ -24,41 +31,21 @@ defmodule Canary.Fixtures do
   def create_error_group(service, error_class, count, opts \\ [])
       when count > 0 do
     last_seen_at = Keyword.get(opts, :last_seen_at, DateTime.utc_now() |> DateTime.to_iso8601())
+    id = "ERR-#{:crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false)}"
 
     group_hash =
       :crypto.hash(:sha256, "#{service}:#{error_class}") |> Base.encode16(case: :lower)
 
-    for i <- 1..count do
-      id = "ERR-#{:crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false)}"
-
-      Canary.Repo.insert!(
-        %Canary.Schemas.Error{
-          id: id,
-          service: service,
-          error_class: error_class,
-          message: "#{error_class}: something failed",
-          message_template: "#{error_class}: something failed",
-          severity: "error",
-          environment: "production",
-          group_hash: group_hash,
-          created_at: last_seen_at
-        },
-        on_conflict: :nothing
-      )
-
-      if i == 1 do
-        Canary.Repo.insert!(%Canary.Schemas.ErrorGroup{
-          group_hash: group_hash,
-          service: service,
-          error_class: error_class,
-          severity: "error",
-          status: "active",
-          first_seen_at: last_seen_at,
-          last_seen_at: last_seen_at,
-          total_count: count,
-          last_error_id: id
-        })
-      end
-    end
+    Canary.Repo.insert!(%Canary.Schemas.ErrorGroup{
+      group_hash: group_hash,
+      service: service,
+      error_class: error_class,
+      severity: "error",
+      status: "active",
+      first_seen_at: last_seen_at,
+      last_seen_at: last_seen_at,
+      total_count: count,
+      last_error_id: id
+    })
   end
 end

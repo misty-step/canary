@@ -5,10 +5,7 @@ defmodule Canary.StatusTest do
   import Canary.Fixtures
 
   setup do
-    Canary.Repo.delete_all(Canary.Schemas.TargetState)
-    Canary.Repo.delete_all(Canary.Schemas.TargetCheck)
-    Canary.Repo.delete_all(Canary.Schemas.Target)
-    Canary.Repo.delete_all(Canary.Schemas.ErrorGroup)
+    clean_status_tables()
     :ok
   end
 

@@ -4,11 +4,7 @@ defmodule CanaryWeb.StatusControllerTest do
   import Canary.Fixtures
 
   setup %{conn: conn} do
-    Canary.Repo.delete_all(Canary.Schemas.TargetState)
-    Canary.Repo.delete_all(Canary.Schemas.TargetCheck)
-    Canary.Repo.delete_all(Canary.Schemas.Target)
-    Canary.Repo.delete_all(Canary.Schemas.ErrorGroup)
-
+    clean_status_tables()
     {raw_key, _key} = create_api_key()
     conn = authenticate(conn, raw_key)
     {:ok, conn: conn}
