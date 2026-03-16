@@ -21,8 +21,9 @@ defmodule Canary.Fixtures do
     })
   end
 
-  def create_error_group(service, error_class, count) do
-    now = DateTime.utc_now() |> DateTime.to_iso8601()
+  def create_error_group(service, error_class, count, opts \\ [])
+      when count > 0 do
+    last_seen_at = Keyword.get(opts, :last_seen_at, DateTime.utc_now() |> DateTime.to_iso8601())
 
     group_hash =
       :crypto.hash(:sha256, "#{service}:#{error_class}") |> Base.encode16(case: :lower)
@@ -40,7 +41,7 @@ defmodule Canary.Fixtures do
           severity: "error",
           environment: "production",
           group_hash: group_hash,
-          created_at: now
+          created_at: last_seen_at
         },
         on_conflict: :nothing
       )
@@ -52,8 +53,8 @@ defmodule Canary.Fixtures do
           error_class: error_class,
           severity: "error",
           status: "active",
-          first_seen_at: now,
-          last_seen_at: now,
+          first_seen_at: last_seen_at,
+          last_seen_at: last_seen_at,
           total_count: count,
           last_error_id: id
         })

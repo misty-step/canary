@@ -129,7 +129,7 @@ defmodule Canary.SummaryTest do
 
       assert result =~ "1 down (api)."
       assert result =~ "1 degraded (web)."
-      assert result =~ "10 errors across 1 services"
+      assert result =~ "10 errors across 1 service in the last hour"
     end
 
     test "warning — errors only, no targets" do

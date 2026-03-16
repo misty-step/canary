@@ -88,5 +88,30 @@ defmodule Canary.StatusTest do
 
       assert result.overall == "degraded"
     end
+
+    test "old errors outside 1h window are excluded" do
+      create_target_with_state("api", "up")
+
+      two_hours_ago =
+        DateTime.utc_now()
+        |> DateTime.add(-7_200, :second)
+        |> DateTime.to_iso8601()
+
+      create_error_group("api", "StaleError", 10, last_seen_at: two_hours_ago)
+
+      result = Status.combined()
+
+      assert result.overall == "healthy"
+      assert result.error_summary == []
+    end
+
+    test "singular service wording with one service" do
+      create_target_with_state("api", "up")
+      create_error_group("api", "TimeoutError", 5)
+
+      result = Status.combined()
+
+      assert result.summary =~ "1 service in the last hour"
+    end
   end
 end

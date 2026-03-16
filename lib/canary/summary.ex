@@ -84,7 +84,9 @@ defmodule Canary.Summary do
 
     errors_part =
       if total_errors > 0 do
-        " #{total_errors} errors across #{length(error_summary)} services in the last hour."
+        svc_count = length(error_summary)
+        svc_word = if svc_count == 1, do: "service", else: "services"
+        " #{total_errors} errors across #{svc_count} #{svc_word} in the last hour."
       end
 
     ["#{length(targets)} targets monitored.", down_part, degraded_part, errors_part]
