@@ -6,7 +6,10 @@ defmodule CanaryWeb.QueryController do
   def query(conn, %{"error_class" => error_class} = params) do
     # Cross-service queries default to wider window than per-service queries (24h vs 1h)
     window = params["window"] || "24h"
-    opts = if params["service"], do: [service: params["service"]], else: []
+
+    opts =
+      [service: params["service"], cursor: params["cursor"]]
+      |> Enum.reject(fn {_, v} -> is_nil(v) end)
 
     case Query.errors_by_error_class(error_class, window, opts) do
       {:ok, result} ->
