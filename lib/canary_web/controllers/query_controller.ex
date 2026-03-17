@@ -3,6 +3,26 @@ defmodule CanaryWeb.QueryController do
 
   alias Canary.Query
 
+  def query(conn, %{"error_class" => error_class} = params) do
+    # Cross-service queries default to wider window than per-service queries (24h vs 1h)
+    window = params["window"] || "24h"
+    opts = if params["service"], do: [service: params["service"]], else: []
+
+    case Query.errors_by_error_class(error_class, window, opts) do
+      {:ok, result} ->
+        json(conn, result)
+
+      {:error, :invalid_window} ->
+        CanaryWeb.Plugs.ProblemDetails.render_error(
+          conn,
+          422,
+          "validation_error",
+          "Invalid window. Allowed: 1h, 6h, 24h, 7d, 30d",
+          %{errors: %{window: ["must be one of: 1h, 6h, 24h, 7d, 30d"]}}
+        )
+    end
+  end
+
   def query(conn, %{"service" => service} = params) do
     window = params["window"] || "1h"
     cursor = params["cursor"]
@@ -45,7 +65,7 @@ defmodule CanaryWeb.QueryController do
       conn,
       422,
       "validation_error",
-      "Provide 'service' or 'group_by=error_class' parameter."
+      "Provide 'service', 'error_class', or 'group_by=error_class' parameter."
     )
   end
 

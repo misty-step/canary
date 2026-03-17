@@ -45,6 +45,47 @@ defmodule CanaryWeb.QueryControllerTest do
       conn = get(conn, "/api/v1/query")
       assert json_response(conn, 422)["code"] == "validation_error"
     end
+
+    test "returns errors by error_class across services", %{conn: conn} do
+      for svc <- ["volume", "canary-triage"] do
+        post(conn, "/api/v1/errors", %{
+          "service" => svc,
+          "error_class" => "RuntimeError",
+          "message" => "boom"
+        })
+      end
+
+      conn = get(conn, "/api/v1/query?error_class=RuntimeError&window=24h")
+      body = json_response(conn, 200)
+      assert body["error_class"] == "RuntimeError"
+      services = Enum.map(body["groups"], & &1["service"])
+      assert "volume" in services
+      assert "canary-triage" in services
+    end
+
+    test "returns 200 with empty groups for unknown error_class", %{conn: conn} do
+      conn = get(conn, "/api/v1/query?error_class=FooError&window=24h")
+      body = json_response(conn, 200)
+      assert body["error_class"] == "FooError"
+      assert body["groups"] == []
+      assert body["total_errors"] == 0
+    end
+
+    test "filters by both error_class and service", %{conn: conn} do
+      for svc <- ["volume", "canary-triage"] do
+        post(conn, "/api/v1/errors", %{
+          "service" => svc,
+          "error_class" => "RuntimeError",
+          "message" => "boom"
+        })
+      end
+
+      conn = get(conn, "/api/v1/query?error_class=RuntimeError&service=volume&window=24h")
+      body = json_response(conn, 200)
+      assert body["error_class"] == "RuntimeError"
+      assert [group] = body["groups"]
+      assert group["service"] == "volume"
+    end
   end
 
   describe "GET /api/v1/errors/:id" do
