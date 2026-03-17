@@ -1,0 +1,28 @@
+# .spellbook.yaml — Canary observability (Elixir/Phoenix + SQLite)
+skills:
+  - autopilot
+  - settle
+  - debug
+  - canary
+  - observability
+  - pr
+  - cli-reference
+  - database
+  - external-integration-patterns
+  - security-scan
+  - harness-engineering
+  - git-mastery
+  - github-cli-hygiene
+  - calibrate
+  - reflect
+agents:
+  - ousterhout
+  - beck
+  - fowler
+  - test-strategy-architect
+  - infrastructure-guardian
+  - observability-advocate
+  - error-handling-specialist
+  - security-sentinel
+  - api-design-specialist
+  - data-integrity-guardian
