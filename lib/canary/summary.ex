@@ -61,6 +61,7 @@ defmodule Canary.Summary do
   @spec error_class_query(map()) :: String.t()
   def error_class_query(%{total: total, error_class: error_class, window: window, groups: groups}) do
     service_count = groups |> Enum.map(& &1.service) |> Enum.uniq() |> length()
+
     "#{total} errors matching #{error_class} in the last #{window}. #{length(groups)} groups across #{service_count} services."
   end
 
