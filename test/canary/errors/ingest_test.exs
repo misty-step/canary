@@ -82,5 +82,15 @@ defmodule Canary.Errors.IngestTest do
       {:error, :validation_error, errors} = Ingest.ingest(attrs)
       assert errors == %{"fingerprint" => ["must be a list of strings"]}
     end
+
+    test "broadcasts new error via PubSub after commit" do
+      Phoenix.PubSub.subscribe(Canary.PubSub, "errors:new")
+
+      {:ok, result} = Ingest.ingest(@valid_attrs)
+
+      assert_receive {:new_error, error}
+      assert error.id == result.id
+      assert error.service == "cadence"
+    end
   end
 end

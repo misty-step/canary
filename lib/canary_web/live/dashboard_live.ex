@@ -66,9 +66,12 @@ defmodule CanaryWeb.DashboardLive do
       if target_ids == [] do
         %{}
       else
+        max_rows = length(target_ids) * @uptime_checks
+
         from(c in TargetCheck,
           where: c.target_id in ^target_ids,
           order_by: [desc: c.checked_at],
+          limit: ^max_rows,
           select: %{target_id: c.target_id, result: c.result, checked_at: c.checked_at}
         )
         |> repo().all()
@@ -163,7 +166,7 @@ defmodule CanaryWeb.DashboardLive do
             <td><.severity_badge severity={error.severity} /></td>
             <td><%= error.service %></td>
             <td>
-              <a href={"/dashboard/errors?error_class=#{error.error_class}"}><%= error.error_class %></a>
+              <a href={"/dashboard/errors?error_class=#{URI.encode_www_form(error.error_class)}"}><%= error.error_class %></a>
             </td>
             <td class="meta"><%= truncate_message(error.message) %></td>
             <td><.time_ago datetime={error.created_at || ""} /></td>

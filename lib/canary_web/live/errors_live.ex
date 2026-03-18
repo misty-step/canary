@@ -47,13 +47,18 @@ defmodule CanaryWeb.ErrorsLive do
 
   defp parse_filters(params) do
     %{
-      service: params["service"],
-      severity: params["severity"],
+      service: normalize_filter(params["service"]),
+      severity: normalize_filter(params["severity"]),
       window: if(params["window"] in @windows, do: params["window"], else: "24h"),
-      error_class: params["error_class"],
+      error_class: normalize_filter(params["error_class"]),
       page: parse_page(params["page"])
     }
   end
+
+  defp normalize_filter(nil), do: nil
+  defp normalize_filter(""), do: nil
+  defp normalize_filter("all"), do: nil
+  defp normalize_filter(val), do: val
 
   defp parse_page(nil), do: 1
 
@@ -70,7 +75,7 @@ defmodule CanaryWeb.ErrorsLive do
     base =
       from(g in ErrorGroup,
         where: g.last_seen_at >= ^cutoff and g.status == "active",
-        order_by: [desc: g.total_count]
+        order_by: [desc: g.total_count, asc: g.group_hash]
       )
 
     base =
