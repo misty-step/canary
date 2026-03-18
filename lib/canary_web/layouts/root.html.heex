@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Canary</title>
+    <style>
+      :root {
+        --bg: #0d1117;
+        --bg-surface: #161b22;
+        --bg-elevated: #1c2128;
+        --border: #30363d;
+        --text: #e6edf3;
+        --text-muted: #8b949e;
+        --text-dim: #484f58;
+        --green: #3fb950;
+        --yellow: #d29922;
+        --red: #f85149;
+        --blue: #58a6ff;
+        --purple: #bc8cff;
+        --radius: 6px;
+        --font: ui-monospace, "SF Mono", "Cascadia Code", "Segoe UI Mono", monospace;
+      }
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: var(--font);
+        font-size: 13px;
+        line-height: 1.5;
+        color: var(--text);
+        background: var(--bg);
+        -webkit-font-smoothing: antialiased;
+      }
+      a { color: var(--blue); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      .shell { display: flex; flex-direction: column; min-height: 100vh; }
+      .topbar {
+        display: flex;
+        align-items: center;
+        gap: 24px;
+        padding: 12px 24px;
+        background: var(--bg-surface);
+        border-bottom: 1px solid var(--border);
+      }
+      .topbar-brand { font-size: 15px; font-weight: 600; color: var(--text); letter-spacing: -0.3px; }
+      .topbar-nav { display: flex; gap: 16px; }
+      .topbar-nav a {
+        color: var(--text-muted);
+        font-size: 13px;
+        padding: 4px 8px;
+        border-radius: var(--radius);
+      }
+      .topbar-nav a:hover { color: var(--text); background: var(--bg-elevated); text-decoration: none; }
+      .topbar-nav a.active { color: var(--text); background: var(--bg-elevated); }
+      .main { flex: 1; padding: 24px; max-width: 1200px; width: 100%; margin: 0 auto; }
+      .card {
+        background: var(--bg-surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 16px;
+        margin-bottom: 16px;
+      }
+      .card-header {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 12px;
+      }
+      table { width: 100%; border-collapse: collapse; }
+      th {
+        text-align: left;
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--text-dim);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--border);
+      }
+      td { padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+      tr:last-child td { border-bottom: none; }
+      tr:hover td { background: var(--bg-elevated); }
+      .badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-size: 11px;
+        font-weight: 600;
+      }
+      .badge-green { background: rgba(63, 185, 80, 0.15); color: var(--green); }
+      .badge-yellow { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
+      .badge-red { background: rgba(248, 81, 73, 0.15); color: var(--red); }
+      .badge-muted { background: rgba(139, 148, 158, 0.15); color: var(--text-muted); }
+      .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+      .dot-up { background: var(--green); }
+      .dot-degraded { background: var(--yellow); }
+      .dot-down { background: var(--red); }
+      .dot-unknown { background: var(--text-dim); }
+      .uptime-bar { display: flex; gap: 1px; height: 24px; align-items: flex-end; }
+      .uptime-bar .tick {
+        flex: 1;
+        min-width: 2px;
+        border-radius: 1px;
+        height: 100%;
+      }
+      .tick-success { background: var(--green); }
+      .tick-failure { background: var(--red); }
+      .tick-empty { background: var(--text-dim); opacity: 0.3; }
+      pre {
+        background: var(--bg-elevated);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 12px;
+        overflow-x: auto;
+        font-size: 12px;
+        line-height: 1.6;
+      }
+      .filters {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        margin-bottom: 16px;
+        flex-wrap: wrap;
+      }
+      .filters select, .filters input {
+        background: var(--bg-elevated);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        color: var(--text);
+        padding: 6px 10px;
+        font-family: var(--font);
+        font-size: 12px;
+      }
+      .pagination { display: flex; gap: 8px; justify-content: center; padding: 16px 0; }
+      .pagination a, .pagination span {
+        padding: 4px 12px;
+        border-radius: var(--radius);
+        font-size: 12px;
+      }
+      .pagination a { background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text); }
+      .pagination a:hover { background: var(--bg-surface); text-decoration: none; }
+      .pagination .current { background: var(--blue); color: var(--bg); font-weight: 600; }
+      .empty { color: var(--text-muted); text-align: center; padding: 48px 0; }
+      .flash-info { background: rgba(88, 166, 255, 0.1); border: 1px solid var(--blue); border-radius: var(--radius); padding: 8px 16px; margin-bottom: 16px; }
+      .flash-error { background: rgba(248, 81, 73, 0.1); border: 1px solid var(--red); border-radius: var(--radius); padding: 8px 16px; margin-bottom: 16px; }
+      .meta { color: var(--text-muted); font-size: 12px; }
+      .section-gap { margin-top: 24px; }
+      .count-badge { font-variant-numeric: tabular-nums; }
+    </style>
+    <meta name="csrf-token" content={Phoenix.Controller.get_csrf_token()} />
+    <.live_title><%= assigns[:page_title] || "Canary" %></.live_title>
+  </head>
+  <body>
+    <div class="shell">
+      <nav class="topbar">
+        <span class="topbar-brand">canary</span>
+        <div class="topbar-nav">
+          <a href="/dashboard">Overview</a>
+          <a href="/dashboard/errors">Errors</a>
+        </div>
+      </nav>
+      <main class="main">
+        <p :if={Phoenix.Flash.get(@flash, :info)} class="flash-info">
+          <%= Phoenix.Flash.get(@flash, :info) %>
+        </p>
+        <p :if={Phoenix.Flash.get(@flash, :error)} class="flash-error">
+          <%= Phoenix.Flash.get(@flash, :error) %>
+        </p>
+        <%= @inner_content %>
+      </main>
+    </div>
+    <script src="/assets/phoenix.min.js"></script>
+    <script src="/assets/phoenix_live_view.min.js"></script>
+    <script>
+      let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content");
+      let liveSocket = new window.LiveView.LiveSocket("/live", window.Phoenix.Socket, {
+        params: {_csrf_token: csrfToken}
+      });
+      liveSocket.connect();
+    </script>
+  </body>
+</html>

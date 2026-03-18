@@ -36,22 +36,29 @@ defmodule Canary.Errors.Ingest do
         created_at: now
       }
 
-      Repo.transaction(fn ->
-        {:ok, error} =
-          %Error{id: error_id}
-          |> Error.changeset(error_attrs)
-          |> Repo.insert()
+      result =
+        Repo.transaction(fn ->
+          {:ok, error} =
+            %Error{id: error_id}
+            |> Error.changeset(error_attrs)
+            |> Repo.insert()
 
-        {is_new, is_regression} = upsert_group(error, group_hash, template, now)
+          {is_new, is_regression} = upsert_group(error, group_hash, template, now)
 
-        maybe_enqueue_webhooks(error, group_hash, is_new, is_regression)
+          maybe_enqueue_webhooks(error, group_hash, is_new, is_regression)
 
-        %{
-          id: error.id,
-          group_hash: group_hash,
-          is_new_class: is_new
-        }
-      end)
+          {error,
+           %{
+             id: error.id,
+             group_hash: group_hash,
+             is_new_class: is_new
+           }}
+        end)
+
+      with {:ok, {error, summary}} <- result do
+        broadcast_new_error(error)
+        {:ok, summary}
+      end
     end
   end
 
@@ -178,6 +185,10 @@ defmodule Canary.Errors.Ingest do
     }
 
     Canary.Workers.WebhookDelivery.enqueue_for_event(event, payload)
+  end
+
+  defp broadcast_new_error(error) do
+    Phoenix.PubSub.broadcast(Canary.PubSub, "errors:new", {:new_error, error})
   end
 
   defp truncate(nil, _max), do: nil

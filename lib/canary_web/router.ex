@@ -23,12 +23,30 @@ defmodule CanaryWeb.Router do
     plug CanaryWeb.Plugs.RateLimit, type: :query
   end
 
+  pipeline :browser do
+    plug :accepts, ["html"]
+    plug :fetch_session
+    plug :fetch_live_flash
+    plug :put_root_layout, html: {CanaryWeb.Layouts, :root}
+    plug :protect_from_forgery
+    plug :put_secure_browser_headers
+  end
+
   # Public health endpoints (no auth)
   scope "/", CanaryWeb do
     pipe_through :api
 
     get "/healthz", HealthController, :healthz
     get "/readyz", HealthController, :readyz
+  end
+
+  # Dashboard (no auth — internal network)
+  scope "/dashboard", CanaryWeb do
+    pipe_through :browser
+
+    live "/", DashboardLive, :index
+    live "/errors", ErrorsLive, :index
+    live "/errors/:id", ErrorDetailLive, :show
   end
 
   # Authenticated API
