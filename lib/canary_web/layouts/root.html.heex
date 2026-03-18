@@ -5,21 +5,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Canary</title>
     <style>
+      @font-face { font-family: "IBM Plex Mono"; font-weight: 400; font-style: normal; font-display: swap; src: url("/fonts/ibm-plex-mono-400.woff2") format("woff2"); }
+      @font-face { font-family: "IBM Plex Mono"; font-weight: 500; font-style: normal; font-display: swap; src: url("/fonts/ibm-plex-mono-500.woff2") format("woff2"); }
+      @font-face { font-family: "IBM Plex Mono"; font-weight: 600; font-style: normal; font-display: swap; src: url("/fonts/ibm-plex-mono-600.woff2") format("woff2"); }
       :root {
-        --bg: #0d1117;
-        --bg-surface: #161b22;
-        --bg-elevated: #1c2128;
-        --border: #30363d;
-        --text: #e6edf3;
-        --text-muted: #8b949e;
-        --text-dim: #484f58;
-        --green: #3fb950;
-        --yellow: #d29922;
-        --red: #f85149;
-        --blue: #58a6ff;
-        --purple: #bc8cff;
-        --radius: 6px;
-        --font: ui-monospace, "SF Mono", "Cascadia Code", "Segoe UI Mono", monospace;
+        --bg: #0d0b08;
+        --surface: #14120d;
+        --border: #2a2518;
+        --text: #ddd0b8;
+        --muted: #8a7e68;
+        --dim: #4a4030;
+        --amber: #ffaa00;
+        --amber-dim: #e89830;
+        --red: #ff2233;
+        --green: #6aaa44;
+        --radius: 2px;
+        --font: "IBM Plex Mono", ui-monospace, "SF Mono", monospace;
       }
       *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
       body {
@@ -30,73 +31,158 @@
         background: var(--bg);
         -webkit-font-smoothing: antialiased;
       }
-      a { color: var(--blue); text-decoration: none; }
-      a:hover { text-decoration: underline; }
+      body::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background: repeating-linear-gradient(
+          0deg,
+          transparent,
+          transparent 2px,
+          rgba(0, 0, 0, 0.03) 2px,
+          rgba(0, 0, 0, 0.03) 4px
+        );
+        pointer-events: none;
+        z-index: 100; /* intentionally above content — CRT scanline effect requires overlay */
+      }
+      a { color: var(--amber); text-decoration: none; }
+      a:hover { text-decoration: underline; color: var(--amber-dim); }
+
+      /* Hazard stripe bars */
+      .hazard-bar {
+        height: 3px;
+        background: repeating-linear-gradient(
+          -45deg,
+          var(--amber),
+          var(--amber) 8px,
+          transparent 8px,
+          transparent 16px
+        );
+        background-size: 22.6px 100%;
+        animation: hazard-scroll 4s linear infinite;
+      }
+      @keyframes hazard-scroll { to { background-position: 22.6px 0; } }
+
       .shell { display: flex; flex-direction: column; min-height: 100vh; }
       .topbar {
         display: flex;
         align-items: center;
         gap: 24px;
-        padding: 12px 24px;
-        background: var(--bg-surface);
+        padding: 10px 24px;
+        background: var(--surface);
         border-bottom: 1px solid var(--border);
       }
-      .topbar-brand { font-size: 15px; font-weight: 600; color: var(--text); letter-spacing: -0.3px; }
-      .topbar-nav { display: flex; gap: 16px; }
-      .topbar-nav a {
-        color: var(--text-muted);
-        font-size: 13px;
-        padding: 4px 8px;
-        border-radius: var(--radius);
+      .topbar-brand {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--amber);
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        text-shadow: 0 0 8px rgba(255, 170, 0, 0.3);
       }
-      .topbar-nav a:hover { color: var(--text); background: var(--bg-elevated); text-decoration: none; }
-      .topbar-nav a.active { color: var(--text); background: var(--bg-elevated); }
+      .topbar-nav { display: flex; gap: 0; }
+      .topbar-nav a {
+        color: var(--muted);
+        font-size: 11px;
+        padding: 6px 12px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        border-bottom: 2px solid transparent;
+        transition: color 0.2s, border-color 0.2s;
+      }
+      .topbar-nav a:hover { color: var(--text); border-bottom-color: var(--muted); text-decoration: none; }
+      .topbar-nav a.active { color: var(--amber); border-bottom-color: var(--amber); }
       .main { flex: 1; padding: 24px; max-width: 1200px; width: 100%; margin: 0 auto; }
+
+      /* Cards */
       .card {
-        background: var(--bg-surface);
+        background: var(--surface);
         border: 1px solid var(--border);
         border-radius: var(--radius);
         padding: 16px;
         margin-bottom: 16px;
       }
       .card-header {
-        font-size: 13px;
+        position: relative;
+        display: inline-block;
+        font-size: 10px;
         font-weight: 600;
-        color: var(--text-muted);
+        color: var(--bg);
         text-transform: uppercase;
-        letter-spacing: 0.5px;
+        letter-spacing: 2px;
         margin-bottom: 12px;
+        padding: 3px 12px;
+        z-index: 0;
       }
+      .card-header::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: var(--amber);
+        transform: skewX(-15deg);
+        z-index: -1;
+      }
+
+      /* Tables */
       table { width: 100%; border-collapse: collapse; }
       th {
         text-align: left;
-        font-size: 11px;
+        font-size: 10px;
         font-weight: 600;
-        color: var(--text-dim);
+        color: var(--muted);
         text-transform: uppercase;
-        letter-spacing: 0.5px;
+        letter-spacing: 1.5px;
         padding: 8px 12px;
         border-bottom: 1px solid var(--border);
       }
-      td { padding: 8px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+      td {
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--border);
+        vertical-align: middle;
+        font-size: 12px;
+      }
       tr:last-child td { border-bottom: none; }
-      tr:hover td { background: var(--bg-elevated); }
+      tr:hover td { background: rgba(255, 170, 0, 0.03); }
+
+      /* Badges */
       .badge {
         display: inline-block;
         padding: 2px 8px;
-        border-radius: 12px;
-        font-size: 11px;
+        border-radius: var(--radius);
+        font-size: 10px;
         font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
       }
-      .badge-green { background: rgba(63, 185, 80, 0.15); color: var(--green); }
-      .badge-yellow { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
-      .badge-red { background: rgba(248, 81, 73, 0.15); color: var(--red); }
-      .badge-muted { background: rgba(139, 148, 158, 0.15); color: var(--text-muted); }
-      .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
-      .dot-up { background: var(--green); }
-      .dot-degraded { background: var(--yellow); }
-      .dot-down { background: var(--red); }
-      .dot-unknown { background: var(--text-dim); }
+      .badge-green { background: rgba(106, 170, 68, 0.15); color: var(--green); }
+      .badge-yellow { background: rgba(255, 170, 0, 0.15); color: var(--amber); }
+      .badge-red { background: rgba(255, 34, 51, 0.15); color: var(--red); box-shadow: inset 0 0 0 1px rgba(255, 34, 51, 0.3); }
+      .badge-muted { background: rgba(138, 126, 104, 0.15); color: var(--muted); }
+
+      /* Status dots — square, not round */
+      .dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; }
+      .dot-up {
+        background: var(--amber);
+        box-shadow: 0 0 6px rgba(255, 170, 0, 0.5);
+        animation: pulse 2.5s ease-in-out infinite;
+      }
+      .dot-degraded { background: var(--amber-dim); }
+      .dot-down {
+        background: var(--red);
+        box-shadow: 0 0 6px rgba(255, 34, 51, 0.5);
+        animation: blink 1s steps(2, start) infinite;
+      }
+      .dot-unknown { background: var(--dim); }
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+      }
+      @keyframes blink {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.4; }
+      }
+
+      /* Uptime bar */
       .uptime-bar { display: flex; gap: 1px; height: 24px; align-items: flex-end; }
       .uptime-bar .tick {
         flex: 1;
@@ -104,11 +190,12 @@
         border-radius: 1px;
         height: 100%;
       }
-      .tick-success { background: var(--green); }
+      .tick-success { background: var(--amber); }
       .tick-failure { background: var(--red); }
-      .tick-empty { background: var(--text-dim); opacity: 0.3; }
+      .tick-empty { background: var(--dim); opacity: 0.3; }
+
       pre {
-        background: var(--bg-elevated);
+        background: var(--bg);
         border: 1px solid var(--border);
         border-radius: var(--radius);
         padding: 12px;
@@ -124,35 +211,79 @@
         flex-wrap: wrap;
       }
       .filters select, .filters input {
-        background: var(--bg-elevated);
+        background: var(--bg);
         border: 1px solid var(--border);
         border-radius: var(--radius);
         color: var(--text);
         padding: 6px 10px;
         font-family: var(--font);
-        font-size: 12px;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
       }
       .pagination { display: flex; gap: 8px; justify-content: center; padding: 16px 0; }
       .pagination a, .pagination span {
         padding: 4px 12px;
         border-radius: var(--radius);
-        font-size: 12px;
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
       }
-      .pagination a { background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text); }
-      .pagination a:hover { background: var(--bg-surface); text-decoration: none; }
-      .pagination .current { background: var(--blue); color: var(--bg); font-weight: 600; }
-      .empty { color: var(--text-muted); text-align: center; padding: 48px 0; }
-      .flash-info { background: rgba(88, 166, 255, 0.1); border: 1px solid var(--blue); border-radius: var(--radius); padding: 8px 16px; margin-bottom: 16px; }
-      .flash-error { background: rgba(248, 81, 73, 0.1); border: 1px solid var(--red); border-radius: var(--radius); padding: 8px 16px; margin-bottom: 16px; }
-      .meta { color: var(--text-muted); font-size: 12px; }
+      .pagination a { background: var(--bg); border: 1px solid var(--border); color: var(--text); }
+      .pagination a:hover { background: var(--surface); text-decoration: none; }
+      .pagination .current { background: var(--amber); color: var(--bg); font-weight: 600; }
+      .empty { color: var(--muted); text-align: center; padding: 48px 0; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
+      .flash-info { background: rgba(255, 170, 0, 0.08); border: 1px solid var(--amber); border-radius: var(--radius); padding: 8px 16px; margin-bottom: 16px; color: var(--amber); }
+      .flash-error {
+        background: rgba(255, 34, 51, 0.08);
+        border-top: 2px solid var(--red);
+        border-left: 1px solid rgba(255, 34, 51, 0.2);
+        border-right: 1px solid rgba(255, 34, 51, 0.2);
+        border-bottom: 1px solid rgba(255, 34, 51, 0.2);
+        border-radius: var(--radius);
+        padding: 8px 16px;
+        margin-bottom: 16px;
+        color: var(--red);
+      }
+      .meta { color: var(--muted); font-size: 11px; }
       .section-gap { margin-top: 24px; }
-      .count-badge { font-variant-numeric: tabular-nums; }
+      .count-badge {
+        font-variant-numeric: tabular-nums;
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--amber);
+        text-shadow: 0 0 5px rgba(255, 170, 0, 0.4);
+      }
+
+      /* Reduced motion */
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+
+      /* Mobile */
+      @media (max-width: 640px) {
+        .topbar { padding: 8px 12px; gap: 12px; flex-wrap: wrap; }
+        .topbar-brand { font-size: 10px; }
+        .topbar-nav a { font-size: 10px; padding: 4px 8px; }
+        .main { padding: 12px; }
+        .card { padding: 12px; }
+        table { font-size: 11px; }
+        th, td { padding: 6px 8px; }
+        .uptime-bar { height: 16px; }
+        .filters { gap: 8px; }
+        .filters select { font-size: 10px; padding: 4px 6px; }
+
+      }
     </style>
     <meta name="csrf-token" content={Phoenix.Controller.get_csrf_token()} />
     <.live_title><%= assigns[:page_title] || "Canary" %></.live_title>
   </head>
   <body>
     <div class="shell">
+      <div class="hazard-bar" aria-hidden="true"></div>
       <nav class="topbar">
         <span class="topbar-brand">canary</span>
         <div class="topbar-nav">
@@ -169,6 +300,7 @@
         </p>
         <%= @inner_content %>
       </main>
+      <div class="hazard-bar" aria-hidden="true"></div>
     </div>
     <script src="/assets/phoenix.min.js"></script>
     <script src="/assets/phoenix_live_view.min.js"></script>
