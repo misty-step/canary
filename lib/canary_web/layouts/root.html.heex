@@ -43,7 +43,7 @@
           rgba(0, 0, 0, 0.03) 4px
         );
         pointer-events: none;
-        z-index: 100;
+        z-index: 100; /* intentionally above content — CRT scanline effect requires overlay */
       }
       a { color: var(--amber); text-decoration: none; }
       a:hover { text-decoration: underline; color: var(--amber-dim); }
@@ -277,12 +277,6 @@
         .filters select { font-size: 10px; padding: 4px 6px; }
 
       }
-      /* Stack table on very narrow screens */
-      @media (max-width: 480px) {
-        table, thead, tbody, th, td, tr { display: block; }
-        thead { display: none; }
-        tr { margin-bottom: 8px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
-        td { border-bottom: none; padding: 2px 0; }
       }
     </style>
     <meta name="csrf-token" content={Phoenix.Controller.get_csrf_token()} />
