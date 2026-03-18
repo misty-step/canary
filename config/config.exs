@@ -20,7 +20,8 @@ config :canary, CanaryWeb.Endpoint,
     formats: [json: CanaryWeb.ErrorJSON],
     layout: false
   ],
-  pubsub_server: Canary.PubSub
+  pubsub_server: Canary.PubSub,
+  live_view: [signing_salt: "canary_lv_salt"]
 
 config :canary, Oban,
   engine: Oban.Engines.Lite,

@@ -8,6 +8,7 @@ defmodule CanaryWeb do
       use Phoenix.Router, helpers: false
       import Plug.Conn
       import Phoenix.Controller
+      import Phoenix.LiveView.Router
     end
   end
 
@@ -15,6 +16,35 @@ defmodule CanaryWeb do
     quote do
       use Phoenix.Controller, formats: [:json]
       import Plug.Conn
+      unquote(verified_routes())
+    end
+  end
+
+  def live_view do
+    quote do
+      use Phoenix.LiveView, layout: {CanaryWeb.Layouts, :dashboard}
+      unquote(html_helpers())
+    end
+  end
+
+  def live_component do
+    quote do
+      use Phoenix.LiveComponent
+      unquote(html_helpers())
+    end
+  end
+
+  def html do
+    quote do
+      use Phoenix.Component
+      import Phoenix.HTML
+      unquote(html_helpers())
+    end
+  end
+
+  defp html_helpers do
+    quote do
+      import CanaryWeb.DashboardComponents
       unquote(verified_routes())
     end
   end

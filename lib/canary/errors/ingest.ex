@@ -45,6 +45,7 @@ defmodule Canary.Errors.Ingest do
         {is_new, is_regression} = upsert_group(error, group_hash, template, now)
 
         maybe_enqueue_webhooks(error, group_hash, is_new, is_regression)
+        broadcast_new_error(error)
 
         %{
           id: error.id,
@@ -178,6 +179,10 @@ defmodule Canary.Errors.Ingest do
     }
 
     Canary.Workers.WebhookDelivery.enqueue_for_event(event, payload)
+  end
+
+  defp broadcast_new_error(error) do
+    Phoenix.PubSub.broadcast(Canary.PubSub, "errors:new", {:new_error, error})
   end
 
   defp truncate(nil, _max), do: nil
