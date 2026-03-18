@@ -182,5 +182,4 @@ defmodule CanaryWeb.DashboardLive do
   defp truncate_message(nil), do: ""
   defp truncate_message(msg) when byte_size(msg) > 100, do: String.slice(msg, 0, 100) <> "..."
   defp truncate_message(msg), do: msg
-
 end

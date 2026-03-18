@@ -73,7 +73,8 @@ defmodule CanaryWeb.ErrorsLive do
         order_by: [desc: g.total_count]
       )
 
-    base = if filters.service, do: from(g in base, where: g.service == ^filters.service), else: base
+    base =
+      if filters.service, do: from(g in base, where: g.service == ^filters.service), else: base
 
     base =
       if filters.severity,
@@ -90,7 +91,7 @@ defmodule CanaryWeb.ErrorsLive do
     groups =
       base
       |> limit(^@per_page)
-      |> offset(^((@per_page * (filters.page - 1))))
+      |> offset(^(@per_page * (filters.page - 1)))
       |> repo().all()
 
     {groups, total}

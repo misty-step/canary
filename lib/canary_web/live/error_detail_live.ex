@@ -25,12 +25,14 @@ defmodule CanaryWeb.ErrorDetailLive do
   end
 
   defp decode_context(nil), do: nil
+
   defp decode_context(json) when is_binary(json) do
     case Jason.decode(json) do
       {:ok, map} -> Jason.encode!(map, pretty: true)
       _ -> json
     end
   end
+
   defp decode_context(other), do: inspect(other)
 
   defp repo, do: Canary.Repos.read_repo()

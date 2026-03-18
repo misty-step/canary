@@ -49,7 +49,11 @@ defmodule CanaryWeb.DashboardLiveTest do
         created_at: DateTime.utc_now() |> DateTime.to_iso8601()
       }
 
-      Phoenix.PubSub.broadcast(Canary.PubSub, "errors:new", {:new_error, struct!(Canary.Schemas.Error, error)})
+      Phoenix.PubSub.broadcast(
+        Canary.PubSub,
+        "errors:new",
+        {:new_error, struct!(Canary.Schemas.Error, error)}
+      )
 
       html = render(view)
       assert html =~ "PaymentError"
