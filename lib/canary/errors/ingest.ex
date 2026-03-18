@@ -36,23 +36,29 @@ defmodule Canary.Errors.Ingest do
         created_at: now
       }
 
-      Repo.transaction(fn ->
-        {:ok, error} =
-          %Error{id: error_id}
-          |> Error.changeset(error_attrs)
-          |> Repo.insert()
+      result =
+        Repo.transaction(fn ->
+          {:ok, error} =
+            %Error{id: error_id}
+            |> Error.changeset(error_attrs)
+            |> Repo.insert()
 
-        {is_new, is_regression} = upsert_group(error, group_hash, template, now)
+          {is_new, is_regression} = upsert_group(error, group_hash, template, now)
 
-        maybe_enqueue_webhooks(error, group_hash, is_new, is_regression)
+          maybe_enqueue_webhooks(error, group_hash, is_new, is_regression)
+
+          {error,
+           %{
+             id: error.id,
+             group_hash: group_hash,
+             is_new_class: is_new
+           }}
+        end)
+
+      with {:ok, {error, summary}} <- result do
         broadcast_new_error(error)
-
-        %{
-          id: error.id,
-          group_hash: group_hash,
-          is_new_class: is_new
-        }
-      end)
+        {:ok, summary}
+      end
     end
   end
 

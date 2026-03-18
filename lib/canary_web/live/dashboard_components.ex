@@ -83,12 +83,12 @@ defmodule CanaryWeb.DashboardComponents do
   def pagination(assigns) do
     ~H"""
     <div :if={@total_pages > 1} class="pagination">
-      <a :if={@page > 1} patch={"#{@patch}&page=#{@page - 1}"}>Prev</a>
+      <.link :if={@page > 1} patch={"#{@patch}&page=#{@page - 1}"}>Prev</.link>
       <span :for={p <- pages_around(@page, @total_pages)} class={if p == @page, do: "current"}>
-        <a :if={p != @page} patch={"#{@patch}&page=#{p}"}><%= p %></a>
+        <.link :if={p != @page} patch={"#{@patch}&page=#{p}"}><%= p %></.link>
         <span :if={p == @page}><%= p %></span>
       </span>
-      <a :if={@page < @total_pages} patch={"#{@patch}&page=#{@page + 1}"}>Next</a>
+      <.link :if={@page < @total_pages} patch={"#{@patch}&page=#{@page + 1}"}>Next</.link>
     </div>
     """
   end

@@ -148,6 +148,7 @@
       .section-gap { margin-top: 24px; }
       .count-badge { font-variant-numeric: tabular-nums; }
     </style>
+    <meta name="csrf-token" content={Phoenix.Controller.get_csrf_token()} />
     <.live_title><%= assigns[:page_title] || "Canary" %></.live_title>
   </head>
   <body>
@@ -160,8 +161,23 @@
         </div>
       </nav>
       <main class="main">
+        <p :if={Phoenix.Flash.get(@flash, :info)} class="flash-info">
+          <%= Phoenix.Flash.get(@flash, :info) %>
+        </p>
+        <p :if={Phoenix.Flash.get(@flash, :error)} class="flash-error">
+          <%= Phoenix.Flash.get(@flash, :error) %>
+        </p>
         <%= @inner_content %>
       </main>
     </div>
+    <script src="/assets/phoenix.min.js"></script>
+    <script src="/assets/phoenix_live_view.min.js"></script>
+    <script>
+      let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content");
+      let liveSocket = new window.LiveView.LiveSocket("/live", window.Phoenix.Socket, {
+        params: {_csrf_token: csrfToken}
+      });
+      liveSocket.connect();
+    </script>
   </body>
 </html>

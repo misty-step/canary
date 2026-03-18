@@ -74,6 +74,7 @@ defmodule CanaryWeb.ErrorsLiveTest do
 
       # After push_patch, only api errors should show
       assert html =~ "RuntimeError"
+      refute html =~ "TypeError"
     end
   end
 end

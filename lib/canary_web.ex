@@ -1,7 +1,7 @@
 defmodule CanaryWeb do
   @moduledoc false
 
-  def static_paths, do: ~w(robots.txt)
+  def static_paths, do: ~w(assets robots.txt)
 
   def router do
     quote do
