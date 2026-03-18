@@ -32,31 +32,55 @@ defmodule Canary.Query do
           groups: groups
         })
 
-      next_cursor =
-        if length(groups) == @max_groups do
-          groups |> List.last() |> Map.get(:group_hash) |> Base.encode64()
-        end
-
       {:ok,
        %{
          summary: summary,
          service: service,
          window: window,
          total_errors: total,
-         groups:
-           Enum.map(groups, fn g ->
-             %{
-               group_hash: g.group_hash,
-               error_class: g.error_class,
-               count: g.total_count,
-               first_seen: g.first_seen_at,
-               last_seen: g.last_seen_at,
-               sample_message: g.message_template,
-               severity: g.severity,
-               status: g.status
-             }
-           end),
-         cursor: next_cursor
+         groups: Enum.map(groups, &format_group/1),
+         cursor: paginate_cursor(groups)
+       }}
+    end
+  end
+
+  def errors_by_error_class(error_class, window, opts \\ []) do
+    with {:ok, cutoff} <- window_to_cutoff(window) do
+      cursor = Keyword.get(opts, :cursor)
+
+      query =
+        from(g in ErrorGroup,
+          where: g.error_class == ^error_class and g.last_seen_at >= ^cutoff,
+          order_by: [desc: g.total_count],
+          limit: ^@max_groups
+        )
+
+      query =
+        case Keyword.get(opts, :service) do
+          nil -> query
+          svc -> from(g in query, where: g.service == ^svc)
+        end
+
+      query = apply_cursor(query, cursor)
+      groups = Canary.Repos.read_repo().all(query)
+      total = Enum.reduce(groups, 0, &(&1.total_count + &2))
+
+      summary =
+        Canary.Summary.error_class_query(%{
+          total: total,
+          error_class: error_class,
+          window: window,
+          groups: groups
+        })
+
+      {:ok,
+       %{
+         summary: summary,
+         error_class: error_class,
+         window: window,
+         total_errors: total,
+         groups: Enum.map(groups, &format_group/1),
+         cursor: paginate_cursor(groups)
        }}
     end
   end
@@ -183,6 +207,28 @@ defmodule Canary.Query do
         |> Canary.Repos.read_repo().all()
 
       {:ok, checks}
+    end
+  end
+
+  # --- Shared formatters ---
+
+  defp format_group(g) do
+    %{
+      group_hash: g.group_hash,
+      error_class: g.error_class,
+      service: g.service,
+      count: g.total_count,
+      first_seen: g.first_seen_at,
+      last_seen: g.last_seen_at,
+      sample_message: g.message_template,
+      severity: g.severity,
+      status: g.status
+    }
+  end
+
+  defp paginate_cursor(groups) do
+    if length(groups) == @max_groups do
+      groups |> List.last() |> Map.get(:group_hash) |> Base.encode64()
     end
   end
 
