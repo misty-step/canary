@@ -12,17 +12,8 @@ defmodule CanaryWeb.QueryController do
       |> Enum.reject(fn {_, v} -> is_nil(v) end)
 
     case Query.errors_by_error_class(error_class, window, opts) do
-      {:ok, result} ->
-        json(conn, result)
-
-      {:error, :invalid_window} ->
-        CanaryWeb.Plugs.ProblemDetails.render_error(
-          conn,
-          422,
-          "validation_error",
-          "Invalid window. Allowed: 1h, 6h, 24h, 7d, 30d",
-          %{errors: %{window: ["must be one of: 1h, 6h, 24h, 7d, 30d"]}}
-        )
+      {:ok, result} -> json(conn, result)
+      {:error, :invalid_window} -> render_invalid_window(conn)
     end
   end
 
@@ -31,17 +22,8 @@ defmodule CanaryWeb.QueryController do
     cursor = params["cursor"]
 
     case Query.errors_by_service(service, window, cursor) do
-      {:ok, result} ->
-        json(conn, result)
-
-      {:error, :invalid_window} ->
-        CanaryWeb.Plugs.ProblemDetails.render_error(
-          conn,
-          422,
-          "validation_error",
-          "Invalid window. Allowed: 1h, 6h, 24h, 7d, 30d",
-          %{errors: %{window: ["must be one of: 1h, 6h, 24h, 7d, 30d"]}}
-        )
+      {:ok, result} -> json(conn, result)
+      {:error, :invalid_window} -> render_invalid_window(conn)
     end
   end
 
@@ -49,17 +31,8 @@ defmodule CanaryWeb.QueryController do
     window = params["window"] || "24h"
 
     case Query.errors_by_class(window) do
-      {:ok, result} ->
-        json(conn, result)
-
-      {:error, :invalid_window} ->
-        CanaryWeb.Plugs.ProblemDetails.render_error(
-          conn,
-          422,
-          "validation_error",
-          "Invalid window.",
-          %{errors: %{window: ["must be one of: 1h, 6h, 24h, 7d, 30d"]}}
-        )
+      {:ok, result} -> json(conn, result)
+      {:error, :invalid_window} -> render_invalid_window(conn)
     end
   end
 
@@ -85,5 +58,15 @@ defmodule CanaryWeb.QueryController do
           "Error #{id} not found."
         )
     end
+  end
+
+  defp render_invalid_window(conn) do
+    CanaryWeb.Plugs.ProblemDetails.render_error(
+      conn,
+      422,
+      "validation_error",
+      "Invalid window. Allowed: 1h, 6h, 24h, 7d, 30d",
+      %{errors: %{window: ["must be one of: 1h, 6h, 24h, 7d, 30d"]}}
+    )
   end
 end
