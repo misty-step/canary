@@ -1,23 +1,20 @@
 # .spellbook.yaml — Canary observability (Elixir/Phoenix + SQLite)
+# Global skills (autopilot, calibrate, debug, harness-engineering, pr, reflect)
+# and global agents (beck, ousterhout) are via bootstrap — not listed here.
 skills:
-  - autopilot
-  - settle
-  - debug
   - canary
   - observability
-  - pr
   - cli-reference
   - database
   - external-integration-patterns
   - security-scan
-  - harness-engineering
   - git-mastery
   - github-cli-hygiene
-  - calibrate
-  - reflect
+  - design
+  - Leonxlnx/taste-skill@redesign-existing-projects
+  - Leonxlnx/taste-skill@high-end-visual-design
+  - garrytan/gstack@design-review
 agents:
-  - ousterhout
-  - beck
   - fowler
   - test-strategy-architect
   - infrastructure-guardian
@@ -26,3 +23,5 @@ agents:
   - security-sentinel
   - api-design-specialist
   - data-integrity-guardian
+  - aesthetician
+  - design-systems-architect
