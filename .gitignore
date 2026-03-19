@@ -19,3 +19,13 @@ thinktank.log
 
 # Dependencies
 /node_modules/
+
+# OS
+.DS_Store
+
+# Harness output (Codex/Pi mirrors)
+/.agents/
+/.codex/
+
+# Generated artifacts
+design-catalog.html
