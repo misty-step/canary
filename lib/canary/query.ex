@@ -183,10 +183,7 @@ defmodule Canary.Query do
           last_checked_at: state && state.last_checked_at,
           last_success_at: state && state.last_success_at,
           latency_ms: recent |> List.first() |> then(&(&1 && &1.latency_ms)),
-          tls_expires_at:
-            recent
-            |> Enum.find(&(&1 && &1.tls_expires_at))
-            |> then(&(&1 && &1.tls_expires_at)),
+          tls_expires_at: Enum.find_value(recent, & &1.tls_expires_at),
           recent_checks:
             Enum.map(recent, fn c ->
               %{
@@ -223,7 +220,10 @@ defmodule Canary.Query do
         windows: [w: [partition_by: c.target_id, order_by: [desc: c.checked_at]]]
       )
 
-    from(r in subquery(ranked), where: r.rn <= ^@recent_checks_limit)
+    from(r in subquery(ranked),
+      where: r.rn <= ^@recent_checks_limit,
+      order_by: [asc: r.target_id, asc: r.rn]
+    )
     |> repo.all()
     |> Enum.group_by(& &1.target_id)
   end
