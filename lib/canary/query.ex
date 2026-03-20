@@ -152,48 +152,80 @@ defmodule Canary.Query do
     }
   end
 
-  def health_status do
-    targets = from(t in Target, order_by: t.name) |> Canary.Repos.read_repo().all()
-    enriched = Enum.map(targets, &enrich_target/1)
-    summary = Canary.Summary.health_status(%{targets: enriched})
+  @recent_checks_limit 5
 
+  def health_status do
+    repo = Canary.Repos.read_repo()
+
+    targets_with_state =
+      from(t in Target,
+        left_join: s in TargetState,
+        on: t.id == s.target_id,
+        order_by: t.name,
+        select: {t, s}
+      )
+      |> repo.all()
+
+    target_ids = Enum.map(targets_with_state, fn {t, _} -> t.id end)
+
+    checks_by_target = fetch_recent_checks(repo, target_ids)
+
+    enriched =
+      Enum.map(targets_with_state, fn {target, state} ->
+        recent = Map.get(checks_by_target, target.id, [])
+
+        %{
+          id: target.id,
+          name: target.name,
+          url: target.url,
+          state: (state && state.state) || "unknown",
+          consecutive_failures: (state && state.consecutive_failures) || 0,
+          last_checked_at: state && state.last_checked_at,
+          last_success_at: state && state.last_success_at,
+          latency_ms: recent |> List.first() |> then(&(&1 && &1.latency_ms)),
+          tls_expires_at:
+            recent
+            |> Enum.find(&(&1 && &1.tls_expires_at))
+            |> then(&(&1 && &1.tls_expires_at)),
+          recent_checks:
+            Enum.map(recent, fn c ->
+              %{
+                checked_at: c.checked_at,
+                result: c.result,
+                status_code: c.status_code,
+                latency_ms: c.latency_ms
+              }
+            end)
+        }
+      end)
+
+    summary = Canary.Summary.health_status(%{targets: enriched})
     %{summary: summary, targets: enriched}
   end
 
-  defp enrich_target(target) do
-    state = Canary.Repos.read_repo().get(TargetState, target.id)
+  # Batch-fetch top-N recent checks per target using ROW_NUMBER window function.
+  # 1 query replaces N individual queries.
+  defp fetch_recent_checks(_repo, []), do: %{}
 
-    recent_checks =
+  defp fetch_recent_checks(repo, target_ids) do
+    ranked =
       from(c in TargetCheck,
-        where: c.target_id == ^target.id,
-        order_by: [desc: c.checked_at],
-        limit: 5
+        where: c.target_id in ^target_ids,
+        select: %{
+          target_id: c.target_id,
+          checked_at: c.checked_at,
+          result: c.result,
+          status_code: c.status_code,
+          latency_ms: c.latency_ms,
+          tls_expires_at: c.tls_expires_at,
+          rn: over(row_number(), :w)
+        },
+        windows: [w: [partition_by: c.target_id, order_by: [desc: c.checked_at]]]
       )
-      |> Canary.Repos.read_repo().all()
 
-    %{
-      id: target.id,
-      name: target.name,
-      url: target.url,
-      state: (state && state.state) || "unknown",
-      consecutive_failures: (state && state.consecutive_failures) || 0,
-      last_checked_at: state && state.last_checked_at,
-      last_success_at: state && state.last_success_at,
-      latency_ms: recent_checks |> List.first() |> then(&(&1 && &1.latency_ms)),
-      tls_expires_at:
-        recent_checks
-        |> Enum.find(&(&1 && &1.tls_expires_at))
-        |> then(&(&1 && &1.tls_expires_at)),
-      recent_checks:
-        Enum.map(recent_checks, fn c ->
-          %{
-            checked_at: c.checked_at,
-            result: c.result,
-            status_code: c.status_code,
-            latency_ms: c.latency_ms
-          }
-        end)
-    }
+    from(r in subquery(ranked), where: r.rn <= ^@recent_checks_limit)
+    |> repo.all()
+    |> Enum.group_by(& &1.target_id)
   end
 
   def target_checks(target_id, window) do

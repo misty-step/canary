@@ -2,7 +2,7 @@ defmodule Canary.QueryTest do
   use Canary.DataCase
 
   alias Canary.Query
-  alias Canary.Schemas.ErrorGroup
+  alias Canary.Schemas.{ErrorGroup, Target, TargetCheck, TargetState}
 
   defp insert_group!(attrs) do
     now = DateTime.utc_now() |> DateTime.to_iso8601()
@@ -22,6 +22,121 @@ defmodule Canary.QueryTest do
     %ErrorGroup{}
     |> ErrorGroup.changeset(Map.merge(defaults, attrs))
     |> Canary.Repo.insert!()
+  end
+
+  defp insert_target!(attrs \\ %{}) do
+    id = Canary.ID.target_id()
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    defaults = %{url: "https://example.com", name: "target-#{id}", created_at: now}
+
+    %Target{id: id}
+    |> Target.changeset(Map.merge(defaults, attrs))
+    |> Canary.Repo.insert!()
+  end
+
+  defp insert_state!(target_id, attrs \\ %{}) do
+    defaults = %{state: "up", consecutive_failures: 0, consecutive_successes: 1}
+
+    %TargetState{target_id: target_id}
+    |> TargetState.changeset(Map.merge(defaults, attrs))
+    |> Canary.Repo.insert!()
+  end
+
+  defp insert_check!(target_id, attrs) do
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+    defaults = %{target_id: target_id, checked_at: now, result: "success", latency_ms: 100}
+
+    %TargetCheck{}
+    |> TargetCheck.changeset(Map.merge(defaults, attrs))
+    |> Canary.Repo.insert!()
+  end
+
+  describe "health_status/0" do
+    test "returns empty targets list when no targets exist" do
+      result = Query.health_status()
+      assert result.targets == []
+      assert is_binary(result.summary)
+    end
+
+    test "returns target with state from LEFT JOIN" do
+      target = insert_target!(%{name: "api"})
+      insert_state!(target.id, %{state: "up", consecutive_failures: 0})
+
+      result = Query.health_status()
+      assert [t] = result.targets
+      assert t.id == target.id
+      assert t.name == "api"
+      assert t.state == "up"
+      assert t.consecutive_failures == 0
+    end
+
+    test "returns unknown state when target has no state record" do
+      _target = insert_target!()
+
+      result = Query.health_status()
+      assert [t] = result.targets
+      assert t.state == "unknown"
+      assert t.consecutive_failures == 0
+    end
+
+    test "includes recent_checks limited to 5 per target" do
+      target = insert_target!()
+      insert_state!(target.id)
+
+      # Insert 7 checks with descending timestamps
+      _checks =
+        for i <- 0..6 do
+          checked_at =
+            DateTime.utc_now()
+            |> DateTime.add(-i * 60, :second)
+            |> DateTime.to_iso8601()
+
+          insert_check!(target.id, %{checked_at: checked_at, latency_ms: 100 + i})
+        end
+
+      result = Query.health_status()
+      assert [t] = result.targets
+      assert length(t.recent_checks) == 5
+      # Most recent first
+      assert hd(t.recent_checks).latency_ms == 100
+    end
+
+    test "batches checks across multiple targets" do
+      t1 = insert_target!(%{name: "alpha"})
+      t2 = insert_target!(%{name: "bravo"})
+      insert_state!(t1.id, %{state: "up"})
+      insert_state!(t2.id, %{state: "degraded"})
+
+      insert_check!(t1.id, %{latency_ms: 50})
+      insert_check!(t2.id, %{latency_ms: 200})
+
+      result = Query.health_status()
+      assert length(result.targets) == 2
+
+      alpha = Enum.find(result.targets, &(&1.name == "alpha"))
+      bravo = Enum.find(result.targets, &(&1.name == "bravo"))
+
+      assert alpha.state == "up"
+      assert bravo.state == "degraded"
+      assert length(alpha.recent_checks) == 1
+      assert length(bravo.recent_checks) == 1
+    end
+
+    test "includes tls_expires_at and latency_ms from recent checks" do
+      target = insert_target!()
+      insert_state!(target.id)
+
+      insert_check!(target.id, %{
+        latency_ms: 42,
+        tls_expires_at: "2026-12-01T00:00:00Z"
+      })
+
+      result = Query.health_status()
+      assert [t] = result.targets
+      assert t.latency_ms == 42
+      assert t.tls_expires_at == "2026-12-01T00:00:00Z"
+    end
   end
 
   describe "errors_by_error_class/3" do
