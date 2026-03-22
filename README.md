@@ -76,6 +76,35 @@ Response includes natural-language summary:
 }
 ```
 
+### Unified Report
+
+```bash
+curl "https://canary-obs.fly.dev/api/v1/report?window=1h" \
+  -H "Authorization: Bearer $CANARY_API_KEY"
+```
+
+Response combines the current health view, active error groups, recent transitions,
+and correlated incidents in one bounded payload:
+
+```json
+{
+  "status": "degraded",
+  "summary": "2 targets monitored. 1 degraded (canary-triage). 14 errors across 1 service in the last hour.",
+  "targets": [...],
+  "error_groups": [...],
+  "incidents": [
+    {
+      "id": "INC-a1b2c3",
+      "service": "canary-triage",
+      "state": "investigating",
+      "severity": "high",
+      "signals": [...]
+    }
+  ],
+  "recent_transitions": [...]
+}
+```
+
 ### Target Management
 
 ```bash
@@ -120,6 +149,9 @@ curl -X POST https://canary-obs.fly.dev/api/v1/keys \
 | `health_check.tls_expiring` | TLS cert expires in <14 days |
 | `error.new_class` | First occurrence of an error group |
 | `error.regression` | Error group recurs after 24h silence |
+| `incident.opened` | A service gets a new correlated incident |
+| `incident.updated` | Signals are attached to an active incident |
+| `incident.resolved` | All signals attached to an incident are resolved |
 
 All webhooks are HMAC-SHA256 signed. Secret returned on subscription creation.
 
