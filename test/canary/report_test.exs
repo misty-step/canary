@@ -2,7 +2,7 @@ defmodule Canary.ReportTest do
   use Canary.DataCase
 
   alias Canary.Report
-  alias Canary.Schemas.TargetState
+  alias Canary.Schemas.{Target, TargetState}
   alias Canary.Incidents
   import Canary.Fixtures
 
@@ -69,6 +69,34 @@ defmodule Canary.ReportTest do
 
       assert Enum.map(result.recent_transitions, & &1.target_name) == ["recent"]
       assert hd(result.recent_transitions).transitioned_at == two_hours_ago
+    end
+
+    test "returns invalid_window for unsupported window" do
+      assert {:error, :invalid_window} = Report.generate(window: "99h")
+    end
+
+    test "returns empty status when no targets or errors exist" do
+      assert {:ok, result} = Report.generate(window: "1h")
+
+      assert result.status == "empty"
+      assert result.targets == []
+      assert result.error_groups == []
+      assert result.recent_transitions == []
+      assert result.summary == "No services configured."
+    end
+
+    test "reports unknown state for targets without a state record" do
+      now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+      Canary.Repo.insert!(%Target{
+        id: "TGT-orphan",
+        name: "orphan",
+        url: "https://orphan.example.com/healthz",
+        created_at: now
+      })
+
+      assert {:ok, result} = Report.generate(window: "1h")
+      assert [%{name: "orphan", state: "unknown"}] = result.targets
     end
   end
 

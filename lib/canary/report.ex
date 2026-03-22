@@ -7,7 +7,7 @@ defmodule Canary.Report do
 
   @spec generate(keyword()) :: {:ok, map()} | {:error, :invalid_window}
   def generate(opts \\ []) do
-    window = Keyword.get(opts, :window, "1h")
+    window = Keyword.get(opts, :window) || "1h"
 
     with {:ok, slice} <- Query.report_slice(window) do
       targets = Query.health_targets()
