@@ -64,6 +64,7 @@ defmodule CanaryWeb.Router do
       pipe_through :query_rate_limit
       get "/query", QueryController, :query
       get "/errors/:id", QueryController, :show
+      get "/report", ReportController, :index
       get "/status", StatusController, :index
       get "/health-status", HealthController, :status
       get "/targets/:id/checks", HealthController, :target_checks
