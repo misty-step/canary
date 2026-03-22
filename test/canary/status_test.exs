@@ -110,5 +110,9 @@ defmodule Canary.StatusTest do
 
       assert result.summary =~ "1 service in the last hour"
     end
+
+    test "returns invalid_window for unsupported window" do
+      assert {:error, :invalid_window} = Status.combined("99h")
+    end
   end
 end

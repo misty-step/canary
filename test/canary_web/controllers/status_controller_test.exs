@@ -54,5 +54,13 @@ defmodule CanaryWeb.StatusControllerTest do
 
       assert json_response(conn, 401)["code"] == "invalid_api_key"
     end
+
+    test "returns 422 for invalid window", %{conn: conn} do
+      conn = get(conn, "/api/v1/status?window=99h")
+      body = json_response(conn, 422)
+
+      assert body["code"] == "validation_error"
+      assert body["errors"]["window"] == ["must be one of: 1h, 6h, 24h, 7d, 30d"]
+    end
   end
 end
