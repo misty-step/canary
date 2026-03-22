@@ -128,6 +128,24 @@ defmodule Canary.SummaryTest do
       assert result =~ "0 targets monitored."
       assert result =~ "5 errors"
     end
+
+    test "uses non-default window labels in summary text" do
+      targets = [%{name: "api", state: "up"}]
+
+      assert Summary.combined_status("healthy", targets, [], "6h") ==
+               "All 1 targets healthy. No errors in the last 6 hours."
+
+      errors = [%{service: "api", total_count: 2, unique_classes: 1}]
+      result = Summary.combined_status("warning", [], errors, "7d")
+
+      assert result =~ "2 errors across 1 service in the last 7 days."
+    end
+
+    test "falls back to requested window text for unknown values" do
+      result = Summary.combined_status("healthy", [%{name: "a", state: "up"}], [], "99h")
+
+      assert result == "All 1 targets healthy. No errors in the last requested window."
+    end
   end
 
   describe "error_detail/1" do

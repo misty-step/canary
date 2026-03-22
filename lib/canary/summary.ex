@@ -112,5 +112,5 @@ defmodule Canary.Summary do
   defp window_label("24h"), do: "24 hours"
   defp window_label("7d"), do: "7 days"
   defp window_label("30d"), do: "30 days"
-  defp window_label(window), do: window
+  defp window_label(_window), do: "requested window"
 end
