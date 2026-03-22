@@ -8,7 +8,7 @@ defmodule Canary.Health.Checker do
   use GenServer, restart: :transient
 
   alias Canary.Health.{Probe, SSRFGuard, StateMachine}
-  alias Canary.Repo
+  alias Canary.{Incidents, Repo}
   alias Canary.Schemas.{Target, TargetCheck, TargetState}
 
   require Logger
@@ -214,6 +214,7 @@ defmodule Canary.Health.Checker do
         }
 
         Canary.Workers.WebhookDelivery.enqueue_for_event(event_name, payload)
+        {:ok, _incident} = Incidents.correlate(:health_transition, target.id, target.name)
 
       {:transition, _from, _to} ->
         :ok

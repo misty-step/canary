@@ -5,7 +5,7 @@ defmodule Canary.Errors.Ingest do
   """
 
   alias Canary.Errors.{DedupCache, Grouping}
-  alias Canary.{ID, Repo}
+  alias Canary.{ID, Incidents, Repo}
   alias Canary.Schemas.{Error, ErrorGroup}
 
   @max_context_size 8_192
@@ -46,6 +46,7 @@ defmodule Canary.Errors.Ingest do
           {is_new, is_regression} = upsert_group(error, group_hash, template, now)
 
           maybe_enqueue_webhooks(error, group_hash, is_new, is_regression)
+          {:ok, _incident} = Incidents.correlate(:error_group, group_hash, error.service)
 
           {error,
            %{
@@ -139,7 +140,8 @@ defmodule Canary.Errors.Ingest do
         |> ErrorGroup.changeset(%{
           last_seen_at: now,
           total_count: group.total_count + 1,
-          last_error_id: error.id
+          last_error_id: error.id,
+          status: "active"
         })
         |> Repo.update!()
 

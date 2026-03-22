@@ -2,7 +2,7 @@ defmodule Canary.Errors.IngestTest do
   use Canary.DataCase
 
   alias Canary.Errors.Ingest
-  alias Canary.Schemas.{Error, ErrorGroup}
+  alias Canary.Schemas.{Error, ErrorGroup, Incident}
 
   @valid_attrs %{
     "service" => "cadence",
@@ -91,6 +91,39 @@ defmodule Canary.Errors.IngestTest do
       assert_receive {:new_error, error}
       assert error.id == result.id
       assert error.service == "cadence"
+    end
+
+    test "attaches a new error group to the existing service incident" do
+      now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+      Repo.insert!(%Canary.Schemas.Target{
+        id: "TGT-cadence",
+        name: "cadence",
+        url: "https://cadence.example.com",
+        created_at: now
+      })
+
+      Repo.insert!(%Canary.Schemas.TargetState{
+        target_id: "TGT-cadence",
+        state: "degraded",
+        consecutive_failures: 1,
+        last_checked_at: now
+      })
+
+      {:ok, _incident} = Canary.Incidents.correlate(:health_transition, "TGT-cadence", "cadence")
+      {:ok, _result} = Ingest.ingest(@valid_attrs)
+
+      incident =
+        Repo.one!(
+          from(i in Incident,
+            preload: [:signals],
+            where: i.service == "cadence" and i.state == "investigating"
+          )
+        )
+
+      assert length(incident.signals) == 2
+      assert Enum.any?(incident.signals, &(&1.signal_type == "health_transition"))
+      assert Enum.any?(incident.signals, &(&1.signal_type == "error_group"))
     end
   end
 end

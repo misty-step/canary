@@ -50,6 +50,17 @@ defmodule CanaryWeb.WebhookControllerTest do
       assert body["detail"] =~ "bogus.event"
     end
 
+    test "create accepts incident event types", %{conn: conn} do
+      conn =
+        post(conn, "/api/v1/webhooks", %{
+          "url" => "https://example.com/hook",
+          "events" => ["incident.opened", "incident.updated", "incident.resolved"]
+        })
+
+      created = json_response(conn, 201)
+      assert created["events"] == ["incident.opened", "incident.updated", "incident.resolved"]
+    end
+
     test "delete returns 404 for missing webhook", %{conn: conn} do
       conn = delete(conn, "/api/v1/webhooks/WHK-nonexistent")
       assert json_response(conn, 404)["code"] == "not_found"

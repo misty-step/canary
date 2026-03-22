@@ -2,9 +2,12 @@ defmodule Canary.Fixtures do
   @moduledoc "Shared test data builders."
 
   def clean_status_tables do
+    Canary.Repo.delete_all(Canary.Schemas.IncidentSignal)
+    Canary.Repo.delete_all(Canary.Schemas.Incident)
     Canary.Repo.delete_all(Canary.Schemas.TargetState)
     Canary.Repo.delete_all(Canary.Schemas.TargetCheck)
     Canary.Repo.delete_all(Canary.Schemas.Target)
+    Canary.Repo.delete_all(Canary.Schemas.Error)
     Canary.Repo.delete_all(Canary.Schemas.ErrorGroup)
   end
 

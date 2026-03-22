@@ -19,6 +19,7 @@ defmodule Canary.Report do
          summary: status.summary,
          targets: targets,
          error_groups: slice.error_groups,
+         incidents: slice.incidents,
          recent_transitions: slice.recent_transitions
        }}
     end

@@ -2,6 +2,7 @@ defmodule CanaryWeb.ReportControllerTest do
   use CanaryWeb.ConnCase
 
   import Canary.Fixtures
+  alias Canary.Incidents
 
   setup %{conn: conn} do
     clean_status_tables()
@@ -14,12 +15,17 @@ defmodule CanaryWeb.ReportControllerTest do
     test "returns the unified report payload", %{conn: conn} do
       create_target_with_state("volume", "degraded")
       create_error_group("volume", "ConnectionError", 12)
+      {:ok, _incident} = Incidents.correlate(:health_transition, "TGT-volume", "volume")
+
+      {:ok, _incident} =
+        Incidents.correlate(:error_group, group_hash("volume", "ConnectionError"), "volume")
 
       conn = get(conn, "/api/v1/report?window=1h")
       body = json_response(conn, 200)
 
       assert Enum.sort(Map.keys(body)) == [
                "error_groups",
+               "incidents",
                "recent_transitions",
                "status",
                "summary",
@@ -28,6 +34,7 @@ defmodule CanaryWeb.ReportControllerTest do
 
       assert body["status"] == "degraded"
       assert [%{"service" => "volume"}] = body["error_groups"]
+      assert [%{"service" => "volume", "signal_count" => 2}] = body["incidents"]
       assert is_list(body["targets"])
       assert is_list(body["recent_transitions"])
     end
@@ -40,6 +47,7 @@ defmodule CanaryWeb.ReportControllerTest do
 
       assert body["status"] == "healthy"
       assert body["error_groups"] == []
+      assert body["incidents"] == []
       assert length(body["targets"]) == 2
       assert is_binary(body["summary"])
     end
@@ -60,5 +68,9 @@ defmodule CanaryWeb.ReportControllerTest do
       assert body["code"] == "validation_error"
       assert body["errors"]["window"] == ["must be one of: 1h, 6h, 24h, 7d, 30d"]
     end
+  end
+
+  defp group_hash(service, error_class) do
+    :crypto.hash(:sha256, "#{service}:#{error_class}") |> Base.encode16(case: :lower)
   end
 end

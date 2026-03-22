@@ -1,10 +1,19 @@
 defmodule Canary.Query do
   @moduledoc """
-  Query API logic. Reads from error_groups and target_state.
+  Query API logic. Reads from errors, targets, and incidents.
   All responses include deterministic summary strings.
   """
 
-  alias Canary.Schemas.{Error, ErrorGroup, Target, TargetCheck, TargetState}
+  alias Canary.Schemas.{
+    Error,
+    ErrorGroup,
+    Incident,
+    IncidentSignal,
+    Target,
+    TargetCheck,
+    TargetState
+  }
+
   import Ecto.Query
 
   @max_groups 50
@@ -226,6 +235,7 @@ defmodule Canary.Query do
        %{
          error_groups: error_groups_since(cutoff),
          error_summary: error_summary_since(cutoff),
+         incidents: active_incidents(),
          recent_transitions: recent_transitions_since(cutoff)
        }}
     end
@@ -335,6 +345,38 @@ defmodule Canary.Query do
       }
     )
     |> Canary.Repos.read_repo().all()
+  end
+
+  defp active_incidents do
+    from(i in Incident,
+      where: i.state != "resolved",
+      order_by: [desc: i.opened_at],
+      preload: [signals: ^from(s in IncidentSignal, order_by: [asc: s.attached_at, asc: s.id])]
+    )
+    |> Canary.Repos.read_repo().all()
+    |> Enum.map(&format_incident/1)
+  end
+
+  defp format_incident(incident) do
+    %{
+      id: incident.id,
+      service: incident.service,
+      state: incident.state,
+      severity: incident.severity,
+      title: incident.title,
+      opened_at: incident.opened_at,
+      resolved_at: incident.resolved_at,
+      signal_count: length(incident.signals),
+      signals:
+        Enum.map(incident.signals, fn signal ->
+          %{
+            signal_type: signal.signal_type,
+            signal_ref: signal.signal_ref,
+            attached_at: signal.attached_at,
+            resolved_at: signal.resolved_at
+          }
+        end)
+    }
   end
 
   defp window_to_cutoff(window) when window in @allowed_windows do

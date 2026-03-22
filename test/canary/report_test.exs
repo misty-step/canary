@@ -3,6 +3,7 @@ defmodule Canary.ReportTest do
 
   alias Canary.Report
   alias Canary.Schemas.TargetState
+  alias Canary.Incidents
   import Canary.Fixtures
 
   setup do
@@ -15,6 +16,14 @@ defmodule Canary.ReportTest do
       create_target_with_state("volume", "degraded")
       create_target_with_state("api", "up")
       create_error_group("volume", "ConnectionError", 12)
+      {:ok, _incident} = Incidents.correlate(:health_transition, "TGT-volume", "volume")
+
+      {:ok, _incident} =
+        Incidents.correlate(
+          :error_group,
+          create_error_group_hash("volume", "ConnectionError"),
+          "volume"
+        )
 
       assert {:ok, result} = Report.generate(window: "1h")
 
@@ -28,6 +37,7 @@ defmodule Canary.ReportTest do
                group.service == "volume" and group.error_class == "ConnectionError"
              end)
 
+      assert [%{service: "volume", signal_count: 2}] = result.incidents
       assert is_binary(result.summary)
     end
 
@@ -55,9 +65,14 @@ defmodule Canary.ReportTest do
       assert {:ok, result} = Report.generate(window: "6h")
 
       assert Enum.map(result.error_groups, & &1.service) == ["recent"]
+      assert result.incidents == []
 
       assert Enum.map(result.recent_transitions, & &1.target_name) == ["recent"]
       assert hd(result.recent_transitions).transitioned_at == two_hours_ago
     end
+  end
+
+  defp create_error_group_hash(service, error_class) do
+    :crypto.hash(:sha256, "#{service}:#{error_class}") |> Base.encode16(case: :lower)
   end
 end
