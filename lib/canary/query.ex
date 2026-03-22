@@ -20,7 +20,7 @@ defmodule Canary.Query do
         )
 
       query = apply_cursor(query, cursor)
-      groups = Canary.Repos.read_repo().all(query)
+      groups = query |> select_group_with_classification() |> Canary.Repos.read_repo().all()
 
       total = Enum.reduce(groups, 0, &(&1.total_count + &2))
 
@@ -62,7 +62,7 @@ defmodule Canary.Query do
         end
 
       query = apply_cursor(query, cursor)
-      groups = Canary.Repos.read_repo().all(query)
+      groups = query |> select_group_with_classification() |> Canary.Repos.read_repo().all()
       total = Enum.reduce(groups, 0, &(&1.total_count + &2))
 
       summary =
@@ -285,7 +285,8 @@ defmodule Canary.Query do
       last_seen: g.last_seen_at,
       sample_message: g.message_template,
       severity: g.severity,
-      status: g.status
+      status: g.status,
+      classification: format_classification(g)
     }
   end
 
@@ -303,8 +304,42 @@ defmodule Canary.Query do
       order_by: [desc: g.total_count, asc: g.service, asc: g.error_class],
       limit: ^@max_groups
     )
+    |> select_group_with_classification()
     |> Canary.Repos.read_repo().all()
     |> Enum.map(&format_group/1)
+  end
+
+  defp select_group_with_classification(query) do
+    from(g in query,
+      left_join: e in Error,
+      on: e.id == g.last_error_id,
+      select: %{
+        group_hash: g.group_hash,
+        error_class: g.error_class,
+        service: g.service,
+        total_count: g.total_count,
+        first_seen_at: g.first_seen_at,
+        last_seen_at: g.last_seen_at,
+        message_template: g.message_template,
+        severity: g.severity,
+        status: g.status,
+        classification_category: e.classification_category,
+        classification_persistence: e.classification_persistence,
+        classification_component: e.classification_component
+      }
+    )
+  end
+
+  defp format_classification(group) do
+    %{
+      category: classification_value(group, :classification_category),
+      persistence: classification_value(group, :classification_persistence),
+      component: classification_value(group, :classification_component)
+    }
+  end
+
+  defp classification_value(group, key) do
+    Map.get(group, key) || "unknown"
   end
 
   defp error_summary_since(cutoff) do

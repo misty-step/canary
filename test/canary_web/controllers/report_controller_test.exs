@@ -32,6 +32,25 @@ defmodule CanaryWeb.ReportControllerTest do
       assert is_list(body["recent_transitions"])
     end
 
+    test "includes classification for each error group", %{conn: conn} do
+      post(conn, "/api/v1/errors", %{
+        "service" => "volume",
+        "error_class" => "DBConnection.ConnectionError",
+        "message" => "database unavailable"
+      })
+
+      conn = get(conn, "/api/v1/report?window=1h")
+      body = json_response(conn, 200)
+
+      assert [%{"classification" => classification}] = body["error_groups"]
+
+      assert classification == %{
+               "category" => "infrastructure",
+               "persistence" => "transient",
+               "component" => "database"
+             }
+    end
+
     test "returns healthy status and no error groups when everything is healthy", %{conn: conn} do
       for name <- ["alpha", "bravo"], do: create_target_with_state(name, "up")
 

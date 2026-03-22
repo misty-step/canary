@@ -1,6 +1,7 @@
 defmodule Canary.QueryTest do
   use Canary.DataCase
 
+  alias Canary.Errors.Ingest
   alias Canary.Query
   alias Canary.Schemas.{ErrorGroup, Target, TargetCheck, TargetState}
 
@@ -191,6 +192,23 @@ defmodule Canary.QueryTest do
                {3, "alpha", "BetaError"},
                {3, "beta", "ZedError"}
              ]
+    end
+
+    test "includes classification from the latest error in the group" do
+      {:ok, _} =
+        Ingest.ingest(%{
+          "service" => "volume",
+          "error_class" => "DBConnection.ConnectionError",
+          "message" => "database unavailable"
+        })
+
+      assert {:ok, [group]} = Query.error_groups("24h")
+
+      assert group.classification == %{
+               category: "infrastructure",
+               persistence: "transient",
+               component: "database"
+             }
     end
   end
 end

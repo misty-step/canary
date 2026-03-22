@@ -15,11 +15,25 @@ defmodule Canary.Schemas.Error do
     field :group_hash, :string
     field :fingerprint, :string
     field :region, :string
+    field :classification_category, :string
+    field :classification_persistence, :string
+    field :classification_component, :string
     field :created_at, :string
   end
 
   @required ~w(service error_class message group_hash created_at)a
-  @optional ~w(message_template stack_trace context severity environment fingerprint region)a
+  @optional ~w(
+    message_template
+    stack_trace
+    context
+    severity
+    environment
+    fingerprint
+    region
+    classification_category
+    classification_persistence
+    classification_component
+  )a
   @severities ~w(error warning info)
 
   def changeset(error, attrs) do
