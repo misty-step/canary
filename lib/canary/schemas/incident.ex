@@ -22,12 +22,21 @@ defmodule Canary.Schemas.Incident do
   @optional ~w(title resolved_at)a
   @states ~w(investigating resolved)
   @severities ~w(medium high)
+  @open_incident_service_constraints [
+    :incidents_open_service_unique_index,
+    :incidents_service_index
+  ]
 
   def changeset(incident, attrs) do
-    incident
-    |> cast(attrs, @required ++ @optional)
-    |> validate_required(@required)
-    |> validate_inclusion(:state, @states)
-    |> validate_inclusion(:severity, @severities)
+    changeset =
+      incident
+      |> cast(attrs, @required ++ @optional)
+      |> validate_required(@required)
+      |> validate_inclusion(:state, @states)
+      |> validate_inclusion(:severity, @severities)
+
+    Enum.reduce(@open_incident_service_constraints, changeset, fn constraint, acc ->
+      unique_constraint(acc, :service, name: constraint)
+    end)
   end
 end

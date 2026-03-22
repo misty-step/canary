@@ -50,6 +50,24 @@ defmodule Canary.IncidentsTest do
       assert Enum.any?(incident.signals, &(&1.signal_type == "error_group"))
     end
 
+    test "enforces one open incident per service at the database boundary" do
+      create_target_with_state("foo", "degraded")
+      {:ok, _incident} = Incidents.correlate(:health_transition, "TGT-foo", "foo")
+      now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+      assert {:error, changeset} =
+               %Incident{id: Canary.ID.incident_id()}
+               |> Incident.changeset(%{
+                 service: "foo",
+                 state: "investigating",
+                 severity: "medium",
+                 opened_at: now
+               })
+               |> Repo.insert()
+
+      assert "has already been taken" in errors_on(changeset).service
+    end
+
     test "escalates severity when three active signals cluster within five minutes" do
       create_target_with_state("foo", "degraded")
 
@@ -138,6 +156,22 @@ defmodule Canary.IncidentsTest do
 
       assert {:ok, report} = Report.generate(window: "1h")
       assert [%{service: "foo", signal_count: 2}] = report.incidents
+    end
+
+    test "omits stale error-only incidents from the unified report" do
+      create_error_group("foo", "TimeoutError", 1)
+      hash = group_hash("foo", "TimeoutError")
+
+      {:ok, _incident} = Incidents.correlate(:error_group, hash, "foo")
+
+      stale = DateTime.utc_now() |> DateTime.add(-10 * 60, :second) |> DateTime.to_iso8601()
+
+      Repo.get!(ErrorGroup, hash)
+      |> ErrorGroup.changeset(%{last_seen_at: stale})
+      |> Repo.update!()
+
+      assert {:ok, report} = Report.generate(window: "1h")
+      assert report.incidents == []
     end
   end
 

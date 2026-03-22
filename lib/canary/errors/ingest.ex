@@ -8,6 +8,8 @@ defmodule Canary.Errors.Ingest do
   alias Canary.{ID, Incidents, Repo}
   alias Canary.Schemas.{Error, ErrorGroup}
 
+  require Logger
+
   @max_context_size 8_192
   @max_fingerprint_elements 5
   @max_fingerprint_element_len 256
@@ -46,7 +48,6 @@ defmodule Canary.Errors.Ingest do
           {is_new, is_regression} = upsert_group(error, group_hash, template, now)
 
           maybe_enqueue_webhooks(error, group_hash, is_new, is_regression)
-          {:ok, _incident} = Incidents.correlate(:error_group, group_hash, error.service)
 
           {error,
            %{
@@ -58,6 +59,7 @@ defmodule Canary.Errors.Ingest do
 
       with {:ok, {error, summary}} <- result do
         broadcast_new_error(error)
+        maybe_correlate_incident(summary.group_hash, error.service)
         {:ok, summary}
       end
     end
@@ -192,6 +194,36 @@ defmodule Canary.Errors.Ingest do
   defp broadcast_new_error(error) do
     Phoenix.PubSub.broadcast(Canary.PubSub, "errors:new", {:new_error, error})
   end
+
+  defp maybe_correlate_incident(group_hash, service) do
+    case safe_correlate_incident(:error_group, group_hash, service) do
+      {:ok, _incident} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "Failed to correlate incident for error group #{group_hash}: #{correlation_error_tag(reason)}"
+        )
+    end
+  end
+
+  defp safe_correlate_incident(signal_type, signal_ref, service) do
+    Incidents.correlate(signal_type, signal_ref, service)
+  rescue
+    error ->
+      {:error, {:exception, error.__struct__}}
+  catch
+    kind, reason ->
+      {:error, {kind, reason}}
+  end
+
+  defp correlation_error_tag({:exception, module}) when is_atom(module),
+    do: Atom.to_string(module)
+
+  defp correlation_error_tag({kind, reason}), do: "#{kind}:#{correlation_error_tag(reason)}"
+  defp correlation_error_tag(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp correlation_error_tag(%module{}) when is_atom(module), do: Atom.to_string(module)
+  defp correlation_error_tag(_reason), do: "unexpected"
 
   defp truncate(nil, _max), do: nil
   defp truncate(str, max), do: String.slice(str, 0, max)

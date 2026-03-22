@@ -15,6 +15,11 @@ defmodule Canary.Repo.Migrations.CreateIncidents do
     create index(:incidents, [:service, :state])
     create index(:incidents, [:opened_at])
 
+    create unique_index(:incidents, [:service],
+             where: "state != 'resolved'",
+             name: :incidents_open_service_unique_index
+           )
+
     create table(:incident_signals) do
       add :incident_id, references(:incidents, type: :string, on_delete: :delete_all), null: false
       add :signal_type, :string, null: false

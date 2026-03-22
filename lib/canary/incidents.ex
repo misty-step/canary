@@ -9,6 +9,10 @@ defmodule Canary.Incidents do
   alias Canary.Schemas.{ErrorGroup, Incident, IncidentSignal, TargetState}
 
   @active_window_seconds 300
+  @open_incident_service_constraints [
+    :incidents_open_service_unique_index,
+    :incidents_service_index
+  ]
   @open_state "investigating"
   @resolved_state "resolved"
 
@@ -21,9 +25,17 @@ defmodule Canary.Incidents do
              is_binary(service) do
     now = DateTime.utc_now() |> DateTime.to_iso8601()
 
-    case with_transaction(fn -> correlate_tx(signal_type, signal_ref, service, now) end) do
-      {:ok, incident} -> {:ok, incident}
-      other -> other
+    try do
+      case with_transaction(fn -> correlate_tx(signal_type, signal_ref, service, now) end) do
+        {:ok, incident} -> {:ok, incident}
+        other -> other
+      end
+    rescue
+      error ->
+        {:error, {:exception, error.__struct__}}
+    catch
+      kind, reason ->
+        {:error, {kind, reason}}
     end
   end
 
@@ -47,7 +59,7 @@ defmodule Canary.Incidents do
   defp create_incident(service, signal_type, signal_ref, now) do
     incident_id = ID.incident_id()
 
-    incident =
+    case(
       %Incident{id: incident_id}
       |> Incident.changeset(%{
         service: service,
@@ -56,20 +68,31 @@ defmodule Canary.Incidents do
         title: title_for(service),
         opened_at: now
       })
-      |> Repo.insert!()
+      |> Repo.insert()
+    ) do
+      {:ok, incident} ->
+        %IncidentSignal{}
+        |> IncidentSignal.changeset(%{
+          incident_id: incident.id,
+          signal_type: signal_type,
+          signal_ref: signal_ref,
+          attached_at: now
+        })
+        |> Repo.insert!()
 
-    %IncidentSignal{}
-    |> IncidentSignal.changeset(%{
-      incident_id: incident.id,
-      signal_type: signal_type,
-      signal_ref: signal_ref,
-      attached_at: now
-    })
-    |> Repo.insert!()
+        incident = refresh_incident!(incident.id)
+        enqueue_webhook("incident.opened", incident, now)
+        incident
 
-    incident = refresh_incident!(incident.id)
-    enqueue_webhook("incident.opened", incident, now)
-    incident
+      {:error, changeset} ->
+        if open_incident_conflict?(changeset) do
+          service
+          |> existing_open_incident!(changeset)
+          |> update_incident(signal_type, signal_ref, true, now)
+        else
+          raise Ecto.InvalidChangesetError, action: :insert, changeset: changeset
+        end
+    end
   end
 
   defp update_incident(%Incident{} = incident, signal_type, signal_ref, signal_active?, now) do
@@ -274,6 +297,24 @@ defmodule Canary.Incidents do
 
   defp resolved?(%IncidentSignal{resolved_at: nil}), do: false
   defp resolved?(%IncidentSignal{}), do: true
+
+  defp open_incident_conflict?(changeset) do
+    Enum.any?(changeset.errors, fn
+      {:service, {"has already been taken", meta}} ->
+        meta[:constraint] == :unique and
+          meta[:constraint_name] in @open_incident_service_constraints
+
+      _ ->
+        false
+    end)
+  end
+
+  defp existing_open_incident!(service, changeset) do
+    case open_incident(service) do
+      %Incident{} = incident -> incident
+      nil -> raise Ecto.InvalidChangesetError, action: :insert, changeset: changeset
+    end
+  end
 
   defp title_for(service), do: "#{service} incident"
 

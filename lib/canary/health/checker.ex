@@ -221,7 +221,7 @@ defmodule Canary.Health.Checker do
 
           {:error, reason} ->
             Logger.error(
-              "Failed to correlate incident for target #{target.id}: #{inspect(reason)}"
+              "Failed to correlate incident for target #{target.id}: #{correlation_error_tag(reason)}"
             )
         end
 
@@ -233,6 +233,14 @@ defmodule Canary.Health.Checker do
   defp webhook_event_name(:health_check_degraded), do: "health_check.degraded"
   defp webhook_event_name(:health_check_down), do: "health_check.down"
   defp webhook_event_name(:health_check_recovered), do: "health_check.recovered"
+
+  defp correlation_error_tag({:exception, module}) when is_atom(module),
+    do: Atom.to_string(module)
+
+  defp correlation_error_tag({kind, reason}), do: "#{kind}:#{correlation_error_tag(reason)}"
+  defp correlation_error_tag(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp correlation_error_tag(%module{}) when is_atom(module), do: Atom.to_string(module)
+  defp correlation_error_tag(_reason), do: "unexpected"
 
   defp load_persisted_state(target_id) do
     case Repo.get(TargetState, target_id) do
