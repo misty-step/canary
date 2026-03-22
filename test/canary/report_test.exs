@@ -1,6 +1,7 @@
 defmodule Canary.ReportTest do
   use Canary.DataCase
 
+  alias Canary.Errors.Ingest
   alias Canary.Report
   alias Canary.Schemas.{Target, TargetState}
   alias Canary.Incidents
@@ -73,6 +74,24 @@ defmodule Canary.ReportTest do
 
     test "returns invalid_window for unsupported window" do
       assert {:error, :invalid_window} = Report.generate(window: "99h")
+    end
+
+    test "includes classification on each error group" do
+      {:ok, _} =
+        Ingest.ingest(%{
+          "service" => "volume",
+          "error_class" => "DBConnection.ConnectionError",
+          "message" => "database unavailable"
+        })
+
+      assert {:ok, result} = Report.generate(window: "1h")
+      assert [group] = result.error_groups
+
+      assert group.classification == %{
+               category: "infrastructure",
+               persistence: "transient",
+               component: "database"
+             }
     end
 
     test "returns empty status when no targets or errors exist" do

@@ -63,6 +63,17 @@ defmodule Canary.Errors.IngestTest do
       assert error.environment == "production"
     end
 
+    test "stores classification on the error record" do
+      attrs = Map.put(@valid_attrs, "error_class", "DBConnection.ConnectionError")
+
+      {:ok, result} = Ingest.ingest(attrs)
+      error = Repo.get(Error, result.id)
+
+      assert error.classification_category == "infrastructure"
+      assert error.classification_persistence == "transient"
+      assert error.classification_component == "database"
+    end
+
     test "accepts custom severity" do
       attrs = Map.put(@valid_attrs, "severity", "warning")
       {:ok, result} = Ingest.ingest(attrs)

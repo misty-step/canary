@@ -4,7 +4,7 @@ defmodule Canary.Errors.Ingest do
   Deep module: single public function, complex internal machinery.
   """
 
-  alias Canary.Errors.{DedupCache, Grouping}
+  alias Canary.Errors.{Classification, DedupCache, Grouping}
   alias Canary.{ID, Incidents, Repo}
   alias Canary.Schemas.{Error, ErrorGroup}
 
@@ -20,6 +20,7 @@ defmodule Canary.Errors.Ingest do
          :ok <- validate_context(attrs),
          :ok <- validate_fingerprint(attrs) do
       {group_hash, template} = Grouping.compute_group_hash(attrs)
+      classification = Classification.classify(attrs)
       now = DateTime.utc_now() |> DateTime.to_iso8601()
       error_id = ID.error_id()
 
@@ -35,6 +36,9 @@ defmodule Canary.Errors.Ingest do
         group_hash: group_hash,
         fingerprint: encode_fingerprint(attrs["fingerprint"]),
         region: attrs["region"],
+        classification_category: Atom.to_string(classification.category),
+        classification_persistence: Atom.to_string(classification.persistence),
+        classification_component: Atom.to_string(classification.component),
         created_at: now
       }
 
