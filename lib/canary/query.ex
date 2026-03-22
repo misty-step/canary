@@ -325,7 +325,7 @@ defmodule Canary.Query do
     from(t in Target,
       join: s in TargetState,
       on: t.id == s.target_id,
-      where: not is_nil(s.last_transition_at) and s.last_transition_at >= ^cutoff,
+      where: s.last_transition_at >= ^cutoff,
       order_by: [desc: s.last_transition_at, asc: t.name],
       select: %{
         target_id: t.id,

@@ -36,8 +36,8 @@ defmodule Canary.ReportTest do
       create_target_with_state("stale", "down")
 
       now = DateTime.utc_now()
-      two_hours_ago = now |> DateTime.add(-7_200, :second) |> DateTime.to_iso8601()
-      eight_hours_ago = now |> DateTime.add(-28_800, :second) |> DateTime.to_iso8601()
+      two_hours_ago = now |> DateTime.add(-2 * 3_600, :second) |> DateTime.to_iso8601()
+      eight_hours_ago = now |> DateTime.add(-8 * 3_600, :second) |> DateTime.to_iso8601()
 
       Canary.Repo.update_all(
         from(s in TargetState, where: s.target_id == "TGT-recent"),
