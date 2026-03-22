@@ -38,13 +38,18 @@ defmodule Canary.Summary do
   end
 
   @spec combined_status(String.t(), list(), list()) :: String.t()
-  def combined_status("empty", _targets, _errors), do: "No services configured."
-
-  def combined_status("healthy", targets, _errors) do
-    "All #{length(targets)} targets healthy. No errors in the last hour."
+  def combined_status(overall, targets, error_summary) do
+    combined_status(overall, targets, error_summary, "1h")
   end
 
-  def combined_status(_overall, targets, error_summary) do
+  @spec combined_status(String.t(), list(), list(), String.t()) :: String.t()
+  def combined_status("empty", _targets, _errors, _window), do: "No services configured."
+
+  def combined_status("healthy", targets, _errors, window) do
+    "All #{length(targets)} targets healthy. No errors in the last #{window_label(window)}."
+  end
+
+  def combined_status(_overall, targets, error_summary, window) do
     by_state = Enum.group_by(targets, & &1.state)
     total_errors = Enum.reduce(error_summary, 0, &(&1.total_count + &2))
 
@@ -52,7 +57,7 @@ defmodule Canary.Summary do
       "#{length(targets)} targets monitored.",
       describe_group(by_state["down"], "down", " "),
       describe_group(by_state["degraded"], "degraded", " "),
-      errors_part(total_errors, error_summary)
+      errors_part(total_errors, error_summary, window)
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join()
@@ -94,11 +99,18 @@ defmodule Canary.Summary do
     "#{prefix}#{length(targets)} #{label} (#{names})."
   end
 
-  defp errors_part(0, _summary), do: nil
+  defp errors_part(0, _summary, _window), do: nil
 
-  defp errors_part(total, error_summary) do
+  defp errors_part(total, error_summary, window) do
     svc_count = length(error_summary)
     svc_word = if svc_count == 1, do: "service", else: "services"
-    " #{total} errors across #{svc_count} #{svc_word} in the last hour."
+    " #{total} errors across #{svc_count} #{svc_word} in the last #{window_label(window)}."
   end
+
+  defp window_label("1h"), do: "hour"
+  defp window_label("6h"), do: "6 hours"
+  defp window_label("24h"), do: "24 hours"
+  defp window_label("7d"), do: "7 days"
+  defp window_label("30d"), do: "30 days"
+  defp window_label(_window), do: "requested window"
 end

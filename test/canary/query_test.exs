@@ -177,4 +177,20 @@ defmodule Canary.QueryTest do
       assert {:error, :invalid_window} = Query.errors_by_error_class("RuntimeError", "99h")
     end
   end
+
+  describe "error_groups/1" do
+    test "orders groups by count, then service, then error class" do
+      insert_group!(%{service: "beta", error_class: "ZedError", total_count: 3})
+      insert_group!(%{service: "alpha", error_class: "AlphaError", total_count: 5})
+      insert_group!(%{service: "alpha", error_class: "BetaError", total_count: 3})
+
+      assert {:ok, groups} = Query.error_groups("24h")
+
+      assert Enum.map(groups, &{&1.count, &1.service, &1.error_class}) == [
+               {5, "alpha", "AlphaError"},
+               {3, "alpha", "BetaError"},
+               {3, "beta", "ZedError"}
+             ]
+    end
+  end
 end

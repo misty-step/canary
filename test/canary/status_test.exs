@@ -13,7 +13,7 @@ defmodule Canary.StatusTest do
     test "all healthy targets and no errors" do
       for name <- ["alpha", "bravo", "charlie"], do: create_target_with_state(name, "up")
 
-      result = Status.combined()
+      assert {:ok, result} = Status.combined()
 
       assert result.overall == "healthy"
       assert length(result.targets) == 3
@@ -27,7 +27,7 @@ defmodule Canary.StatusTest do
       create_target_with_state("api", "up")
       create_error_group("volume", "ConnectionError", 12)
 
-      result = Status.combined()
+      assert {:ok, result} = Status.combined()
 
       assert result.overall == "unhealthy"
 
@@ -41,7 +41,7 @@ defmodule Canary.StatusTest do
     end
 
     test "no targets and no errors" do
-      result = Status.combined()
+      assert {:ok, result} = Status.combined()
 
       assert result.overall == "empty"
       assert result.targets == []
@@ -53,7 +53,7 @@ defmodule Canary.StatusTest do
       create_target_with_state("api", "degraded")
       create_target_with_state("web", "up")
 
-      result = Status.combined()
+      assert {:ok, result} = Status.combined()
 
       assert result.overall == "degraded"
       assert result.summary =~ "degraded"
@@ -63,7 +63,7 @@ defmodule Canary.StatusTest do
       create_target_with_state("api", "up")
       create_error_group("api", "TimeoutError", 5)
 
-      result = Status.combined()
+      assert {:ok, result} = Status.combined()
 
       assert result.overall == "warning"
       assert result.summary =~ "error"
@@ -72,7 +72,7 @@ defmodule Canary.StatusTest do
     test "errors exist with no targets returns warning" do
       create_error_group("orphan-svc", "CrashError", 3)
 
-      result = Status.combined()
+      assert {:ok, result} = Status.combined()
 
       assert result.overall == "warning"
       assert result.summary =~ "error"
@@ -81,7 +81,7 @@ defmodule Canary.StatusTest do
     test "unknown target state treated as degraded" do
       create_target_with_state("booting", "unknown")
 
-      result = Status.combined()
+      assert {:ok, result} = Status.combined()
 
       assert result.overall == "degraded"
     end
@@ -96,7 +96,7 @@ defmodule Canary.StatusTest do
 
       create_error_group("api", "StaleError", 10, last_seen_at: two_hours_ago)
 
-      result = Status.combined()
+      assert {:ok, result} = Status.combined()
 
       assert result.overall == "healthy"
       assert result.error_summary == []
@@ -106,9 +106,13 @@ defmodule Canary.StatusTest do
       create_target_with_state("api", "up")
       create_error_group("api", "TimeoutError", 5)
 
-      result = Status.combined()
+      assert {:ok, result} = Status.combined()
 
       assert result.summary =~ "1 service in the last hour"
+    end
+
+    test "returns invalid_window for unsupported window" do
+      assert {:error, :invalid_window} = Status.combined("99h")
     end
   end
 end

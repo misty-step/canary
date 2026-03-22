@@ -154,7 +154,7 @@ defmodule Canary.Query do
 
   @recent_checks_limit 5
 
-  def health_status do
+  def health_targets do
     repo = Canary.Repos.read_repo()
 
     targets_with_state =
@@ -170,34 +170,65 @@ defmodule Canary.Query do
 
     checks_by_target = fetch_recent_checks(repo, target_ids)
 
-    enriched =
-      Enum.map(targets_with_state, fn {target, state} ->
-        recent = Map.get(checks_by_target, target.id, [])
+    Enum.map(targets_with_state, fn {target, state} ->
+      recent = Map.get(checks_by_target, target.id, [])
 
-        %{
-          id: target.id,
-          name: target.name,
-          url: target.url,
-          state: (state && state.state) || "unknown",
-          consecutive_failures: (state && state.consecutive_failures) || 0,
-          last_checked_at: state && state.last_checked_at,
-          last_success_at: state && state.last_success_at,
-          latency_ms: recent |> List.first() |> then(&(&1 && &1.latency_ms)),
-          tls_expires_at: Enum.find_value(recent, & &1.tls_expires_at),
-          recent_checks:
-            Enum.map(recent, fn c ->
-              %{
-                checked_at: c.checked_at,
-                result: c.result,
-                status_code: c.status_code,
-                latency_ms: c.latency_ms
-              }
-            end)
-        }
-      end)
+      %{
+        id: target.id,
+        name: target.name,
+        url: target.url,
+        state: (state && state.state) || "unknown",
+        consecutive_failures: (state && state.consecutive_failures) || 0,
+        last_checked_at: state && state.last_checked_at,
+        last_success_at: state && state.last_success_at,
+        latency_ms: recent |> List.first() |> then(&(&1 && &1.latency_ms)),
+        tls_expires_at: Enum.find_value(recent, & &1.tls_expires_at),
+        recent_checks:
+          Enum.map(recent, fn c ->
+            %{
+              checked_at: c.checked_at,
+              result: c.result,
+              status_code: c.status_code,
+              latency_ms: c.latency_ms
+            }
+          end)
+      }
+    end)
+  end
 
-    summary = Canary.Summary.health_status(%{targets: enriched})
-    %{summary: summary, targets: enriched}
+  def health_status do
+    targets = health_targets()
+    summary = Canary.Summary.health_status(%{targets: targets})
+    %{summary: summary, targets: targets}
+  end
+
+  def error_groups(window) do
+    with {:ok, cutoff} <- window_to_cutoff(window) do
+      {:ok, error_groups_since(cutoff)}
+    end
+  end
+
+  def error_summary(window) do
+    with {:ok, cutoff} <- window_to_cutoff(window) do
+      {:ok, error_summary_since(cutoff)}
+    end
+  end
+
+  def recent_transitions(window) do
+    with {:ok, cutoff} <- window_to_cutoff(window) do
+      {:ok, recent_transitions_since(cutoff)}
+    end
+  end
+
+  def report_slice(window) do
+    with {:ok, cutoff} <- window_to_cutoff(window) do
+      {:ok,
+       %{
+         error_groups: error_groups_since(cutoff),
+         error_summary: error_summary_since(cutoff),
+         recent_transitions: recent_transitions_since(cutoff)
+       }}
+    end
   end
 
   # Batch-fetch top-N recent checks per target using ROW_NUMBER window function.
@@ -265,6 +296,46 @@ defmodule Canary.Query do
   end
 
   # --- Helpers ---
+
+  defp error_groups_since(cutoff) do
+    from(g in ErrorGroup,
+      where: g.last_seen_at >= ^cutoff and g.status == "active",
+      order_by: [desc: g.total_count, asc: g.service, asc: g.error_class],
+      limit: ^@max_groups
+    )
+    |> Canary.Repos.read_repo().all()
+    |> Enum.map(&format_group/1)
+  end
+
+  defp error_summary_since(cutoff) do
+    from(g in ErrorGroup,
+      where: g.last_seen_at >= ^cutoff and g.status == "active",
+      group_by: g.service,
+      select: %{
+        service: g.service,
+        total_count: sum(g.total_count),
+        unique_classes: count(g.group_hash)
+      },
+      order_by: [desc: sum(g.total_count)]
+    )
+    |> Canary.Repos.read_repo().all()
+  end
+
+  defp recent_transitions_since(cutoff) do
+    from(t in Target,
+      join: s in TargetState,
+      on: t.id == s.target_id,
+      where: s.last_transition_at >= ^cutoff,
+      order_by: [desc: s.last_transition_at, asc: t.name],
+      select: %{
+        target_id: t.id,
+        target_name: t.name,
+        state: s.state,
+        transitioned_at: s.last_transition_at
+      }
+    )
+    |> Canary.Repos.read_repo().all()
+  end
 
   defp window_to_cutoff(window) when window in @allowed_windows do
     seconds =
