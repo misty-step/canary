@@ -1,12 +1,22 @@
 defmodule Canary.Query do
   @moduledoc """
-  Query API logic. Reads from error_groups and target_state.
+  Query API logic. Reads from errors, targets, and incidents.
   All responses include deterministic summary strings.
   """
 
-  alias Canary.Schemas.{Error, ErrorGroup, Target, TargetCheck, TargetState}
+  alias Canary.Schemas.{
+    Error,
+    ErrorGroup,
+    Incident,
+    IncidentSignal,
+    Target,
+    TargetCheck,
+    TargetState
+  }
+
   import Ecto.Query
 
+  @incident_active_window_seconds 300
   @max_groups 50
   @allowed_windows ~w(1h 6h 24h 7d 30d)
 
@@ -226,6 +236,7 @@ defmodule Canary.Query do
        %{
          error_groups: error_groups_since(cutoff),
          error_summary: error_summary_since(cutoff),
+         incidents: active_incidents(),
          recent_transitions: recent_transitions_since(cutoff)
        }}
     end
@@ -335,6 +346,107 @@ defmodule Canary.Query do
       }
     )
     |> Canary.Repos.read_repo().all()
+  end
+
+  defp active_incidents do
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    from(i in Incident,
+      where: i.state != "resolved",
+      order_by: [desc: i.opened_at],
+      preload: [signals: ^from(s in IncidentSignal, order_by: [asc: s.attached_at, asc: s.id])]
+    )
+    |> Canary.Repos.read_repo().all()
+    |> Enum.map(&active_incident_view(&1, now))
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp active_incident_view(incident, now) do
+    active_signals =
+      Enum.filter(incident.signals, fn signal ->
+        signal_active_for_report?(signal, now)
+      end)
+
+    case active_signals do
+      [] ->
+        nil
+
+      signals ->
+        format_incident(incident, signals, now)
+    end
+  end
+
+  defp format_incident(incident, signals, now) do
+    %{
+      id: incident.id,
+      service: incident.service,
+      state: "investigating",
+      severity: incident_severity(signals, now),
+      title: incident.title,
+      opened_at: incident.opened_at,
+      resolved_at: incident.resolved_at,
+      signal_count: length(signals),
+      signals:
+        Enum.map(signals, fn signal ->
+          %{
+            signal_type: signal.signal_type,
+            signal_ref: signal.signal_ref,
+            attached_at: signal.attached_at,
+            resolved_at: signal.resolved_at
+          }
+        end)
+    }
+  end
+
+  defp signal_active_for_report?(%IncidentSignal{resolved_at: resolved_at}, _now)
+       when not is_nil(resolved_at),
+       do: false
+
+  defp signal_active_for_report?(
+         %IncidentSignal{signal_type: "health_transition", signal_ref: ref},
+         _now
+       ) do
+    case Canary.Repos.read_repo().get(TargetState, ref) do
+      %TargetState{state: "up"} -> false
+      %TargetState{} -> true
+      nil -> false
+    end
+  end
+
+  defp signal_active_for_report?(
+         %IncidentSignal{signal_type: "error_group", signal_ref: ref},
+         now
+       ) do
+    case Canary.Repos.read_repo().get(ErrorGroup, ref) do
+      %ErrorGroup{status: "active", last_seen_at: last_seen_at} ->
+        within_incident_window?(last_seen_at, now)
+
+      %ErrorGroup{} ->
+        false
+
+      nil ->
+        false
+    end
+  end
+
+  defp signal_active_for_report?(%IncidentSignal{}, _now), do: false
+
+  defp incident_severity(signals, now) do
+    recent_count =
+      Enum.count(signals, fn signal ->
+        within_incident_window?(signal.attached_at, now)
+      end)
+
+    if recent_count >= 3, do: "high", else: "medium"
+  end
+
+  defp within_incident_window?(timestamp, now) do
+    with {:ok, timestamp_dt, _} <- DateTime.from_iso8601(timestamp),
+         {:ok, now_dt, _} <- DateTime.from_iso8601(now) do
+      DateTime.diff(now_dt, timestamp_dt, :second) <= @incident_active_window_seconds
+    else
+      _ -> false
+    end
   end
 
   defp window_to_cutoff(window) when window in @allowed_windows do

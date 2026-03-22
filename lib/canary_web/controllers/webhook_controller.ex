@@ -3,12 +3,8 @@ defmodule CanaryWeb.WebhookController do
 
   alias Canary.{ID, Repo}
   alias Canary.Schemas.Webhook
+  alias Canary.Webhooks.EventTypes
   import Ecto.Query
-
-  @valid_events ~w(
-    health_check.degraded health_check.down health_check.recovered
-    health_check.tls_expiring error.new_class error.regression
-  )
 
   def index(conn, _params) do
     webhooks = from(w in Webhook, order_by: w.created_at) |> Canary.Repos.read_repo().all()
@@ -30,7 +26,7 @@ defmodule CanaryWeb.WebhookController do
   def create(conn, params) do
     events = params["events"] || []
 
-    invalid = Enum.reject(events, &(&1 in @valid_events))
+    invalid = Enum.reject(events, &EventTypes.valid?/1)
 
     if invalid != [] do
       CanaryWeb.Plugs.ProblemDetails.render_error(
