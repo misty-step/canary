@@ -9,18 +9,17 @@ defmodule Canary.Report do
   def generate(opts \\ []) do
     window = Keyword.get(opts, :window, "1h")
 
-    with {:ok, error_groups} <- Query.error_groups(window),
-         {:ok, recent_transitions} <- Query.recent_transitions(window) do
+    with {:ok, slice} <- Query.report_slice(window) do
       targets = Query.health_targets()
-      status = Status.combined(window)
+      status = Status.from_snapshot(targets, slice.error_summary, window)
 
       {:ok,
        %{
          status: status.overall,
          summary: status.summary,
          targets: targets,
-         error_groups: error_groups,
-         recent_transitions: recent_transitions
+         error_groups: slice.error_groups,
+         recent_transitions: slice.recent_transitions
        }}
     end
   end

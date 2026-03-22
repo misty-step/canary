@@ -6,10 +6,16 @@ defmodule Canary.Status do
 
   alias Canary.Query
 
-  @spec combined(String.t()) :: map()
+  @spec combined(String.t()) :: {:ok, map()} | {:error, :invalid_window}
   def combined(window \\ "1h") do
-    targets = Query.health_targets() |> Enum.map(&legacy_target/1)
-    {:ok, error_summary} = Query.error_summary(window)
+    with {:ok, error_summary} <- Query.error_summary(window) do
+      {:ok, from_snapshot(Query.health_targets(), error_summary, window)}
+    end
+  end
+
+  @spec from_snapshot(list(), list(), String.t()) :: map()
+  def from_snapshot(targets, error_summary, window \\ "1h") do
+    targets = Enum.map(targets, &legacy_target/1)
     overall = compute_overall(targets, error_summary)
 
     %{

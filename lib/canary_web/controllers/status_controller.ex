@@ -2,6 +2,7 @@ defmodule CanaryWeb.StatusController do
   use CanaryWeb, :controller
 
   def index(conn, _params) do
-    json(conn, Canary.Status.combined())
+    {:ok, status} = Canary.Status.combined()
+    json(conn, status)
   end
 end
