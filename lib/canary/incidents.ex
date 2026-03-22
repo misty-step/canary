@@ -114,7 +114,7 @@ defmodule Canary.Incidents do
 
   defp desired_incident_attrs(%Incident{} = incident, now) do
     active_signals = Enum.reject(incident.signals, &resolved?/1)
-    severity = desired_severity(active_signals)
+    severity = desired_severity(active_signals, now)
 
     base =
       if active_signals == [] do
@@ -132,11 +132,10 @@ defmodule Canary.Incidents do
     end)
   end
 
-  defp desired_severity(active_signals) do
+  defp desired_severity(active_signals, now) do
     recent_count =
       Enum.count(active_signals, fn signal ->
-        signal.attached_at
-        |> within_active_window?()
+        within_active_window?(signal.attached_at, now)
       end)
 
     if recent_count >= 3, do: "high", else: "medium"
@@ -262,10 +261,6 @@ defmodule Canary.Incidents do
       nil ->
         false
     end
-  end
-
-  defp within_active_window?(attached_at) do
-    within_active_window?(attached_at, DateTime.utc_now() |> DateTime.to_iso8601())
   end
 
   defp within_active_window?(timestamp, now) do

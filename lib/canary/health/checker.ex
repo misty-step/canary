@@ -214,7 +214,16 @@ defmodule Canary.Health.Checker do
         }
 
         Canary.Workers.WebhookDelivery.enqueue_for_event(event_name, payload)
-        {:ok, _incident} = Incidents.correlate(:health_transition, target.id, target.name)
+
+        case Incidents.correlate(:health_transition, target.id, target.name) do
+          {:ok, _incident} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.error(
+              "Failed to correlate incident for target #{target.id}: #{inspect(reason)}"
+            )
+        end
 
       {:transition, _from, _to} ->
         :ok
