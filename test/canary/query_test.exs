@@ -1,8 +1,9 @@
 defmodule Canary.QueryTest do
   use Canary.DataCase
 
+  alias Canary.Errors.Ingest
   alias Canary.Query
-  alias Canary.Schemas.{ErrorGroup, Target, TargetCheck, TargetState}
+  alias Canary.Schemas.{Error, ErrorGroup, Target, TargetCheck, TargetState}
 
   defp insert_group!(attrs) do
     now = DateTime.utc_now() |> DateTime.to_iso8601()
@@ -21,6 +22,23 @@ defmodule Canary.QueryTest do
 
     %ErrorGroup{}
     |> ErrorGroup.changeset(Map.merge(defaults, attrs))
+    |> Canary.Repo.insert!()
+  end
+
+  defp insert_error!(attrs \\ %{}) do
+    id = Canary.ID.error_id()
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    defaults = %{
+      service: "test-svc",
+      error_class: "RuntimeError",
+      message: "boom",
+      group_hash: "grp-#{id}",
+      created_at: now
+    }
+
+    %Error{id: id}
+    |> Error.changeset(Map.merge(defaults, attrs))
     |> Canary.Repo.insert!()
   end
 
@@ -191,6 +209,41 @@ defmodule Canary.QueryTest do
                {3, "alpha", "BetaError"},
                {3, "beta", "ZedError"}
              ]
+    end
+
+    test "includes classification from the latest error in the group" do
+      {:ok, _} =
+        Ingest.ingest(%{
+          "service" => "volume",
+          "error_class" => "DBConnection.ConnectionError",
+          "message" => "database unavailable"
+        })
+
+      assert {:ok, [group]} = Query.error_groups("24h")
+
+      assert group.classification == %{
+               category: "infrastructure",
+               persistence: "transient",
+               component: "database"
+             }
+    end
+
+    test "falls back to unknown classification for legacy rows" do
+      error = insert_error!()
+
+      insert_group!(%{
+        service: error.service,
+        error_class: error.error_class,
+        last_error_id: error.id
+      })
+
+      assert {:ok, [group]} = Query.error_groups("24h")
+
+      assert group.classification == %{
+               category: "unknown",
+               persistence: "unknown",
+               component: "unknown"
+             }
     end
   end
 end
