@@ -3,34 +3,57 @@ defmodule Canary.Schemas.ErrorTest do
 
   alias Canary.Schemas.Error
 
-  test "accepts known classification domains" do
-    changeset =
-      Error.changeset(%Error{}, %{
+  defp error_attrs(overrides) do
+    Map.merge(
+      %{
         service: "svc",
         error_class: "RuntimeError",
         message: "boom",
         group_hash: "group-hash",
-        created_at: "2026-03-24T00:00:00Z",
-        classification_category: "infrastructure",
-        classification_persistence: "transient",
-        classification_component: "database"
-      })
+        created_at: "2026-03-24T00:00:00Z"
+      },
+      overrides
+    )
+  end
+
+  test "accepts known classification domains" do
+    changeset =
+      Error.changeset(
+        %Error{},
+        error_attrs(%{
+          classification_category: "infrastructure",
+          classification_persistence: "transient",
+          classification_component: "database"
+        })
+      )
+
+    assert changeset.valid?
+  end
+
+  test "accepts unknown classification domains" do
+    changeset =
+      Error.changeset(
+        %Error{},
+        error_attrs(%{
+          classification_category: "unknown",
+          classification_persistence: "unknown",
+          classification_component: "unknown"
+        })
+      )
 
     assert changeset.valid?
   end
 
   test "rejects invalid classification domains" do
     changeset =
-      Error.changeset(%Error{}, %{
-        service: "svc",
-        error_class: "RuntimeError",
-        message: "boom",
-        group_hash: "group-hash",
-        created_at: "2026-03-24T00:00:00Z",
-        classification_category: "oops",
-        classification_persistence: "forever",
-        classification_component: "kernel"
-      })
+      Error.changeset(
+        %Error{},
+        error_attrs(%{
+          classification_category: "oops",
+          classification_persistence: "forever",
+          classification_component: "kernel"
+        })
+      )
 
     refute changeset.valid?
 

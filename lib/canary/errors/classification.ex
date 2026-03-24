@@ -58,7 +58,7 @@ defmodule Canary.Errors.Classification do
   rescue
     error in [ArgumentError, BadMapError, FunctionClauseError, KeyError] ->
       Logger.warning(
-        "classification_failed error_class=#{inspect(value(subject, :error_class))} " <>
+        "classification_failed error_class=#{inspect(safe_error_class(subject))} " <>
           "exception=#{inspect(error.__struct__)} message=#{Exception.message(error)}"
       )
 
@@ -86,4 +86,7 @@ defmodule Canary.Errors.Classification do
   defp value(subject, key) do
     Map.get(subject, key) || Map.get(subject, Atom.to_string(key)) || ""
   end
+
+  defp safe_error_class(subject) when is_map(subject), do: value(subject, :error_class)
+  defp safe_error_class(subject), do: subject
 end
