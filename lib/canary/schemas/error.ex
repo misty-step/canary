@@ -35,12 +35,18 @@ defmodule Canary.Schemas.Error do
     classification_component
   )a
   @severities ~w(error warning info)
+  @classification_categories ~w(infrastructure application unknown)
+  @classification_persistences ~w(transient persistent unknown)
+  @classification_components ~w(database network runtime unknown)
 
   def changeset(error, attrs) do
     error
     |> cast(attrs, @required ++ @optional)
     |> validate_required(@required)
     |> validate_inclusion(:severity, @severities)
+    |> validate_inclusion(:classification_category, @classification_categories)
+    |> validate_inclusion(:classification_persistence, @classification_persistences)
+    |> validate_inclusion(:classification_component, @classification_components)
     |> validate_length(:message, max: 4_096)
     |> validate_length(:stack_trace, max: 32_768)
   end
