@@ -5,7 +5,7 @@ defmodule Canary.Report do
 
   alias Canary.{Query, Status}
 
-  @spec generate(keyword()) :: {:ok, map()} | {:error, :invalid_window}
+  @spec generate(keyword()) :: {:ok, map()} | {:error, :invalid_query | :invalid_window}
   def generate(opts \\ []) do
     window = Keyword.get(opts, :window) || "1h"
     search_query = Keyword.get(opts, :q)
