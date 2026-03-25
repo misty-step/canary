@@ -105,6 +105,34 @@ and correlated incidents in one bounded payload:
 }
 ```
 
+Optional free-text error search stays on the same endpoint:
+
+```bash
+curl "https://canary-obs.fly.dev/api/v1/report?window=1h&q=timeout" \
+  -H "Authorization: Bearer $CANARY_API_KEY"
+```
+
+When `q` is present, the response adds `search_results`, scoped to the same
+window as the rest of the report:
+
+```json
+{
+  "status": "degraded",
+  "summary": "2 targets monitored. 1 degraded (canary-triage). 14 errors across 1 service in the last hour.",
+  "search_results": [
+    {
+      "id": "ERR-a1b2c3",
+      "service": "canary-triage",
+      "error_class": "TimeoutError",
+      "message": "timeout while posting issue",
+      "group_hash": "sha256...",
+      "created_at": "2026-03-24T20:15:00Z",
+      "score": 1.73
+    }
+  ]
+}
+```
+
 ### Target Management
 
 ```bash

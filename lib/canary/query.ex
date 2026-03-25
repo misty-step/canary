@@ -18,10 +18,8 @@ defmodule Canary.Query do
 
   @incident_active_window_seconds 300
   @max_groups 50
-  @allowed_windows ~w(1h 6h 24h 7d 30d)
-
   def errors_by_service(service, window, cursor \\ nil) do
-    with {:ok, cutoff} <- window_to_cutoff(window) do
+    with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
       query =
         from(g in ErrorGroup,
           where: g.service == ^service and g.last_seen_at >= ^cutoff,
@@ -55,7 +53,7 @@ defmodule Canary.Query do
   end
 
   def errors_by_error_class(error_class, window, opts \\ []) do
-    with {:ok, cutoff} <- window_to_cutoff(window) do
+    with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
       cursor = Keyword.get(opts, :cursor)
 
       query =
@@ -96,7 +94,7 @@ defmodule Canary.Query do
   end
 
   def errors_by_class(window) do
-    with {:ok, cutoff} <- window_to_cutoff(window) do
+    with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
       groups =
         from(g in ErrorGroup,
           where: g.last_seen_at >= ^cutoff,
@@ -119,6 +117,18 @@ defmodule Canary.Query do
     case Canary.Repos.read_repo().get(Error, error_id) do
       nil -> {:error, :not_found}
       error -> {:ok, build_error_detail(error)}
+    end
+  end
+
+  def search(query, opts \\ []) do
+    case Keyword.get(opts, :window) do
+      nil ->
+        Canary.Query.Search.search(query, opts)
+
+      window ->
+        with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
+          Canary.Query.Search.search(query, Keyword.put(opts, :cutoff, cutoff))
+        end
     end
   end
 
@@ -213,25 +223,25 @@ defmodule Canary.Query do
   end
 
   def error_groups(window) do
-    with {:ok, cutoff} <- window_to_cutoff(window) do
+    with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
       {:ok, error_groups_since(cutoff)}
     end
   end
 
   def error_summary(window) do
-    with {:ok, cutoff} <- window_to_cutoff(window) do
+    with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
       {:ok, error_summary_since(cutoff)}
     end
   end
 
   def recent_transitions(window) do
-    with {:ok, cutoff} <- window_to_cutoff(window) do
+    with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
       {:ok, recent_transitions_since(cutoff)}
     end
   end
 
   def report_slice(window) do
-    with {:ok, cutoff} <- window_to_cutoff(window) do
+    with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
       {:ok,
        %{
          error_groups: error_groups_since(cutoff),
@@ -271,7 +281,7 @@ defmodule Canary.Query do
   end
 
   def target_checks(target_id, window) do
-    with {:ok, cutoff} <- window_to_cutoff(window) do
+    with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
       checks =
         from(c in TargetCheck,
           where: c.target_id == ^target_id and c.checked_at >= ^cutoff,
@@ -486,26 +496,6 @@ defmodule Canary.Query do
       _ -> false
     end
   end
-
-  defp window_to_cutoff(window) when window in @allowed_windows do
-    seconds =
-      case window do
-        "1h" -> 3_600
-        "6h" -> 21_600
-        "24h" -> 86_400
-        "7d" -> 604_800
-        "30d" -> 2_592_000
-      end
-
-    cutoff =
-      DateTime.utc_now()
-      |> DateTime.add(-seconds, :second)
-      |> DateTime.to_iso8601()
-
-    {:ok, cutoff}
-  end
-
-  defp window_to_cutoff(_), do: {:error, :invalid_window}
 
   defp apply_cursor(query, nil), do: query
 
