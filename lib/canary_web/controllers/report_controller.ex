@@ -5,8 +5,9 @@ defmodule CanaryWeb.ReportController do
 
   def index(conn, params) do
     window = Map.get(params, "window", "1h")
+    q = Map.get(params, "q")
 
-    case Report.generate(window: window) do
+    case Report.generate(window: window, q: q) do
       {:ok, report} -> json(conn, report)
       {:error, :invalid_window} -> render_invalid_window(conn)
     end

@@ -52,6 +52,21 @@ defmodule CanaryWeb.ReportControllerTest do
       assert is_binary(body["summary"])
     end
 
+    test "includes search_results when q is provided", %{conn: conn} do
+      {:ok, _result} =
+        Canary.Errors.Ingest.ingest(%{
+          "service" => "volume",
+          "error_class" => "TimeoutError",
+          "message" => "timeout while reporting health"
+        })
+
+      conn = get(conn, "/api/v1/report?q=timeout")
+      body = json_response(conn, 200)
+
+      assert [%{"service" => "volume", "message" => "timeout while reporting health"}] =
+               body["search_results"]
+    end
+
     test "returns 401 without auth", %{conn: conn} do
       conn =
         conn

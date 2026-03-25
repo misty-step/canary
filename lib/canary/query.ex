@@ -122,6 +122,8 @@ defmodule Canary.Query do
     end
   end
 
+  def search(query, opts \\ []), do: Canary.Query.Search.search(query, opts)
+
   defp build_error_detail(error) do
     group = Canary.Repos.read_repo().get(ErrorGroup, error.group_hash)
 
