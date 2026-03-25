@@ -2,6 +2,7 @@ defmodule Canary.Query.Search do
   @moduledoc false
 
   @default_limit 20
+  @bm25_weights "1.0, 2.0, 5.0, 1.0"
 
   def search(query, opts \\ [])
 
@@ -28,7 +29,7 @@ defmodule Canary.Query.Search do
   defp search_sql(query, nil, limit) do
     {"""
      SELECT e.id, e.service, e.error_class, e.message, e.group_hash, e.created_at,
-            -bm25(errors_fts, 1.0, 2.0, 5.0, 1.0) AS score
+            -bm25(errors_fts, #{@bm25_weights}) AS score
      FROM errors_fts
      JOIN errors AS e ON e.rowid = errors_fts.rowid
      WHERE errors_fts MATCH ?
@@ -40,7 +41,7 @@ defmodule Canary.Query.Search do
   defp search_sql(query, service, limit) do
     {"""
      SELECT e.id, e.service, e.error_class, e.message, e.group_hash, e.created_at,
-            -bm25(errors_fts, 1.0, 2.0, 5.0, 1.0) AS score
+            -bm25(errors_fts, #{@bm25_weights}) AS score
      FROM errors_fts
      JOIN errors AS e ON e.rowid = errors_fts.rowid
      WHERE errors_fts MATCH ?
