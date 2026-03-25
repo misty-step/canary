@@ -64,6 +64,7 @@ defmodule Canary.Query.Search do
     {clauses ++ [clause], params ++ [value]}
   end
 
+  # format_result/1 must stay in the same column order as search_sql/4.
   defp format_result([id, service, error_class, message, group_hash, created_at, score]) do
     %{
       id: id,
