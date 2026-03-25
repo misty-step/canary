@@ -3,6 +3,7 @@ defmodule CanaryWeb.ReportControllerTest do
 
   import Canary.Fixtures
   alias Canary.Incidents
+  alias Canary.Schemas.{Error, ErrorGroup}
 
   setup %{conn: conn} do
     clean_status_tables()
@@ -65,6 +66,42 @@ defmodule CanaryWeb.ReportControllerTest do
 
       assert [%{"service" => "volume", "message" => "timeout while reporting health"}] =
                body["search_results"]
+    end
+
+    test "scopes search_results to the requested window", %{conn: conn} do
+      two_hours_ago =
+        DateTime.utc_now()
+        |> DateTime.add(-7_200, :second)
+        |> DateTime.to_iso8601()
+
+      {:ok, result} =
+        Canary.Errors.Ingest.ingest(%{
+          "service" => "volume",
+          "error_class" => "TimeoutError",
+          "message" => "timeout from two hours ago"
+        })
+
+      Canary.Repo.get!(Error, result.id)
+      |> Ecto.Changeset.change(created_at: two_hours_ago)
+      |> Canary.Repo.update!()
+
+      Canary.Repo.get!(ErrorGroup, result.group_hash)
+      |> Ecto.Changeset.change(first_seen_at: two_hours_ago, last_seen_at: two_hours_ago)
+      |> Canary.Repo.update!()
+
+      conn = get(conn, "/api/v1/report?window=1h&q=timeout")
+      body = json_response(conn, 200)
+
+      assert body["error_groups"] == []
+      assert body["search_results"] == []
+    end
+
+    test "returns 422 for an invalid q shape", %{conn: conn} do
+      conn = get(conn, "/api/v1/report", %{"q" => ["timeout"]})
+      body = json_response(conn, 422)
+
+      assert body["code"] == "validation_error"
+      assert body["errors"]["q"] == ["must be a string"]
     end
 
     test "returns 401 without auth", %{conn: conn} do

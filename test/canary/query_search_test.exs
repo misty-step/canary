@@ -3,6 +3,7 @@ defmodule Canary.QuerySearchTest do
 
   alias Canary.Errors.Ingest
   alias Canary.Query
+  alias Canary.Schemas.Error
 
   defp ingest_error!(attrs) do
     defaults = %{
@@ -66,6 +67,37 @@ defmodule Canary.QuerySearchTest do
       ingest_error!(%{"message" => "database connection dropped"})
 
       assert {:ok, []} = Query.search("nonexistent")
+    end
+
+    test "returns an empty list for a blank query" do
+      ingest_error!(%{"message" => "timeout while calling upstream service"})
+
+      assert {:ok, []} = Query.search("   ")
+    end
+
+    test "updates search results when an error changes" do
+      %{id: error_id} = ingest_error!(%{"message" => "stale timeout message"})
+      error = Repo.get!(Error, error_id)
+
+      error
+      |> Ecto.Changeset.change(message: "fresh connection failure")
+      |> Repo.update!()
+
+      assert {:ok, []} = Query.search("timeout")
+
+      assert {:ok, [%{id: ^error_id, message: "fresh connection failure"}]} =
+               Query.search("connection")
+    end
+
+    test "removes search results when an error is deleted" do
+      %{id: error_id} = ingest_error!(%{"message" => "timeout before delete"})
+      error = Repo.get!(Error, error_id)
+
+      assert {:ok, [%{id: ^error_id}]} = Query.search("delete")
+
+      Repo.delete!(error)
+
+      assert {:ok, []} = Query.search("delete")
     end
   end
 end
