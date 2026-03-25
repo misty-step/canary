@@ -2,7 +2,7 @@ defmodule CanaryWeb.Router do
   use CanaryWeb, :router
 
   pipeline :api do
-    plug :accepts, ["json"]
+    plug :accepts, ["json", "csv"]
 
     plug Plug.Parsers,
       parsers: [:json],

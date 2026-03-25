@@ -41,4 +41,8 @@ config :logger, :default_formatter,
 
 config :phoenix, :json_library, Jason
 
+config :mime, :types, %{
+  "text/csv" => ["csv"]
+}
+
 import_config "#{config_env()}.exs"

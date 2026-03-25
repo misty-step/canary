@@ -102,6 +102,8 @@ defmodule Canary.ReportTest do
       assert result.error_groups == []
       assert result.recent_transitions == []
       assert result.summary == "No services configured."
+      assert result.truncated == false
+      assert result.cursor == nil
     end
 
     test "reports unknown state for targets without a state record" do
@@ -116,6 +118,74 @@ defmodule Canary.ReportTest do
 
       assert {:ok, result} = Report.generate(window: "1h")
       assert [%{name: "orphan", state: "unknown"}] = result.targets
+    end
+
+    test "applies a default limit to error groups but not targets" do
+      for name <- ~w(alpha bravo), do: create_target_with_state(name, "up")
+
+      for index <- 1..30 do
+        create_error_group("svc-#{index}", "Error#{index}", 100 - index)
+      end
+
+      assert {:ok, result} = Report.generate(window: "1h")
+
+      assert length(result.targets) == 2
+      assert length(result.error_groups) == 25
+      assert result.truncated == true
+      assert is_binary(result.cursor)
+    end
+
+    test "paginates targets and error groups without duplicates" do
+      for name <- ~w(alpha bravo charlie delta echo foxtrot golf) do
+        create_target_with_state(name, "up")
+      end
+
+      for {service, count} <- Enum.zip(~w(svc-a svc-b svc-c svc-d svc-e svc-f svc-g), 70..64//-1) do
+        create_error_group(service, "ConnectionError", count)
+      end
+
+      assert {:ok, first_page} = Report.generate(window: "1h", limit: 5)
+
+      assert Enum.map(first_page.targets, & &1.name) == ~w(alpha bravo charlie delta echo)
+      assert Enum.map(first_page.error_groups, & &1.service) == ~w(svc-a svc-b svc-c svc-d svc-e)
+      assert first_page.truncated == true
+      assert is_binary(first_page.cursor)
+
+      assert {:ok, second_page} =
+               Report.generate(window: "1h", limit: 5, cursor: first_page.cursor)
+
+      assert Enum.map(second_page.targets, & &1.name) == ~w(foxtrot golf)
+      assert Enum.map(second_page.error_groups, & &1.service) == ~w(svc-f svc-g)
+      assert second_page.truncated == false
+      assert second_page.cursor == nil
+
+      assert MapSet.disjoint?(
+               MapSet.new(Enum.map(first_page.targets, & &1.id)),
+               MapSet.new(Enum.map(second_page.targets, & &1.id))
+             )
+
+      assert MapSet.disjoint?(
+               MapSet.new(Enum.map(first_page.error_groups, & &1.group_hash)),
+               MapSet.new(Enum.map(second_page.error_groups, & &1.group_hash))
+             )
+    end
+
+    test "does not replay targets after they are exhausted on an earlier page" do
+      create_target_with_state("alpha", "up")
+
+      for index <- 1..8 do
+        create_error_group("svc-#{index}", "Error#{index}", 100 - index)
+      end
+
+      assert {:ok, first_page} = Report.generate(window: "1h", limit: 5)
+      assert Enum.map(first_page.targets, & &1.name) == ["alpha"]
+      assert is_binary(first_page.cursor)
+
+      assert {:ok, second_page} =
+               Report.generate(window: "1h", limit: 5, cursor: first_page.cursor)
+
+      assert second_page.targets == []
+      assert length(second_page.error_groups) == 3
     end
   end
 
