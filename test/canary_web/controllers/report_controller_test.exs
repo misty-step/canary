@@ -146,6 +146,14 @@ defmodule CanaryWeb.ReportControllerTest do
       assert body["errors"]["window"] == ["must be one of: 1h, 6h, 24h, 7d, 30d"]
     end
 
+    test "returns 422 for a cursor payload that is valid json but not an object", %{conn: conn} do
+      conn = get(conn, "/api/v1/report?cursor=W10")
+      body = json_response(conn, 422)
+
+      assert body["code"] == "validation_error"
+      assert body["errors"]["cursor"] == ["must be a valid pagination cursor"]
+    end
+
     test "applies limit and cursor pagination to targets and error groups", %{conn: conn} do
       for name <- ~w(alpha bravo charlie delta echo foxtrot golf) do
         create_target_with_state(name, "up")

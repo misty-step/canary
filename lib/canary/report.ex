@@ -73,7 +73,7 @@ defmodule Canary.Report do
 
   defp decode_cursor(cursor) when is_binary(cursor) do
     with {:ok, decoded} <- Base.url_decode64(cursor, padding: false),
-         {:ok, offsets} <- Jason.decode(decoded),
+         {:ok, offsets} <- decode_cursor_payload(decoded),
          {:ok, targets_offset} <- parse_cursor_offset(Map.get(offsets, "targets_offset")),
          {:ok, error_groups_offset} <-
            parse_cursor_offset(Map.get(offsets, "error_groups_offset")) do
@@ -84,6 +84,13 @@ defmodule Canary.Report do
   end
 
   defp decode_cursor(_), do: {:error, :invalid_cursor}
+
+  defp decode_cursor_payload(decoded) do
+    case Jason.decode(decoded) do
+      {:ok, offsets} when is_map(offsets) -> {:ok, offsets}
+      _ -> {:error, :invalid_cursor}
+    end
+  end
 
   defp parse_cursor_offset(value) when is_integer(value) and value >= 0, do: {:ok, value}
   defp parse_cursor_offset(nil), do: {:ok, nil}
