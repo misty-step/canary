@@ -6,9 +6,11 @@ MODE=full
 
 usage() {
   cat <<'EOF'
-Usage: bin/validate [--fast]
+Usage: bin/validate [--fast] [-h|--help]
 
 Runs repo-local validation across every maintained package.
+  --fast      Run the reduced validation set.
+  -h, --help  Show this help message.
 EOF
 }
 

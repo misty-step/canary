@@ -6,9 +6,11 @@ CI_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: bin/bootstrap [--ci]
+Usage: bin/bootstrap [--ci] [-h|--help]
 
 Bootstraps every maintained package in the monorepo.
+  --ci        Skip local git hook setup and honor explicit CI MIX_ENV.
+  -h, --help  Show this help message.
 EOF
 }
 
@@ -43,8 +45,13 @@ run() {
 run_mix() {
   local dir="$1"
   shift
+  local mix_env=dev
 
-  run "$dir" env MIX_ENV=dev "$@"
+  if [[ "$CI_MODE" -eq 1 ]] && [[ -n "${MIX_ENV:-}" ]]; then
+    mix_env="$MIX_ENV"
+  fi
+
+  run "$dir" env MIX_ENV="$mix_env" "$@"
 }
 
 run_mix "." mix setup

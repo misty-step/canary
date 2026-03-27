@@ -40,9 +40,9 @@ Supported local toolchains are pinned in `.tool-versions`:
 
 - Erlang/OTP `27.3.4.9`
 - Elixir `1.17.3-otp-27`
-- Node.js `22.15.0`
+- Node.js `22.22.0`
 
-The production Dockerfiles also build on Elixir `1.17`, and CI uses the same pinned family.
+The production Dockerfiles also build on Elixir `1.17`, and CI uses the same pinned toolchain versions.
 
 ### Bootstrap
 
