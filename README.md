@@ -68,11 +68,11 @@ Run the full repo-local quality gate from the repo root:
 ./bin/validate
 ```
 
-That mirrors CI across the maintained packages:
+That matches the current CI checks across the maintained packages:
 
 - core: compile, format, credo, test, dialyzer
 - triage: compile, format, test
-- Elixir SDK: format, test
+- Elixir SDK: compile, format, test
 - TypeScript SDK: typecheck, test, build
 
 The pre-commit hook runs the fast subset instead:
