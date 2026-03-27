@@ -11,7 +11,8 @@ defmodule CanaryTriage.GitHub do
     labels = Map.get(issue, "labels", [])
     repo = resolve_repo(service)
 
-    case Req.post("https://api.github.com/repos/#{repo}/issues",
+    case Req.post(
+           "https://api.github.com/repos/#{repo}/issues",
            [json: %{title: title, body: body, labels: labels}] ++ common_opts()
          ) do
       {:ok, %{status: 201, body: resp}} ->
@@ -32,7 +33,8 @@ defmodule CanaryTriage.GitHub do
   def find_open_health_issue(service) do
     repo = resolve_repo(service)
 
-    case Req.get("https://api.github.com/repos/#{repo}/issues",
+    case Req.get(
+           "https://api.github.com/repos/#{repo}/issues",
            [params: [labels: "health-check", state: "open", per_page: 10]] ++ common_opts()
          ) do
       {:ok, %{status: 200, body: issues}} when is_list(issues) ->
@@ -56,7 +58,8 @@ defmodule CanaryTriage.GitHub do
     repo = resolve_repo(service)
 
     with {:ok, _} <- comment_on_issue(service, issue_number, comment) do
-      case Req.patch("https://api.github.com/repos/#{repo}/issues/#{issue_number}",
+      case Req.patch(
+             "https://api.github.com/repos/#{repo}/issues/#{issue_number}",
              [json: %{state: "closed", state_reason: "completed"}] ++ common_opts()
            ) do
         {:ok, %{status: 200, body: resp}} ->
@@ -78,7 +81,8 @@ defmodule CanaryTriage.GitHub do
   def comment_on_issue(service, issue_number, comment) do
     repo = resolve_repo(service)
 
-    case Req.post("https://api.github.com/repos/#{repo}/issues/#{issue_number}/comments",
+    case Req.post(
+           "https://api.github.com/repos/#{repo}/issues/#{issue_number}/comments",
            [json: %{body: comment}] ++ common_opts()
          ) do
       {:ok, %{status: 201, body: resp}} ->

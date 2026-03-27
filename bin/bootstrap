@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CI_MODE=0
+
+usage() {
+  cat <<'EOF'
+Usage: bin/bootstrap [--ci]
+
+Bootstraps every maintained package in the monorepo.
+EOF
+}
+
+while (($#)); do
+  case "$1" in
+    --ci)
+      CI_MODE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+run() {
+  local dir="$1"
+  shift
+
+  printf '==> %s: %s\n' "$dir" "$*"
+  (
+    cd "$ROOT/$dir"
+    "$@"
+  )
+}
+
+run_mix() {
+  local dir="$1"
+  shift
+
+  run "$dir" env MIX_ENV=dev "$@"
+}
+
+run_mix "." mix setup
+run_mix "triage" mix setup
+run_mix "canary_sdk" mix deps.get
+run "clients/typescript" npm ci
+
+if [[ "$CI_MODE" -eq 0 ]] && git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git -C "$ROOT" config core.hooksPath .githooks
+  printf '==> hooks: configured core.hooksPath=.githooks\n'
+fi

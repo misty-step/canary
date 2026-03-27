@@ -1,18 +1,20 @@
-# CanaryTriage
+# Canary Triage
 
-To start your Phoenix server:
+Companion Phoenix service for Canary webhooks and GitHub issue synthesis.
 
-* Run `mix setup` to install and setup dependencies
-* Start Phoenix endpoint with `mix phx.server` or inside IEx with `iex -S mix phx.server`
+Use the repo-root workflow for a full checkout:
 
-Now you can visit [`localhost:4000`](http://localhost:4000) from your browser.
+```bash
+./bin/bootstrap
+./bin/validate
+```
 
-Ready to run in production? Please [check our deployment guides](https://hexdocs.pm/phoenix/deployment.html).
+For triage-only work:
 
-## Learn more
+```bash
+cd triage
+mix setup
+mix phx.server
+```
 
-* Official website: https://www.phoenixframework.org/
-* Guides: https://hexdocs.pm/phoenix/overview.html
-* Docs: https://hexdocs.pm/phoenix
-* Forum: https://elixirforum.com/c/phoenix-forum
-* Source: https://github.com/phoenixframework/phoenix
+Triage deploys from `triage/`, not the repo root.

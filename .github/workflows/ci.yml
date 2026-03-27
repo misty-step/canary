@@ -21,37 +21,37 @@ jobs:
       - uses: erlef/setup-beam@ee09b1e59bb240681c382eb1f0abc6a04af72764 # v1
         id: beam
         with:
-          otp-version: "27"
-          elixir-version: "1.17"
+          otp-version: "27.3.4.9"
+          elixir-version: "1.17.3"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.15.0"
+          cache: npm
+          cache-dependency-path: clients/typescript/package-lock.json
 
       - name: Restore deps cache
         uses: actions/cache@v4
         with:
-          path: deps
-          key: deps-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
+          path: |
+            deps
+            triage/deps
+            canary_sdk/deps
+          key: deps-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock', 'triage/mix.lock', 'canary_sdk/mix.lock') }}
           restore-keys: deps-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
 
       - name: Restore build cache
         uses: actions/cache@v4
         with:
-          path: _build
-          key: build-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
+          path: |
+            _build
+            triage/_build
+            canary_sdk/_build
+          key: build-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock', 'triage/mix.lock', 'canary_sdk/mix.lock') }}
           restore-keys: build-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
 
-      - name: Install dependencies
-        run: mix deps.get
-
-      - name: Compile (warnings as errors)
-        run: mix compile --warnings-as-errors
-
-      - name: Check formatting
-        run: mix format --check-formatted
-
-      - name: Credo (strict)
-        run: mix credo --strict
-
-      - name: Run tests
-        run: mix test
+      - name: Bootstrap repo
+        run: ./bin/bootstrap --ci
 
       - name: Restore PLT cache
         uses: actions/cache@v4
@@ -67,7 +67,5 @@ jobs:
           MIX_ENV: dev
         run: mix dialyzer --plt
 
-      - name: Dialyzer
-        env:
-          MIX_ENV: dev
-        run: mix dialyzer
+      - name: Validate repo
+        run: ./bin/validate --ci
