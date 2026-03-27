@@ -9,8 +9,12 @@ defmodule CanaryTriage.ErrorReporter do
   @spec attach() :: :ok
   def attach do
     case :logger.add_handler(:canary_triage_reporter, __MODULE__, %{}) do
-      :ok -> :ok
-      {:error, {:already_exist, _}} -> :ok
+      :ok ->
+        :ok
+
+      {:error, {:already_exist, _}} ->
+        :ok
+
       {:error, reason} ->
         Logger.warning("Failed to attach error reporter: #{inspect(reason)}")
         :ok

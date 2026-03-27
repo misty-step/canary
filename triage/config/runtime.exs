@@ -6,8 +6,7 @@ end
 
 port = String.to_integer(System.get_env("PORT", "4001"))
 
-config :canary_triage, CanaryTriageWeb.Endpoint,
-  http: [port: port]
+config :canary_triage, CanaryTriageWeb.Endpoint, http: [port: port]
 
 if config_env() == :prod do
   secret_key_base =

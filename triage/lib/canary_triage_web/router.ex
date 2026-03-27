@@ -3,6 +3,7 @@ defmodule CanaryTriageWeb.Router do
 
   pipeline :webhook do
     plug :accepts, ["json"]
+
     plug Plug.Parsers,
       parsers: [:json],
       pass: ["application/json"],

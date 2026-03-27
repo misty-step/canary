@@ -6,7 +6,8 @@ defmodule CanaryTriage.Webhook do
   @spec verify(binary(), binary(), binary()) :: :ok | {:error, :invalid_signature}
   def verify(body, secret, signature)
       when is_binary(body) and is_binary(secret) and is_binary(signature) do
-    expected = "sha256=" <> (:crypto.mac(:hmac, :sha256, secret, body) |> Base.encode16(case: :lower))
+    expected =
+      "sha256=" <> (:crypto.mac(:hmac, :sha256, secret, body) |> Base.encode16(case: :lower))
 
     if Plug.Crypto.secure_compare(expected, signature) do
       :ok

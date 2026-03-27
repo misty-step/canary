@@ -25,7 +25,8 @@ defmodule CanaryTriage.Dispatch do
     handle_recovery(extract_service(payload), payload)
   end
 
-  defp dispatch(%{"event" => "health_check." <> type} = payload) when type in ["degraded", "down"] do
+  defp dispatch(%{"event" => "health_check." <> type} = payload)
+       when type in ["degraded", "down"] do
     handle_degradation(extract_service(payload), payload)
   end
 

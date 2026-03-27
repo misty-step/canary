@@ -15,7 +15,11 @@ defmodule CanaryTriage.GitHubTest do
     test "returns issue when matching title found" do
       stub_github(fn conn ->
         Req.Test.json(conn, [
-          %{"number" => 42, "title" => "Health Check Degraded: my-service", "html_url" => "https://github.com/misty-step/canary/issues/42"}
+          %{
+            "number" => 42,
+            "title" => "Health Check Degraded: my-service",
+            "html_url" => "https://github.com/misty-step/canary/issues/42"
+          }
         ])
       end)
 
@@ -50,7 +54,9 @@ defmodule CanaryTriage.GitHubTest do
 
     test "returns error on API failure" do
       stub_github(fn conn ->
-        conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "Internal Server Error"})
+        conn
+        |> Plug.Conn.put_status(500)
+        |> Req.Test.json(%{"message" => "Internal Server Error"})
       end)
 
       assert {:error, {:github, 500, _}} = GitHub.find_open_health_issue("my-service")
@@ -109,7 +115,10 @@ defmodule CanaryTriage.GitHubTest do
     test "creates issue and returns response" do
       stub_github(fn conn ->
         assert conn.method == "POST"
-        conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 10, "html_url" => "https://example.com"})
+
+        conn
+        |> Plug.Conn.put_status(201)
+        |> Req.Test.json(%{"number" => 10, "html_url" => "https://example.com"})
       end)
 
       issue = %{"title" => "Test", "body" => "Body", "labels" => ["bug"]}
