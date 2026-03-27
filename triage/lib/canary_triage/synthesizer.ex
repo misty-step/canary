@@ -45,12 +45,13 @@ defmodule CanaryTriage.Synthesizer do
     4. Verify endpoint: `curl -I #{url}`
     """
 
-    {:ok, %{
-      "title" => title,
-      "body" => body,
-      "labels" => ["health-check", priority_label(state)],
-      "priority" => priority_from_state(state)
-    }}
+    {:ok,
+     %{
+       "title" => title,
+       "body" => body,
+       "labels" => ["health-check", priority_label(state)],
+       "priority" => priority_from_state(state)
+     }}
   end
 
   @spec build_health_check_comment(map()) :: String.t()
@@ -132,7 +133,9 @@ defmodule CanaryTriage.Synthesizer do
 
   defp build_prompt(payload, detail) do
     event = payload["event"] || "unknown"
-    service = get_in(payload, ["error", "service"]) || get_in(payload, ["target", "name"]) || "unknown"
+
+    service =
+      get_in(payload, ["error", "service"]) || get_in(payload, ["target", "name"]) || "unknown"
 
     context =
       case {event, detail} do

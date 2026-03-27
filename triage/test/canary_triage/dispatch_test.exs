@@ -36,8 +36,16 @@ defmodule CanaryTriage.DispatchTest do
 
       stub_github(fn conn ->
         case conn.method do
-          "GET" -> Req.Test.json(conn, [])
-          "POST" -> conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"number" => 1, "html_url" => "https://github.com/misty-step/canary/issues/1"})
+          "GET" ->
+            Req.Test.json(conn, [])
+
+          "POST" ->
+            conn
+            |> Plug.Conn.put_status(201)
+            |> Req.Test.json(%{
+              "number" => 1,
+              "html_url" => "https://github.com/misty-step/canary/issues/1"
+            })
         end
       end)
 
@@ -52,7 +60,11 @@ defmodule CanaryTriage.DispatchTest do
         case conn.method do
           "GET" ->
             Req.Test.json(conn, [
-              %{"number" => 42, "title" => "Health Check Degraded: canary-triage", "html_url" => "https://github.com/misty-step/canary/issues/42"}
+              %{
+                "number" => 42,
+                "title" => "Health Check Degraded: canary-triage",
+                "html_url" => "https://github.com/misty-step/canary/issues/42"
+              }
             ])
 
           "POST" ->
@@ -73,7 +85,11 @@ defmodule CanaryTriage.DispatchTest do
         case conn.method do
           "GET" ->
             Req.Test.json(conn, [
-              %{"number" => 42, "title" => "Health Check Degraded: canary-triage", "html_url" => "https://github.com/misty-step/canary/issues/42"}
+              %{
+                "number" => 42,
+                "title" => "Health Check Degraded: canary-triage",
+                "html_url" => "https://github.com/misty-step/canary/issues/42"
+              }
             ])
 
           "POST" ->
@@ -107,7 +123,10 @@ defmodule CanaryTriage.DispatchTest do
 
       stub_github(fn conn ->
         "GET" = conn.method
-        conn |> Plug.Conn.put_status(500) |> Req.Test.json(%{"message" => "Internal Server Error"})
+
+        conn
+        |> Plug.Conn.put_status(500)
+        |> Req.Test.json(%{"message" => "Internal Server Error"})
       end)
 
       assert {:error, {:github, 500, _}} = Dispatch.handle(body, payload, sign(body))
@@ -119,8 +138,13 @@ defmodule CanaryTriage.DispatchTest do
 
       stub_github(fn conn ->
         case conn.method do
-          "GET" -> Req.Test.json(conn, [])
-          "POST" -> conn |> Plug.Conn.put_status(422) |> Req.Test.json(%{"message" => "Validation Failed"})
+          "GET" ->
+            Req.Test.json(conn, [])
+
+          "POST" ->
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{"message" => "Validation Failed"})
         end
       end)
 
@@ -135,7 +159,11 @@ defmodule CanaryTriage.DispatchTest do
         case conn.method do
           "GET" ->
             Req.Test.json(conn, [
-              %{"number" => 42, "title" => "Health Check Degraded: canary-triage", "html_url" => "url"}
+              %{
+                "number" => 42,
+                "title" => "Health Check Degraded: canary-triage",
+                "html_url" => "url"
+              }
             ])
 
           "POST" ->
@@ -154,14 +182,20 @@ defmodule CanaryTriage.DispatchTest do
         case conn.method do
           "GET" ->
             Req.Test.json(conn, [
-              %{"number" => 42, "title" => "Health Check Degraded: canary-triage", "html_url" => "url"}
+              %{
+                "number" => 42,
+                "title" => "Health Check Degraded: canary-triage",
+                "html_url" => "url"
+              }
             ])
 
           "POST" ->
             conn |> Plug.Conn.put_status(201) |> Req.Test.json(%{"id" => 1})
 
           "PATCH" ->
-            conn |> Plug.Conn.put_status(422) |> Req.Test.json(%{"message" => "Validation Failed"})
+            conn
+            |> Plug.Conn.put_status(422)
+            |> Req.Test.json(%{"message" => "Validation Failed"})
         end
       end)
 
