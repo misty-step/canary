@@ -11,7 +11,17 @@ kill_timeout = "10s"
   PORT = "4001"
   PHX_SERVER = "true"
   GITHUB_ORG = "misty-step"
-  SERVICE_REPOS = "{\"consumer-portal\":\"adminifi-ai/consumer-portal\",\"web\":\"adminifi-ai/web\",\"time-tracker\":\"adminifi-ai/time-tracker\",\"vulcan\":\"adminifi-ai/vulcan\",\"volume\":\"misty-step/volume\",\"chrondle\":\"misty-step/chrondle\",\"linejam\":\"misty-step/linejam\"}"
+  SERVICE_REPOS = """
+{
+  "consumer-portal": "adminifi-ai/consumer-portal",
+  "web": "adminifi-ai/web",
+  "time-tracker": "adminifi-ai/time-tracker",
+  "vulcan": "adminifi-ai/vulcan",
+  "volume": "misty-step/volume",
+  "chrondle": "misty-step/chrondle",
+  "linejam": "misty-step/linejam"
+}
+"""
   CANARY_ENDPOINT = "https://canary-obs.fly.dev"
 
 [http_service]
