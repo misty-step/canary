@@ -18,11 +18,68 @@ Existing tools (Sentry, Uptime Robot) are designed for humans staring at dashboa
 ```bash
 git clone https://github.com/misty-step/canary && cd canary
 cp .env.example .env
-mix setup          # deps.get + ecto.create + ecto.migrate
+./bin/bootstrap    # installs deps for root, triage, SDK, and TypeScript client
 mix phx.server     # starts on localhost:4000
 ```
 
-No Docker required for local development. Zero external dependencies.
+No Docker required for local development. The core service stays Elixir-only, and the
+repo also includes a Node-based TypeScript SDK package.
+
+## Development
+
+This is a monorepo with four maintained packages:
+
+- `.` — Canary core service
+- `triage/` — Canary Triage companion service
+- `canary_sdk/` — Elixir SDK
+- `clients/typescript/` — TypeScript SDK
+
+### Toolchain
+
+Supported local toolchains are pinned in `.tool-versions`:
+
+- Erlang/OTP `27.3.4.9`
+- Elixir `1.17.3-otp-27`
+- Node.js `22.22.0`
+
+The production Dockerfiles also build on Elixir `1.17`, and CI uses the same pinned toolchain versions.
+
+### Bootstrap
+
+From the repo root:
+
+```bash
+./bin/bootstrap
+```
+
+That command:
+
+- runs `mix setup` for the core service
+- runs `mix setup` for `triage/`
+- installs `canary_sdk/` dependencies
+- runs `npm ci` for `clients/typescript/`
+- configures `core.hooksPath` to use `.githooks/pre-commit`
+
+### Validation
+
+Run the full repo-local quality gate from the repo root:
+
+```bash
+./bin/validate
+```
+
+That matches the current CI checks across the maintained packages:
+
+- core: compile, format, credo, test, dialyzer
+- triage: compile, format, test
+- Elixir SDK: compile, format, test
+- TypeScript SDK: typecheck, test, build
+
+The pre-commit hook runs the fast subset instead:
+
+```bash
+./bin/validate --fast
+```
 
 ## API
 
