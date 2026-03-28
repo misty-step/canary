@@ -43,7 +43,7 @@ if config_env() == :prod do
       password ->
         {
           Bcrypt.hash_pwd_salt(password),
-          :crypto.hash(:sha256, password) |> Base.url_encode64(padding: false)
+          CanaryWeb.DashboardAuth.auth_version(password, secret_key_base)
         }
     end
 

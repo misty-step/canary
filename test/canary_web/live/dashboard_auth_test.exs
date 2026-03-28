@@ -4,6 +4,7 @@ defmodule CanaryWeb.DashboardAuthTest do
   import Phoenix.LiveViewTest
 
   @password "test-password-123"
+  @auth_secret "test-dashboard-auth-secret"
 
   setup do
     original_hash = Application.get_env(:canary, :dashboard_password_hash)
@@ -80,6 +81,14 @@ defmodule CanaryWeb.DashboardAuthTest do
       assert html =~ "Health Targets"
     end
 
+    test "auth version depends on the secret" do
+      assert CanaryWeb.DashboardAuth.auth_version(@password, @auth_secret) ==
+               CanaryWeb.DashboardAuth.auth_version(@password, @auth_secret)
+
+      refute CanaryWeb.DashboardAuth.auth_version(@password, @auth_secret) ==
+               CanaryWeb.DashboardAuth.auth_version(@password, "different-secret")
+    end
+
     test "stale session shows login form instead of redirect loop", %{conn: conn} do
       # Log in
       conn = post(conn, "/dashboard/login", %{"password" => @password})
@@ -132,7 +141,7 @@ defmodule CanaryWeb.DashboardAuthTest do
     Application.put_env(
       :canary,
       :dashboard_auth_version,
-      :crypto.hash(:sha256, password) |> Base.url_encode64(padding: false)
+      CanaryWeb.DashboardAuth.auth_version(password, @auth_secret)
     )
   end
 end

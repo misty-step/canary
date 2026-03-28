@@ -16,6 +16,11 @@ defmodule CanaryWeb.DashboardAuth do
     auth_disabled?() or valid_session?(session)
   end
 
+  def auth_version(password, secret) when is_binary(password) and is_binary(secret) do
+    :crypto.mac(:hmac, :sha256, secret, password)
+    |> Base.url_encode64(padding: false)
+  end
+
   defp auth_disabled?, do: is_nil(Application.get_env(:canary, :dashboard_password_hash))
 
   def current_version, do: Application.get_env(:canary, :dashboard_auth_version)

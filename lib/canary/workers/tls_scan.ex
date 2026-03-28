@@ -49,8 +49,14 @@ defmodule Canary.Workers.TlsScan do
       if days_until < @expiry_warning_days and days_until >= 0 do
         Logger.warning("TLS cert for #{target.name} expires in #{days_until} days")
         now = DateTime.utc_now() |> DateTime.to_iso8601()
-        payload = Timeline.record_tls_expiring!(target, expiry_str, days_until, now)
-        WebhookDelivery.enqueue_for_event("health_check.tls_expiring", payload)
+
+        case Timeline.record_tls_expiring(target, expiry_str, days_until, now) do
+          {:ok, payload} ->
+            WebhookDelivery.enqueue_for_event("health_check.tls_expiring", payload)
+
+          {:error, reason} ->
+            Logger.error("failed to record TLS expiry event for #{target.id}: #{inspect(reason)}")
+        end
       end
     end
   end

@@ -126,8 +126,9 @@ defmodule Canary.Timeline do
     payload
   end
 
-  @spec record_tls_expiring!(Target.t(), String.t(), integer(), String.t()) :: map()
-  def record_tls_expiring!(%Target{} = target, expiry_str, days_until, now) do
+  @spec record_tls_expiring(Target.t(), String.t(), integer(), String.t()) ::
+          {:ok, map()} | {:error, term()}
+  def record_tls_expiring(%Target{} = target, expiry_str, days_until, now) do
     payload = %{
       "event" => "health_check.tls_expiring",
       "target" => %{
@@ -140,7 +141,7 @@ defmodule Canary.Timeline do
       "timestamp" => now
     }
 
-    insert_event!(%{
+    attrs = %{
       service: Target.service_name(target),
       event: "health_check.tls_expiring",
       entity_type: "target",
@@ -149,9 +150,19 @@ defmodule Canary.Timeline do
       summary: "#{Target.service_name(target)}: TLS expires in #{days_until} day(s)",
       payload: payload,
       created_at: now
-    })
+    }
 
-    payload
+    with {:ok, _service_event} <- insert_event(attrs) do
+      {:ok, payload}
+    end
+  end
+
+  @spec record_tls_expiring!(Target.t(), String.t(), integer(), String.t()) :: map()
+  def record_tls_expiring!(%Target{} = target, expiry_str, days_until, now) do
+    case record_tls_expiring(target, expiry_str, days_until, now) do
+      {:ok, payload} -> payload
+      {:error, reason} -> raise "failed to record TLS expiry event: #{inspect(reason)}"
+    end
   end
 
   @spec list(keyword()) ::
