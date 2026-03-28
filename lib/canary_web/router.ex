@@ -75,6 +75,7 @@ defmodule CanaryWeb.Router do
       get "/query", QueryController, :query
       get "/errors/:id", QueryController, :show
       get "/report", ReportController, :index
+      get "/timeline", TimelineController, :index
       get "/status", StatusController, :index
       get "/health-status", HealthController, :status
       get "/targets/:id/checks", HealthController, :target_checks

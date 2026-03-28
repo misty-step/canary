@@ -2,7 +2,7 @@ defmodule Canary.IncidentsTest do
   use Canary.DataCase
 
   alias Canary.{Incidents, Report}
-  alias Canary.Schemas.{ErrorGroup, Incident, TargetState, Webhook}
+  alias Canary.Schemas.{ErrorGroup, Incident, ServiceEvent, TargetState, Webhook}
 
   import Canary.Fixtures
 
@@ -141,6 +141,15 @@ defmodule Canary.IncidentsTest do
 
       assert_receive {:webhook_event, "incident.opened"}
       assert_receive {:webhook_event, "incident.updated"}
+
+      assert ["incident.opened", "incident.updated"] ==
+               Repo.all(
+                 from(e in ServiceEvent,
+                   where: e.service == "foo" and e.entity_type == "incident",
+                   order_by: [asc: e.created_at, asc: e.id],
+                   select: e.event
+                 )
+               )
     end
   end
 

@@ -1,6 +1,6 @@
 defmodule Canary.Workers.RetentionPrune do
   @moduledoc """
-  Daily Oban worker that prunes old errors and target_checks
+  Daily Oban worker that prunes old errors, service_events, and target_checks
   based on configured retention periods. Paginated deletes.
   """
 
@@ -28,9 +28,13 @@ defmodule Canary.Workers.RetentionPrune do
       |> DateTime.to_iso8601()
 
     errors_deleted = prune_table("errors", "created_at", error_cutoff)
+    events_deleted = prune_table("service_events", "created_at", error_cutoff)
     checks_deleted = prune_table("target_checks", "checked_at", check_cutoff)
 
-    Logger.info("Retention prune: #{errors_deleted} errors, #{checks_deleted} checks deleted")
+    Logger.info(
+      "Retention prune: #{errors_deleted} errors, #{events_deleted} events, #{checks_deleted} checks deleted"
+    )
+
     :ok
   end
 

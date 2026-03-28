@@ -160,7 +160,7 @@ defmodule Canary.QueryTest do
   describe "errors_by_error_class/3" do
     test "returns errors matching class across multiple services" do
       insert_group!(%{service: "volume", error_class: "RuntimeError"})
-      insert_group!(%{service: "canary-triage", error_class: "RuntimeError"})
+      insert_group!(%{service: "linejam", error_class: "RuntimeError"})
       insert_group!(%{service: "volume", error_class: "OtherError"})
 
       assert {:ok, result} = Query.errors_by_error_class("RuntimeError", "24h")
@@ -170,7 +170,7 @@ defmodule Canary.QueryTest do
 
       services = Enum.map(result.groups, & &1.service)
       assert "volume" in services
-      assert "canary-triage" in services
+      assert "linejam" in services
     end
 
     test "returns empty groups when no errors match class" do
@@ -183,7 +183,7 @@ defmodule Canary.QueryTest do
 
     test "filters by both error_class and service when service given" do
       insert_group!(%{service: "volume", error_class: "RuntimeError"})
-      insert_group!(%{service: "canary-triage", error_class: "RuntimeError"})
+      insert_group!(%{service: "linejam", error_class: "RuntimeError"})
 
       assert {:ok, result} = Query.errors_by_error_class("RuntimeError", "24h", service: "volume")
       assert result.total_errors == 1

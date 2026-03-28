@@ -2,6 +2,7 @@ defmodule Canary.Fixtures do
   @moduledoc "Shared test data builders."
 
   def clean_status_tables do
+    Canary.Repo.delete_all(Canary.Schemas.ServiceEvent)
     Canary.Repo.delete_all(Canary.Schemas.IncidentSignal)
     Canary.Repo.delete_all(Canary.Schemas.Incident)
     Canary.Repo.delete_all(Canary.Schemas.TargetState)
@@ -18,6 +19,7 @@ defmodule Canary.Fixtures do
     Canary.Repo.insert!(%Canary.Schemas.Target{
       id: id,
       name: name,
+      service: name,
       url: "https://#{name}.example.com/healthz",
       created_at: now
     })

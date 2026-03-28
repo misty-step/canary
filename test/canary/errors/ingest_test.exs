@@ -2,13 +2,19 @@ defmodule Canary.Errors.IngestTest do
   use Canary.DataCase
 
   alias Canary.Errors.Ingest
-  alias Canary.Schemas.{Error, ErrorGroup, Incident}
+  alias Canary.Schemas.{Error, ErrorGroup, Incident, ServiceEvent}
 
   @valid_attrs %{
     "service" => "cadence",
     "error_class" => "RuntimeError",
     "message" => "something went wrong"
   }
+
+  setup do
+    Canary.Fixtures.clean_status_tables()
+    :ets.delete_all_objects(:canary_dedup_cache)
+    :ok
+  end
 
   describe "ingest/1" do
     test "creates error and group for new error" do
@@ -20,6 +26,24 @@ defmodule Canary.Errors.IngestTest do
 
       assert Repo.get(Error, result.id)
       assert Repo.get(ErrorGroup, result.group_hash)
+    end
+
+    test "records a timeline event for a new error class" do
+      {:ok, result} = Ingest.ingest(@valid_attrs)
+
+      event =
+        Repo.one!(
+          from(e in ServiceEvent,
+            where: e.event == "error.new_class" and e.entity_ref == ^result.group_hash
+          )
+        )
+
+      payload = Jason.decode!(event.payload)
+
+      assert event.service == "cadence"
+      assert payload["event"] == "error.new_class"
+      assert payload["error"]["service"] == "cadence"
+      assert payload["error"]["group_hash"] == result.group_hash
     end
 
     test "increments group count on duplicate" do
@@ -110,6 +134,7 @@ defmodule Canary.Errors.IngestTest do
       Repo.insert!(%Canary.Schemas.Target{
         id: "TGT-cadence",
         name: "cadence",
+        service: "cadence",
         url: "https://cadence.example.com",
         created_at: now
       })

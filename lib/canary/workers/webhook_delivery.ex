@@ -35,45 +35,16 @@ defmodule Canary.Workers.WebhookDelivery do
     end
   end
 
+  def deliver_test(webhook, payload, event) do
+    send_request(webhook, payload, event, false)
+  end
+
   def deliver(webhook, payload, event) do
     if CircuitBreaker.open?(webhook.id) and not CircuitBreaker.should_probe?(webhook.id) do
       Logger.info("Circuit open for #{webhook.id}, skipping")
       :ok
     else
-      body = Jason.encode!(payload)
-      delivery_id = Canary.ID.generate()
-
-      headers = [
-        {"content-type", "application/json"},
-        {"x-signature", Signer.signature_header(body, webhook.secret)},
-        {"x-event", event},
-        {"x-delivery-id", delivery_id},
-        {"x-webhook-version", "1"},
-        {"x-sequence", to_string(payload["sequence"] || 0)}
-      ]
-
-      case Req.post(webhook.url,
-             body: body,
-             headers: headers,
-             receive_timeout: @delivery_timeout,
-             retry: false,
-             finch: Canary.Finch
-           ) do
-        {:ok, %{status: status}} when status in 200..299 ->
-          CircuitBreaker.record_success(webhook.id)
-          Logger.info("Webhook delivered to #{webhook.url}", event: event)
-          :ok
-
-        {:ok, %{status: status}} ->
-          CircuitBreaker.record_failure(webhook.id)
-          Logger.warning("Webhook delivery failed: HTTP #{status}", event: event)
-          {:error, "HTTP #{status}"}
-
-        {:error, reason} ->
-          CircuitBreaker.record_failure(webhook.id)
-          Logger.warning("Webhook delivery error: #{inspect(reason)}", event: event)
-          {:error, inspect(reason)}
-      end
+      send_request(webhook, payload, event, true)
     end
   end
 
@@ -104,6 +75,43 @@ defmodule Canary.Workers.WebhookDelivery do
       2 -> 5
       3 -> 30
       _ -> 60
+    end
+  end
+
+  defp send_request(webhook, payload, event, track_circuit?) do
+    body = Jason.encode!(payload)
+    delivery_id = Canary.ID.generate()
+
+    headers = [
+      {"content-type", "application/json"},
+      {"x-signature", Signer.signature_header(body, webhook.secret)},
+      {"x-event", event},
+      {"x-delivery-id", delivery_id},
+      {"x-webhook-version", "1"},
+      {"x-sequence", to_string(payload["sequence"] || 0)}
+    ]
+
+    case Req.post(webhook.url,
+           body: body,
+           headers: headers,
+           receive_timeout: @delivery_timeout,
+           retry: false,
+           finch: Canary.Finch
+         ) do
+      {:ok, %{status: status}} when status in 200..299 ->
+        if track_circuit?, do: CircuitBreaker.record_success(webhook.id)
+        Logger.info("Webhook delivered to #{webhook.url}", event: event)
+        :ok
+
+      {:ok, %{status: status}} ->
+        if track_circuit?, do: CircuitBreaker.record_failure(webhook.id)
+        Logger.warning("Webhook delivery failed: HTTP #{status}", event: event)
+        {:error, "HTTP #{status}"}
+
+      {:error, reason} ->
+        if track_circuit?, do: CircuitBreaker.record_failure(webhook.id)
+        Logger.warning("Webhook delivery error: #{inspect(reason)}", event: event)
+        {:error, inspect(reason)}
     end
   end
 end

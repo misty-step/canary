@@ -102,21 +102,11 @@ jobs:
           MIX_ENV: dev
         run: mix dialyzer
 
-  elixir-packages:
+  canary-sdk:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    strategy:
-      matrix:
-        include:
-          - name: triage
-            path: triage
-            lockfile: triage/mix.lock
-          - name: canary_sdk
-            path: canary_sdk
-            lockfile: canary_sdk/mix.lock
     env:
       MIX_ENV: test
-    name: elixir-${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4 # v4
       - uses: erlef/setup-beam@ee09b1e59bb240681c382eb1f0abc6a04af72764 # v1
@@ -128,31 +118,31 @@ jobs:
       - name: Restore deps cache
         uses: actions/cache@v4
         with:
-          path: ${{ matrix.path }}/deps
-          key: deps-${{ matrix.name }}-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles(matrix.lockfile) }}
-          restore-keys: deps-${{ matrix.name }}-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
+          path: canary_sdk/deps
+          key: deps-canary-sdk-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('canary_sdk/mix.lock') }}
+          restore-keys: deps-canary-sdk-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
 
       - name: Restore build cache
         uses: actions/cache@v4
         with:
-          path: ${{ matrix.path }}/_build/test
-          key: build-${{ matrix.name }}-test-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles(matrix.lockfile) }}
-          restore-keys: build-${{ matrix.name }}-test-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
+          path: canary_sdk/_build/test
+          key: build-canary-sdk-test-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('canary_sdk/mix.lock') }}
+          restore-keys: build-canary-sdk-test-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
 
       - name: Install dependencies
-        working-directory: ${{ matrix.path }}
+        working-directory: canary_sdk
         run: mix deps.get
 
       - name: Compile (warnings as errors)
-        working-directory: ${{ matrix.path }}
+        working-directory: canary_sdk
         run: mix compile --warnings-as-errors
 
       - name: Check formatting
-        working-directory: ${{ matrix.path }}
+        working-directory: canary_sdk
         run: mix format --check-formatted
 
       - name: Run tests
-        working-directory: ${{ matrix.path }}
+        working-directory: canary_sdk
         run: mix test
 
   typescript-client:

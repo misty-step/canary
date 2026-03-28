@@ -4,14 +4,16 @@ defmodule CanaryWeb.DashboardAuthTest do
   import Phoenix.LiveViewTest
 
   @password "test-password-123"
+  @auth_secret "test-dashboard-auth-secret"
 
   setup do
-    hash = Bcrypt.hash_pwd_salt(@password)
-    original = Application.get_env(:canary, :dashboard_password_hash)
-    Application.put_env(:canary, :dashboard_password_hash, hash)
+    original_hash = Application.get_env(:canary, :dashboard_password_hash)
+    original_version = Application.get_env(:canary, :dashboard_auth_version)
+    put_dashboard_password(@password)
 
     on_exit(fn ->
-      Application.put_env(:canary, :dashboard_password_hash, original)
+      Application.put_env(:canary, :dashboard_password_hash, original_hash)
+      Application.put_env(:canary, :dashboard_auth_version, original_version)
       :ets.match_delete(:canary_rate_limits, {{:auth_fail, :_}, :_, :_})
     end)
 
@@ -62,11 +64,29 @@ defmodule CanaryWeb.DashboardAuthTest do
       conn = recycle(conn)
 
       # Rotate password
-      new_hash = Bcrypt.hash_pwd_salt("new-password-456")
-      Application.put_env(:canary, :dashboard_password_hash, new_hash)
+      put_dashboard_password("new-password-456")
 
       # Old session should be rejected
       assert {:error, {:redirect, %{to: "/dashboard/login"}}} = live(conn, "/dashboard")
+    end
+
+    test "same password keeps the session valid across hash regeneration", %{conn: conn} do
+      conn = post(conn, "/dashboard/login", %{"password" => @password})
+      assert redirected_to(conn) == "/dashboard"
+      conn = recycle(conn)
+
+      put_dashboard_password(@password)
+
+      {:ok, _view, html} = live(conn, "/dashboard")
+      assert html =~ "Health Targets"
+    end
+
+    test "auth version depends on the secret" do
+      assert CanaryWeb.DashboardAuth.auth_version(@password, @auth_secret) ==
+               CanaryWeb.DashboardAuth.auth_version(@password, @auth_secret)
+
+      refute CanaryWeb.DashboardAuth.auth_version(@password, @auth_secret) ==
+               CanaryWeb.DashboardAuth.auth_version(@password, "different-secret")
     end
 
     test "stale session shows login form instead of redirect loop", %{conn: conn} do
@@ -75,8 +95,7 @@ defmodule CanaryWeb.DashboardAuthTest do
       conn = recycle(conn)
 
       # Rotate password
-      new_hash = Bcrypt.hash_pwd_salt("new-password-456")
-      Application.put_env(:canary, :dashboard_password_hash, new_hash)
+      put_dashboard_password("new-password-456")
 
       # Login page should show form, not redirect to /dashboard
       {:ok, _view, html} = live(conn, "/dashboard/login")
@@ -101,6 +120,7 @@ defmodule CanaryWeb.DashboardAuthTest do
   describe "auth disabled" do
     setup do
       Application.put_env(:canary, :dashboard_password_hash, nil)
+      Application.put_env(:canary, :dashboard_auth_version, nil)
       :ok
     end
 
@@ -113,5 +133,15 @@ defmodule CanaryWeb.DashboardAuthTest do
       conn = post(conn, "/dashboard/login", %{"password" => "anything"})
       assert redirected_to(conn) == "/dashboard"
     end
+  end
+
+  defp put_dashboard_password(password) do
+    Application.put_env(:canary, :dashboard_password_hash, Bcrypt.hash_pwd_salt(password))
+
+    Application.put_env(
+      :canary,
+      :dashboard_auth_version,
+      CanaryWeb.DashboardAuth.auth_version(password, @auth_secret)
+    )
   end
 end

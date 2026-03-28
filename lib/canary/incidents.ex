@@ -5,7 +5,7 @@ defmodule Canary.Incidents do
 
   import Ecto.Query
 
-  alias Canary.{ID, Repo}
+  alias Canary.{ID, Repo, Timeline}
   alias Canary.Schemas.{ErrorGroup, Incident, IncidentSignal, TargetState}
 
   @active_window_seconds 300
@@ -319,32 +319,8 @@ defmodule Canary.Incidents do
   defp title_for(service), do: "#{service} incident"
 
   defp enqueue_webhook(event, incident, now) do
-    Canary.Workers.WebhookDelivery.enqueue_for_event(event, %{
-      "event" => event,
-      "incident" => incident_payload(incident),
-      "timestamp" => now
-    })
-  end
-
-  defp incident_payload(incident) do
-    %{
-      "id" => incident.id,
-      "service" => incident.service,
-      "state" => incident.state,
-      "severity" => incident.severity,
-      "title" => incident.title,
-      "opened_at" => incident.opened_at,
-      "resolved_at" => incident.resolved_at,
-      "signals" =>
-        Enum.map(incident.signals, fn signal ->
-          %{
-            "signal_type" => signal.signal_type,
-            "signal_ref" => signal.signal_ref,
-            "attached_at" => signal.attached_at,
-            "resolved_at" => signal.resolved_at
-          }
-        end)
-    }
+    payload = Timeline.record_incident!(event, incident, now)
+    Canary.Workers.WebhookDelivery.enqueue_for_event(event, payload)
   end
 
   defp with_transaction(fun) do

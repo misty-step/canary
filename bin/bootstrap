@@ -55,7 +55,6 @@ run_mix() {
 }
 
 run_mix "." mix setup
-run_mix "triage" mix setup
 run_mix "canary_sdk" mix deps.get
 run "clients/typescript" npm ci
 

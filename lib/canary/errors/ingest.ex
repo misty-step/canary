@@ -5,7 +5,7 @@ defmodule Canary.Errors.Ingest do
   """
 
   alias Canary.Errors.{Classification, DedupCache, Grouping}
-  alias Canary.{ID, Incidents, Repo}
+  alias Canary.{ID, Incidents, Repo, Timeline}
   alias Canary.Schemas.{Error, ErrorGroup}
 
   require Logger
@@ -179,20 +179,15 @@ defmodule Canary.Errors.Ingest do
   end
 
   defp enqueue_error_webhook(event, error, group_hash) do
-    payload = %{
-      event: event,
-      error: %{
-        id: error.id,
-        service: error.service,
-        error_class: error.error_class,
-        message: error.message,
-        severity: error.severity,
-        group_hash: group_hash
-      },
-      timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
-    }
+    case Timeline.record_error(event, error, group_hash) do
+      {:ok, payload} ->
+        Canary.Workers.WebhookDelivery.enqueue_for_event(event, payload)
 
-    Canary.Workers.WebhookDelivery.enqueue_for_event(event, payload)
+      {:error, reason} ->
+        Logger.error(
+          "Failed to record error event #{event} for #{group_hash}: #{inspect(reason)}"
+        )
+    end
   end
 
   defp broadcast_new_error(error) do

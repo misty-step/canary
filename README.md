@@ -2,14 +2,15 @@
 
 Open-source, self-hosted observability for agent-driven infrastructure.
 
-Ingests errors, probes health, broadcasts incidents, answers queries. Built for AI agents, not dashboards.
+Ingests errors, probes health, correlates incidents, keeps timelines, and answers queries. Built for AI agents and operators.
 
 ## Why
 
-Existing tools (Sentry, Uptime Robot) are designed for humans staring at dashboards. Canary is designed for AI agents that need structured, bounded, pre-aggregated data to detect incidents and debug autonomously.
+Existing tools (Sentry, Uptime Robot) are designed around humans staring at dashboards or bespoke downstream integrations. Canary is designed for AI agents and operators who need structured, bounded, queryable observability data.
 
 - **One service** replaces Sentry error capture + Uptime Robot health monitoring
 - **Agent-first responses** with natural-language summaries and bounded payloads
+- **Timelines and incidents** — deterministic correlation without an LLM in the loop
 - **Generic webhooks** — consumers define their own behavior
 - **Self-hosted** on Fly.io with SQLite + Litestream backup
 
@@ -18,19 +19,22 @@ Existing tools (Sentry, Uptime Robot) are designed for humans staring at dashboa
 ```bash
 git clone https://github.com/misty-step/canary && cd canary
 cp .env.example .env
-./bin/bootstrap    # installs deps for root, triage, SDK, and TypeScript client
+./bin/bootstrap    # installs deps for the core service and SDK packages
 mix phx.server     # starts on localhost:4000
 ```
 
-No Docker required for local development. The core service stays Elixir-only, and the
-repo also includes a Node-based TypeScript SDK package.
+No Docker required for local development. The repo also includes Elixir and
+TypeScript SDK packages.
+
+The operator console lives at `/dashboard`. Set `DASHBOARD_PASSWORD` to require
+login in non-local environments; leave it unset in dev/test to keep the
+dashboard open.
 
 ## Development
 
-This is a monorepo with four maintained packages:
+This is a monorepo with three maintained packages:
 
 - `.` — Canary core service
-- `triage/` — Canary Triage companion service
 - `canary_sdk/` — Elixir SDK
 - `clients/typescript/` — TypeScript SDK
 
@@ -42,7 +46,7 @@ Supported local toolchains are pinned in `.tool-versions`:
 - Elixir `1.17.3-otp-27`
 - Node.js `22.22.0`
 
-The production Dockerfiles also build on Elixir `1.17`, and CI uses the same pinned toolchain versions.
+The production Dockerfile also builds on Elixir `1.17`, and CI uses the same pinned toolchain versions.
 
 ### Bootstrap
 
@@ -55,7 +59,6 @@ From the repo root:
 That command:
 
 - runs `mix setup` for the core service
-- runs `mix setup` for `triage/`
 - installs `canary_sdk/` dependencies
 - runs `npm ci` for `clients/typescript/`
 - configures `core.hooksPath` to use `.githooks/pre-commit`
@@ -71,7 +74,6 @@ Run the full repo-local quality gate from the repo root:
 That matches the current CI checks across the maintained packages:
 
 - core: compile, format, credo, test, dialyzer
-- triage: compile, format, test
 - Elixir SDK: compile, format, test
 - TypeScript SDK: typecheck, test, build
 
@@ -146,13 +148,13 @@ and correlated incidents in one bounded payload:
 ```json
 {
   "status": "degraded",
-  "summary": "2 targets monitored. 1 degraded (canary-triage). 14 errors across 1 service in the last hour.",
+  "summary": "2 targets monitored. 1 degraded (volume). 14 errors across 1 service in the last hour.",
   "targets": [...],
   "error_groups": [...],
   "incidents": [
     {
       "id": "INC-a1b2c3",
-      "service": "canary-triage",
+      "service": "volume",
       "state": "investigating",
       "severity": "high",
       "signals": [...]
@@ -161,6 +163,16 @@ and correlated incidents in one bounded payload:
   "recent_transitions": [...]
 }
 ```
+
+### Timeline
+
+```bash
+curl "https://canary-obs.fly.dev/api/v1/timeline?service=volume&window=24h&limit=50" \
+  -H "Authorization: Bearer $CANARY_API_KEY"
+```
+
+Timeline events are canonical observability facts. The same payloads drive both
+timeline queries and outbound webhook deliveries.
 
 Optional free-text error search stays on the same endpoint:
 
@@ -175,13 +187,13 @@ window as the rest of the report:
 ```json
 {
   "status": "degraded",
-  "summary": "2 targets monitored. 1 degraded (canary-triage). 14 errors across 1 service in the last hour.",
+  "summary": "2 targets monitored. 1 degraded (volume). 14 errors across 1 service in the last hour.",
   "search_results": [
     {
       "id": "ERR-a1b2c3",
-      "service": "canary-triage",
+      "service": "volume",
       "error_class": "TimeoutError",
-      "message": "timeout while posting issue",
+      "message": "timeout while reaching upstream",
       "group_hash": "sha256...",
       "created_at": "2026-03-24T20:15:00Z",
       "score": 1.73
@@ -197,7 +209,7 @@ window as the rest of the report:
 curl -X POST https://canary-obs.fly.dev/api/v1/targets \
   -H "Authorization: Bearer $CANARY_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name": "my-api", "url": "https://my-api.fly.dev/health", "interval_ms": 60000}'
+  -d '{"name": "my-api", "service": "my-api", "url": "https://my-api.fly.dev/health", "interval_ms": 60000}'
 
 # List / pause / resume / delete
 curl https://canary-obs.fly.dev/api/v1/targets -H "Authorization: Bearer $CANARY_API_KEY"
@@ -239,6 +251,7 @@ curl -X POST https://canary-obs.fly.dev/api/v1/keys \
 | `incident.resolved` | All signals attached to an incident are resolved |
 
 All webhooks are HMAC-SHA256 signed. Secret returned on subscription creation.
+`POST /api/v1/webhooks/:id/test` sends a non-business `canary.ping` payload and does not write to the timeline.
 
 ## Self-Observability
 
@@ -260,7 +273,7 @@ See `fly.toml`, `Dockerfile`, `litestream.yml`, and `bin/entrypoint.sh`.
 ## Tech Stack
 
 - **Elixir/OTP** — GenServer-per-target health checkers, DynamicSupervisor, crash isolation
-- **Phoenix** — HTTP routing, plug pipeline, telemetry (no HTML/LiveView)
+- **Phoenix** — HTTP routing, plug pipeline, telemetry, and a thin LiveView operator console
 - **SQLite** — WAL mode, write-serialized, Ecto abstraction preserves Postgres migration path
 - **Oban** — Webhook delivery retries, retention pruning, TLS scanning
 - **Req/Finch** — Connection-pooled HTTP probes

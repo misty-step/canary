@@ -1,13 +1,13 @@
 # Canary
 
 Open-source, self-hosted observability for agent-driven infrastructure.
-Ingests errors, probes health, broadcasts incidents, answers queries.
+Ingests errors, probes health, correlates incidents, keeps timelines, and answers queries.
 
 ## Why
 
 - Sentry's auto-issue-creation requires Business plan ($26/mo/user) — we won't pay for features we can build
 - Uptime Robot is a separate surface with no agent integration
-- The primary consumer of observability data is AI agents, not humans staring at dashboards
+- The primary consumers of observability data are AI agents and operators, not bespoke point tools
 - We want one queryable service that agents can use for incident detection, debugging, and automated response
 - Existing tools (Sentry MCP, Uptime Robot API) are read-only and clunky — agents need structured, bounded, pre-aggregated data
 
@@ -15,12 +15,12 @@ Ingests errors, probes health, broadcasts incidents, answers queries.
 
 1. **Error ingestion** — structured error intake via HTTP API. Replaces Sentry's core `captureException`.
 2. **Health checking** — periodic HTTP probes on configurable intervals with state machine (up → degraded → down). Replaces Uptime Robot.
-3. **Incident broadcasting** — webhook dispatch on state transitions. Consumers define their own behavior (GitHub issues, Discord, PagerDuty, whatever).
-4. **Queryable API** — agents query for recent errors, error frequency, affected services, stack traces. Pre-aggregated, bounded responses optimized for LLM context windows.
+3. **Incident correlation + event broadcasting** — deterministic incident lifecycle plus generic webhook dispatch. Consumers define their own behavior.
+4. **Queryable API** — agents query snapshots, timelines, recent errors, affected services, stack traces, and active incidents. Responses stay bounded and context-window friendly.
 
 ## What It Doesn't Do
 
-- No browser-based dashboard (agents are the UI)
+- No workflow console, repo mutation layer, or embedded triage agent
 - No session replay, performance monitoring, or user analytics
 - No source map processing or release tracking (use git blame)
 - No billing, team management, or RBAC
@@ -31,7 +31,7 @@ Ingests errors, probes health, broadcasts incidents, answers queries.
 
 ## Design Principles
 
-- **Agent-first** — every API response optimized for LLM context windows. Natural-language `summary` fields. Pre-aggregated by error class. Bounded response sizes.
+- **Agent-first, operator-usable** — every API response optimized for LLM context windows. Natural-language `summary` fields. Pre-aggregated by error class. Bounded response sizes. Thin human views are fine; workflow logic stays out.
 - **Single deployable service** — one Docker image, one database, one config file. No microservices, no message queues, no external dependencies beyond S3 for backups.
 - **Broadcast, don't prescribe** — fire webhooks on state transitions. Don't build GitHub/Slack/Discord integrations. Let consumers decide.
 - **Queryable** — structured queries for debugging: "errors in the last hour", "most frequent error class", "errors affecting service X"
@@ -46,7 +46,7 @@ Architecturally ideal for this workload:
 - GenServer-per-target health checkers with crash isolation via DynamicSupervisor
 - Supervision tree provides automatic restart and fault tolerance
 - ETS for in-memory rate limiting and deduplication caches
-- **Phoenix** (`--no-html --no-assets`) for HTTP routing, plug pipeline, telemetry. Zero HTML/LiveView overhead; community consensus is that pure-Plug reimplements half of Phoenix's router.
+- **Phoenix** for HTTP routing, plug pipeline, telemetry, and a thin operator console. Pure-Plug would reimplement half of Phoenix's router and socket boundary for little gain.
 - **Bandit** as HTTP server (Phoenix default since 1.7.11). Pure Elixir. HTTP/1.x up to 4x faster than Cowboy.
 
 **Tradeoff acknowledged:** Elixir has a smaller community than Go, which limits OSS contributor pool and complicates the "single binary" narrative (BEAM release ≠ static binary). We accept this because:
@@ -181,6 +181,7 @@ CREATE TABLE targets (
   id TEXT PRIMARY KEY,
   url TEXT NOT NULL,
   name TEXT NOT NULL,               -- human label: "cadence-api"
+  service TEXT,                     -- canonical service identity; app fallback uses name when NULL/blank
   method TEXT DEFAULT 'GET',        -- GET | HEAD
   headers TEXT,                     -- JSON object of custom headers
   interval_ms INTEGER DEFAULT 60000,
@@ -216,6 +217,28 @@ CREATE INDEX idx_target_checks_target ON target_checks(target_id, checked_at DES
 ```
 
 **Retention:** 7 days or 10,000 rows per target, whichever is smaller.
+
+### Service Events (timeline)
+
+Canonical append-only observability facts. Timeline queries and outbound
+webhooks share the same payload model.
+
+```sql
+CREATE TABLE service_events (
+  id TEXT PRIMARY KEY,              -- EVT-<nanoid>
+  service TEXT NOT NULL,
+  event TEXT NOT NULL,
+  entity_type TEXT NOT NULL,        -- error_group | target | incident
+  entity_ref TEXT,
+  severity TEXT,
+  summary TEXT NOT NULL,
+  payload TEXT NOT NULL,            -- JSON, same envelope used for webhooks
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_service_events_service_created ON service_events(service, created_at DESC, id DESC);
+CREATE INDEX idx_service_events_created ON service_events(created_at DESC, id DESC);
+```
 
 ### Target State (runtime, separate from config)
 

@@ -12,6 +12,7 @@ defmodule Canary.ID do
 
   def error_id, do: generate("ERR")
   def incident_id, do: generate("INC")
+  def event_id, do: generate("EVT")
   def target_id, do: generate("TGT")
   def webhook_id, do: generate("WHK")
   def key_id, do: generate("KEY")

@@ -20,7 +20,7 @@ defmodule CanaryWeb.LoginController do
           :ok ->
             if Bcrypt.verify_pass(password, hash) do
               conn
-              |> put_session("dashboard_auth_version", CanaryWeb.DashboardAuth.auth_version(hash))
+              |> put_session("dashboard_auth_version", CanaryWeb.DashboardAuth.current_version())
               |> redirect(to: "/dashboard")
             else
               conn

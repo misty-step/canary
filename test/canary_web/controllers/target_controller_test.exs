@@ -20,6 +20,7 @@ defmodule CanaryWeb.TargetControllerTest do
       created = json_response(create_conn, 201)
       assert created["id"] =~ ~r/^TGT-/
       assert created["name"] == "Example"
+      assert created["service"] == "Example"
       assert created["url"] == "https://example.com"
       assert created["active"] == true
 

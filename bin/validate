@@ -57,8 +57,6 @@ run_elixir_full() {
 if [[ "$MODE" == "fast" ]]; then
   run_elixir_fast "."
   run "." env MIX_ENV=test mix compile --warnings-as-errors
-  run_elixir_fast "triage"
-  run "triage" env MIX_ENV=test mix compile --warnings-as-errors
   run_elixir_fast "canary_sdk"
   run "canary_sdk" env MIX_ENV=test mix compile --warnings-as-errors
   run "clients/typescript" npm run typecheck
@@ -71,7 +69,6 @@ run "." mix credo --strict
 run "." mix test
 run "." env MIX_ENV=dev mix dialyzer
 
-run_elixir_full "triage"
 run_elixir_full "canary_sdk"
 
 run "clients/typescript" npm run typecheck
