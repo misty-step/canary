@@ -14,6 +14,17 @@ defmodule Canary.Health.CheckerTest do
     :ok
   end
 
+  test "uses a permanent child restart policy" do
+    target = %Target{
+      id: "TGT-restart",
+      name: "restart",
+      service: "restart",
+      url: "https://example.com"
+    }
+
+    assert %{restart: :permanent} = Checker.child_spec(target)
+  end
+
   test "records health transition timeline events using target service identity" do
     bypass = Bypass.open()
 

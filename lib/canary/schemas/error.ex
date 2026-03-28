@@ -2,6 +2,8 @@ defmodule Canary.Schemas.Error do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @type t :: %__MODULE__{}
+
   @primary_key {:id, :string, autogenerate: false}
   schema "errors" do
     field :service, :string

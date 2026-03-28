@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CI_MODE=0
+
+usage() {
+  cat <<'EOF'
+Usage: bin/bootstrap [--ci] [-h|--help]
+
+Bootstraps every maintained package in the monorepo.
+  --ci        Skip local git hook setup and honor explicit CI MIX_ENV.
+  -h, --help  Show this help message.
+EOF
+}
+
+while (($#)); do
+  case "$1" in
+    --ci)
+      CI_MODE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+run() {
+  local dir="$1"
+  shift
+
+  printf '==> %s: %s\n' "$dir" "$*"
+  (
+    cd "$ROOT/$dir"
+    "$@"
+  )
+}
+
+run_mix() {
+  local dir="$1"
+  shift
+  local mix_env=dev
+
+  if [[ "$CI_MODE" -eq 1 ]] && [[ -n "${MIX_ENV:-}" ]]; then
+    mix_env="$MIX_ENV"
+  fi
+
+  run "$dir" env MIX_ENV="$mix_env" "$@"
+}
+
+run_mix "." mix setup
+run_mix "canary_sdk" mix deps.get
+run "clients/typescript" npm ci
+
+if [[ "$CI_MODE" -eq 0 ]] && git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git -C "$ROOT" config core.hooksPath .githooks
+  printf '==> hooks: configured core.hooksPath=.githooks\n'
+fi

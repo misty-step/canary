@@ -86,9 +86,10 @@ defmodule CanarySdkTest do
 
     test "ignores non-error log levels" do
       bypass = Bypass.open()
+      test_pid = self()
 
       Bypass.stub(bypass, "POST", "/api/v1/errors", fn conn ->
-        flunk("Should not send non-error logs")
+        send(test_pid, :unexpected_post)
         Plug.Conn.resp(conn, 201, ~s({}))
       end)
 
@@ -101,7 +102,9 @@ defmodule CanarySdkTest do
       Logger.info("just info")
       Logger.debug("just debug")
       Logger.warning("just warning")
-      Process.sleep(200)
+
+      CanarySdk.detach()
+      refute_receive :unexpected_post, 200
     end
   end
 
@@ -119,15 +122,12 @@ defmodule CanarySdkTest do
   describe "self-referential loop prevention" do
     test "drops errors originating from CanarySdk modules (class-name check)" do
       bypass = Bypass.open()
+      test_pid = self()
 
       Bypass.stub(bypass, "POST", "/api/v1/errors", fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
         payload = Jason.decode!(body)
-
-        if payload["error_class"] =~ "CanarySdk" do
-          flunk("Should not report self-referential errors")
-        end
-
+        send(test_pid, {:unexpected_post, payload})
         Plug.Conn.resp(conn, 201, ~s({}))
       end)
 
@@ -138,20 +138,18 @@ defmodule CanarySdkTest do
       )
 
       Logger.error("** (CanarySdk.Client) connection refused")
-      Process.sleep(200)
+      CanarySdk.detach()
+      refute_receive {:unexpected_post, _payload}, 200
     end
 
     test "drops errors from sending process via process metadata flag" do
       bypass = Bypass.open()
+      test_pid = self()
 
       Bypass.stub(bypass, "POST", "/api/v1/errors", fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
         payload = Jason.decode!(body)
-
-        if payload["message"] =~ "from sending task" do
-          flunk("Should not report errors from sending process")
-        end
-
+        send(test_pid, {:unexpected_post, payload})
         Plug.Conn.resp(conn, 201, ~s({}))
       end)
 
@@ -165,7 +163,9 @@ defmodule CanarySdkTest do
       Logger.metadata(canary_sdk_sending: true)
       Logger.error("from sending task: ArgumentError")
       Logger.metadata(canary_sdk_sending: nil)
-      Process.sleep(200)
+
+      CanarySdk.detach()
+      refute_receive {:unexpected_post, _payload}, 200
     end
   end
 

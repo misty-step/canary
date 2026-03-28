@@ -2,6 +2,8 @@ defmodule Canary.Schemas.TargetState do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @type t :: %__MODULE__{}
+
   @primary_key {:target_id, :string, autogenerate: false}
   schema "target_state" do
     field :state, :string, default: "unknown"

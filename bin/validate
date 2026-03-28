@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MODE=full
+
+usage() {
+  cat <<'EOF'
+Usage: bin/validate [--fast] [-h|--help]
+
+Runs repo-local validation across every maintained package.
+  --fast      Run the reduced validation set.
+  -h, --help  Show this help message.
+EOF
+}
+
+while (($#)); do
+  case "$1" in
+    --fast)
+      MODE=fast
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+run() {
+  local dir="$1"
+  shift
+
+  printf '==> %s: %s\n' "$dir" "$*"
+  (
+    cd "$ROOT/$dir"
+    "$@"
+  )
+}
+
+run_elixir_fast() {
+  local dir="$1"
+  run "$dir" mix format --check-formatted
+}
+
+run_elixir_full() {
+  local dir="$1"
+  run "$dir" env MIX_ENV=test mix compile --warnings-as-errors
+  run "$dir" mix format --check-formatted
+  run "$dir" mix test
+}
+
+if [[ "$MODE" == "fast" ]]; then
+  run_elixir_fast "."
+  run "." env MIX_ENV=test mix compile --warnings-as-errors
+  run_elixir_fast "canary_sdk"
+  run "canary_sdk" env MIX_ENV=test mix compile --warnings-as-errors
+  run "clients/typescript" npm run typecheck
+  exit 0
+fi
+
+run "." env MIX_ENV=test mix compile --warnings-as-errors
+run "." mix format --check-formatted
+run "." mix credo --strict
+run "." mix test
+run "." env MIX_ENV=dev mix dialyzer
+
+run_elixir_full "canary_sdk"
+
+run "clients/typescript" npm run typecheck
+run "clients/typescript" npm test
+run "clients/typescript" npm run build
