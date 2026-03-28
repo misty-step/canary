@@ -37,6 +37,9 @@ if config_env() == :prod do
         IO.puts("[canary] WARNING: DASHBOARD_PASSWORD not set — dashboard is publicly accessible")
         nil
 
+      "" ->
+        raise "DASHBOARD_PASSWORD must not be empty"
+
       password ->
         Bcrypt.hash_pwd_salt(password)
     end

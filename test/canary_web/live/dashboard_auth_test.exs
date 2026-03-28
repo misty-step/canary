@@ -49,6 +49,22 @@ defmodule CanaryWeb.DashboardAuthTest do
     end
   end
 
+  describe "password rotation" do
+    test "old session rejected after password change", %{conn: conn} do
+      # Log in with original password
+      conn = post(conn, "/dashboard/login", %{"password" => @password})
+      assert redirected_to(conn) == "/dashboard"
+      conn = recycle(conn)
+
+      # Rotate password
+      new_hash = Bcrypt.hash_pwd_salt("new-password-456")
+      Application.put_env(:canary, :dashboard_password_hash, new_hash)
+
+      # Old session should be rejected
+      assert {:error, {:redirect, %{to: "/dashboard/login"}}} = live(conn, "/dashboard")
+    end
+  end
+
   describe "auth disabled" do
     setup do
       Application.put_env(:canary, :dashboard_password_hash, nil)

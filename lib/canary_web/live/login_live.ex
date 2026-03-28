@@ -3,7 +3,7 @@ defmodule CanaryWeb.LoginLive do
 
   @impl true
   def mount(_params, session, socket) do
-    if session["dashboard_authenticated"] do
+    if session["dashboard_auth_version"] do
       {:ok, redirect(socket, to: "/dashboard")}
     else
       {:ok, socket}
@@ -21,8 +21,10 @@ defmodule CanaryWeb.LoginLive do
           <input
             type="password"
             name="password"
+            aria-label="Password"
             placeholder="Password"
             autofocus
+            required
             autocomplete="current-password"
             style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);padding:8px 12px;font-family:var(--font);font-size:12px;"
           />
