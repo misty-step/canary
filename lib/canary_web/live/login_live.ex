@@ -6,7 +6,7 @@ defmodule CanaryWeb.LoginLive do
     if session["dashboard_authenticated"] do
       {:ok, redirect(socket, to: "/dashboard")}
     else
-      {:ok, assign(socket, :error, nil)}
+      {:ok, socket}
     end
   end
 
@@ -16,8 +16,7 @@ defmodule CanaryWeb.LoginLive do
     <div style="display:flex;align-items:center;justify-content:center;min-height:60vh;">
       <div class="card" style="width:100%;max-width:360px;">
         <div class="card-header">Authenticate</div>
-        <p :if={@error} class="flash-error"><%= @error %></p>
-        <form method="post" action="/dashboard/login" style="display:flex;flex-direction:column;gap:12px;margin-top:8px;">
+        <form method="post" action={~p"/dashboard/login"} style="display:flex;flex-direction:column;gap:12px;margin-top:8px;">
           <input type="hidden" name="_csrf_token" value={Phoenix.Controller.get_csrf_token()} />
           <input
             type="password"
