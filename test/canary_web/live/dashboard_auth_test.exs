@@ -68,6 +68,20 @@ defmodule CanaryWeb.DashboardAuthTest do
       # Old session should be rejected
       assert {:error, {:redirect, %{to: "/dashboard/login"}}} = live(conn, "/dashboard")
     end
+
+    test "stale session shows login form instead of redirect loop", %{conn: conn} do
+      # Log in
+      conn = post(conn, "/dashboard/login", %{"password" => @password})
+      conn = recycle(conn)
+
+      # Rotate password
+      new_hash = Bcrypt.hash_pwd_salt("new-password-456")
+      Application.put_env(:canary, :dashboard_password_hash, new_hash)
+
+      # Login page should show form, not redirect to /dashboard
+      {:ok, _view, html} = live(conn, "/dashboard/login")
+      assert html =~ "Authenticate"
+    end
   end
 
   describe "rate limiting" do

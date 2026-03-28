@@ -4,11 +4,16 @@ defmodule CanaryWeb.DashboardAuth do
   import Phoenix.LiveView
 
   def on_mount(:default, _params, session, socket) do
-    if auth_disabled?() or valid_session?(session) do
+    if authenticated?(session) do
       {:cont, socket}
     else
       {:halt, redirect(socket, to: "/dashboard/login")}
     end
+  end
+
+  @doc "Returns true when no password is configured or the session holds a valid auth version."
+  def authenticated?(session) do
+    auth_disabled?() or valid_session?(session)
   end
 
   defp auth_disabled?, do: is_nil(Application.get_env(:canary, :dashboard_password_hash))

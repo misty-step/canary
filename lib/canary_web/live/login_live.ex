@@ -3,7 +3,7 @@ defmodule CanaryWeb.LoginLive do
 
   @impl true
   def mount(_params, session, socket) do
-    if session["dashboard_auth_version"] do
+    if CanaryWeb.DashboardAuth.authenticated?(session) do
       {:ok, redirect(socket, to: "/dashboard")}
     else
       {:ok, socket}
