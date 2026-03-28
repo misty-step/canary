@@ -40,13 +40,23 @@ defmodule CanaryWeb.Router do
     get "/readyz", HealthController, :readyz
   end
 
-  # Dashboard (no auth — internal network)
+  # Dashboard login (outside live_session — no on_mount gate)
   scope "/dashboard", CanaryWeb do
     pipe_through :browser
 
-    live "/", DashboardLive, :index
-    live "/errors", ErrorsLive, :index
-    live "/errors/:id", ErrorDetailLive, :show
+    live "/login", LoginLive, :index
+    post "/login", LoginController, :create
+  end
+
+  # Dashboard (password-gated via on_mount hook)
+  scope "/dashboard", CanaryWeb do
+    pipe_through :browser
+
+    live_session :dashboard, on_mount: [CanaryWeb.DashboardAuth] do
+      live "/", DashboardLive, :index
+      live "/errors", ErrorsLive, :index
+      live "/errors/:id", ErrorDetailLive, :show
+    end
   end
 
   # Authenticated API
