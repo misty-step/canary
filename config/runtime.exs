@@ -31,9 +31,20 @@ if config_env() == :prod do
     http: [ip: {0, 0, 0, 0, 0, 0, 0, 0}, port: port],
     secret_key_base: secret_key_base
 
+  dashboard_password_hash =
+    case System.get_env("DASHBOARD_PASSWORD") do
+      nil ->
+        IO.puts("[canary] WARNING: DASHBOARD_PASSWORD not set — dashboard is publicly accessible")
+        nil
+
+      password ->
+        Bcrypt.hash_pwd_salt(password)
+    end
+
   config :canary,
     api_key_salt: System.get_env("API_KEY_SALT", secret_key_base),
     allow_private_targets: System.get_env("ALLOW_PRIVATE_TARGETS", "false") == "true",
     error_retention_days: String.to_integer(System.get_env("ERROR_RETENTION_DAYS", "30")),
-    check_retention_days: String.to_integer(System.get_env("CHECK_RETENTION_DAYS", "7"))
+    check_retention_days: String.to_integer(System.get_env("CHECK_RETENTION_DAYS", "7")),
+    dashboard_password_hash: dashboard_password_hash
 end

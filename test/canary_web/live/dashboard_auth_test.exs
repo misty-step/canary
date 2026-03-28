@@ -1,0 +1,68 @@
+defmodule CanaryWeb.DashboardAuthTest do
+  use CanaryWeb.ConnCase
+
+  import Phoenix.LiveViewTest
+
+  @password "test-password-123"
+
+  setup do
+    hash = Bcrypt.hash_pwd_salt(@password)
+    original = Application.get_env(:canary, :dashboard_password_hash)
+    Application.put_env(:canary, :dashboard_password_hash, hash)
+    on_exit(fn -> Application.put_env(:canary, :dashboard_password_hash, original) end)
+    :ok
+  end
+
+  describe "unauthenticated" do
+    test "redirects /dashboard to login", %{conn: conn} do
+      assert {:error, {:redirect, %{to: "/dashboard/login"}}} = live(conn, "/dashboard")
+    end
+
+    test "redirects /dashboard/errors to login", %{conn: conn} do
+      assert {:error, {:redirect, %{to: "/dashboard/login"}}} = live(conn, "/dashboard/errors")
+    end
+
+    test "login page renders", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/dashboard/login")
+      assert html =~ "Authenticate"
+      assert html =~ "password"
+    end
+  end
+
+  describe "login" do
+    test "correct password sets session and redirects", %{conn: conn} do
+      conn = post(conn, "/dashboard/login", %{"password" => @password})
+      assert redirected_to(conn) == "/dashboard"
+
+      conn = get(recycle(conn), "/dashboard")
+      assert html_response(conn, 200) =~ "Health Targets"
+    end
+
+    test "wrong password redirects back to login", %{conn: conn} do
+      conn = post(conn, "/dashboard/login", %{"password" => "wrong"})
+      assert redirected_to(conn) == "/dashboard/login"
+    end
+
+    test "missing password redirects back to login", %{conn: conn} do
+      conn = post(conn, "/dashboard/login", %{})
+      assert redirected_to(conn) == "/dashboard/login"
+    end
+  end
+
+  describe "auth disabled" do
+    setup do
+      Application.put_env(:canary, :dashboard_password_hash, nil)
+      :ok
+    end
+
+    test "dashboard accessible without login", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/dashboard")
+      assert html =~ "Health Targets"
+    end
+
+    test "login page redirects to dashboard when auth disabled", %{conn: conn} do
+      conn = post(conn, "/dashboard/login", %{"password" => "anything"})
+      assert redirected_to(conn) == "/dashboard"
+    end
+  end
+end
