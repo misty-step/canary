@@ -9,7 +9,12 @@ defmodule CanaryWeb.DashboardAuthTest do
     hash = Bcrypt.hash_pwd_salt(@password)
     original = Application.get_env(:canary, :dashboard_password_hash)
     Application.put_env(:canary, :dashboard_password_hash, hash)
-    on_exit(fn -> Application.put_env(:canary, :dashboard_password_hash, original) end)
+
+    on_exit(fn ->
+      Application.put_env(:canary, :dashboard_password_hash, original)
+      :ets.match_delete(:canary_rate_limits, {{:auth_fail, :_}, :_, :_})
+    end)
+
     :ok
   end
 
@@ -62,6 +67,20 @@ defmodule CanaryWeb.DashboardAuthTest do
 
       # Old session should be rejected
       assert {:error, {:redirect, %{to: "/dashboard/login"}}} = live(conn, "/dashboard")
+    end
+  end
+
+  describe "rate limiting" do
+    test "blocks login after too many failed attempts", %{conn: conn} do
+      # Exhaust the rate limit (10 attempts)
+      for _ <- 1..10 do
+        post(build_conn(), "/dashboard/login", %{"password" => "wrong"})
+      end
+
+      # Next attempt should be rate-limited
+      conn = post(conn, "/dashboard/login", %{"password" => "wrong"})
+      assert redirected_to(conn) == "/dashboard/login"
+      assert Phoenix.Flash.get(conn.assigns.flash, :error) =~ "Too many attempts"
     end
   end
 

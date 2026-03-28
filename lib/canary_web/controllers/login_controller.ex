@@ -11,16 +11,22 @@ defmodule CanaryWeb.LoginController do
       hash ->
         ip = to_string(:inet.ntoa(conn.remote_ip))
 
-        if Bcrypt.verify_pass(password, hash) do
-          conn
-          |> put_session("dashboard_auth_version", auth_version(hash))
-          |> redirect(to: "/dashboard")
-        else
-          RateLimiter.check(ip, :auth_fail)
+        case RateLimiter.check(ip, :auth_fail) do
+          {:error, retry_after} ->
+            conn
+            |> put_flash(:error, "Too many attempts. Try again in #{retry_after}s.")
+            |> redirect(to: "/dashboard/login")
 
-          conn
-          |> put_flash(:error, "Invalid password")
-          |> redirect(to: "/dashboard/login")
+          :ok ->
+            if Bcrypt.verify_pass(password, hash) do
+              conn
+              |> put_session("dashboard_auth_version", auth_version(hash))
+              |> redirect(to: "/dashboard")
+            else
+              conn
+              |> put_flash(:error, "Invalid password")
+              |> redirect(to: "/dashboard/login")
+            end
         end
     end
   end
