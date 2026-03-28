@@ -20,7 +20,7 @@ defmodule CanaryWeb.LoginController do
           :ok ->
             if Bcrypt.verify_pass(password, hash) do
               conn
-              |> put_session("dashboard_auth_version", auth_version(hash))
+              |> put_session("dashboard_auth_version", CanaryWeb.DashboardAuth.auth_version(hash))
               |> redirect(to: "/dashboard")
             else
               conn
@@ -36,7 +36,4 @@ defmodule CanaryWeb.LoginController do
     |> put_flash(:error, "Password required")
     |> redirect(to: "/dashboard/login")
   end
-
-  @doc false
-  def auth_version(hash), do: :crypto.hash(:sha256, hash) |> Base.url_encode64(padding: false)
 end

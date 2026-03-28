@@ -18,10 +18,13 @@ defmodule CanaryWeb.DashboardAuth do
 
   defp auth_disabled?, do: is_nil(Application.get_env(:canary, :dashboard_password_hash))
 
+  @doc false
+  def auth_version(hash), do: :crypto.hash(:sha256, hash) |> Base.url_encode64(padding: false)
+
   defp valid_session?(session) do
     with version when is_binary(version) <- session["dashboard_auth_version"],
          hash when is_binary(hash) <- Application.get_env(:canary, :dashboard_password_hash) do
-      version == CanaryWeb.LoginController.auth_version(hash)
+      version == auth_version(hash)
     else
       _ -> false
     end
