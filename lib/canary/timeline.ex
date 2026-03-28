@@ -11,8 +11,8 @@ defmodule Canary.Timeline do
   @default_limit 50
   @max_limit 200
 
-  @spec record_error!(String.t(), Error.t(), String.t()) :: map()
-  def record_error!(event, %Error{} = error, group_hash) do
+  @spec record_error(String.t(), Error.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def record_error(event, %Error{} = error, group_hash) do
     payload = %{
       "event" => event,
       "error" => %{
@@ -33,7 +33,7 @@ defmodule Canary.Timeline do
         _ -> "#{error.service}: #{event}"
       end
 
-    insert_event!(%{
+    attrs = %{
       service: error.service,
       event: event,
       entity_type: "error_group",
@@ -42,9 +42,19 @@ defmodule Canary.Timeline do
       summary: summary,
       payload: payload,
       created_at: error.created_at
-    })
+    }
 
-    payload
+    with {:ok, _service_event} <- insert_event(attrs) do
+      {:ok, payload}
+    end
+  end
+
+  @spec record_error!(String.t(), Error.t(), String.t()) :: map()
+  def record_error!(event, %Error{} = error, group_hash) do
+    case record_error(event, error, group_hash) do
+      {:ok, payload} -> payload
+      {:error, reason} -> raise "failed to record error event #{event}: #{inspect(reason)}"
+    end
   end
 
   @spec record_health_transition!(
@@ -186,11 +196,10 @@ defmodule Canary.Timeline do
     end
   end
 
-  defp insert_event!(attrs) do
+  defp insert_event(attrs) do
     payload = Jason.encode!(attrs.payload)
 
-    %ServiceEvent{id: ID.event_id()}
-    |> ServiceEvent.changeset(%{
+    attrs = %{
       service: attrs.service,
       event: attrs.event,
       entity_type: attrs.entity_type,
@@ -199,8 +208,18 @@ defmodule Canary.Timeline do
       summary: attrs.summary,
       payload: payload,
       created_at: attrs.created_at
-    })
-    |> Repo.insert!()
+    }
+
+    ID.event_id()
+    |> ServiceEvent.with_id(attrs)
+    |> Repo.insert()
+  end
+
+  defp insert_event!(attrs) do
+    case insert_event(attrs) do
+      {:ok, service_event} -> service_event
+      {:error, reason} -> raise "failed to insert service event: #{inspect(reason)}"
+    end
   end
 
   defp health_severity(:down), do: "error"
@@ -286,7 +305,7 @@ defmodule Canary.Timeline do
           page
           |> List.last()
           |> then(fn event ->
-            %{created_at: event.created_at, id: event.id}
+            %{created_at: cursor_created_at(event.created_at), id: event.id}
             |> Jason.encode!()
             |> Base.url_encode64(padding: false)
           end)
@@ -314,4 +333,7 @@ defmodule Canary.Timeline do
 
   defp summary_for(events, service, window),
     do: "Returned #{length(events)} timeline events for #{service} in the last #{window}."
+
+  defp cursor_created_at(%DateTime{} = created_at), do: DateTime.to_iso8601(created_at)
+  defp cursor_created_at(created_at), do: created_at
 end

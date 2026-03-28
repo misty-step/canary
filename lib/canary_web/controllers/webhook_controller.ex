@@ -106,8 +106,16 @@ defmodule CanaryWeb.WebhookController do
         }
 
         case Canary.Workers.WebhookDelivery.deliver_test(webhook, payload, "canary.ping") do
-          :ok -> json(conn, %{status: "delivered"})
-          {:error, reason} -> json(conn, %{status: "failed", reason: reason})
+          :ok ->
+            json(conn, %{status: "delivered"})
+
+          {:error, reason} ->
+            CanaryWeb.Plugs.ProblemDetails.render_error(
+              conn,
+              502,
+              "webhook_delivery_failed",
+              "Webhook test delivery failed: #{reason}"
+            )
         end
     end
   end

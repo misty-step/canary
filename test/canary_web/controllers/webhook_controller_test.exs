@@ -94,5 +94,28 @@ defmodule CanaryWeb.WebhookControllerTest do
       assert_receive {:test_delivery, %{"event" => "canary.ping", "test" => true}}
       assert Canary.Repo.aggregate(ServiceEvent, :count) == before_count
     end
+
+    test "test delivery failures return problem details", %{conn: conn} do
+      bypass = Bypass.open()
+
+      create_conn =
+        post(conn, "/api/v1/webhooks", %{
+          "url" => "http://localhost:#{bypass.port}/hook",
+          "events" => ["error.new_class"]
+        })
+
+      created = json_response(create_conn, 201)
+
+      Bypass.expect_once(bypass, "POST", "/hook", fn conn ->
+        Plug.Conn.resp(conn, 500, "nope")
+      end)
+
+      conn = post(conn, "/api/v1/webhooks/#{created["id"]}/test")
+      body = json_response(conn, 502)
+
+      assert get_resp_header(conn, "content-type") == ["application/problem+json; charset=utf-8"]
+      assert body["code"] == "webhook_delivery_failed"
+      assert body["detail"] =~ "HTTP 500"
+    end
   end
 end

@@ -181,7 +181,7 @@ CREATE TABLE targets (
   id TEXT PRIMARY KEY,
   url TEXT NOT NULL,
   name TEXT NOT NULL,               -- human label: "cadence-api"
-  service TEXT,                     -- canonical service identity, defaults to name
+  service TEXT,                     -- canonical service identity; app fallback uses name when NULL/blank
   method TEXT DEFAULT 'GET',        -- GET | HEAD
   headers TEXT,                     -- JSON object of custom headers
   interval_ms INTEGER DEFAULT 60000,

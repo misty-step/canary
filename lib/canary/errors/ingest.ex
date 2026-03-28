@@ -179,8 +179,15 @@ defmodule Canary.Errors.Ingest do
   end
 
   defp enqueue_error_webhook(event, error, group_hash) do
-    payload = Timeline.record_error!(event, error, group_hash)
-    Canary.Workers.WebhookDelivery.enqueue_for_event(event, payload)
+    case Timeline.record_error(event, error, group_hash) do
+      {:ok, payload} ->
+        Canary.Workers.WebhookDelivery.enqueue_for_event(event, payload)
+
+      {:error, reason} ->
+        Logger.error(
+          "Failed to record error event #{event} for #{group_hash}: #{inspect(reason)}"
+        )
+    end
   end
 
   defp broadcast_new_error(error) do

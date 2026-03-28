@@ -20,6 +20,11 @@ defmodule Canary.Schemas.ServiceEvent do
   @required ~w(service event entity_type summary payload created_at)a
   @optional ~w(entity_ref severity)a
 
+  def with_id(id, attrs) do
+    %__MODULE__{id: id}
+    |> changeset(attrs)
+  end
+
   def changeset(service_event, attrs) do
     service_event
     |> cast(attrs, @required ++ @optional)

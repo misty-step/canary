@@ -133,6 +133,52 @@ defmodule Canary.Health.CheckerTest do
     end
   end
 
+  test "creates state on cold start before recording a transition" do
+    bypass = Bypass.open()
+
+    Bypass.expect_once(bypass, "GET", "/healthz", fn conn ->
+      Plug.Conn.resp(conn, 500, "nope")
+    end)
+
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    target =
+      Repo.insert!(%Target{
+        id: "TGT-cold-api",
+        name: "cold-api",
+        service: "cold-api",
+        url: "http://localhost:#{bypass.port}/healthz",
+        created_at: now,
+        degraded_after: 1,
+        down_after: 3,
+        up_after: 1
+      })
+
+    {:ok, pid} = Checker.start_link(target)
+
+    try do
+      Checker.check_now(target.id)
+
+      event =
+        eventually(fn ->
+          Repo.one(
+            from(e in ServiceEvent,
+              where: e.event == "health_check.degraded" and e.entity_ref == ^target.id
+            )
+          )
+        end)
+
+      state = Repo.get(TargetState, target.id)
+      payload = Jason.decode!(event.payload)
+
+      assert state.state == "degraded"
+      assert event.service == "cold-api"
+      assert payload["target"]["service"] == "cold-api"
+    after
+      GenServer.stop(pid)
+    end
+  end
+
   defp eventually(fun, attempts \\ 20)
 
   defp eventually(fun, attempts) when attempts > 0 do
