@@ -196,6 +196,7 @@ defmodule Canary.Query do
       %{
         id: target.id,
         name: target.name,
+        service: Target.service_name(target),
         url: target.url,
         state: (state && state.state) || "unknown",
         consecutive_failures: (state && state.consecutive_failures) || 0,

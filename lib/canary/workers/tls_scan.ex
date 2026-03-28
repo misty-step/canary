@@ -6,6 +6,7 @@ defmodule Canary.Workers.TlsScan do
 
   use Oban.Worker, queue: :maintenance, max_attempts: 2
 
+  alias Canary.{Timeline, Workers.WebhookDelivery}
   alias Canary.Schemas.{Target, TargetCheck}
   import Ecto.Query
 
@@ -47,19 +48,9 @@ defmodule Canary.Workers.TlsScan do
 
       if days_until < @expiry_warning_days and days_until >= 0 do
         Logger.warning("TLS cert for #{target.name} expires in #{days_until} days")
-
-        payload = %{
-          event: "health_check.tls_expiring",
-          target: %{name: target.name, url: target.url},
-          tls_expires_at: expiry_str,
-          days_until_expiry: days_until,
-          timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
-        }
-
-        Canary.Workers.WebhookDelivery.enqueue_for_event(
-          "health_check.tls_expiring",
-          payload
-        )
+        now = DateTime.utc_now() |> DateTime.to_iso8601()
+        payload = Timeline.record_tls_expiring!(target, expiry_str, days_until, now)
+        WebhookDelivery.enqueue_for_event("health_check.tls_expiring", payload)
       end
     end
   end

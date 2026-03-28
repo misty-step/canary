@@ -26,9 +26,8 @@ defmodule Canary.Status do
     }
   end
 
-  defp legacy_target(target) do
-    Map.take(target, [:id, :name, :url, :state, :consecutive_failures, :last_checked_at])
-  end
+  defp legacy_target(target),
+    do: Map.take(target, [:id, :name, :url, :state, :consecutive_failures, :last_checked_at])
 
   defp compute_overall([], []), do: "empty"
 

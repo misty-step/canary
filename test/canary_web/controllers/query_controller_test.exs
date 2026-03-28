@@ -47,7 +47,7 @@ defmodule CanaryWeb.QueryControllerTest do
     end
 
     test "returns errors by error_class across services", %{conn: conn} do
-      for svc <- ["volume", "canary-triage"] do
+      for svc <- ["volume", "linejam"] do
         post(conn, "/api/v1/errors", %{
           "service" => svc,
           "error_class" => "RuntimeError",
@@ -60,7 +60,7 @@ defmodule CanaryWeb.QueryControllerTest do
       assert body["error_class"] == "RuntimeError"
       services = Enum.map(body["groups"], & &1["service"])
       assert "volume" in services
-      assert "canary-triage" in services
+      assert "linejam" in services
     end
 
     test "returns 200 with empty groups for unknown error_class", %{conn: conn} do
@@ -72,7 +72,7 @@ defmodule CanaryWeb.QueryControllerTest do
     end
 
     test "filters by both error_class and service", %{conn: conn} do
-      for svc <- ["volume", "canary-triage"] do
+      for svc <- ["volume", "linejam"] do
         post(conn, "/api/v1/errors", %{
           "service" => svc,
           "error_class" => "RuntimeError",

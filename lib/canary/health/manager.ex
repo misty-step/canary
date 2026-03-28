@@ -72,6 +72,7 @@ defmodule Canary.Health.Manager do
       attrs
       |> Map.put("id", ID.target_id())
       |> Map.put("created_at", now)
+      |> Map.put_new("service", Map.get(attrs, "name"))
       |> Map.put_new("method", "GET")
       |> Map.put_new("interval_ms", 60_000)
       |> Map.put_new("timeout_ms", 10_000)

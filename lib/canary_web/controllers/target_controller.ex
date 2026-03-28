@@ -95,6 +95,7 @@ defmodule CanaryWeb.TargetController do
     %{
       id: target.id,
       name: target.name,
+      service: Canary.Schemas.Target.service_name(target),
       url: target.url,
       method: target.method,
       interval_ms: target.interval_ms,

@@ -38,7 +38,7 @@ defmodule Canary.QuerySearchTest do
 
     test "filters matches by service" do
       ingest_error!(%{
-        "service" => "canary-triage",
+        "service" => "linejam",
         "message" => "connection refused when posting issue"
       })
 
@@ -47,14 +47,14 @@ defmodule Canary.QuerySearchTest do
         "message" => "connection refused while calling webhook"
       })
 
-      assert {:ok, [result]} = Query.search("connection refused", service: "canary-triage")
-      assert result.service == "canary-triage"
+      assert {:ok, [result]} = Query.search("connection refused", service: "linejam")
+      assert result.service == "linejam"
     end
 
     test "indexes newly ingested errors immediately" do
       {:ok, summary} =
         Ingest.ingest(%{
-          "service" => "canary-triage",
+          "service" => "linejam",
           "error_class" => "TimeoutError",
           "message" => "searchable immediately after ingest"
         })

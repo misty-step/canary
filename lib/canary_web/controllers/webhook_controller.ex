@@ -99,12 +99,13 @@ defmodule CanaryWeb.WebhookController do
 
       webhook ->
         payload = %{
-          event: "test",
-          message: "Test webhook delivery from Canary",
+          event: "canary.ping",
+          message: "Webhook test from Canary",
+          test: true,
           timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
         }
 
-        case Canary.Workers.WebhookDelivery.deliver(webhook, payload, "test") do
+        case Canary.Workers.WebhookDelivery.deliver_test(webhook, payload, "canary.ping") do
           :ok -> json(conn, %{status: "delivered"})
           {:error, reason} -> json(conn, %{status: "failed", reason: reason})
         end

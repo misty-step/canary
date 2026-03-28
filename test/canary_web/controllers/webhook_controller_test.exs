@@ -1,6 +1,8 @@
 defmodule CanaryWeb.WebhookControllerTest do
   use CanaryWeb.ConnCase
 
+  alias Canary.Schemas.ServiceEvent
+
   setup %{conn: conn} do
     {raw_key, _key} = create_api_key()
     conn = authenticate(conn, raw_key)
@@ -64,6 +66,33 @@ defmodule CanaryWeb.WebhookControllerTest do
     test "delete returns 404 for missing webhook", %{conn: conn} do
       conn = delete(conn, "/api/v1/webhooks/WHK-nonexistent")
       assert json_response(conn, 404)["code"] == "not_found"
+    end
+
+    test "test delivery uses a non-business canary ping event", %{conn: conn} do
+      bypass = Bypass.open()
+      test_pid = self()
+
+      create_conn =
+        post(conn, "/api/v1/webhooks", %{
+          "url" => "http://localhost:#{bypass.port}/hook",
+          "events" => ["error.new_class"]
+        })
+
+      created = json_response(create_conn, 201)
+      before_count = Canary.Repo.aggregate(ServiceEvent, :count)
+
+      Bypass.expect_once(bypass, "POST", "/hook", fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:test_delivery, Jason.decode!(body)})
+        Plug.Conn.resp(conn, 200, "ok")
+      end)
+
+      conn = post(conn, "/api/v1/webhooks/#{created["id"]}/test")
+
+      assert json_response(conn, 200)["status"] == "delivered"
+
+      assert_receive {:test_delivery, %{"event" => "canary.ping", "test" => true}}
+      assert Canary.Repo.aggregate(ServiceEvent, :count) == before_count
     end
   end
 end

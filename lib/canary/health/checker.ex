@@ -8,7 +8,7 @@ defmodule Canary.Health.Checker do
   use GenServer, restart: :transient
 
   alias Canary.Health.{Probe, SSRFGuard, StateMachine}
-  alias Canary.{Incidents, Repo}
+  alias Canary.{Incidents, Repo, Timeline}
   alias Canary.Schemas.{Target, TargetCheck, TargetState}
 
   require Logger
@@ -67,7 +67,7 @@ defmodule Canary.Health.Checker do
 
   @impl true
   def terminate(_reason, %{target: target, state: state, counters: counters}) do
-    persist_state(target.id, state, counters)
+    persist_state(target.id, state, counters, DateTime.utc_now() |> DateTime.to_iso8601())
   end
 
   # --- Internal ---
@@ -111,7 +111,6 @@ defmodule Canary.Health.Checker do
       Logger.info("#{target.name}: #{s.state} → #{new_state}")
     end
 
-    persist_state(target.id, new_state, new_counters)
     process_effects(target, s.state, new_state, effects, new_counters)
 
     %{s | state: new_state, counters: new_counters}
@@ -135,7 +134,6 @@ defmodule Canary.Health.Checker do
     {new_state, new_counters, effects} =
       StateMachine.transition(s.state, :failure, thresholds, s.counters)
 
-    persist_state(target.id, new_state, new_counters)
     process_effects(target, s.state, new_state, effects, new_counters)
 
     %{s | state: new_state, counters: new_counters}
@@ -157,9 +155,7 @@ defmodule Canary.Health.Checker do
     |> Repo.insert!()
   end
 
-  defp persist_state(target_id, state, counters) do
-    now = DateTime.utc_now() |> DateTime.to_iso8601()
-
+  defp persist_state(target_id, state, counters, now) do
     attrs = %{
       state: to_string(state),
       consecutive_failures: counters.consecutive_failures,
@@ -185,49 +181,62 @@ defmodule Canary.Health.Checker do
     end
   end
 
-  defp process_effects(target, old_state, new_state, effects, _counters) do
-    Enum.each(effects, fn
+  defp process_effects(target, old_state, new_state, effects, counters) do
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    case Enum.find(effects, fn
+           {:webhook, _, _} -> true
+           _ -> false
+         end) do
       {:webhook, event_type, _meta} ->
+        service = Target.service_name(target)
         event_name = webhook_event_name(event_type)
 
-        ts = Repo.get(TargetState, target.id)
-        seq = if ts, do: ts.sequence + 1, else: 1
+        case Repo.transaction(fn ->
+               state = persist_state(target.id, new_state, counters, now)
+               seq = state.sequence + 1
 
-        if ts do
-          ts
-          |> TargetState.changeset(%{
-            sequence: seq,
-            last_transition_at: DateTime.utc_now() |> DateTime.to_iso8601()
-          })
-          |> Repo.update!()
-        end
+               state =
+                 state
+                 |> TargetState.changeset(%{
+                   sequence: seq,
+                   last_transition_at: now
+                 })
+                 |> Repo.update!()
 
-        payload = %{
-          event: event_name,
-          target: %{name: target.name, url: target.url},
-          state: to_string(new_state),
-          previous_state: to_string(old_state),
-          consecutive_failures: 0,
-          last_success_at: ts && ts.last_success_at,
-          sequence: seq,
-          timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
-        }
+               payload =
+                 Timeline.record_health_transition!(
+                   event_name,
+                   target,
+                   old_state,
+                   new_state,
+                   state,
+                   seq,
+                   now
+                 )
 
-        Canary.Workers.WebhookDelivery.enqueue_for_event(event_name, payload)
+               Canary.Workers.WebhookDelivery.enqueue_for_event(event_name, payload)
+               payload
+             end) do
+          {:ok, _payload} ->
+            case Incidents.correlate(:health_transition, target.id, service) do
+              {:ok, _incident} ->
+                :ok
 
-        case Incidents.correlate(:health_transition, target.id, target.name) do
-          {:ok, _incident} ->
-            :ok
+              {:error, reason} ->
+                Logger.error(
+                  "Failed to correlate incident for target #{target.id}: #{correlation_error_tag(reason)}"
+                )
+            end
 
           {:error, reason} ->
-            Logger.error(
-              "Failed to correlate incident for target #{target.id}: #{correlation_error_tag(reason)}"
-            )
+            raise "failed to record health transition #{event_name}: #{inspect(reason)}"
         end
 
-      {:transition, _from, _to} ->
+      _ ->
+        persist_state(target.id, new_state, counters, now)
         :ok
-    end)
+    end
   end
 
   defp webhook_event_name(:health_check_degraded), do: "health_check.degraded"
