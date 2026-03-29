@@ -18,6 +18,8 @@ defmodule Canary.Query do
 
   @incident_active_window_seconds 300
   @max_groups 50
+  @spec errors_by_service(String.t(), String.t(), String.t() | nil) ::
+          {:ok, map()} | {:error, :invalid_window}
   def errors_by_service(service, window, cursor \\ nil) do
     with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
       query =
@@ -52,6 +54,8 @@ defmodule Canary.Query do
     end
   end
 
+  @spec errors_by_error_class(String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, :invalid_window}
   def errors_by_error_class(error_class, window, opts \\ []) do
     with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
       cursor = Keyword.get(opts, :cursor)
@@ -93,6 +97,7 @@ defmodule Canary.Query do
     end
   end
 
+  @spec errors_by_class(String.t()) :: {:ok, map()} | {:error, :invalid_window}
   def errors_by_class(window) do
     with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
       groups =
@@ -113,6 +118,7 @@ defmodule Canary.Query do
     end
   end
 
+  @spec error_detail(String.t()) :: {:ok, map()} | {:error, :not_found}
   def error_detail(error_id) do
     case Canary.Repos.read_repo().get(Error, error_id) do
       nil -> {:error, :not_found}
@@ -120,6 +126,7 @@ defmodule Canary.Query do
     end
   end
 
+  @spec search(String.t(), keyword()) :: {:ok, list(map())} | {:error, atom()}
   def search(query, opts \\ []) do
     case Keyword.get(opts, :window) do
       nil ->
@@ -174,6 +181,7 @@ defmodule Canary.Query do
 
   @recent_checks_limit 5
 
+  @spec health_targets() :: [map()]
   def health_targets do
     repo = Canary.Repos.read_repo()
 
@@ -217,30 +225,35 @@ defmodule Canary.Query do
     end)
   end
 
+  @spec health_status() :: map()
   def health_status do
     targets = health_targets()
     summary = Canary.Summary.health_status(%{targets: targets})
     %{summary: summary, targets: targets}
   end
 
+  @spec error_groups(String.t()) :: {:ok, [map()]} | {:error, :invalid_window}
   def error_groups(window) do
     with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
       {:ok, error_groups_since(cutoff)}
     end
   end
 
+  @spec error_summary(String.t()) :: {:ok, [map()]} | {:error, :invalid_window}
   def error_summary(window) do
     with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
       {:ok, error_summary_since(cutoff)}
     end
   end
 
+  @spec recent_transitions(String.t()) :: {:ok, [map()]} | {:error, :invalid_window}
   def recent_transitions(window) do
     with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
       {:ok, recent_transitions_since(cutoff)}
     end
   end
 
+  @spec report_slice(String.t()) :: {:ok, map()} | {:error, :invalid_window}
   def report_slice(window) do
     with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
       {:ok,
@@ -281,6 +294,8 @@ defmodule Canary.Query do
     |> Enum.group_by(& &1.target_id)
   end
 
+  @spec target_checks(String.t(), String.t()) ::
+          {:ok, [%TargetCheck{}]} | {:error, :invalid_window}
   def target_checks(target_id, window) do
     with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
       checks =

@@ -3,6 +3,7 @@ defmodule Canary.Query.Window do
 
   @allowed_windows ~w(1h 6h 24h 7d 30d)
 
+  @spec to_cutoff(String.t()) :: {:ok, String.t()} | {:error, :invalid_window}
   def to_cutoff(window) when window in @allowed_windows do
     seconds =
       case window do

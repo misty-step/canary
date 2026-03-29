@@ -15,12 +15,15 @@ defmodule Canary.Health.Checker do
 
   defstruct [:target, :state, :counters, :jitter_seed]
 
+  @spec start_link(Target.t()) :: GenServer.on_start()
   def start_link(%Target{} = target) do
     GenServer.start_link(__MODULE__, target, name: via(target.id))
   end
 
+  @spec via(String.t()) :: GenServer.name()
   def via(target_id), do: {:via, Registry, {Canary.Health.Registry, target_id}}
 
+  @spec check_now(String.t()) :: :ok
   def check_now(target_id) do
     GenServer.cast(via(target_id), :check_now)
   end

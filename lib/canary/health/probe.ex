@@ -103,6 +103,7 @@ defmodule Canary.Health.Probe do
   end
 
   @doc "Check if status code matches expected pattern: '200', '200-299', '200,204'"
+  @spec status_matches?(integer(), String.t()) :: boolean()
   def status_matches?(status, expected) do
     cond do
       String.contains?(expected, "-") ->

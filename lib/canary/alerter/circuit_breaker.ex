@@ -10,6 +10,7 @@ defmodule Canary.Alerter.CircuitBreaker do
   @failure_threshold 10
   @probe_interval_ms 300_000
 
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end

@@ -114,6 +114,7 @@ defmodule Canary.Health.StateMachine do
   defp webhook_effects(_from, :down), do: [{:webhook, :health_check_down, %{}}]
   defp webhook_effects(_from, _to), do: []
 
+  @spec initial_counters() :: counters()
   def initial_counters do
     %{consecutive_failures: 0, consecutive_successes: 0, transitions: []}
   end

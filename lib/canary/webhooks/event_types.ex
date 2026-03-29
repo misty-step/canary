@@ -7,6 +7,8 @@ defmodule Canary.Webhooks.EventTypes do
     incident.opened incident.updated incident.resolved
   )
 
+  @spec all() :: [String.t()]
   def all, do: @events
+  @spec valid?(String.t()) :: boolean()
   def valid?(event), do: event in @events
 end
