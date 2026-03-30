@@ -51,8 +51,14 @@ jobs:
       - name: Credo (strict)
         run: mix credo --strict
 
-      - name: Run tests
-        run: mix test
+      - name: Security lint (Sobelow)
+        run: mix sobelow --config --exit --threshold medium
+
+      - name: Dependency audit
+        run: mix deps.audit
+
+      - name: Run tests with coverage
+        run: mix test --cover
 
   root-dialyzer:
     runs-on: ubuntu-latest

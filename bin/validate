@@ -66,7 +66,9 @@ fi
 run "." env MIX_ENV=test mix compile --warnings-as-errors
 run "." mix format --check-formatted
 run "." mix credo --strict
-run "." mix test
+run "." mix sobelow --config
+run "." mix deps.audit
+run "." mix test --cover
 run "." env MIX_ENV=dev mix dialyzer
 
 run_elixir_full "canary_sdk"

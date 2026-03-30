@@ -5,6 +5,7 @@ defmodule Canary.Query.Search do
   @default_limit 20
   @bm25_weights "1.0, 2.0, 5.0, 1.0"
 
+  @spec search(term(), keyword()) :: {:ok, [map()]} | {:error, :invalid_query | :search_failed}
   def search(query, opts \\ [])
 
   def search(query, opts) when is_binary(query) do

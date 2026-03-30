@@ -10,6 +10,8 @@ defmodule Canary.Auth do
 
   @prefix_len 12
 
+  @spec generate_key(String.t(), String.t()) ::
+          {:ok, %ApiKey{}, String.t()} | {:error, Ecto.Changeset.t()}
   def generate_key(name, env \\ "live") do
     raw_key = "sk_#{env}_#{Nanoid.generate(24)}"
     prefix = String.slice(raw_key, 0, @prefix_len)
@@ -30,6 +32,7 @@ defmodule Canary.Auth do
     end
   end
 
+  @spec verify_key(String.t()) :: {:ok, %ApiKey{}} | {:error, :invalid}
   def verify_key(raw_key) when is_binary(raw_key) do
     prefix = String.slice(raw_key, 0, @prefix_len)
 
@@ -53,11 +56,13 @@ defmodule Canary.Auth do
     end) || {:error, :invalid}
   end
 
+  @spec list_keys() :: [%ApiKey{}]
   def list_keys do
     from(k in ApiKey, order_by: [desc: k.created_at])
     |> Repo.all()
   end
 
+  @spec revoke_key(String.t()) :: {:ok, %ApiKey{}} | {:error, :not_found | Ecto.Changeset.t()}
   def revoke_key(key_id) do
     now = DateTime.utc_now() |> DateTime.to_iso8601()
 

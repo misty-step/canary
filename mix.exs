@@ -9,7 +9,8 @@ defmodule Canary.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
-      deps: deps()
+      deps: deps(),
+      test_coverage: [summary: [threshold: 75]]
     ]
   end
 
@@ -43,6 +44,8 @@ defmodule Canary.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.13", only: [:dev, :test], runtime: false},
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
       {:bypass, "~> 2.1", only: :test},
       {:lazy_html, ">= 0.1.0", only: :test}
     ]

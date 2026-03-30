@@ -19,9 +19,11 @@ Canary generates monitors per code change, auto-triages alerts, and proposes fix
 - [ ] State on monitor prevents duplicate work
 
 ## Notes
-Blocked on: Cerberus CLI (needed for the fix-review loop).
+Blocked on: annotations API (001), timeline enrichment (002), triage sprite in bitterblossom (bb backlog.d/011).
 Reference: "How we made Ramp Sheets self-maintaining" (Ramp Labs, 2026-03-23).
 Current state: canary-watch synthesizes incidents into GitHub issues.
-Next step: close the loop so the triaging agent also proposes fixes.
+Next step: annotations API + timeline enrichment in Canary, then triage sprite in bitterblossom.
+After that: close the loop so the triaging agent also proposes fixes.
 
 Source: spellbook simplification session 2026-03-25.
+Refined: grooming session 2026-03-30 — decided annotations over triage state machine.

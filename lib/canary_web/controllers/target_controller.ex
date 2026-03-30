@@ -113,6 +113,4 @@ defmodule CanaryWeb.TargetController do
       end)
     end)
   end
-
-  defp format_errors(_), do: %{}
 end

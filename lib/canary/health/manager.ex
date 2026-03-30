@@ -13,26 +13,32 @@ defmodule Canary.Health.Manager do
 
   require Logger
 
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
+  @spec add_target(map()) :: {:ok, Target.t()} | {:error, Ecto.Changeset.t()}
   def add_target(attrs) do
     GenServer.call(__MODULE__, {:add_target, attrs})
   end
 
+  @spec remove_target(String.t()) :: {:ok, Target.t()} | {:error, :not_found | Ecto.Changeset.t()}
   def remove_target(target_id) do
     GenServer.call(__MODULE__, {:remove_target, target_id})
   end
 
+  @spec pause_target(String.t()) :: :ok | {:error, :not_found}
   def pause_target(target_id) do
     GenServer.call(__MODULE__, {:pause_target, target_id})
   end
 
+  @spec resume_target(String.t()) :: :ok | {:error, :not_found}
   def resume_target(target_id) do
     GenServer.call(__MODULE__, {:resume_target, target_id})
   end
 
+  @spec list_targets() :: [Target.t()]
   def list_targets do
     from(t in Target, order_by: t.name)
     |> Canary.Repos.read_repo().all()
