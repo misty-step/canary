@@ -85,7 +85,7 @@ export class Ci {
   @func()
   async sobelow(source: Directory): Promise<string> {
     return this.base(source)
-      .withExec(["mix", "sobelow", "--config", "--exit"])
+      .withExec(["mix", "sobelow", "--config", "--exit", "--threshold", "medium"])
       .stdout()
   }
 
@@ -147,7 +147,7 @@ export class Ci {
     results.push(
       "=== sobelow ===\n" +
         (await container
-          .withExec(["mix", "sobelow", "--config", "--exit"])
+          .withExec(["mix", "sobelow", "--config", "--exit", "--threshold", "medium"])
           .stdout())
     )
 

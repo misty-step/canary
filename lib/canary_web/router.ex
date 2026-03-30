@@ -29,7 +29,11 @@ defmodule CanaryWeb.Router do
     plug :fetch_live_flash
     plug :put_root_layout, html: {CanaryWeb.Layouts, :root}
     plug :protect_from_forgery
-    plug :put_secure_browser_headers
+
+    plug :put_secure_browser_headers, %{
+      "content-security-policy" =>
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss:"
+    }
   end
 
   # Public health endpoints (no auth)
