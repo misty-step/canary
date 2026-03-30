@@ -113,5 +113,4 @@ defmodule CanaryWeb.TargetController do
       end)
     end)
   end
-
 end
