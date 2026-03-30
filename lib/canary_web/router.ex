@@ -32,7 +32,7 @@ defmodule CanaryWeb.Router do
 
     plug :put_secure_browser_headers, %{
       "content-security-policy" =>
-        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss:"
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss:"
     }
   end
 
