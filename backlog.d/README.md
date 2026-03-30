@@ -19,7 +19,7 @@
 
 ## Dependency Map
 
-```
+```text
 001 (annotations) ──┐
                     ├──→ 010 (ramp pattern) ──→ north star
 002 (timeline)   ──┘        ↑
