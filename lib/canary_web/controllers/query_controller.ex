@@ -10,6 +10,7 @@ defmodule CanaryWeb.QueryController do
     opts =
       [service: params["service"], cursor: params["cursor"]]
       |> Enum.reject(fn {_, v} -> is_nil(v) end)
+      |> Kernel.++(annotation_opts(params))
 
     case Query.errors_by_error_class(error_class, window, opts) do
       {:ok, result} -> json(conn, result)
@@ -19,9 +20,12 @@ defmodule CanaryWeb.QueryController do
 
   def query(conn, %{"service" => service} = params) do
     window = params["window"] || "1h"
-    cursor = params["cursor"]
 
-    case Query.errors_by_service(service, window, cursor) do
+    opts =
+      [{:cursor, params["cursor"]} | annotation_opts(params)]
+      |> Enum.reject(fn {_, v} -> is_nil(v) end)
+
+    case Query.errors_by_service(service, window, opts) do
       {:ok, result} -> json(conn, result)
       {:error, :invalid_window} -> render_invalid_window(conn)
     end
@@ -58,6 +62,16 @@ defmodule CanaryWeb.QueryController do
           "Error #{id} not found."
         )
     end
+  end
+
+  defp annotation_opts(params) do
+    Enum.reject(
+      [
+        with_annotation: params["with_annotation"],
+        without_annotation: params["without_annotation"]
+      ],
+      fn {_, v} -> is_nil(v) end
+    )
   end
 
   defp render_invalid_window(conn) do

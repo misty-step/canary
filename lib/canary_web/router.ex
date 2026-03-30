@@ -83,6 +83,15 @@ defmodule CanaryWeb.Router do
       get "/status", StatusController, :index
       get "/health-status", HealthController, :status
       get "/targets/:id/checks", HealthController, :target_checks
+
+      # Incidents
+      get "/incidents", IncidentController, :index
+
+      # Annotations
+      get "/incidents/:incident_id/annotations", AnnotationController, :index
+      post "/incidents/:incident_id/annotations", AnnotationController, :create
+      get "/groups/:group_hash/annotations", AnnotationController, :group_index
+      post "/groups/:group_hash/annotations", AnnotationController, :group_create
     end
 
     # Admin: targets

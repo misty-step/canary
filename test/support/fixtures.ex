@@ -2,6 +2,7 @@ defmodule Canary.Fixtures do
   @moduledoc "Shared test data builders."
 
   def clean_status_tables do
+    Canary.Repo.delete_all(Canary.Schemas.Annotation)
     Canary.Repo.delete_all(Canary.Schemas.ServiceEvent)
     Canary.Repo.delete_all(Canary.Schemas.IncidentSignal)
     Canary.Repo.delete_all(Canary.Schemas.Incident)
@@ -52,5 +53,40 @@ defmodule Canary.Fixtures do
       total_count: count,
       last_error_id: id
     })
+  end
+
+  def create_incident(service, opts \\ []) do
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+    id = Canary.ID.incident_id()
+
+    Canary.Repo.insert!(%Canary.Schemas.Incident{
+      id: id,
+      service: service,
+      state: Keyword.get(opts, :state, "investigating"),
+      severity: Keyword.get(opts, :severity, "medium"),
+      opened_at: Keyword.get(opts, :opened_at, now)
+    })
+  end
+
+  def create_annotation(target_type, target_id, attrs) when target_type in [:incident, :group] do
+    id = Canary.ID.annotation_id()
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    base = %{
+      agent: attrs[:agent] || "test-agent",
+      action: attrs[:action] || "acknowledged",
+      metadata: if(attrs[:metadata], do: Jason.encode!(attrs[:metadata])),
+      created_at: now
+    }
+
+    target_attrs =
+      case target_type do
+        :incident -> %{incident_id: target_id}
+        :group -> %{group_hash: target_id}
+      end
+
+    %Canary.Schemas.Annotation{id: id}
+    |> Canary.Schemas.Annotation.changeset(Map.merge(base, target_attrs))
+    |> Canary.Repo.insert!()
   end
 end
