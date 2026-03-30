@@ -86,28 +86,6 @@ defmodule Canary.Annotations do
     end
   end
 
-  @spec format(Annotation.t()) :: map()
-  def format(%Annotation{} = ann) do
-    %{
-      id: ann.id,
-      incident_id: ann.incident_id,
-      group_hash: ann.group_hash,
-      agent: ann.agent,
-      action: ann.action,
-      metadata: decode_metadata(ann.metadata),
-      created_at: ann.created_at
-    }
-  end
-
-  defp decode_metadata(nil), do: nil
-
-  defp decode_metadata(json) when is_binary(json) do
-    case Jason.decode(json) do
-      {:ok, decoded} -> decoded
-      _ -> json
-    end
-  end
-
   defp build_and_insert(target, attrs) do
     now = DateTime.utc_now() |> DateTime.to_iso8601()
 
