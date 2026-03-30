@@ -9,7 +9,7 @@ Only the latest release is supported with security updates.
 **Do not open a public issue.**
 
 Report vulnerabilities through
-[GitHub Security Advisories](https://github.com/your-org/canary/security/advisories/new).
+[GitHub Security Advisories](https://github.com/misty-step/canary/security/advisories/new).
 
 Include:
 

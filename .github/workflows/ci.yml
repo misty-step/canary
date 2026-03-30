@@ -52,7 +52,7 @@ jobs:
         run: mix credo --strict
 
       - name: Security lint (Sobelow)
-        run: mix sobelow --config
+        run: mix sobelow --config --exit
 
       - name: Dependency audit
         run: mix deps.audit

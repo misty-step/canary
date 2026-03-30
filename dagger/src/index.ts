@@ -16,6 +16,40 @@ import {
 const ELIXIR_IMAGE =
   "hexpm/elixir:1.17.3-erlang-27.3-debian-bookworm-20250224-slim"
 
+/** Elixir container with system deps, hex/rebar, and caches mounted. */
+function elixirContainer(
+  source: Directory,
+  mixEnv: string,
+  buildCacheName: string,
+): Container {
+  const depsCache: CacheVolume = dag.cacheVolume("elixir-deps")
+  const buildCache: CacheVolume = dag.cacheVolume(buildCacheName)
+  const hexCache: CacheVolume = dag.cacheVolume("hex-home")
+
+  return dag
+    .container()
+    .from(ELIXIR_IMAGE)
+    .withExec(["apt-get", "update", "-q"])
+    .withExec([
+      "apt-get",
+      "install",
+      "-yq",
+      "--no-install-recommends",
+      "build-essential",
+      "git",
+    ])
+    .withExec(["apt-get", "clean"])
+    .withExec(["mix", "local.hex", "--force"])
+    .withExec(["mix", "local.rebar", "--force"])
+    .withEnvVariable("MIX_ENV", mixEnv)
+    .withMountedCache("/app/deps", depsCache)
+    .withMountedCache("/app/_build", buildCache)
+    .withMountedCache("/root/.hex", hexCache)
+    .withMountedDirectory("/app", source)
+    .withWorkdir("/app")
+    .withExec(["mix", "deps.get"])
+}
+
 @object()
 export class Ci {
   /**
@@ -24,36 +58,11 @@ export class Ci {
    */
   @func()
   base(source: Directory): Container {
-    const depsCache: CacheVolume = dag.cacheVolume("elixir-deps")
-    const buildCache: CacheVolume = dag.cacheVolume("elixir-build-test")
-    const hexCache: CacheVolume = dag.cacheVolume("hex-home")
-
-    return (
-      dag
-        .container()
-        .from(ELIXIR_IMAGE)
-        // system deps for SQLite NIF compilation
-        .withExec(["apt-get", "update", "-q"])
-        .withExec([
-          "apt-get",
-          "install",
-          "-yq",
-          "--no-install-recommends",
-          "build-essential",
-          "git",
-        ])
-        .withExec(["apt-get", "clean"])
-        .withExec(["mix", "local.hex", "--force"])
-        .withExec(["mix", "local.rebar", "--force"])
-        .withEnvVariable("MIX_ENV", "test")
-        .withMountedCache("/app/deps", depsCache)
-        .withMountedCache("/app/_build", buildCache)
-        .withMountedCache("/root/.hex", hexCache)
-        .withMountedDirectory("/app", source)
-        .withWorkdir("/app")
-        .withExec(["mix", "deps.get"])
-        .withExec(["mix", "compile", "--warnings-as-errors"])
-    )
+    return elixirContainer(source, "test", "elixir-build-test").withExec([
+      "mix",
+      "compile",
+      "--warnings-as-errors",
+    ])
   }
 
   /** mix format --check-formatted */
@@ -72,11 +81,11 @@ export class Ci {
       .stdout()
   }
 
-  /** mix sobelow --config */
+  /** mix sobelow --config --exit */
   @func()
   async sobelow(source: Directory): Promise<string> {
     return this.base(source)
-      .withExec(["mix", "sobelow", "--config"])
+      .withExec(["mix", "sobelow", "--config", "--exit"])
       .stdout()
   }
 
@@ -100,41 +109,15 @@ export class Ci {
     )
   }
 
-  /** mix dialyzer (runs in dev env, separate caches) */
+  /** mix dialyzer (runs in dev env, separate build cache) */
   @func()
   async dialyzer(source: Directory): Promise<string> {
-    const depsCache: CacheVolume = dag.cacheVolume("elixir-deps")
-    const buildCache: CacheVolume = dag.cacheVolume("elixir-build-dev")
-    const hexCache: CacheVolume = dag.cacheVolume("hex-home")
     const pltCache: CacheVolume = dag.cacheVolume("dialyzer-plt")
 
-    return (
-      dag
-        .container()
-        .from(ELIXIR_IMAGE)
-        .withExec(["apt-get", "update", "-q"])
-        .withExec([
-          "apt-get",
-          "install",
-          "-yq",
-          "--no-install-recommends",
-          "build-essential",
-          "git",
-        ])
-        .withExec(["apt-get", "clean"])
-        .withExec(["mix", "local.hex", "--force"])
-        .withExec(["mix", "local.rebar", "--force"])
-        .withEnvVariable("MIX_ENV", "dev")
-        .withMountedCache("/app/deps", depsCache)
-        .withMountedCache("/app/_build", buildCache)
-        .withMountedCache("/root/.hex", hexCache)
-        .withMountedCache("/app/_build/dev/dialyxir_plt", pltCache)
-        .withMountedDirectory("/app", source)
-        .withWorkdir("/app")
-        .withExec(["mix", "deps.get"])
-        .withExec(["mix", "dialyzer"])
-        .stdout()
-    )
+    return elixirContainer(source, "dev", "elixir-build-dev")
+      .withMountedCache("/app/_build/dev", pltCache)
+      .withExec(["mix", "dialyzer"])
+      .stdout()
   }
 
   /**
@@ -163,7 +146,9 @@ export class Ci {
 
     results.push(
       "=== sobelow ===\n" +
-        (await container.withExec(["mix", "sobelow", "--config"]).stdout())
+        (await container
+          .withExec(["mix", "sobelow", "--config", "--exit"])
+          .stdout())
     )
 
     results.push(
