@@ -302,7 +302,7 @@ defmodule Canary.Timeline do
     types =
       event_type |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
 
-    case Enum.split_with(types, &Canary.Webhooks.EventTypes.valid?/1) do
+    case Enum.split_with(types, &(&1 in Canary.Webhooks.EventTypes.timeline())) do
       {valid, []} -> {:ok, valid}
       {_, invalid} -> {:error, {:invalid_event_type, invalid}}
     end

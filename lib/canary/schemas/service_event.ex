@@ -3,7 +3,7 @@ defmodule Canary.Schemas.ServiceEvent do
   import Ecto.Changeset
 
   @entity_types ~w(error_group target incident)
-  @events Canary.Webhooks.EventTypes.all()
+  @events Canary.Webhooks.EventTypes.timeline()
 
   @primary_key {:id, :string, autogenerate: false}
   schema "service_events" do
