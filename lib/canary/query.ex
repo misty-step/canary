@@ -471,25 +471,40 @@ defmodule Canary.Query do
     with_action = Keyword.get(opts, :with_annotation)
     without_action = Keyword.get(opts, :without_annotation)
 
-    incidents
-    |> then(fn incs ->
-      if with_action,
-        do: Enum.filter(incs, &has_incident_annotation?(&1.id, with_action)),
-        else: incs
-    end)
-    |> then(fn incs ->
-      if without_action,
-        do: Enum.reject(incs, &has_incident_annotation?(&1.id, without_action)),
-        else: incs
-    end)
+    if is_nil(with_action) and is_nil(without_action) do
+      incidents
+    else
+      ids = Enum.map(incidents, & &1.id)
+
+      incidents
+      |> then(fn incs ->
+        if with_action do
+          have = annotated_incident_ids(ids, with_action)
+          Enum.filter(incs, &(&1.id in have))
+        else
+          incs
+        end
+      end)
+      |> then(fn incs ->
+        if without_action do
+          have = annotated_incident_ids(ids, without_action)
+          Enum.reject(incs, &(&1.id in have))
+        else
+          incs
+        end
+      end)
+    end
   end
 
-  defp has_incident_annotation?(incident_id, action) do
-    Canary.Repos.read_repo().exists?(
-      from(a in Canary.Schemas.Annotation,
-        where: a.incident_id == ^incident_id and a.action == ^action
-      )
+  defp annotated_incident_ids([], _action), do: []
+
+  defp annotated_incident_ids(incident_ids, action) do
+    from(a in Canary.Schemas.Annotation,
+      where: a.incident_id in ^incident_ids and a.action == ^action,
+      select: a.incident_id,
+      distinct: true
     )
+    |> Canary.Repos.read_repo().all()
   end
 
   defp active_incident_view(incident, now) do

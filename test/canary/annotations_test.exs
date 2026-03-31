@@ -39,7 +39,11 @@ defmodule Canary.AnnotationsTest do
   end
 
   describe "list_for_incident/1" do
-    test "returns annotations ordered by created_at then id" do
+    test "returns :not_found for nonexistent incident" do
+      assert {:error, :not_found} = Annotations.list_for_incident("INC-nonexistent")
+    end
+
+    test "returns annotations for existing incident" do
       incident = create_incident("test-svc")
 
       {:ok, _} =
@@ -54,7 +58,7 @@ defmodule Canary.AnnotationsTest do
           "action" => "triaged"
         })
 
-      annotations = Annotations.list_for_incident(incident.id)
+      {:ok, annotations} = Annotations.list_for_incident(incident.id)
       assert length(annotations) == 2
       agents = Enum.map(annotations, & &1.agent)
       assert MapSet.new(agents) == MapSet.new(["bot-a", "bot-b"])
@@ -87,6 +91,10 @@ defmodule Canary.AnnotationsTest do
   end
 
   describe "list_for_group/1" do
+    test "returns :not_found for nonexistent group" do
+      assert {:error, :not_found} = Annotations.list_for_group("nonexistent-hash")
+    end
+
     test "returns annotations for a group" do
       group = create_error_group("test-svc", "RuntimeError", 5)
 
@@ -96,7 +104,7 @@ defmodule Canary.AnnotationsTest do
           "action" => "acknowledged"
         })
 
-      annotations = Annotations.list_for_group(group.group_hash)
+      {:ok, annotations} = Annotations.list_for_group(group.group_hash)
       assert length(annotations) == 1
       assert hd(annotations).group_hash == group.group_hash
     end
@@ -134,6 +142,19 @@ defmodule Canary.AnnotationsTest do
 
       formatted = Annotations.format(ann)
       assert formatted.metadata == nil
+    end
+
+    test "drops non-map non-string metadata to nil" do
+      incident = create_incident("test-svc")
+
+      {:ok, ann} =
+        Annotations.create_for_incident(incident.id, %{
+          "agent" => "bot",
+          "action" => "ack",
+          "metadata" => [1, 2, 3]
+        })
+
+      assert ann.metadata == nil
     end
 
     test "handles non-JSON string metadata gracefully" do

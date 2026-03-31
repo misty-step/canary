@@ -17,13 +17,22 @@ defmodule Canary.Annotations do
     end
   end
 
-  @spec list_for_incident(String.t()) :: [Annotation.t()]
+  @spec list_for_incident(String.t()) :: {:ok, [Annotation.t()]} | {:error, :not_found}
   def list_for_incident(incident_id) do
-    from(a in Annotation,
-      where: a.incident_id == ^incident_id,
-      order_by: [asc: a.created_at, asc: a.id]
-    )
-    |> Canary.Repos.read_repo().all()
+    case Canary.Repos.read_repo().get(Incident, incident_id) do
+      nil ->
+        {:error, :not_found}
+
+      _incident ->
+        annotations =
+          from(a in Annotation,
+            where: a.incident_id == ^incident_id,
+            order_by: [asc: a.created_at, asc: a.id]
+          )
+          |> Canary.Repos.read_repo().all()
+
+        {:ok, annotations}
+    end
   end
 
   @spec create_for_group(String.t(), map()) :: {:ok, Annotation.t()} | {:error, term()}
@@ -37,13 +46,22 @@ defmodule Canary.Annotations do
     end
   end
 
-  @spec list_for_group(String.t()) :: [Annotation.t()]
+  @spec list_for_group(String.t()) :: {:ok, [Annotation.t()]} | {:error, :not_found}
   def list_for_group(group_hash) do
-    from(a in Annotation,
-      where: a.group_hash == ^group_hash,
-      order_by: [asc: a.created_at, asc: a.id]
-    )
-    |> Canary.Repos.read_repo().all()
+    case Canary.Repos.read_repo().get(ErrorGroup, group_hash) do
+      nil ->
+        {:error, :not_found}
+
+      _group ->
+        annotations =
+          from(a in Annotation,
+            where: a.group_hash == ^group_hash,
+            order_by: [asc: a.created_at, asc: a.id]
+          )
+          |> Canary.Repos.read_repo().all()
+
+        {:ok, annotations}
+    end
   end
 
   @spec format(Annotation.t()) :: map()

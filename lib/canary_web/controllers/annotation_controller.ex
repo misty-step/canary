@@ -13,13 +13,12 @@ defmodule CanaryWeb.AnnotationController do
   end
 
   def index(conn, %{"incident_id" => incident_id}) do
-    case Canary.Repos.read_repo().get(Canary.Schemas.Incident, incident_id) do
-      nil ->
-        CanaryWeb.Plugs.ProblemDetails.render_error(conn, 404, "not_found", "Incident not found.")
-
-      _incident ->
-        annotations = Annotations.list_for_incident(incident_id)
+    case Annotations.list_for_incident(incident_id) do
+      {:ok, annotations} ->
         json(conn, %{annotations: Enum.map(annotations, &Annotations.format/1)})
+
+      {:error, :not_found} ->
+        CanaryWeb.Plugs.ProblemDetails.render_error(conn, 404, "not_found", "Incident not found.")
     end
   end
 
@@ -33,18 +32,17 @@ defmodule CanaryWeb.AnnotationController do
   end
 
   def group_index(conn, %{"group_hash" => group_hash}) do
-    case Canary.Repos.read_repo().get(Canary.Schemas.ErrorGroup, group_hash) do
-      nil ->
+    case Annotations.list_for_group(group_hash) do
+      {:ok, annotations} ->
+        json(conn, %{annotations: Enum.map(annotations, &Annotations.format/1)})
+
+      {:error, :not_found} ->
         CanaryWeb.Plugs.ProblemDetails.render_error(
           conn,
           404,
           "not_found",
           "Error group not found."
         )
-
-      _group ->
-        annotations = Annotations.list_for_group(group_hash)
-        json(conn, %{annotations: Enum.map(annotations, &Annotations.format/1)})
     end
   end
 
