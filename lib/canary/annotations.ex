@@ -76,6 +76,7 @@ defmodule Canary.Annotations do
         nil -> nil
         m when is_map(m) -> Jason.encode!(m)
         m when is_binary(m) -> m
+        _ -> nil
       end
 
     %Annotation{id: ID.annotation_id()}

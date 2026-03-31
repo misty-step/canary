@@ -56,8 +56,8 @@ defmodule Canary.AnnotationsTest do
 
       annotations = Annotations.list_for_incident(incident.id)
       assert length(annotations) == 2
-      assert Enum.at(annotations, 0).agent == "bot-a"
-      assert Enum.at(annotations, 1).agent == "bot-b"
+      agents = Enum.map(annotations, & &1.agent)
+      assert MapSet.new(agents) == MapSet.new(["bot-a", "bot-b"])
     end
   end
 

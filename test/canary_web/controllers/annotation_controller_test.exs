@@ -90,6 +90,12 @@ defmodule CanaryWeb.AnnotationControllerTest do
       assert "bot-b" in agents
     end
 
+    test "returns 404 for nonexistent incident", %{conn: conn} do
+      conn = get(conn, "/api/v1/incidents/INC-nonexistent/annotations")
+      body = json_response(conn, 404)
+      assert body["code"] == "not_found"
+    end
+
     test "multi-consumer coexistence: two agents annotating same incident", %{conn: conn} do
       incident = create_incident("test-svc")
 
@@ -142,6 +148,12 @@ defmodule CanaryWeb.AnnotationControllerTest do
   end
 
   describe "GET /api/v1/groups/:group_hash/annotations" do
+    test "returns 404 for nonexistent group", %{conn: conn} do
+      conn = get(conn, "/api/v1/groups/nonexistent-hash/annotations")
+      body = json_response(conn, 404)
+      assert body["code"] == "not_found"
+    end
+
     test "lists annotations for error group", %{conn: conn} do
       group = create_error_group("test-svc", "RuntimeError", 5)
 

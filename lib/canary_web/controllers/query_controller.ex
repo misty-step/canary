@@ -70,7 +70,7 @@ defmodule CanaryWeb.QueryController do
         with_annotation: params["with_annotation"],
         without_annotation: params["without_annotation"]
       ],
-      fn {_, v} -> is_nil(v) end
+      fn {_, v} -> is_nil(v) or v == "" end
     )
   end
 

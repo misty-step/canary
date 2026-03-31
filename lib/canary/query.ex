@@ -101,7 +101,7 @@ defmodule Canary.Query do
     end
   end
 
-  @spec errors_by_class(String.t()) :: {:ok, [map()]} | {:error, :invalid_window}
+  @spec errors_by_class(String.t()) :: {:ok, map()} | {:error, :invalid_window}
   def errors_by_class(window) do
     with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
       groups =
