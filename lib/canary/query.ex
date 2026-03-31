@@ -18,10 +18,12 @@ defmodule Canary.Query do
 
   @incident_active_window_seconds 300
   @max_groups 50
-  @spec errors_by_service(String.t(), String.t(), String.t() | nil) ::
+  @spec errors_by_service(String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, :invalid_window}
-  def errors_by_service(service, window, cursor \\ nil) do
+  def errors_by_service(service, window, opts \\ []) do
     with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
+      cursor = Keyword.get(opts, :cursor)
+
       query =
         from(g in ErrorGroup,
           where: g.service == ^service and g.last_seen_at >= ^cutoff,
@@ -30,6 +32,7 @@ defmodule Canary.Query do
         )
 
       query = apply_cursor(query, cursor)
+      query = maybe_filter_annotation(query, opts)
       groups = query |> select_group_with_classification() |> Canary.Repos.read_repo().all()
 
       total = Enum.reduce(groups, 0, &(&1.total_count + &2))
@@ -74,6 +77,7 @@ defmodule Canary.Query do
         end
 
       query = apply_cursor(query, cursor)
+      query = maybe_filter_annotation(query, opts)
       groups = query |> select_group_with_classification() |> Canary.Repos.read_repo().all()
       total = Enum.reduce(groups, 0, &(&1.total_count + &2))
 
@@ -310,6 +314,41 @@ defmodule Canary.Query do
     end
   end
 
+  # --- Annotation filters ---
+
+  defp maybe_filter_annotation(query, opts) do
+    query =
+      case Keyword.get(opts, :with_annotation) do
+        nil ->
+          query
+
+        action ->
+          from(g in query,
+            where:
+              fragment(
+                "EXISTS (SELECT 1 FROM annotations WHERE group_hash = ? AND action = ?)",
+                g.group_hash,
+                ^action
+              )
+          )
+      end
+
+    case Keyword.get(opts, :without_annotation) do
+      nil ->
+        query
+
+      action ->
+        from(g in query,
+          where:
+            fragment(
+              "NOT EXISTS (SELECT 1 FROM annotations WHERE group_hash = ? AND action = ?)",
+              g.group_hash,
+              ^action
+            )
+        )
+    end
+  end
+
   # --- Shared formatters ---
 
   defp format_group(g) do
@@ -412,7 +451,9 @@ defmodule Canary.Query do
     |> Canary.Repos.read_repo().all()
   end
 
-  defp active_incidents do
+  @doc "Returns active incidents, optionally filtered by annotation."
+  @spec active_incidents(keyword()) :: [map()]
+  def active_incidents(opts \\ []) do
     now = DateTime.utc_now() |> DateTime.to_iso8601()
 
     from(i in Incident,
@@ -423,6 +464,47 @@ defmodule Canary.Query do
     |> Canary.Repos.read_repo().all()
     |> Enum.map(&active_incident_view(&1, now))
     |> Enum.reject(&is_nil/1)
+    |> maybe_filter_incident_annotation(opts)
+  end
+
+  defp maybe_filter_incident_annotation(incidents, opts) do
+    with_action = Keyword.get(opts, :with_annotation)
+    without_action = Keyword.get(opts, :without_annotation)
+
+    if is_nil(with_action) and is_nil(without_action) do
+      incidents
+    else
+      ids = Enum.map(incidents, & &1.id)
+
+      incidents
+      |> then(fn incs ->
+        if with_action do
+          have = annotated_incident_ids(ids, with_action)
+          Enum.filter(incs, &(&1.id in have))
+        else
+          incs
+        end
+      end)
+      |> then(fn incs ->
+        if without_action do
+          have = annotated_incident_ids(ids, without_action)
+          Enum.reject(incs, &(&1.id in have))
+        else
+          incs
+        end
+      end)
+    end
+  end
+
+  defp annotated_incident_ids([], _action), do: []
+
+  defp annotated_incident_ids(incident_ids, action) do
+    from(a in Canary.Schemas.Annotation,
+      where: a.incident_id in ^incident_ids and a.action == ^action,
+      select: a.incident_id,
+      distinct: true
+    )
+    |> Canary.Repos.read_repo().all()
   end
 
   defp active_incident_view(incident, now) do

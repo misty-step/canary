@@ -23,4 +23,6 @@ defmodule Canary.ID do
   def webhook_id, do: generate("WHK")
   @spec key_id() :: String.t()
   def key_id, do: generate("KEY")
+  @spec annotation_id() :: String.t()
+  def annotation_id, do: generate("ANN")
 end

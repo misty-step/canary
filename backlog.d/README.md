@@ -6,7 +6,7 @@
 
 | # | Item | Priority | Status | Estimate |
 |---|------|----------|--------|----------|
-| 001 | Annotations API | high | ready | M |
+| 001 | Annotations API | high | done | M |
 | 002 | Timeline agent polling | high | ready | S |
 | 003 | Triage diagnostic webhooks non-fatal | high | ready | S |
 | 004 | Incident correlation failure paths | high | ready | S |
