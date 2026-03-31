@@ -117,5 +117,16 @@ defmodule CanaryWeb.WebhookControllerTest do
       assert body["code"] == "webhook_delivery_failed"
       assert body["detail"] =~ "HTTP 500"
     end
+
+    test "create accepts diagnostic canary.ping event", %{conn: conn} do
+      conn =
+        post(conn, "/api/v1/webhooks", %{
+          "url" => "https://example.com/hook",
+          "events" => ["canary.ping"]
+        })
+
+      created = json_response(conn, 201)
+      assert created["events"] == ["canary.ping"]
+    end
   end
 end

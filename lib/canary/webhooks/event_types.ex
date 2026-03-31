@@ -1,14 +1,18 @@
 defmodule Canary.Webhooks.EventTypes do
   @moduledoc false
 
-  @events ~w(
+  @timeline ~w(
     health_check.degraded health_check.down health_check.recovered
     health_check.tls_expiring error.new_class error.regression
     incident.opened incident.updated incident.resolved
   )
 
-  @spec all() :: [String.t()]
-  def all, do: @events
+  @diagnostic ~w(canary.ping)
+  @all @timeline ++ @diagnostic
+
   @spec valid?(String.t()) :: boolean()
-  def valid?(event), do: event in @events
+  def valid?(event), do: event in @all
+
+  @spec timeline() :: [String.t()]
+  def timeline, do: @timeline
 end

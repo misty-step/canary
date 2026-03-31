@@ -216,6 +216,15 @@ defmodule CanaryWeb.TimelineControllerTest do
       assert hd(second["events"])["event"] == "incident.opened"
       assert is_nil(second["cursor"])
     end
+
+    test "returns 422 for diagnostic event_type canary.ping", %{conn: conn} do
+      conn = get(conn, "/api/v1/timeline?event_type=canary.ping")
+      body = json_response(conn, 422)
+
+      assert body["code"] == "validation_error"
+      assert body["detail"] =~ "canary.ping"
+      assert body["errors"]["event_type"]
+    end
   end
 
   defp insert_event!(attrs) do

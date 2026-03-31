@@ -48,7 +48,7 @@ defmodule CanaryWeb.TimelineController do
             )
 
           {:error, {:invalid_event_type, invalid}} ->
-            allowed = Canary.Webhooks.EventTypes.all() |> Enum.join(", ")
+            allowed = Canary.Webhooks.EventTypes.timeline() |> Enum.join(", ")
 
             CanaryWeb.Plugs.ProblemDetails.render_error(
               conn,
