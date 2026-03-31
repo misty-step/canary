@@ -175,14 +175,19 @@ defmodule Canary.Timeline do
              events: list(),
              cursor: String.t() | nil
            }}
-          | {:error, :invalid_cursor | :invalid_limit | :invalid_window}
+          | {:error,
+             :invalid_cursor
+             | :invalid_limit
+             | :invalid_window
+             | {:invalid_event_type, list()}}
   def list(opts \\ []) do
     window = Keyword.get(opts, :window, "24h")
     service = Keyword.get(opts, :service)
 
     with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window),
          {:ok, limit} <- parse_limit(Keyword.get(opts, :limit)),
-         {:ok, cursor} <- decode_cursor(Keyword.get(opts, :cursor)) do
+         {:ok, cursor} <- decode_cursor(Keyword.get(opts, :cursor)),
+         {:ok, event_types} <- parse_event_types(Keyword.get(opts, :event_type)) do
       query =
         from(e in ServiceEvent,
           where: e.created_at >= ^cutoff,
@@ -190,6 +195,7 @@ defmodule Canary.Timeline do
           limit: ^(limit + 1)
         )
         |> maybe_filter_service(service)
+        |> maybe_filter_event(event_types)
         |> maybe_apply_cursor(cursor)
 
       rows = Canary.Repos.read_repo().all(query)
@@ -289,9 +295,28 @@ defmodule Canary.Timeline do
 
   defp decode_cursor(_), do: {:error, :invalid_cursor}
 
+  defp parse_event_types(nil), do: {:ok, nil}
+  defp parse_event_types(""), do: {:ok, nil}
+
+  defp parse_event_types(event_type) when is_binary(event_type) do
+    types =
+      event_type |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+
+    case Enum.split_with(types, &Canary.Webhooks.EventTypes.valid?/1) do
+      {valid, []} -> {:ok, valid}
+      {_, invalid} -> {:error, {:invalid_event_type, invalid}}
+    end
+  end
+
+  defp parse_event_types(_), do: {:error, {:invalid_event_type, []}}
+
   defp maybe_filter_service(query, nil), do: query
   defp maybe_filter_service(query, ""), do: query
   defp maybe_filter_service(query, service), do: from(e in query, where: e.service == ^service)
+
+  defp maybe_filter_event(query, nil), do: query
+  defp maybe_filter_event(query, []), do: query
+  defp maybe_filter_event(query, types), do: from(e in query, where: e.event in ^types)
 
   defp maybe_apply_cursor(query, nil), do: query
 

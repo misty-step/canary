@@ -123,6 +123,99 @@ defmodule CanaryWeb.TimelineControllerTest do
       assert body["code"] == "validation_error"
       assert body["errors"]["service"] == ["must be a string"]
     end
+
+    test "filters by single event_type", %{conn: conn} do
+      insert_event!(%{service: "alpha", event: "error.new_class", created_at: ts(-10)})
+      insert_event!(%{service: "alpha", event: "incident.opened", created_at: ts(-20)})
+      insert_event!(%{service: "alpha", event: "health_check.down", created_at: ts(-30)})
+
+      conn = get(conn, "/api/v1/timeline?event_type=incident.opened")
+      body = json_response(conn, 200)
+
+      assert body["returned_count"] == 1
+      assert hd(body["events"])["event"] == "incident.opened"
+    end
+
+    test "filters by multiple comma-separated event_types", %{conn: conn} do
+      insert_event!(%{service: "alpha", event: "error.new_class", created_at: ts(-10)})
+      insert_event!(%{service: "alpha", event: "incident.opened", created_at: ts(-20)})
+      insert_event!(%{service: "alpha", event: "health_check.down", created_at: ts(-30)})
+
+      conn = get(conn, "/api/v1/timeline?event_type=incident.opened,error.new_class")
+      body = json_response(conn, 200)
+
+      assert body["returned_count"] == 2
+      events = Enum.map(body["events"], & &1["event"])
+      assert "error.new_class" in events
+      assert "incident.opened" in events
+      refute "health_check.down" in events
+    end
+
+    test "event_type filter combines with service filter", %{conn: conn} do
+      insert_event!(%{service: "alpha", event: "error.new_class", created_at: ts(-10)})
+      insert_event!(%{service: "beta", event: "error.new_class", created_at: ts(-20)})
+      insert_event!(%{service: "alpha", event: "incident.opened", created_at: ts(-30)})
+
+      conn = get(conn, "/api/v1/timeline?service=alpha&event_type=error.new_class")
+      body = json_response(conn, 200)
+
+      assert body["returned_count"] == 1
+      assert hd(body["events"])["service"] == "alpha"
+      assert hd(body["events"])["event"] == "error.new_class"
+    end
+
+    test "returns 422 for invalid event_type", %{conn: conn} do
+      conn = get(conn, "/api/v1/timeline?event_type=bogus.event")
+      body = json_response(conn, 422)
+
+      assert body["code"] == "validation_error"
+      assert body["errors"]["event_type"]
+    end
+
+    test "returns 422 when any event_type in list is invalid", %{conn: conn} do
+      conn = get(conn, "/api/v1/timeline?event_type=incident.opened,bogus.event")
+      body = json_response(conn, 422)
+
+      assert body["code"] == "validation_error"
+      assert body["errors"]["event_type"]
+    end
+
+    test "after param works as alias for cursor", %{conn: conn} do
+      insert_event!(%{service: "alpha", event: "error.new_class", created_at: ts(-10)})
+      insert_event!(%{service: "alpha", event: "incident.opened", created_at: ts(-20)})
+
+      first_conn = get(conn, "/api/v1/timeline?service=alpha&limit=1")
+      first = json_response(first_conn, 200)
+      assert is_binary(first["cursor"])
+
+      second_conn = get(conn, "/api/v1/timeline?service=alpha&after=#{first["cursor"]}")
+      second = json_response(second_conn, 200)
+
+      assert second["returned_count"] == 1
+      assert hd(second["events"])["event"] == "incident.opened"
+    end
+
+    test "event_type filter works with cursor pagination", %{conn: conn} do
+      insert_event!(%{service: "alpha", event: "incident.opened", created_at: ts(-10)})
+      insert_event!(%{service: "alpha", event: "error.new_class", created_at: ts(-20)})
+      insert_event!(%{service: "alpha", event: "incident.opened", created_at: ts(-30)})
+      insert_event!(%{service: "alpha", event: "health_check.down", created_at: ts(-40)})
+
+      first_conn = get(conn, "/api/v1/timeline?event_type=incident.opened&limit=1")
+      first = json_response(first_conn, 200)
+
+      assert first["returned_count"] == 1
+      assert is_binary(first["cursor"])
+
+      second_conn =
+        get(conn, "/api/v1/timeline?event_type=incident.opened&limit=1&cursor=#{first["cursor"]}")
+
+      second = json_response(second_conn, 200)
+
+      assert second["returned_count"] == 1
+      assert hd(second["events"])["event"] == "incident.opened"
+      assert is_nil(second["cursor"])
+    end
   end
 
   defp insert_event!(attrs) do
