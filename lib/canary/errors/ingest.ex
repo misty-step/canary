@@ -5,7 +5,7 @@ defmodule Canary.Errors.Ingest do
   """
 
   alias Canary.Errors.{Classification, DedupCache, Grouping}
-  alias Canary.{ID, Incidents, Repo, Timeline}
+  alias Canary.{ID, IncidentCorrelation, Repo, Timeline}
   alias Canary.Schemas.{Error, ErrorGroup}
 
   require Logger
@@ -195,7 +195,7 @@ defmodule Canary.Errors.Ingest do
   end
 
   defp maybe_correlate_incident(group_hash, service) do
-    case safe_correlate_incident(:error_group, group_hash, service) do
+    case IncidentCorrelation.safe_correlate(:error_group, group_hash, service) do
       {:ok, _incident} ->
         :ok
 
@@ -204,16 +204,6 @@ defmodule Canary.Errors.Ingest do
           "Failed to correlate incident for error group #{group_hash}: #{correlation_error_tag(reason)}"
         )
     end
-  end
-
-  defp safe_correlate_incident(signal_type, signal_ref, service) do
-    Incidents.correlate(signal_type, signal_ref, service)
-  rescue
-    error ->
-      {:error, {:exception, error.__struct__}}
-  catch
-    kind, reason ->
-      {:error, {kind, reason}}
   end
 
   defp correlation_error_tag({:exception, module}) when is_atom(module),

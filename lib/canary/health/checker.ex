@@ -8,7 +8,7 @@ defmodule Canary.Health.Checker do
   use GenServer, restart: :permanent
 
   alias Canary.Health.{Probe, SSRFGuard, StateMachine}
-  alias Canary.{Incidents, Repo, Timeline}
+  alias Canary.{IncidentCorrelation, Repo, Timeline}
   alias Canary.Schemas.{Target, TargetCheck, TargetState}
 
   require Logger
@@ -276,7 +276,11 @@ defmodule Canary.Health.Checker do
   end
 
   defp correlate_incident(target) do
-    case Incidents.correlate(:health_transition, target.id, Target.service_name(target)) do
+    case IncidentCorrelation.safe_correlate(
+           :health_transition,
+           target.id,
+           Target.service_name(target)
+         ) do
       {:ok, _incident} ->
         :ok
 

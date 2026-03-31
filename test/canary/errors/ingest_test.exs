@@ -1,6 +1,8 @@
 defmodule Canary.Errors.IngestTest do
   use Canary.DataCase
 
+  import ExUnit.CaptureLog
+
   alias Canary.Errors.Ingest
   alias Canary.Schemas.{Error, ErrorGroup, Incident, ServiceEvent}
 
@@ -160,6 +162,53 @@ defmodule Canary.Errors.IngestTest do
       assert length(incident.signals) == 2
       assert Enum.any?(incident.signals, &(&1.signal_type == "health_transition"))
       assert Enum.any?(incident.signals, &(&1.signal_type == "error_group"))
+    end
+
+    test "logs raised correlation failures but still succeeds" do
+      Application.put_env(:canary, :incident_correlator, Canary.TestIncidentCorrelator)
+      Application.put_env(:canary, :self_report_errors, false)
+
+      Application.put_env(
+        :canary,
+        :test_incident_correlator_outcome,
+        :raise
+      )
+
+      on_exit(fn ->
+        Application.delete_env(:canary, :incident_correlator)
+        Application.delete_env(:canary, :self_report_errors)
+        Application.delete_env(:canary, :test_incident_correlator_outcome)
+      end)
+
+      log =
+        capture_log(fn ->
+          assert {:ok, result} = Ingest.ingest(@valid_attrs)
+          assert Repo.get(Error, result.id)
+          assert Repo.get(ErrorGroup, result.group_hash)
+        end)
+
+      assert log =~ "Failed to correlate incident for error group"
+    end
+
+    test "logs thrown correlation failures but still succeeds" do
+      Application.put_env(:canary, :incident_correlator, Canary.TestIncidentCorrelator)
+      Application.put_env(:canary, :self_report_errors, false)
+      Application.put_env(:canary, :test_incident_correlator_outcome, :throw)
+
+      on_exit(fn ->
+        Application.delete_env(:canary, :incident_correlator)
+        Application.delete_env(:canary, :self_report_errors)
+        Application.delete_env(:canary, :test_incident_correlator_outcome)
+      end)
+
+      log =
+        capture_log(fn ->
+          assert {:ok, result} = Ingest.ingest(@valid_attrs)
+          assert Repo.get(Error, result.id)
+          assert Repo.get(ErrorGroup, result.group_hash)
+        end)
+
+      assert log =~ "Failed to correlate incident for error group"
     end
   end
 end
