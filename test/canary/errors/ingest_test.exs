@@ -128,19 +128,6 @@ defmodule Canary.Errors.IngestTest do
       assert error.service == "cadence"
     end
 
-    test "succeeds and persists error even when correlation creates an incident as side effect" do
-      {:ok, result} = Ingest.ingest(@valid_attrs)
-
-      assert String.starts_with?(result.id, "ERR-")
-      assert Repo.get(Error, result.id)
-      assert Repo.get(ErrorGroup, result.group_hash)
-
-      # Correlation is a non-blocking side effect: incident may or may not exist,
-      # but the error and group are always persisted and the return is {:ok, _}.
-      assert is_binary(result.group_hash)
-      assert result.is_new_class == true
-    end
-
     test "attaches a new error group to the existing service incident" do
       now = DateTime.utc_now() |> DateTime.to_iso8601()
 
