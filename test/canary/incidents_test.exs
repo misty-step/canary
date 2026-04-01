@@ -13,6 +13,13 @@ defmodule Canary.IncidentsTest do
   end
 
   describe "correlate/3" do
+    test "returns {:ok, nil} when target is up and no open incident exists" do
+      create_target_with_state("quiescent", "up")
+
+      assert {:ok, nil} = Incidents.correlate(:health_transition, "TGT-quiescent", "quiescent")
+      assert Repo.all(from(i in Incident, where: i.service == "quiescent")) == []
+    end
+
     test "creates an incident for a degraded target and attaches the health signal" do
       create_target_with_state("foo", "degraded")
 
