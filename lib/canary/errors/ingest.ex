@@ -5,7 +5,7 @@ defmodule Canary.Errors.Ingest do
   """
 
   alias Canary.Errors.{Classification, DedupCache, Grouping}
-  alias Canary.{ID, Incidents, Repo, Timeline}
+  alias Canary.{CorrelationErrorTag, ID, Incidents, Repo, Timeline}
   alias Canary.Schemas.{Error, ErrorGroup}
 
   require Logger
@@ -195,34 +195,16 @@ defmodule Canary.Errors.Ingest do
   end
 
   defp maybe_correlate_incident(group_hash, service) do
-    case safe_correlate_incident(:error_group, group_hash, service) do
+    case Incidents.correlate(:error_group, group_hash, service) do
       {:ok, _incident} ->
         :ok
 
       {:error, reason} ->
         Logger.error(
-          "Failed to correlate incident for error group #{group_hash}: #{correlation_error_tag(reason)}"
+          "Failed to correlate incident for error group #{group_hash}: #{CorrelationErrorTag.format(reason)}"
         )
     end
   end
-
-  defp safe_correlate_incident(signal_type, signal_ref, service) do
-    Incidents.correlate(signal_type, signal_ref, service)
-  rescue
-    error ->
-      {:error, {:exception, error.__struct__}}
-  catch
-    kind, reason ->
-      {:error, {kind, reason}}
-  end
-
-  defp correlation_error_tag({:exception, module}) when is_atom(module),
-    do: Atom.to_string(module)
-
-  defp correlation_error_tag({kind, reason}), do: "#{kind}:#{correlation_error_tag(reason)}"
-  defp correlation_error_tag(reason) when is_atom(reason), do: Atom.to_string(reason)
-  defp correlation_error_tag(%module{}) when is_atom(module), do: Atom.to_string(module)
-  defp correlation_error_tag(_reason), do: "unexpected"
 
   defp truncate(nil, _max), do: nil
   defp truncate(str, max), do: String.slice(str, 0, max)
