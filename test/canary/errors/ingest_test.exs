@@ -210,5 +210,26 @@ defmodule Canary.Errors.IngestTest do
 
       assert log =~ "Failed to correlate incident for error group"
     end
+
+    test "logs invalid correlation return shapes but still succeeds" do
+      Application.put_env(:canary, :incident_correlator, Canary.TestIncidentCorrelator)
+      Application.put_env(:canary, :self_report_errors, false)
+      Application.put_env(:canary, :test_incident_correlator_outcome, :bogus)
+
+      on_exit(fn ->
+        Application.delete_env(:canary, :incident_correlator)
+        Application.delete_env(:canary, :self_report_errors)
+        Application.delete_env(:canary, :test_incident_correlator_outcome)
+      end)
+
+      log =
+        capture_log(fn ->
+          assert {:ok, result} = Ingest.ingest(@valid_attrs)
+          assert Repo.get(Error, result.id)
+          assert Repo.get(ErrorGroup, result.group_hash)
+        end)
+
+      assert log =~ "invalid_return:bogus"
+    end
   end
 end

@@ -7,7 +7,16 @@ defmodule Canary.IncidentCorrelation do
   @spec safe_correlate(Incidents.signal_type(), String.t(), String.t()) ::
           {:ok, Incident.t() | nil} | {:error, term()}
   def safe_correlate(signal_type, signal_ref, service) do
-    incident_correlator().correlate(signal_type, signal_ref, service)
+    case incident_correlator().correlate(signal_type, signal_ref, service) do
+      {:ok, _incident} = ok ->
+        ok
+
+      {:error, _reason} = error ->
+        error
+
+      other ->
+        {:error, {:invalid_return, other}}
+    end
   rescue
     error ->
       {:error, {:exception, error.__struct__}}

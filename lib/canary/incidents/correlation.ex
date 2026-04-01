@@ -19,14 +19,19 @@ defmodule Canary.Incidents.Correlation do
   @spec correlate(signal_type(), String.t(), String.t()) ::
           {:ok, Incident.t() | nil} | {:error, term()}
   def correlate(signal_type, signal_ref, service),
-    do: correlate(signal_type, signal_ref, service, [])
+    do: do_correlate(signal_type, signal_ref, service, [])
 
-  @doc false
-  @spec correlate(signal_type(), String.t(), String.t(), keyword()) ::
-          {:ok, Incident.t() | nil} | {:error, term()}
-  def correlate(signal_type, signal_ref, service, opts)
-      when signal_type in [:health_transition, :error_group] and is_binary(signal_ref) and
-             is_binary(service) and is_list(opts) do
+  if Mix.env() == :test do
+    @doc false
+    @spec correlate(signal_type(), String.t(), String.t(), keyword()) ::
+            {:ok, Incident.t() | nil} | {:error, term()}
+    def correlate(signal_type, signal_ref, service, opts),
+      do: do_correlate(signal_type, signal_ref, service, opts)
+  end
+
+  defp do_correlate(signal_type, signal_ref, service, opts)
+       when signal_type in [:health_transition, :error_group] and is_binary(signal_ref) and
+              is_binary(service) and is_list(opts) do
     now = DateTime.utc_now() |> DateTime.to_iso8601()
     transaction_runner = Keyword.get(opts, :transaction_runner, &with_transaction/1)
 
