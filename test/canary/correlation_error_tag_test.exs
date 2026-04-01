@@ -6,7 +6,7 @@ defmodule Canary.CorrelationErrorTagTest do
   describe "format/1" do
     test "formats exception tuple with module atom" do
       assert CorrelationErrorTag.format({:exception, Ecto.InvalidChangesetError}) ==
-               "Elixir.Ecto.InvalidChangesetError"
+               "Ecto.InvalidChangesetError"
     end
 
     test "formats nested kind/reason tuple" do
@@ -19,7 +19,7 @@ defmodule Canary.CorrelationErrorTagTest do
 
     test "formats struct by module name" do
       assert CorrelationErrorTag.format(%RuntimeError{message: "boom"}) ==
-               "Elixir.RuntimeError"
+               "RuntimeError"
     end
 
     test "formats unknown term as unexpected" do
