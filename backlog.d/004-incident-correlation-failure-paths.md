@@ -1,7 +1,7 @@
 # Expand incident correlation failure-path coverage
 
 Priority: high
-Status: in-progress
+Status: done
 Estimate: S
 
 ## Goal

@@ -9,7 +9,7 @@
 | 001 | Annotations API | high | done | M |
 | 002 | Timeline agent polling | high | done | S |
 | 003 | Triage diagnostic webhooks non-fatal | high | done | S |
-| 004 | Incident correlation failure paths | high | in-progress | S |
+| 004 | Incident correlation failure paths | high | done | S |
 | 005 | Connect-a-service workflow | high | ready | M |
 | 006 | Split Query into read models | medium | ready | L |
 | 007 | Networked service dogfooding | medium | ready | L |
