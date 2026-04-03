@@ -1,7 +1,6 @@
 defmodule Canary.IncidentsTest do
   use Canary.DataCase
 
-  alias Canary.Incidents.Correlation
   alias Canary.{Incidents, Report}
   alias Canary.Schemas.{ErrorGroup, Incident, ServiceEvent, TargetState, Webhook}
 
@@ -14,6 +13,13 @@ defmodule Canary.IncidentsTest do
   end
 
   describe "correlate/3" do
+    test "returns {:ok, nil} when target is up and no open incident exists" do
+      create_target_with_state("quiescent", "up")
+
+      assert {:ok, nil} = Incidents.correlate(:health_transition, "TGT-quiescent", "quiescent")
+      assert Repo.all(from(i in Incident, where: i.service == "quiescent")) == []
+    end
+
     test "creates an incident for a degraded target and attaches the health signal" do
       create_target_with_state("foo", "degraded")
 
@@ -182,7 +188,7 @@ defmodule Canary.IncidentsTest do
       end
 
       assert {:ok, incident} =
-               Correlation.correlate(
+               Incidents.correlate(
                  :health_transition,
                  "TGT-foo",
                  "foo",
@@ -200,7 +206,7 @@ defmodule Canary.IncidentsTest do
 
     test "tags raised failures as exception tuples" do
       assert {:error, {:exception, RuntimeError}} =
-               Correlation.correlate(
+               Incidents.correlate(
                  :health_transition,
                  "TGT-foo",
                  "foo",
@@ -210,7 +216,7 @@ defmodule Canary.IncidentsTest do
 
     test "tags thrown failures with the catch kind" do
       assert {:error, {:throw, :boom}} =
-               Correlation.correlate(
+               Incidents.correlate(
                  :health_transition,
                  "TGT-foo",
                  "foo",

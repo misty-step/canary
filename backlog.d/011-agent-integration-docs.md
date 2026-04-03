@@ -1,6 +1,6 @@
 # OpenAPI spec and agent integration guide
 
-Priority: medium
+Priority: high
 Status: ready
 Estimate: M
 
@@ -30,3 +30,9 @@ The key insight: webhooks are fire-and-forget notifications. Timeline is the dur
 Consider serving the spec at `GET /api/v1/openapi.json` so agents can self-discover. No Phoenix dependency needed — just a static JSON file served from priv.
 
 Feeds into: 010-ramp-pattern.md (the ramp pattern's polling loop needs this documented).
+
+As of 2026-04-01 audit: 3 hand-rolled clients (linejam, chrondle, adminifi) + 1 SDK
+consumer (volume) with 1/7 adoption. All three external reviewers (Thinktank, Codex,
+Gemini) agreed the OpenAPI spec is the forcing function for client convergence —
+contract-first, not SDK-first. Only webhook sig verification and cursor replay are
+worth standardizing as handcrafted helpers.

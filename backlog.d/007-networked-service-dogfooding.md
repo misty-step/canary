@@ -19,4 +19,11 @@ Bring owned HTTP services under Canary using safe server-side integrations that 
 
 ## Notes
 Real workload validation. Without dogfooding, annotations and timeline enrichment are designed in a vacuum.
+
+As of 2026-04-01 audit: 7 consumer services are already integrated (linejam, chrondle,
+volume, vulcan, adminifi-web, consumer-portal, time-tracker). Three Vercel apps had
+env vars configured ~2026-03-26. Cerberus has a full Python sink at
+`pkg/canary.py` with `canary.enabled: false` — a free dogfooding target (config flip).
+
+Oracle should be updated to reflect that some services are already reporting.
 Migrated from .backlog.d/004.

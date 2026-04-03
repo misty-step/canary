@@ -1,6 +1,6 @@
 # Connect-a-service workflow
 
-Priority: high
+Priority: medium
 Status: ready
 Estimate: M
 

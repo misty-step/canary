@@ -1,6 +1,6 @@
 # Split Query into domain read models
 
-Priority: medium
+Priority: high
 Status: ready
 Estimate: L
 
@@ -19,5 +19,8 @@ Reduce `Canary.Query` coupling by separating error, health, incident, and search
 - [ ] Given `mix test` runs, then the read-path regression suite is green
 
 ## Notes
-`lib/canary/query.ex` is 523 LOC — the only module above the 500 LOC quality bar. Splitting this enables cleaner annotation-aware queries (001) and agent-specific read paths.
+`lib/canary/query.ex` is 620 LOC as of 2026-04-01 (was 523 at backlog creation) — the
+only module above the 500 LOC quality bar and growing. Codex flagged this as
+under-prioritized during the architecture audit. Splitting enables cleaner
+annotation-aware queries (001) and agent-specific read paths.
 Migrated from .backlog.d/005.

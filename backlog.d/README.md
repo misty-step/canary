@@ -1,19 +1,24 @@
 # Canary Backlog
 
-`backlog.d/` is the source of truth for active backlog work as of 2026-03-30.
+`backlog.d/` is the source of truth for active backlog work as of 2026-04-02.
 
 ## Priority Order
 
 | # | Item | Priority | Status | Estimate |
 |---|------|----------|--------|----------|
 | 001 | Annotations API | high | done | M |
-| 002 | Timeline agent polling | high | ready | S |
+| 002 | Timeline agent polling | high | done | S |
 | 003 | Triage diagnostic webhooks non-fatal | high | done | S |
 | 004 | Incident correlation failure paths | high | done | S |
-| 005 | Connect-a-service workflow | high | ready | M |
-| 006 | Split Query into read models | medium | ready | L |
-| 007 | Networked service dogfooding | medium | ready | L |
+| 012 | Webhook delivery ledger + idempotency | high | ready | M |
+| 013 | Self-observability metrics export | high | ready | M |
+| 011 | OpenAPI spec + agent integration guide | high | ready | M |
+| 006 | Split Query into read models | high | ready | L |
+| 005 | Connect-a-service workflow | medium | ready | M |
+| 014 | Backup/restore + DR validation | medium | ready | S |
 | 008 | Security + governance baseline | medium | ready | S |
+| 007 | Networked service dogfooding | medium | ready | L |
+| 015 | Product security controls (scoped keys) | low | ready | M |
 | 009 | Desktop health semantics research | low | blocked | M |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
 
@@ -24,17 +29,24 @@
                     ├──→ 010 (ramp pattern) ──→ north star
 002 (timeline)   ──┘        ↑
                     bb/011 (triage sprite) ──┘
+                            ↑
+012 (delivery ledger) ──────┘  load-bearing for agent consumers
 003 (non-fatal webhooks) — prerequisite for sprite reliability
 004 (correlation paths) — prerequisite for sprite signal quality
 006 (query split) — enables cleaner annotation-aware queries
 007 (dogfooding) — validates 001+002 on real workloads
+011 (OpenAPI) — contract for SDK convergence and agent self-discovery
+013 (metrics) — self-observability for dogfooding credibility
+014 (DR) — data durability assurance
 ```
 
 ## Execution Lanes
 
-**Lane 1 (agent readiness):** 001 + 002 (parallel) → bb/011 → 010
-**Lane 2 (hardening):** 003, 004 (independent, small, can ship anytime)
-**Lane 3 (structural):** 005, 006, 007, 008 (ready but lower priority)
+**Lane 1 (agent readiness):** 012 (delivery ledger) → bb/011 (triage sprite) → 010 (ramp)
+**Lane 2 (contract + observability):** 011 (OpenAPI) + 013 (metrics) — parallel, no deps
+**Lane 3 (structural):** 006 (query split) → 005 (connect-a-service)
+**Lane 4 (hardening):** 008, 014 (independent, small, can ship anytime)
+**Lane 5 (future):** 015 (scoped keys), 009 (desktop health, blocked on 007)
 
 ## Migration Notes
 
@@ -42,6 +54,7 @@
 - `.backlog.d/006` (monorepo bootstrap) archived as shipped — commit `c87f28f`.
 - `.backlog.d/008` (monitor generation spike) superseded by 010-ramp-pattern.
 - Bitterblossom triage sprite tracked at `bitterblossom/backlog.d/011-canary-triage-sprite.md`.
+- 2026-04-02: Added 012–015 from multi-AI architecture audit. Promoted 006, 011 to high.
 
 ## Status
 

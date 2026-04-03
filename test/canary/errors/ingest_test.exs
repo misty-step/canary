@@ -165,71 +165,56 @@ defmodule Canary.Errors.IngestTest do
     end
 
     test "logs raised correlation failures but still succeeds" do
-      Application.put_env(:canary, :incident_correlator, Canary.TestIncidentCorrelator)
-      Application.put_env(:canary, :self_report_errors, false)
-
-      Application.put_env(
-        :canary,
-        :test_incident_correlator_outcome,
-        :raise
-      )
-
-      on_exit(fn ->
-        Application.delete_env(:canary, :incident_correlator)
-        Application.delete_env(:canary, :self_report_errors)
-        Application.delete_env(:canary, :test_incident_correlator_outcome)
-      end)
-
       log =
-        capture_log(fn ->
-          assert {:ok, result} = Ingest.ingest(@valid_attrs)
-          assert Repo.get(Error, result.id)
-          assert Repo.get(ErrorGroup, result.group_hash)
+        with_test_correlator(:raise, fn ->
+          capture_log(fn ->
+            assert {:ok, result} = Ingest.ingest(@valid_attrs)
+            assert Repo.get(Error, result.id)
+            assert Repo.get(ErrorGroup, result.group_hash)
+          end)
         end)
 
       assert log =~ "Failed to correlate incident for error group"
     end
 
     test "logs thrown correlation failures but still succeeds" do
-      Application.put_env(:canary, :incident_correlator, Canary.TestIncidentCorrelator)
-      Application.put_env(:canary, :self_report_errors, false)
-      Application.put_env(:canary, :test_incident_correlator_outcome, :throw)
-
-      on_exit(fn ->
-        Application.delete_env(:canary, :incident_correlator)
-        Application.delete_env(:canary, :self_report_errors)
-        Application.delete_env(:canary, :test_incident_correlator_outcome)
-      end)
-
       log =
-        capture_log(fn ->
-          assert {:ok, result} = Ingest.ingest(@valid_attrs)
-          assert Repo.get(Error, result.id)
-          assert Repo.get(ErrorGroup, result.group_hash)
+        with_test_correlator(:throw, fn ->
+          capture_log(fn ->
+            assert {:ok, result} = Ingest.ingest(@valid_attrs)
+            assert Repo.get(Error, result.id)
+            assert Repo.get(ErrorGroup, result.group_hash)
+          end)
         end)
 
       assert log =~ "Failed to correlate incident for error group"
     end
 
     test "logs invalid correlation return shapes but still succeeds" do
-      Application.put_env(:canary, :incident_correlator, Canary.TestIncidentCorrelator)
-      Application.put_env(:canary, :self_report_errors, false)
-      Application.put_env(:canary, :test_incident_correlator_outcome, :bogus)
-
-      on_exit(fn ->
-        Application.delete_env(:canary, :incident_correlator)
-        Application.delete_env(:canary, :self_report_errors)
-        Application.delete_env(:canary, :test_incident_correlator_outcome)
-      end)
-
       log =
-        capture_log(fn ->
-          assert {:ok, result} = Ingest.ingest(@valid_attrs)
-          assert Repo.get(Error, result.id)
-          assert Repo.get(ErrorGroup, result.group_hash)
+        with_test_correlator(:bogus, fn ->
+          capture_log(fn ->
+            assert {:ok, result} = Ingest.ingest(@valid_attrs)
+            assert Repo.get(Error, result.id)
+            assert Repo.get(ErrorGroup, result.group_hash)
+          end)
         end)
 
       assert log =~ "invalid_return:bogus"
+    end
+  end
+
+  defp with_test_correlator(outcome, fun) do
+    Application.put_env(:canary, :incident_correlator, Canary.TestIncidentCorrelator)
+    Application.put_env(:canary, :self_report_errors, false)
+    Application.put_env(:canary, :test_incident_correlator_outcome, outcome)
+
+    try do
+      fun.()
+    after
+      Application.delete_env(:canary, :incident_correlator)
+      Application.delete_env(:canary, :self_report_errors)
+      Application.delete_env(:canary, :test_incident_correlator_outcome)
     end
   end
 end
