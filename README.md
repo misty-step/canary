@@ -225,6 +225,9 @@ curl -X POST https://canary-obs.fly.dev/api/v1/webhooks \
   -H "Authorization: Bearer $CANARY_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"url": "https://example.com/hook", "events": ["health_check.down", "error.new_class"]}'
+
+curl "https://canary-obs.fly.dev/api/v1/webhook-deliveries?webhook_id=WHK-abc123&limit=20" \
+  -H "Authorization: Bearer $CANARY_API_KEY"
 ```
 
 ### API Key Management
@@ -252,6 +255,13 @@ curl -X POST https://canary-obs.fly.dev/api/v1/keys \
 
 All webhooks are HMAC-SHA256 signed. Secret returned on subscription creation.
 `POST /api/v1/webhooks/:id/test` sends a non-business `canary.ping` payload and does not write to the timeline.
+
+### Webhook Consumer Contract
+
+- Deliveries are at-least-once. Deduplicate on `X-Delivery-Id`.
+- `X-Delivery-Id` is stable across retries for the same logical delivery.
+- Webhooks are wake-up hints, not the source of truth. Query `/api/v1/timeline` or the relevant read API for correctness.
+- `GET /api/v1/webhook-deliveries` exposes operator-visible delivery outcomes, attempt counts, reasons, and cursor-paginated history.
 
 ## Self-Observability
 

@@ -560,7 +560,7 @@ Probe history for a specific target. Returns individual check results for debugg
 
 **At-least-once, unordered, lossy on restart.**
 
-Webhooks may be delivered more than once (use `X-Delivery-Id` to deduplicate). Order is not guaranteed across events, but `sequence` numbers within a target/group allow consumers to ignore stale state. In-flight deliveries are lost on process restart (no persistent queue in v1).
+Webhooks may be delivered more than once (use `X-Delivery-Id` to deduplicate). `X-Delivery-Id` is stable across retries for the same logical delivery. Order is not guaranteed across events, but `sequence` numbers within a target/group allow consumers to ignore stale state. In-flight deliveries are lost on process restart (no persistent queue in v1).
 
 ### Signing
 
@@ -571,7 +571,7 @@ All webhooks signed with HMAC-SHA256 using the subscription's secret.
 ```
 X-Signature: sha256=<hex digest of body>
 X-Event: health_check.down
-X-Delivery-Id: <uuid>
+X-Delivery-Id: DLV-<nanoid>
 X-Webhook-Version: 1
 X-Sequence: 42
 Content-Type: application/json
@@ -619,11 +619,13 @@ Content-Type: application/json
 
 ### Delivery
 
-- **Retry:** 3 attempts with exponential backoff (1s, 5s, 30s)
+- **Retry:** 4 attempts with exponential backoff (1s, 5s, 30s, 60s)
 - **Timeout:** 10s per delivery attempt
-- **Idempotency:** `X-Delivery-Id` header for consumer deduplication
+- **Idempotency:** `X-Delivery-Id` header for consumer deduplication; stable across retries for the same delivery
+- **Correctness:** Treat webhooks as wake-up hints. Replay from timeline or query APIs for authoritative state.
 - **Circuit breaker:** After 10 consecutive delivery failures to a webhook URL, mark subscription as `suspended`. Probe periodically (every 5 min) to re-enable.
-- **No dead letter queue** (v1) — failed deliveries are logged (structured), not persisted
+- **Delivery ledger:** `GET /api/v1/webhook-deliveries` exposes final status, attempt count, timestamps, reasons, and cursor-paginated history for operator visibility
+- **No dead letter queue** (v1) — replay/DLQ remains follow-up work
 - **Cooldown:** Per-group cooldown prevents webhook flood from flapping or exception loops (5 min default)
 - **Webhook URL validation:** HTTPS required by default. HTTP allowed only with explicit `--allow-insecure` flag.
 
