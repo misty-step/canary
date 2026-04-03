@@ -27,6 +27,10 @@ Deferred from 002-timeline-agent-polling.md — the timeline API is shipped but 
 
 The key insight: webhooks are fire-and-forget notifications. Timeline is the durable, queryable event log. Agents should never depend solely on webhook delivery for correctness.
 
+Item 012 shipped the concrete idempotency contract in `README.md`: deduplicate on
+`x-delivery-id`, treat webhooks as wake-up hints, and replay from timeline for
+correctness. Fold that wording into `x-agent-guide` when this item lands.
+
 Consider serving the spec at `GET /api/v1/openapi.json` so agents can self-discover. No Phoenix dependency needed — just a static JSON file served from priv.
 
 Feeds into: 010-ramp-pattern.md (the ramp pattern's polling loop needs this documented).

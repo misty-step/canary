@@ -2,7 +2,9 @@ defmodule CanaryWeb.WebhookController do
   use CanaryWeb, :controller
 
   alias Canary.{ID, Repo}
+  alias Canary.Schemas.WebhookDelivery
   alias Canary.Schemas.Webhook
+  alias Canary.WebhookDeliveries
   alias Canary.Webhooks.EventTypes
   import Ecto.Query
 
@@ -118,5 +120,38 @@ defmodule CanaryWeb.WebhookController do
             )
         end
     end
+  end
+
+  def deliveries(conn, %{"id" => id} = params) do
+    deliveries = WebhookDeliveries.list_for_webhook(id, limit: params["limit"])
+
+    if deliveries == [] and is_nil(Canary.Repos.read_repo().get(Webhook, id)) do
+      CanaryWeb.Plugs.ProblemDetails.render_error(
+        conn,
+        404,
+        "not_found",
+        "Webhook not found."
+      )
+    else
+      json(conn, %{
+        deliveries: Enum.map(deliveries, &format_delivery/1)
+      })
+    end
+  end
+
+  defp format_delivery(%WebhookDelivery{} = delivery) do
+    %{
+      delivery_id: delivery.id,
+      event: delivery.event,
+      status: delivery.status,
+      attempt_count: delivery.attempt_count,
+      last_status_code: delivery.last_status_code,
+      last_error: delivery.last_error,
+      suppression_reason: delivery.suppression_reason,
+      first_attempted_at: delivery.first_attempted_at,
+      last_attempted_at: delivery.last_attempted_at,
+      completed_at: delivery.completed_at,
+      created_at: delivery.created_at
+    }
   end
 end

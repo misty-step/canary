@@ -3,6 +3,7 @@ defmodule Canary.Fixtures do
 
   def clean_status_tables do
     Canary.Repo.delete_all(Canary.Schemas.Annotation)
+    Canary.Repo.delete_all(Canary.Schemas.WebhookDelivery)
     Canary.Repo.delete_all(Canary.Schemas.ServiceEvent)
     Canary.Repo.delete_all(Canary.Schemas.IncidentSignal)
     Canary.Repo.delete_all(Canary.Schemas.Incident)

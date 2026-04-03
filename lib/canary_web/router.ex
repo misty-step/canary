@@ -104,6 +104,7 @@ defmodule CanaryWeb.Router do
     # Admin: webhooks
     get "/webhooks", WebhookController, :index
     post "/webhooks", WebhookController, :create
+    get "/webhooks/:id/deliveries", WebhookController, :deliveries
     delete "/webhooks/:id", WebhookController, :delete
     post "/webhooks/:id/test", WebhookController, :test
 

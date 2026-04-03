@@ -1,7 +1,7 @@
 defmodule CanaryWeb.WebhookControllerTest do
   use CanaryWeb.ConnCase
 
-  alias Canary.Schemas.ServiceEvent
+  alias Canary.Schemas.{ServiceEvent, WebhookDelivery}
 
   setup %{conn: conn} do
     {raw_key, _key} = create_api_key()
@@ -127,6 +127,149 @@ defmodule CanaryWeb.WebhookControllerTest do
 
       created = json_response(conn, 201)
       assert created["events"] == ["canary.ping"]
+    end
+
+    test "lists delivery ledger entries for a webhook", %{conn: conn} do
+      create_conn =
+        post(conn, "/api/v1/webhooks", %{
+          "url" => "https://example.com/hook",
+          "events" => ["error.new_class"]
+        })
+
+      created = json_response(create_conn, 201)
+
+      now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+      %WebhookDelivery{id: "DLV-1"}
+      |> WebhookDelivery.changeset(%{
+        webhook_id: created["id"],
+        event: "error.new_class",
+        status: "delivered",
+        attempt_count: 2,
+        first_attempted_at: now,
+        last_attempted_at: now,
+        completed_at: now,
+        created_at: now
+      })
+      |> Canary.Repo.insert!()
+
+      conn = get(conn, "/api/v1/webhooks/#{created["id"]}/deliveries")
+      body = json_response(conn, 200)
+
+      assert [%{"delivery_id" => "DLV-1"} = delivery] = body["deliveries"]
+      assert delivery["event"] == "error.new_class"
+      assert delivery["status"] == "delivered"
+      assert delivery["attempt_count"] == 2
+      assert delivery["first_attempted_at"] == now
+      assert delivery["last_attempted_at"] == now
+      assert delivery["completed_at"] == now
+    end
+
+    test "returns suppression metadata and respects limit when listing deliveries", %{conn: conn} do
+      create_conn =
+        post(conn, "/api/v1/webhooks", %{
+          "url" => "https://example.com/hook",
+          "events" => ["error.new_class"]
+        })
+
+      created = json_response(create_conn, 201)
+      older = "2026-04-02T22:00:00Z"
+      newer = "2026-04-02T22:10:00Z"
+
+      %WebhookDelivery{id: "DLV-old"}
+      |> WebhookDelivery.changeset(%{
+        webhook_id: created["id"],
+        event: "error.new_class",
+        status: "suppressed",
+        attempt_count: 0,
+        suppression_reason: "cooldown",
+        completed_at: older,
+        created_at: older
+      })
+      |> Canary.Repo.insert!()
+
+      %WebhookDelivery{id: "DLV-new"}
+      |> WebhookDelivery.changeset(%{
+        webhook_id: created["id"],
+        event: "error.new_class",
+        status: "delivered",
+        attempt_count: 1,
+        last_status_code: 202,
+        completed_at: newer,
+        created_at: newer
+      })
+      |> Canary.Repo.insert!()
+
+      conn = get(conn, "/api/v1/webhooks/#{created["id"]}/deliveries?limit=1")
+      body = json_response(conn, 200)
+
+      assert [%{"delivery_id" => "DLV-new"} = delivery] = body["deliveries"]
+      assert delivery["last_status_code"] == 202
+      assert delivery["created_at"] == newer
+    end
+
+    test "returns suppressed and discarded ledger rows with operator-visible fields", %{
+      conn: conn
+    } do
+      create_conn =
+        post(conn, "/api/v1/webhooks", %{
+          "url" => "https://example.com/hook",
+          "events" => ["error.new_class"]
+        })
+
+      created = json_response(create_conn, 201)
+      suppressed_at = "2026-04-02T22:05:00Z"
+      discarded_at = "2026-04-02T22:15:00Z"
+
+      %WebhookDelivery{id: "DLV-suppressed"}
+      |> WebhookDelivery.changeset(%{
+        webhook_id: created["id"],
+        event: "error.new_class",
+        status: "suppressed",
+        attempt_count: 0,
+        suppression_reason: "cooldown",
+        completed_at: suppressed_at,
+        created_at: suppressed_at
+      })
+      |> Canary.Repo.insert!()
+
+      %WebhookDelivery{id: "DLV-discarded"}
+      |> WebhookDelivery.changeset(%{
+        webhook_id: created["id"],
+        event: "error.new_class",
+        status: "discarded",
+        attempt_count: 4,
+        last_status_code: 500,
+        last_error: "HTTP 500",
+        first_attempted_at: discarded_at,
+        last_attempted_at: discarded_at,
+        completed_at: discarded_at,
+        created_at: discarded_at
+      })
+      |> Canary.Repo.insert!()
+
+      conn = get(conn, "/api/v1/webhooks/#{created["id"]}/deliveries")
+      body = json_response(conn, 200)
+
+      suppressed = Enum.find(body["deliveries"], &(&1["delivery_id"] == "DLV-suppressed"))
+      discarded = Enum.find(body["deliveries"], &(&1["delivery_id"] == "DLV-discarded"))
+
+      assert suppressed["status"] == "suppressed"
+      assert suppressed["suppression_reason"] == "cooldown"
+      assert suppressed["completed_at"] == suppressed_at
+
+      assert discarded["status"] == "discarded"
+      assert discarded["attempt_count"] == 4
+      assert discarded["last_status_code"] == 500
+      assert discarded["last_error"] == "HTTP 500"
+      assert discarded["first_attempted_at"] == discarded_at
+      assert discarded["last_attempted_at"] == discarded_at
+      assert discarded["completed_at"] == discarded_at
+    end
+
+    test "returns 404 when listing deliveries for an unknown webhook", %{conn: conn} do
+      conn = get(conn, "/api/v1/webhooks/WHK-missing/deliveries")
+      assert json_response(conn, 404)["code"] == "not_found"
     end
   end
 end

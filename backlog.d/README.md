@@ -10,7 +10,7 @@
 | 002 | Timeline agent polling | high | done | S |
 | 003 | Triage diagnostic webhooks non-fatal | high | done | S |
 | 004 | Incident correlation failure paths | high | done | S |
-| 012 | Webhook delivery ledger + idempotency | high | ready | M |
+| 012 | Webhook delivery ledger + idempotency | high | done | M |
 | 013 | Self-observability metrics export | high | ready | M |
 | 011 | OpenAPI spec + agent integration guide | high | ready | M |
 | 006 | Split Query into read models | high | ready | L |

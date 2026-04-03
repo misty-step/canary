@@ -252,6 +252,8 @@ curl -X POST https://canary-obs.fly.dev/api/v1/keys \
 
 All webhooks are HMAC-SHA256 signed. Secret returned on subscription creation.
 `POST /api/v1/webhooks/:id/test` sends a non-business `canary.ping` payload and does not write to the timeline.
+`x-delivery-id` is stable across retries for the same logical delivery. Consumers should deduplicate on that header, treat webhooks as wake-up hints, and replay from `GET /api/v1/timeline` for correctness.
+`GET /api/v1/webhooks/:id/deliveries` exposes delivery attempt counts, final status, timestamps, and suppression reasons for operators.
 
 ## Self-Observability
 
