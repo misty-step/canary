@@ -158,6 +158,71 @@ defmodule Canary.IncidentsTest do
                  )
                )
     end
+
+    test "falls back to the existing open incident when insert hits the open-service unique constraint" do
+      parent = self()
+      create_target_with_state("foo", "degraded")
+
+      incident_insert = fn changeset ->
+        existing =
+          %Incident{id: Canary.ID.incident_id()}
+          |> Incident.changeset(%{
+            service: "foo",
+            state: "investigating",
+            severity: "medium",
+            title: "foo incident",
+            opened_at: DateTime.utc_now() |> DateTime.to_iso8601()
+          })
+          |> Repo.insert!()
+
+        send(parent, {:existing_incident, existing.id})
+
+        {:error,
+         Ecto.Changeset.add_error(
+           changeset,
+           :service,
+           "has already been taken",
+           constraint: :unique,
+           constraint_name: :incidents_open_service_unique_index
+         )}
+      end
+
+      assert {:ok, incident} =
+               Incidents.correlate(
+                 :health_transition,
+                 "TGT-foo",
+                 "foo",
+                 incident_insert: incident_insert
+               )
+
+      assert_receive {:existing_incident, existing_id}
+      assert incident.id == existing_id
+
+      assert [%{signal_type: "health_transition", signal_ref: "TGT-foo", resolved_at: nil}] =
+               incident.signals
+
+      assert Repo.aggregate(Incident, :count, :id) == 1
+    end
+
+    test "tags raised failures as exception tuples" do
+      assert {:error, {:exception, RuntimeError}} =
+               Incidents.correlate(
+                 :health_transition,
+                 "TGT-foo",
+                 "foo",
+                 transaction_runner: fn _ -> raise RuntimeError end
+               )
+    end
+
+    test "tags thrown failures with the catch kind" do
+      assert {:error, {:throw, :boom}} =
+               Incidents.correlate(
+                 :health_transition,
+                 "TGT-foo",
+                 "foo",
+                 transaction_runner: fn _ -> throw(:boom) end
+               )
+    end
   end
 
   describe "report integration" do

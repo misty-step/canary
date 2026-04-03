@@ -1,6 +1,8 @@
 defmodule Canary.Errors.IngestTest do
   use Canary.DataCase
 
+  import ExUnit.CaptureLog
+
   alias Canary.Errors.Ingest
   alias Canary.Schemas.{Error, ErrorGroup, Incident, ServiceEvent}
 
@@ -160,6 +162,59 @@ defmodule Canary.Errors.IngestTest do
       assert length(incident.signals) == 2
       assert Enum.any?(incident.signals, &(&1.signal_type == "health_transition"))
       assert Enum.any?(incident.signals, &(&1.signal_type == "error_group"))
+    end
+
+    test "logs raised correlation failures but still succeeds" do
+      log =
+        with_test_correlator(:raise, fn ->
+          capture_log(fn ->
+            assert {:ok, result} = Ingest.ingest(@valid_attrs)
+            assert Repo.get(Error, result.id)
+            assert Repo.get(ErrorGroup, result.group_hash)
+          end)
+        end)
+
+      assert log =~ "Failed to correlate incident for error group"
+    end
+
+    test "logs thrown correlation failures but still succeeds" do
+      log =
+        with_test_correlator(:throw, fn ->
+          capture_log(fn ->
+            assert {:ok, result} = Ingest.ingest(@valid_attrs)
+            assert Repo.get(Error, result.id)
+            assert Repo.get(ErrorGroup, result.group_hash)
+          end)
+        end)
+
+      assert log =~ "Failed to correlate incident for error group"
+    end
+
+    test "logs invalid correlation return shapes but still succeeds" do
+      log =
+        with_test_correlator(:bogus, fn ->
+          capture_log(fn ->
+            assert {:ok, result} = Ingest.ingest(@valid_attrs)
+            assert Repo.get(Error, result.id)
+            assert Repo.get(ErrorGroup, result.group_hash)
+          end)
+        end)
+
+      assert log =~ "invalid_return:bogus"
+    end
+  end
+
+  defp with_test_correlator(outcome, fun) do
+    Application.put_env(:canary, :incident_correlator, Canary.TestIncidentCorrelator)
+    Application.put_env(:canary, :self_report_errors, false)
+    Application.put_env(:canary, :test_incident_correlator_outcome, outcome)
+
+    try do
+      fun.()
+    after
+      Application.delete_env(:canary, :incident_correlator)
+      Application.delete_env(:canary, :self_report_errors)
+      Application.delete_env(:canary, :test_incident_correlator_outcome)
     end
   end
 end

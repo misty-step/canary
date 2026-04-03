@@ -20,13 +20,27 @@ defmodule Canary.Incidents do
 
   @spec correlate(signal_type(), String.t(), String.t()) ::
           {:ok, Incident.t() | nil} | {:error, term()}
-  def correlate(signal_type, signal_ref, service)
-      when signal_type in [:health_transition, :error_group] and is_binary(signal_ref) and
-             is_binary(service) do
+  def correlate(signal_type, signal_ref, service),
+    do: do_correlate(signal_type, signal_ref, service, [])
+
+  if Mix.env() == :test do
+    @doc false
+    @spec correlate(signal_type(), String.t(), String.t(), keyword()) ::
+            {:ok, Incident.t() | nil} | {:error, term()}
+    def correlate(signal_type, signal_ref, service, opts),
+      do: do_correlate(signal_type, signal_ref, service, opts)
+  end
+
+  defp do_correlate(signal_type, signal_ref, service, opts)
+       when signal_type in [:health_transition, :error_group] and is_binary(signal_ref) and
+              is_binary(service) and is_list(opts) do
     now = DateTime.utc_now() |> DateTime.to_iso8601()
+    transaction_runner = Keyword.get(opts, :transaction_runner, &with_transaction/1)
 
     try do
-      case with_transaction(fn -> correlate_tx(signal_type, signal_ref, service, now) end) do
+      case transaction_runner.(fn ->
+             correlate_tx(signal_type, signal_ref, service, now, opts)
+           end) do
         {:ok, incident} -> {:ok, incident}
         other -> other
       end
@@ -39,7 +53,7 @@ defmodule Canary.Incidents do
     end
   end
 
-  defp correlate_tx(signal_type, signal_ref, service, now) do
+  defp correlate_tx(signal_type, signal_ref, service, now, opts) do
     signal_kind = to_string(signal_type)
     signal_active? = signal_active?(signal_kind, signal_ref, now)
     incident = open_incident(service)
@@ -49,27 +63,27 @@ defmodule Canary.Incidents do
         nil
 
       incident == nil ->
-        create_incident(service, signal_kind, signal_ref, now)
+        create_incident(service, signal_kind, signal_ref, now, opts)
 
       true ->
         update_incident(incident, signal_kind, signal_ref, signal_active?, now)
     end
   end
 
-  defp create_incident(service, signal_type, signal_ref, now) do
+  defp create_incident(service, signal_type, signal_ref, now, opts) do
     incident_id = ID.incident_id()
+    incident_insert = Keyword.get(opts, :incident_insert, &Repo.insert/1)
 
-    case(
-      %Incident{id: incident_id}
-      |> Incident.changeset(%{
-        service: service,
-        state: @open_state,
-        severity: "medium",
-        title: title_for(service),
-        opened_at: now
-      })
-      |> Repo.insert()
-    ) do
+    case incident_insert.(
+           %Incident{id: incident_id}
+           |> Incident.changeset(%{
+             service: service,
+             state: @open_state,
+             severity: "medium",
+             title: title_for(service),
+             opened_at: now
+           })
+         ) do
       {:ok, incident} ->
         %IncidentSignal{}
         |> IncidentSignal.changeset(%{

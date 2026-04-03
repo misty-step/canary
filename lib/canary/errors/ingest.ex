@@ -5,7 +5,7 @@ defmodule Canary.Errors.Ingest do
   """
 
   alias Canary.Errors.{Classification, DedupCache, Grouping}
-  alias Canary.{CorrelationErrorTag, ID, Incidents, Repo, Timeline}
+  alias Canary.{CorrelationErrorTag, ID, IncidentCorrelation, Repo, Timeline}
   alias Canary.Schemas.{Error, ErrorGroup}
 
   require Logger
@@ -195,7 +195,7 @@ defmodule Canary.Errors.Ingest do
   end
 
   defp maybe_correlate_incident(group_hash, service) do
-    case Incidents.correlate(:error_group, group_hash, service) do
+    case IncidentCorrelation.safe_correlate(:error_group, group_hash, service) do
       {:ok, _incident} ->
         :ok
 

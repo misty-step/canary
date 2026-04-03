@@ -1,6 +1,7 @@
 defmodule Canary.Health.CheckerTest do
   use Canary.DataCase
 
+  import ExUnit.CaptureLog
   import Canary.Fixtures
 
   alias Canary.Health.Checker
@@ -174,6 +175,80 @@ defmodule Canary.Health.CheckerTest do
       assert state.state == "degraded"
       assert event.service == "cold-api"
       assert payload["target"]["service"] == "cold-api"
+    after
+      GenServer.stop(pid)
+    end
+  end
+
+  test "logs raised correlation failures and preserves the health transition" do
+    Application.put_env(:canary, :incident_correlator, Canary.TestIncidentCorrelator)
+    Application.put_env(:canary, :self_report_errors, false)
+
+    Application.put_env(
+      :canary,
+      :test_incident_correlator_outcome,
+      :raise
+    )
+
+    on_exit(fn ->
+      Application.delete_env(:canary, :incident_correlator)
+      Application.delete_env(:canary, :self_report_errors)
+      Application.delete_env(:canary, :test_incident_correlator_outcome)
+    end)
+
+    bypass = Bypass.open()
+
+    Bypass.expect_once(bypass, "GET", "/healthz", fn conn ->
+      Plug.Conn.resp(conn, 500, "nope")
+    end)
+
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    target =
+      Repo.insert!(%Target{
+        id: "TGT-correlation-failure",
+        name: "correlation-failure",
+        service: "correlation-failure",
+        url: "http://localhost:#{bypass.port}/healthz",
+        created_at: now,
+        degraded_after: 1,
+        down_after: 3,
+        up_after: 1
+      })
+
+    Repo.insert!(%TargetState{
+      target_id: target.id,
+      state: "up",
+      consecutive_failures: 0,
+      consecutive_successes: 1,
+      last_checked_at: now,
+      last_success_at: now
+    })
+
+    {:ok, pid} = Checker.start_link(target)
+
+    try do
+      log =
+        capture_log(fn ->
+          Checker.check_now(target.id)
+
+          event =
+            eventually(fn ->
+              Repo.one(
+                from(e in ServiceEvent,
+                  where: e.event == "health_check.degraded" and e.entity_ref == ^target.id
+                )
+              )
+            end)
+
+          state = Repo.get!(TargetState, target.id)
+
+          assert event.service == "correlation-failure"
+          assert state.state == "degraded"
+          assert Process.alive?(pid)
+        end)
+
+      assert log =~ "Failed to correlate incident for target #{target.id}"
     after
       GenServer.stop(pid)
     end

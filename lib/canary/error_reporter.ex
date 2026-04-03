@@ -31,7 +31,7 @@ defmodule Canary.ErrorReporter do
     {error_class, message, stacktrace} = extract_error(msg, meta)
 
     # Skip if this looks like our own reporting (prevent loops)
-    unless self_referential?(error_class) do
+    if self_reporting_enabled?() and not self_referential?(error_class) do
       attrs = %{
         "service" => "canary",
         "error_class" => error_class,
@@ -93,6 +93,10 @@ defmodule Canary.ErrorReporter do
 
   defp self_referential?(class) do
     class in ["Canary.ErrorReporter", "Canary.Errors.Ingest"]
+  end
+
+  defp self_reporting_enabled? do
+    Application.get_env(:canary, :self_report_errors, true)
   end
 
   defp environment do
