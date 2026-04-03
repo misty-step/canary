@@ -2,6 +2,8 @@ defmodule Canary.Schemas.WebhookDeliveryLedger do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @type t :: %__MODULE__{}
+
   @statuses ~w(pending retrying delivered discarded suppressed)
 
   @primary_key {:delivery_id, :string, autogenerate: false}

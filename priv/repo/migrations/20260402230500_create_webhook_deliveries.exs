@@ -17,8 +17,9 @@ defmodule Canary.Repo.Migrations.CreateWebhookDeliveries do
       add :updated_at, :string, null: false
     end
 
-    create index(:webhook_deliveries, [:webhook_id, :created_at])
-    create index(:webhook_deliveries, [:event, :created_at])
-    create index(:webhook_deliveries, [:status, :created_at])
+    create index(:webhook_deliveries, [:created_at, :delivery_id])
+    create index(:webhook_deliveries, [:webhook_id, :created_at, :delivery_id])
+    create index(:webhook_deliveries, [:event, :created_at, :delivery_id])
+    create index(:webhook_deliveries, [:status, :created_at, :delivery_id])
   end
 end

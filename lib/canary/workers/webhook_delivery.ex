@@ -10,7 +10,7 @@ defmodule Canary.Workers.WebhookDelivery do
     priority: 1
 
   alias Canary.Alerter.{CircuitBreaker, Cooldown, Signer}
-  alias Canary.WebhookDeliveries
+  alias Canary.{Repo, WebhookDeliveries}
   alias Canary.Schemas.Webhook
   import Ecto.Query
 
@@ -72,12 +72,19 @@ defmodule Canary.Workers.WebhookDelivery do
       if Cooldown.in_cooldown?(cooldown_key) do
         WebhookDeliveries.create_suppressed(delivery_id, webhook.id, event, "cooldown", now)
       else
-        Cooldown.mark(cooldown_key)
-        WebhookDeliveries.create_pending(delivery_id, webhook.id, event, now)
+        case enqueue_delivery(webhook, payload, event, delivery_id, now) do
+          :ok ->
+            Cooldown.mark(cooldown_key)
 
-        %{webhook_id: webhook.id, payload: payload, event: event, delivery_id: delivery_id}
-        |> __MODULE__.new()
-        |> Oban.insert()
+          {:error, reason} ->
+            Logger.error("Failed to enqueue webhook delivery",
+              webhook_id: webhook.id,
+              event: event,
+              reason: inspect(reason)
+            )
+
+            WebhookDeliveries.mark_discarded(delivery_id, "enqueue_failed", now)
+        end
       end
     end)
 
@@ -160,6 +167,27 @@ defmodule Canary.Workers.WebhookDelivery do
         reason,
         DateTime.utc_now() |> DateTime.to_iso8601()
       )
+    end
+  end
+
+  defp enqueue_delivery(webhook, payload, event, delivery_id, now) do
+    args = %{webhook_id: webhook.id, payload: payload, event: event, delivery_id: delivery_id}
+
+    try do
+      Repo.transaction(fn ->
+        WebhookDeliveries.create_pending(delivery_id, webhook.id, event, now)
+
+        case args |> __MODULE__.new() |> Oban.insert() do
+          {:ok, _job} -> :ok
+          {:error, reason} -> Repo.rollback(reason)
+        end
+      end)
+      |> case do
+        {:ok, :ok} -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+    rescue
+      error -> {:error, {:exception, error}}
     end
   end
 
