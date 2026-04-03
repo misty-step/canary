@@ -1,7 +1,7 @@
 # Webhook delivery ledger and idempotency
 
 Priority: high
-Status: ready
+Status: in-progress
 Estimate: M
 
 ## Goal
