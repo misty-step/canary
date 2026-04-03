@@ -57,21 +57,24 @@ defmodule Canary.WebhookDeliveries do
 
   @spec mark_attempt(String.t(), String.t()) :: :ok
   def mark_attempt(delivery_id, now) do
-    case Repo.get(WebhookDeliveryLedger, delivery_id) do
-      nil ->
-        :ok
+    from(d in WebhookDeliveryLedger,
+      where: d.delivery_id == ^delivery_id,
+      update: [
+        set: [
+          status:
+            fragment(
+              "CASE WHEN status IN ('pending', 'retrying') THEN 'retrying' ELSE status END"
+            ),
+          attempt_count: fragment("attempt_count + 1"),
+          first_attempt_at: fragment("COALESCE(first_attempt_at, ?)", ^now),
+          last_attempt_at: ^now,
+          updated_at: ^now
+        ]
+      ]
+    )
+    |> Repo.update_all([])
 
-      row ->
-        attrs = %{
-          status: if(row.status in ["pending", "retrying"], do: "retrying", else: row.status),
-          attempt_count: row.attempt_count + 1,
-          first_attempt_at: row.first_attempt_at || now,
-          last_attempt_at: now,
-          updated_at: now
-        }
-
-        persist_update(row, attrs)
-    end
+    :ok
   end
 
   @spec mark_delivered(String.t(), String.t()) :: :ok

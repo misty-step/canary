@@ -42,13 +42,13 @@ defmodule CanaryWeb.WebhookDeliveryController do
         )
 
       {:error, {:invalid_param, param}} ->
-        param = to_string(param)
+        param_str = to_string(param)
 
         CanaryWeb.Plugs.ProblemDetails.render_error(
           conn,
           422,
           "validation_error",
-          "Invalid #{param} parameter. Must be a string.",
+          "Invalid #{param_str} parameter. Must be a string.",
           %{errors: %{param => ["must be a string"]}}
         )
 

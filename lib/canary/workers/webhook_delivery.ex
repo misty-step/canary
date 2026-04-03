@@ -235,21 +235,23 @@ defmodule Canary.Workers.WebhookDelivery do
   defp stable_payload_hash(payload) do
     payload
     |> Map.drop(["timestamp", "sequence"])
-    |> canonicalize()
-    |> :erlang.term_to_binary()
-    |> then(&:crypto.hash(:sha256, &1))
-    |> Base.encode16(case: :lower)
+    |> stable_hash()
     |> then(&"payload:#{&1}")
   end
 
   defp stable_args_hash(args) do
     args
     |> Map.drop(["delivery_id"])
+    |> stable_hash()
+    |> String.slice(0, 24)
+  end
+
+  defp stable_hash(value) do
+    value
     |> canonicalize()
-    |> :erlang.term_to_binary()
+    |> :erlang.term_to_binary(minor_version: 1)
     |> then(&:crypto.hash(:sha256, &1))
     |> Base.encode16(case: :lower)
-    |> String.slice(0, 24)
   end
 
   defp canonicalize(value) when is_map(value) do
