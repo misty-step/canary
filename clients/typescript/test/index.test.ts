@@ -161,4 +161,31 @@ describe("captureMessage", () => {
     expect(body.message).toBe("something happened");
     expect(body.severity).toBe("info");
   });
+
+  it("scrubs message context when enabled", async () => {
+    initCanary({
+      endpoint: "https://canary.test",
+      apiKey: "sk_test_abc",
+      service: "test-svc",
+      scrubPii: true,
+    });
+
+    await captureMessage("contact alice@example.com", {
+      context: { owner: "alice@example.com" },
+    });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.message).toBe("contact [EMAIL]");
+    expect(body.context).toEqual({ owner: "[EMAIL]" });
+  });
+});
+
+describe("uninitialized capture helpers", () => {
+  it("return null before initCanary runs", async () => {
+    vi.resetModules();
+    const { captureException, captureMessage } = await import("../src/index");
+
+    await expect(captureException(new Error("boom"))).resolves.toBeNull();
+    await expect(captureMessage("boom")).resolves.toBeNull();
+  });
 });

@@ -13,7 +13,8 @@ defmodule CanarySdk.MixProject do
       deps: deps(),
       description: "Elixir SDK for Canary error reporting — Logger handler with async HTTP",
       package: package(),
-      source_url: @source_url
+      source_url: @source_url,
+      test_coverage: [summary: [threshold: 90]]
     ]
   end
 
@@ -25,6 +26,7 @@ defmodule CanarySdk.MixProject do
     [
       {:req, "~> 0.5"},
       {:bypass, "~> 2.1", only: :test},
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end

@@ -44,6 +44,12 @@ defmodule CanaryWeb.Router do
     get "/readyz", HealthController, :readyz
   end
 
+  scope "/", CanaryWeb do
+    pipe_through [:api, :authenticated, :query_rate_limit]
+
+    get "/metrics", MetricsController, :index
+  end
+
   # Dashboard login (outside live_session — no on_mount gate)
   scope "/dashboard", CanaryWeb do
     pipe_through :browser

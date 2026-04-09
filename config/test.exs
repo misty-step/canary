@@ -18,6 +18,7 @@ config :canary, CanaryWeb.Endpoint,
 config :canary, Oban, testing: :inline
 
 config :canary, run_migrations: false
+config :canary, :skip_health_manager_boot, true
 
 # Route reads through write Repo in test for sandbox compatibility.
 # SQLite can't share transactions across separate repo pools.

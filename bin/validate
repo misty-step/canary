@@ -6,11 +6,13 @@ MODE=full
 
 usage() {
   cat <<'EOF'
-Usage: bin/validate [--fast] [-h|--help]
+Usage: bin/validate [--fast|--advisories|--strict] [-h|--help]
 
-Runs repo-local validation across every maintained package.
-  --fast      Run the reduced validation set.
-  -h, --help  Show this help message.
+Runs the canonical repo-local validation through Dagger.
+  --fast        Run the reduced hook-oriented validation set.
+  --advisories  Run live dependency advisory scans only.
+  --strict      Run the deterministic gate followed by advisory scans.
+  -h, --help    Show this help message.
 EOF
 }
 
@@ -18,6 +20,14 @@ while (($#)); do
   case "$1" in
     --fast)
       MODE=fast
+      shift
+      ;;
+    --advisories)
+      MODE=advisories
+      shift
+      ;;
+    --strict)
+      MODE=strict
       shift
       ;;
     -h|--help)
@@ -31,48 +41,25 @@ while (($#)); do
   esac
 done
 
-run() {
-  local dir="$1"
-  shift
-
-  printf '==> %s: %s\n' "$dir" "$*"
-  (
-    cd "$ROOT/$dir"
-    "$@"
-  )
-}
-
-run_elixir_fast() {
-  local dir="$1"
-  run "$dir" mix format --check-formatted
-}
-
-run_elixir_full() {
-  local dir="$1"
-  run "$dir" env MIX_ENV=test mix compile --warnings-as-errors
-  run "$dir" mix format --check-formatted
-  run "$dir" mix test
-}
-
-if [[ "$MODE" == "fast" ]]; then
-  run_elixir_fast "."
-  run "." env MIX_ENV=test mix compile --warnings-as-errors
-  run_elixir_fast "canary_sdk"
-  run "canary_sdk" env MIX_ENV=test mix compile --warnings-as-errors
-  run "clients/typescript" npm run typecheck
-  exit 0
+if ! command -v dagger >/dev/null 2>&1; then
+  printf 'dagger CLI is required for repo validation. Install it before running hooks or CI.\n' >&2
+  exit 1
 fi
 
-run "." env MIX_ENV=test mix compile --warnings-as-errors
-run "." mix format --check-formatted
-run "." mix credo --strict
-run "." mix sobelow --config
-run "." mix deps.audit
-run "." mix test --cover
-run "." env MIX_ENV=dev mix dialyzer
+cd "$ROOT"
 
-run_elixir_full "canary_sdk"
+if [[ "$MODE" == "fast" ]]; then
+  exec dagger call --progress=plain fast
+fi
 
-run "clients/typescript" npm run typecheck
-run "clients/typescript" npm test
-run "clients/typescript" npm run build
+if [[ "$MODE" == "advisories" ]]; then
+  exec dagger call --progress=plain advisories
+fi
+
+if [[ "$MODE" == "strict" ]]; then
+  dagger call --progress=plain codex-agent-roles
+  dagger check --progress=plain
+  exec dagger call --progress=plain advisories
+fi
+
+exec dagger check --progress=plain

@@ -11,164 +11,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  root-quality:
+  dagger:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      MIX_ENV: test
+    timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4 # v4
-        # Pin first-party actions to tag; pin third-party to SHA
-      - uses: erlef/setup-beam@ee09b1e59bb240681c382eb1f0abc6a04af72764 # v1
-        id: beam
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Read Dagger engine version
+        id: dagger_version
+        run: echo "version=$(jq -r '.engineVersion | ltrimstr(\"v\")' dagger.json)" >> "$GITHUB_OUTPUT"
+      - name: Run Dagger codex role validation
+        uses: dagger/dagger-for-github@456fc3af63a2ba6f9789af9c55045b459115541b # v8.3.0
         with:
-          otp-version: "27.3.4.9"
-          elixir-version: "1.17.3"
-
-      - name: Restore deps cache
-        uses: actions/cache@v4
+          version: ${{ steps.dagger_version.outputs.version }}
+          verb: call
+          args: codex-agent-roles
+      - name: Run Dagger CI
+        uses: dagger/dagger-for-github@456fc3af63a2ba6f9789af9c55045b459115541b # v8.3.0
         with:
-          path: deps
-          key: deps-root-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
-          restore-keys: deps-root-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
-
-      - name: Restore test build cache
-        uses: actions/cache@v4
+          version: ${{ steps.dagger_version.outputs.version }}
+          verb: check
+      - name: Run Dagger advisories
+        uses: dagger/dagger-for-github@456fc3af63a2ba6f9789af9c55045b459115541b # v8.3.0
         with:
-          path: _build/test
-          key: build-root-test-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
-          restore-keys: build-root-test-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
-
-      - name: Install dependencies
-        run: mix deps.get
-
-      - name: Compile (warnings as errors)
-        run: mix compile --warnings-as-errors
-
-      - name: Check formatting
-        run: mix format --check-formatted
-
-      - name: Credo (strict)
-        run: mix credo --strict
-
-      - name: Security lint (Sobelow)
-        run: mix sobelow --config --exit --threshold medium
-
-      - name: Dependency audit
-        run: mix deps.audit
-
-      - name: Run tests with coverage
-        run: mix test --cover
-
-  root-dialyzer:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: root-quality
-    steps:
-      - uses: actions/checkout@v4 # v4
-      - uses: erlef/setup-beam@ee09b1e59bb240681c382eb1f0abc6a04af72764 # v1
-        id: beam
-        with:
-          otp-version: "27.3.4.9"
-          elixir-version: "1.17.3"
-
-      - name: Restore deps cache
-        uses: actions/cache@v4
-        with:
-          path: deps
-          key: deps-root-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
-          restore-keys: deps-root-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
-
-      - name: Restore dev build cache
-        uses: actions/cache@v4
-        with:
-          path: _build/dev
-          key: build-root-dev-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
-          restore-keys: build-root-dev-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
-
-      - name: Install dependencies
-        run: mix deps.get
-
-      - name: Restore PLT cache
-        uses: actions/cache@v4
-        id: plt-cache
-        with:
-          path: _build/dev/dialyxir_*.plt
-          key: plt-root-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
-          restore-keys: plt-root-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
-
-      - name: Build PLT
-        if: steps.plt-cache.outputs.cache-hit != 'true'
-        env:
-          MIX_ENV: dev
-        run: mix dialyzer --plt
-
-      - name: Dialyzer
-        env:
-          MIX_ENV: dev
-        run: mix dialyzer
-
-  canary-sdk:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      MIX_ENV: test
-    steps:
-      - uses: actions/checkout@v4 # v4
-      - uses: erlef/setup-beam@ee09b1e59bb240681c382eb1f0abc6a04af72764 # v1
-        id: beam
-        with:
-          otp-version: "27.3.4.9"
-          elixir-version: "1.17.3"
-
-      - name: Restore deps cache
-        uses: actions/cache@v4
-        with:
-          path: canary_sdk/deps
-          key: deps-canary-sdk-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('canary_sdk/mix.lock') }}
-          restore-keys: deps-canary-sdk-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
-
-      - name: Restore build cache
-        uses: actions/cache@v4
-        with:
-          path: canary_sdk/_build/test
-          key: build-canary-sdk-test-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('canary_sdk/mix.lock') }}
-          restore-keys: build-canary-sdk-test-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
-
-      - name: Install dependencies
-        working-directory: canary_sdk
-        run: mix deps.get
-
-      - name: Compile (warnings as errors)
-        working-directory: canary_sdk
-        run: mix compile --warnings-as-errors
-
-      - name: Check formatting
-        working-directory: canary_sdk
-        run: mix format --check-formatted
-
-      - name: Run tests
-        working-directory: canary_sdk
-        run: mix test
-
-  typescript-client:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: clients/typescript
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22.22.0"
-          cache: npm
-          cache-dependency-path: clients/typescript/package-lock.json
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-      - name: Build
-        run: npm run build
-      - name: Typecheck
-        run: npm run typecheck
-      - name: Test
-        run: npm test
+          version: ${{ steps.dagger_version.outputs.version }}
+          verb: call
+          args: advisories

@@ -16,6 +16,14 @@ defmodule Canary.Errors.Ingest do
 
   @spec ingest(map()) :: {:ok, map()} | {:error, atom(), term()}
   def ingest(attrs) do
+    started_at = System.monotonic_time()
+
+    result = do_ingest(attrs)
+    emit_ingest_metrics(started_at, result)
+    result
+  end
+
+  defp do_ingest(attrs) do
     with :ok <- validate_required(attrs),
          :ok <- validate_context(attrs),
          :ok <- validate_fingerprint(attrs) do
@@ -205,6 +213,17 @@ defmodule Canary.Errors.Ingest do
         )
     end
   end
+
+  defp emit_ingest_metrics(started_at, result) do
+    :telemetry.execute(
+      [:canary, :ingest, :stop],
+      %{duration: System.monotonic_time() - started_at},
+      %{status: ingest_status(result)}
+    )
+  end
+
+  defp ingest_status({:ok, _summary}), do: :ok
+  defp ingest_status({:error, _reason, _details}), do: :error
 
   defp truncate(nil, _max), do: nil
   defp truncate(str, max), do: String.slice(str, 0, max)

@@ -25,13 +25,15 @@
     "build": "tsup",
     "prepare": "tsup",
     "test": "vitest run",
+    "test:ci": "vitest run --coverage",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.3",
     "tsup": "^8.0.0",
     "typescript": "^5.8.0",
-    "vitest": "^3.0.0"
+    "vitest": "^4.1.3"
   },
   "license": "MIT"
 }

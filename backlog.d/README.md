@@ -11,13 +11,15 @@
 | 003 | Triage diagnostic webhooks non-fatal | high | done | S |
 | 004 | Incident correlation failure paths | high | done | S |
 | 012 | Webhook delivery ledger + idempotency | high | ready | M |
-| 013 | Self-observability metrics export | high | ready | M |
+| 013 | Self-observability metrics export | high | done | M |
 | 011 | OpenAPI spec + agent integration guide | high | ready | M |
 | 006 | Split Query into read models | high | ready | L |
 | 005 | Connect-a-service workflow | medium | ready | M |
 | 014 | Backup/restore + DR validation | medium | ready | S |
 | 008 | Security + governance baseline | medium | ready | S |
 | 007 | Networked service dogfooding | medium | ready | L |
+| 016 | Immutable CI control plane | medium | ready | M |
+| 017 | Dagger source contract + cache portability | medium | ready | M |
 | 015 | Product security controls (scoped keys) | low | ready | M |
 | 009 | Desktop health semantics research | low | blocked | M |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
@@ -45,7 +47,7 @@
 **Lane 1 (agent readiness):** 012 (delivery ledger) → bb/011 (triage sprite) → 010 (ramp)
 **Lane 2 (contract + observability):** 011 (OpenAPI) + 013 (metrics) — parallel, no deps
 **Lane 3 (structural):** 006 (query split) → 005 (connect-a-service)
-**Lane 4 (hardening):** 008, 014 (independent, small, can ship anytime)
+**Lane 4 (hardening):** 008, 014, 016, 017 (independent, small, can ship anytime)
 **Lane 5 (future):** 015 (scoped keys), 009 (desktop health, blocked on 007)
 
 ## Migration Notes

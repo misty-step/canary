@@ -56,4 +56,23 @@ describe("onRequestError", () => {
     expect(body.context.path).toBe("/dashboard");
     expect(body.context.method).toBe("POST");
   });
+
+  it("merges existing context with request info", async () => {
+    await onRequestError(
+      new Error("oops"),
+      {
+        path: "/dashboard",
+        method: "POST",
+        headers: {},
+      },
+      { context: { requestId: "req-123" } }
+    );
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.context).toEqual({
+      requestId: "req-123",
+      path: "/dashboard",
+      method: "POST",
+    });
+  });
 });

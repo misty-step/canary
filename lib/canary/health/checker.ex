@@ -99,11 +99,11 @@ defmodule Canary.Health.Checker do
     event =
       case Probe.check(target) do
         {:ok, result} ->
-          persist_check(target.id, result)
+          persist_check(target, result)
           :success
 
         {:error, result} ->
-          persist_check(target.id, result)
+          persist_check(target, result)
           :failure
       end
 
@@ -124,7 +124,7 @@ defmodule Canary.Health.Checker do
   end
 
   defp record_failure(target, s, result, detail) do
-    persist_check(target.id, %{
+    persist_check(target, %{
       status_code: nil,
       latency_ms: 0,
       result: result,
@@ -148,12 +148,12 @@ defmodule Canary.Health.Checker do
     %{s | state: state, counters: counters}
   end
 
-  defp persist_check(target_id, result) do
+  defp persist_check(target, result) do
     now = DateTime.utc_now() |> DateTime.to_iso8601()
 
     %TargetCheck{}
     |> TargetCheck.changeset(%{
-      target_id: target_id,
+      target_id: target.id,
       checked_at: now,
       status_code: result.status_code,
       latency_ms: result.latency_ms,
@@ -162,6 +162,12 @@ defmodule Canary.Health.Checker do
       error_detail: result.error_detail
     })
     |> Repo.insert!()
+
+    :telemetry.execute(
+      [:canary, :probe, :stop],
+      %{duration: result.latency_ms},
+      %{result: if(result.result == "success", do: "success", else: "failure")}
+    )
   end
 
   defp persist_state(target_id, state, counters, now) do

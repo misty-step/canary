@@ -4,6 +4,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CI_MODE=0
 
+require_command() {
+  local command_name="$1"
+  local help_text="$2"
+
+  if command -v "$command_name" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  printf 'Missing required command: %s\n%s\n' "$command_name" "$help_text" >&2
+  exit 1
+}
+
 usage() {
   cat <<'EOF'
 Usage: bin/bootstrap [--ci] [-h|--help]
@@ -30,6 +42,10 @@ while (($#)); do
       ;;
   esac
 done
+
+if [[ "$CI_MODE" -eq 0 ]]; then
+  require_command "dagger" "Install the Dagger CLI before relying on repo hooks or validation."
+fi
 
 run() {
   local dir="$1"

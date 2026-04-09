@@ -46,6 +46,9 @@ Supported local toolchains are pinned in `.tool-versions`:
 - Elixir `1.17.3-otp-27`
 - Node.js `22.22.0`
 
+Local validation also requires the `dagger` CLI. Dagger is the canonical CI
+surface for this repo; GitHub Actions and git hooks delegate to it.
+
 The production Dockerfile also builds on Elixir `1.17`, and CI uses the same pinned toolchain versions.
 
 ### Bootstrap
@@ -61,27 +64,62 @@ That command:
 - runs `mix setup` for the core service
 - installs `canary_sdk/` dependencies
 - runs `npm ci` for `clients/typescript/`
-- configures `core.hooksPath` to use `.githooks/pre-commit`
+- configures `core.hooksPath` to use `.githooks/`
 
 ### Validation
 
-Run the full repo-local quality gate from the repo root:
+Run the canonical repo-local quality gate from the repo root:
 
 ```bash
-./bin/validate
+dagger check
 ```
 
-That matches the current CI checks across the maintained packages:
+`./bin/validate` defaults to the same deterministic gate for scripts and hooks.
 
-- core: compile, format, credo, test, dialyzer
-- Elixir SDK: compile, format, test
-- TypeScript SDK: typecheck, test, build
+The canonical Dagger gate is deterministic and enforces checks across the
+maintained packages:
 
-The pre-commit hook runs the fast subset instead:
+- core: compile, format, credo, sobelow, coverage, dialyzer
+- Elixir SDK: compile, format, coverage
+- TypeScript SDK: typecheck, coverage, build
+
+Run live dependency advisory scans explicitly when you want current registry
+state as part of a stricter local release check:
 
 ```bash
-./bin/validate --fast
+./bin/validate --advisories
 ```
+
+Or run both in sequence:
+
+```bash
+./bin/validate --strict
+```
+
+`--strict` also includes the local `.codex/agents/*.toml` role validation
+before the deterministic and advisory phases.
+
+Repo-local metadata validation for `.codex/agents/*.toml` is part of the local
+hook surfaces and can also be invoked directly:
+
+```bash
+dagger call codex-agent-roles
+```
+
+The pre-commit hook runs the fast local subset instead:
+
+```bash
+dagger call fast
+```
+
+The pre-push hook runs the full Dagger gate before local pushes:
+
+```bash
+./bin/validate --strict
+```
+
+GitHub Actions mirrors that strict path by running `dagger call codex-agent-roles`,
+`dagger check`, and `dagger call advisories` through the same pinned Dagger action.
 
 ## API
 

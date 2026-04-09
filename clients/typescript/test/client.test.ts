@@ -92,6 +92,37 @@ describe("createClient", () => {
     });
   });
 
+  it("returns null after both retry attempts fail", async () => {
+    fetchSpy
+      .mockRejectedValueOnce(new Error("timeout"))
+      .mockRejectedValueOnce(new Error("still down"));
+
+    const client = createClient(opts);
+
+    await expect(
+      client.send({
+        error_class: "Error",
+        message: "retry exhausted",
+        severity: "error",
+      })
+    ).resolves.toBeNull();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns null when the server responds with a non-2xx status", async () => {
+    fetchSpy.mockResolvedValueOnce(new Response("bad gateway", { status: 502 }));
+
+    const client = createClient(opts);
+    await expect(
+      client.send({
+        error_class: "Error",
+        message: "server failure",
+        severity: "error",
+      })
+    ).resolves.toBeNull();
+  });
+
   it("returns null when inflight reaches maxQueue", async () => {
     // Never resolve — simulate slow network
     fetchSpy.mockImplementation(

@@ -48,7 +48,10 @@ defmodule Canary.Health.Manager do
 
   @impl true
   def init(_opts) do
-    send(self(), :boot)
+    unless Application.get_env(:canary, :skip_health_manager_boot, false) do
+      send(self(), :boot)
+    end
+
     {:ok, %{}}
   end
 

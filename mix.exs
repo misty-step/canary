@@ -10,7 +10,7 @@ defmodule Canary.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
-      test_coverage: [summary: [threshold: 75]]
+      test_coverage: [summary: [threshold: 81]]
     ]
   end
 
@@ -40,6 +40,7 @@ defmodule Canary.MixProject do
       {:jason, "~> 1.4"},
       {:bandit, "~> 1.5"},
       {:telemetry_metrics, "~> 1.0"},
+      {:telemetry_metrics_prometheus_core, "~> 1.2"},
       {:telemetry_poller, "~> 1.0"},
       {:dns_cluster, "~> 0.2.0"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},

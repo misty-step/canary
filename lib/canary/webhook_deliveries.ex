@@ -46,13 +46,21 @@ defmodule Canary.WebhookDeliveries do
       updated_at: now
     }
 
-    %WebhookDeliveryLedger{delivery_id: delivery_id}
-    |> WebhookDeliveryLedger.changeset(attrs)
-    |> Repo.insert(
-      on_conflict: [set: [status: "suppressed", reason: reason, updated_at: now]],
-      conflict_target: :delivery_id
-    )
-    |> log_result("mark webhook delivery #{delivery_id} as suppressed")
+    case Repo.insert(
+           WebhookDeliveryLedger.changeset(
+             %WebhookDeliveryLedger{delivery_id: delivery_id},
+             attrs
+           ),
+           on_conflict: [set: [status: "suppressed", reason: reason, updated_at: now]],
+           conflict_target: :delivery_id
+         ) do
+      {:ok, _row} ->
+        emit_delivery_metric("suppressed")
+        :ok
+
+      {:error, changeset} ->
+        log_result({:error, changeset}, "mark webhook delivery #{delivery_id} as suppressed")
+    end
   end
 
   @spec mark_attempt(String.t(), String.t()) :: :ok
@@ -84,7 +92,11 @@ defmodule Canary.WebhookDeliveries do
         :ok
 
       row ->
-        persist_update(row, %{status: "delivered", delivered_at: now, updated_at: now})
+        persist_update(
+          row,
+          %{status: "delivered", delivered_at: now, updated_at: now},
+          "delivered"
+        )
     end
   end
 
@@ -95,12 +107,16 @@ defmodule Canary.WebhookDeliveries do
         :ok
 
       row ->
-        persist_update(row, %{
-          status: "discarded",
-          reason: reason,
-          discarded_at: now,
-          updated_at: now
-        })
+        persist_update(
+          row,
+          %{
+            status: "discarded",
+            reason: reason,
+            discarded_at: now,
+            updated_at: now
+          },
+          "discarded"
+        )
     end
   end
 
@@ -226,11 +242,15 @@ defmodule Canary.WebhookDeliveries do
     |> Base.url_encode64(padding: false)
   end
 
-  defp persist_update(row, attrs) do
-    row
-    |> WebhookDeliveryLedger.changeset(attrs)
-    |> Repo.update()
-    |> log_result("update webhook delivery #{row.delivery_id}")
+  defp persist_update(row, attrs, status) do
+    case Repo.update(WebhookDeliveryLedger.changeset(row, attrs)) do
+      {:ok, _updated_row} ->
+        emit_delivery_metric(status)
+        :ok
+
+      {:error, changeset} ->
+        log_result({:error, changeset}, "update webhook delivery #{row.delivery_id}")
+    end
   end
 
   defp log_result({:ok, _row}, _action), do: :ok
@@ -238,5 +258,13 @@ defmodule Canary.WebhookDeliveries do
   defp log_result({:error, changeset}, action) do
     Logger.error("Failed to #{action}: #{inspect(changeset.errors)}")
     :ok
+  end
+
+  defp emit_delivery_metric(status) do
+    :telemetry.execute(
+      [:canary, :webhook, :delivery],
+      %{count: 1},
+      %{status: status}
+    )
   end
 end
