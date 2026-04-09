@@ -1,8 +1,8 @@
 /**
  * Dagger-first CI for the Canary monorepo.
  *
- * Canonical local gate:  dagger check
- * Fast hook subset:      dagger call fast
+ * Canonical local gate:  ./bin/validate
+ * Fast hook subset:      ./bin/dagger call fast
  */
 import {
   dag,
@@ -67,16 +67,39 @@ def require(condition, message):
 with tempfile.TemporaryDirectory() as tmp:
     tmp_path = Path(tmp)
     log_path = tmp_path / "dagger.log"
+    ssh_log_path = tmp_path / "ssh.log"
     dagger_path = tmp_path / "dagger"
     dagger_path.write_text(
         "#!/usr/bin/env bash\\n"
         f"printf '%s\\\\n' \\"$*\\" >> \\"{log_path}\\"\\n"
+        "if [[ \\"$EXPECT_DOCKER_CALL\\" == \\"1\\" ]]; then\\n"
+        "  docker version >/dev/null\\n"
+        "fi\\n"
     )
     dagger_path.chmod(0o755)
 
     env = os.environ.copy()
     env["PATH"] = f"{tmp}:{env['PATH']}"
     env["HOME"] = tmp
+
+    colima_dir = tmp_path / ".colima"
+    colima_dir.mkdir()
+    (colima_dir / "ssh_config").write_text("Host colima\\n")
+    colima_path = tmp_path / "colima"
+    colima_path.write_text(
+        "#!/usr/bin/env bash\\n"
+        "if [[ \\"$1\\" == \\"status\\" ]]; then\\n"
+        "  exit 0\\n"
+        "fi\\n"
+        "exit 1\\n"
+    )
+    colima_path.chmod(0o755)
+    ssh_path = tmp_path / "ssh"
+    ssh_path.write_text(
+        "#!/usr/bin/env bash\\n"
+        f"printf '%s\\\\n' \\"$*\\" >> \\"{ssh_log_path}\\"\\n"
+    )
+    ssh_path.chmod(0o755)
 
     def run(command):
         return subprocess.run(
@@ -94,6 +117,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
     def reset_calls():
         log_path.write_text("")
+        ssh_log_path.write_text("")
 
     reset_calls()
     result = run(["bash", "bin/validate", "--fast"])
@@ -141,6 +165,22 @@ with tempfile.TemporaryDirectory() as tmp:
         ],
         "pre-push hook must delegate to the strict validation path",
     )
+
+    reset_calls()
+    env["CANARY_DAGGER_DOCKER_TRANSPORT"] = "colima-ssh"
+    env["EXPECT_DOCKER_CALL"] = "1"
+    result = run(["bash", "bin/dagger", "call", "fast"])
+    require(result.returncode == 0,
+            "bin/dagger must support the Colima transport override")
+    require(read_calls() == ["call fast"],
+            "bin/dagger must still delegate to the installed dagger binary under the Colima transport override")
+    ssh_calls = [line.strip() for line in ssh_log_path.read_text().splitlines() if line.strip()]
+    require(
+        ssh_calls == [f"-F {colima_dir / 'ssh_config'} -T colima docker version"],
+        "bin/dagger must route Docker calls through Colima over SSH",
+    )
+    env.pop("CANARY_DAGGER_DOCKER_TRANSPORT", None)
+    env.pop("EXPECT_DOCKER_CALL", None)
 
 require("steps.dagger_version.outputs.version" in workflow,
         "GitHub workflow must source the Dagger version from dagger.json")
