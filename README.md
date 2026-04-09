@@ -46,8 +46,9 @@ Supported local toolchains are pinned in `.tool-versions`:
 - Elixir `1.17.3-otp-27`
 - Node.js `22.22.0`
 
-Local validation also requires the `dagger` CLI. Dagger is the canonical CI
-surface for this repo; GitHub Actions and git hooks delegate to it.
+Local validation also requires the `dagger` CLI. On macOS, repo-local Dagger
+execution assumes Colima and routes Docker calls into the Colima VM over SSH.
+GitHub Actions and git hooks delegate to the same Dagger surface.
 
 The production Dockerfile also builds on Elixir `1.17`, and CI uses the same pinned toolchain versions.
 
@@ -71,10 +72,26 @@ That command:
 Run the canonical repo-local quality gate from the repo root:
 
 ```bash
-dagger check
+./bin/validate
 ```
 
-`./bin/validate` defaults to the same deterministic gate for scripts and hooks.
+`./bin/validate` defaults to the deterministic Dagger gate and automatically
+uses the repo-local `./bin/dagger` wrapper.
+
+On macOS, start Colima first:
+
+```bash
+colima start --runtime docker
+./bin/validate
+```
+
+Use the wrapper directly when you want raw Dagger entrypoints from the repo:
+
+```bash
+./bin/dagger check
+./bin/dagger call codex-agent-roles
+./bin/dagger call fast
+```
 
 The canonical Dagger gate is deterministic and enforces checks across the
 maintained packages:
@@ -103,13 +120,13 @@ Repo-local metadata validation for `.codex/agents/*.toml` is part of the local
 hook surfaces and can also be invoked directly:
 
 ```bash
-dagger call codex-agent-roles
+./bin/dagger call codex-agent-roles
 ```
 
 The pre-commit hook runs the fast local subset instead:
 
 ```bash
-dagger call fast
+./bin/dagger call fast
 ```
 
 The pre-push hook runs the full Dagger gate before local pushes:

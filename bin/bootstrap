@@ -26,6 +26,21 @@ Bootstraps every maintained package in the monorepo.
 EOF
 }
 
+note_colima() {
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    return 0
+  fi
+
+  if ! command -v colima >/dev/null 2>&1; then
+    printf '==> tooling: macOS local validation uses Colima. Install it before running ./bin/validate.\n'
+    return 0
+  fi
+
+  if ! colima status >/dev/null 2>&1; then
+    printf '==> tooling: start Colima before running local validation: colima start --runtime docker\n'
+  fi
+}
+
 while (($#)); do
   case "$1" in
     --ci)
@@ -45,6 +60,7 @@ done
 
 if [[ "$CI_MODE" -eq 0 ]]; then
   require_command "dagger" "Install the Dagger CLI before relying on repo hooks or validation."
+  note_colima
 fi
 
 run() {

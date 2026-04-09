@@ -41,25 +41,20 @@ while (($#)); do
   esac
 done
 
-if ! command -v dagger >/dev/null 2>&1; then
-  printf 'dagger CLI is required for repo validation. Install it before running hooks or CI.\n' >&2
-  exit 1
-fi
-
 cd "$ROOT"
 
 if [[ "$MODE" == "fast" ]]; then
-  exec dagger call --progress=plain fast
+  exec "$ROOT/bin/dagger" call --progress=plain fast
 fi
 
 if [[ "$MODE" == "advisories" ]]; then
-  exec dagger call --progress=plain advisories
+  exec "$ROOT/bin/dagger" call --progress=plain advisories
 fi
 
 if [[ "$MODE" == "strict" ]]; then
-  dagger call --progress=plain codex-agent-roles
-  dagger check --progress=plain
-  exec dagger call --progress=plain advisories
+  "$ROOT/bin/dagger" call --progress=plain codex-agent-roles
+  "$ROOT/bin/dagger" check --progress=plain
+  exec "$ROOT/bin/dagger" call --progress=plain advisories
 fi
 
-exec dagger check --progress=plain
+exec "$ROOT/bin/dagger" check --progress=plain
