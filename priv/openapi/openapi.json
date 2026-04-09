@@ -1,0 +1,3077 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Canary API",
+    "version": "0.1.0",
+    "description": "Machine-consumable contract for the Canary observability API. Canary exposes deterministic, bounded responses for error ingestion, health checks, incidents, timelines, operator management, and webhook delivery visibility.",
+    "x-agent-guide": {
+      "summary": "Register webhooks as wake-up hints, then treat the timeline as the durable source of truth for correctness.",
+      "flow": [
+        "Create a webhook subscription for the business events that should wake the agent.",
+        "Persist the last processed timeline cursor after each successful polling cycle.",
+        "When a webhook arrives, poll GET /api/v1/timeline from the last persisted cursor.",
+        "Process the returned events in order, then persist the response cursor before going idle again.",
+        "Write incident or error-group annotations back to Canary when the agent completes follow-up work."
+      ],
+      "webhook_contract": "Deduplicate deliveries by x-delivery-id. Webhooks are non-authoritative wake-up hints; the timeline is the durable event log and must be replayed for correctness.",
+      "crash_recovery": "After a crash or restart, resume from the last persisted cursor, replay missed timeline events, and continue polling until the API returns no further cursor.",
+      "cursor_precedence": "When both `after` and `cursor` are provided on timeline-style pagination endpoints, Canary resolves `after` first and ignores `cursor` for that request."
+    }
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Health"
+    },
+    {
+      "name": "Metrics"
+    },
+    {
+      "name": "Errors"
+    },
+    {
+      "name": "Report"
+    },
+    {
+      "name": "Timeline"
+    },
+    {
+      "name": "Incidents"
+    },
+    {
+      "name": "Annotations"
+    },
+    {
+      "name": "Targets"
+    },
+    {
+      "name": "Webhooks"
+    },
+    {
+      "name": "Keys"
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Liveness probe",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Process is alive.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthzResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Readiness probe",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The application is ready.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadyzResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A readiness dependency failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadyzResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/openapi.json": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Fetch the OpenAPI contract",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The current OpenAPI document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "Metrics"
+        ],
+        "summary": "Scrape Prometheus metrics",
+        "responses": {
+          "200": {
+            "description": "Prometheus exposition format.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/errors": {
+      "post": {
+        "tags": [
+          "Errors"
+        ],
+        "summary": "Ingest an error event",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ErrorIngestRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Error accepted and grouped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorIngestResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLargeProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/query": {
+      "get": {
+        "tags": [
+          "Errors"
+        ],
+        "summary": "Query grouped errors",
+        "description": "Provide `service`, `error_class`, or `group_by=error_class`. Service-scoped queries default to `window=1h`; error-class and group-by queries default to `window=24h`.",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "error_class",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "group_by",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "error_class"
+              ]
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Window"
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Opaque cursor for grouped error pagination."
+          },
+          {
+            "name": "with_annotation",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "without_annotation",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Grouped error query response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ErrorQueryByServiceResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorQueryByClassResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorClassesResponse"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/errors/{id}": {
+      "get": {
+        "tags": [
+          "Errors"
+        ],
+        "summary": "Fetch an error by id",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Detailed error payload.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetailResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/report": {
+      "get": {
+        "tags": [
+          "Report"
+        ],
+        "summary": "Generate the unified agent report",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Window"
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Unified report in JSON or CSV form.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReportResponse"
+                }
+              },
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/timeline": {
+      "get": {
+        "tags": [
+          "Timeline"
+        ],
+        "summary": "List timeline events",
+        "description": "If both `after` and `cursor` are supplied, `after` takes precedence.",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Window"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/After"
+          },
+          {
+            "name": "event_type",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated business event names."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Timeline page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimelineResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/webhook-deliveries": {
+      "get": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Page through webhook delivery ledger rows",
+        "description": "If both `after` and `cursor` are supplied, `after` takes precedence.",
+        "parameters": [
+          {
+            "name": "webhook_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "event",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/WebhookEvent"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "retrying",
+                "delivered",
+                "discarded",
+                "suppressed"
+              ]
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "$ref": "#/components/parameters/After"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Webhook delivery ledger page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookDeliveriesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/status": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Combined health and error summary",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Window"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Combined system status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/health-status": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Current health target state",
+        "responses": {
+          "200": {
+            "description": "Current target health summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/checks": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "List recent checks for a target",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Window"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent target checks.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetChecksResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/incidents": {
+      "get": {
+        "tags": [
+          "Incidents"
+        ],
+        "summary": "List active incidents",
+        "parameters": [
+          {
+            "name": "with_annotation",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "without_annotation",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active incident list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/incidents/{incident_id}/annotations": {
+      "get": {
+        "tags": [
+          "Annotations"
+        ],
+        "summary": "List annotations for an incident",
+        "parameters": [
+          {
+            "name": "incident_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Incident annotations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnotationsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Annotations"
+        ],
+        "summary": "Create an annotation for an incident",
+        "parameters": [
+          {
+            "name": "incident_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnnotationCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Annotation created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Annotation"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/groups/{group_hash}/annotations": {
+      "get": {
+        "tags": [
+          "Annotations"
+        ],
+        "summary": "List annotations for an error group",
+        "parameters": [
+          {
+            "name": "group_hash",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Error-group annotations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnotationsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Annotations"
+        ],
+        "summary": "Create an annotation for an error group",
+        "parameters": [
+          {
+            "name": "group_hash",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnnotationCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Annotation created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Annotation"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/targets": {
+      "get": {
+        "tags": [
+          "Targets"
+        ],
+        "summary": "List health-check targets",
+        "responses": {
+          "200": {
+            "description": "Target list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Targets"
+        ],
+        "summary": "Create a health-check target",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TargetCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Target created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Target"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{id}": {
+      "delete": {
+        "tags": [
+          "Targets"
+        ],
+        "summary": "Delete a target",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Target deleted."
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/pause": {
+      "post": {
+        "tags": [
+          "Targets"
+        ],
+        "summary": "Pause a target",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Target paused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/resume": {
+      "post": {
+        "tags": [
+          "Targets"
+        ],
+        "summary": "Resume a target",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Target resumed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/webhooks": {
+      "get": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "List webhook subscriptions",
+        "responses": {
+          "200": {
+            "description": "Webhook list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhooksResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Create a webhook subscription",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Webhook created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookCreateResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/webhooks/{id}": {
+      "delete": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Delete a webhook",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Webhook deleted."
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/webhooks/{id}/test": {
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Send a test webhook",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Test delivery accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          },
+          "502": {
+            "$ref": "#/components/responses/WebhookDeliveryFailedProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/keys": {
+      "get": {
+        "tags": [
+          "Keys"
+        ],
+        "summary": "List API keys",
+        "responses": {
+          "200": {
+            "description": "API key list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeysResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Keys"
+        ],
+        "summary": "Create an API key",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApiKeyCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "API key created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyCreateResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/keys/{id}/revoke": {
+      "post": {
+        "tags": [
+          "Keys"
+        ],
+        "summary": "Revoke an API key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimpleStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "API key",
+        "description": "Send `Authorization: Bearer sk_live_...`."
+      }
+    },
+    "parameters": {
+      "Window": {
+        "name": "window",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "1h",
+            "6h",
+            "24h",
+            "7d",
+            "30d"
+          ]
+        }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        }
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "After": {
+        "name": "after",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "responses": {
+      "UnauthorizedProblem": {
+        "description": "Missing, invalid, or revoked API key.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetails"
+            }
+          }
+        }
+      },
+      "ValidationProblem": {
+        "description": "Request validation failed.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetails"
+            }
+          }
+        }
+      },
+      "RateLimitedProblem": {
+        "description": "The client exceeded a per-key or per-IP rate limit.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetails"
+            }
+          }
+        }
+      },
+      "NotFoundProblem": {
+        "description": "The requested resource does not exist.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetails"
+            }
+          }
+        }
+      },
+      "PayloadTooLargeProblem": {
+        "description": "The request body exceeded a size limit.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetails"
+            }
+          }
+        }
+      },
+      "InternalProblem": {
+        "description": "Unexpected server failure.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetails"
+            }
+          }
+        }
+      },
+      "WebhookDeliveryFailedProblem": {
+        "description": "Test webhook delivery failed.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetails"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "JsonValue": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "$ref": "#/components/schemas/JsonObject"
+          },
+          {
+            "$ref": "#/components/schemas/JsonArray"
+          }
+        ]
+      },
+      "JsonObject": {
+        "type": "object",
+        "additionalProperties": {
+          "$ref": "#/components/schemas/JsonValue"
+        }
+      },
+      "JsonArray": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/JsonValue"
+        }
+      },
+      "BusinessEvent": {
+        "type": "string",
+        "enum": [
+          "health_check.degraded",
+          "health_check.down",
+          "health_check.recovered",
+          "health_check.tls_expiring",
+          "error.new_class",
+          "error.regression",
+          "incident.opened",
+          "incident.updated",
+          "incident.resolved"
+        ]
+      },
+      "WebhookEvent": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/BusinessEvent"
+          },
+          {
+            "type": "string",
+            "enum": [
+              "canary.ping"
+            ]
+          }
+        ]
+      },
+      "ProblemDetails": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "code",
+          "request_id"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "format": "uri"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "retry_after": {
+            "type": "integer"
+          },
+          "errors": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "HealthzResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          }
+        }
+      },
+      "ReadyzResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "checks"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "not_ready"
+            ]
+          },
+          "checks": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "database",
+              "supervisor"
+            ],
+            "properties": {
+              "database": {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "error"
+                ]
+              },
+              "supervisor": {
+                "type": "string",
+                "enum": [
+                  "ok",
+                  "error"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "ErrorIngestRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "service",
+          "error_class",
+          "message"
+        ],
+        "properties": {
+          "service": {
+            "type": "string"
+          },
+          "error_class": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "stack_trace": {
+            "type": "string",
+            "maxLength": 32768
+          },
+          "context": {
+            "$ref": "#/components/schemas/JsonObject"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "error",
+              "warning",
+              "info"
+            ]
+          },
+          "environment": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+              "type": "string",
+              "maxLength": 256
+            }
+          },
+          "region": {
+            "type": "string"
+          }
+        }
+      },
+      "ErrorIngestResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "group_hash",
+          "is_new_class"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "group_hash": {
+            "type": "string"
+          },
+          "is_new_class": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ErrorGroupClassification": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "category",
+          "persistence",
+          "component"
+        ],
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": [
+              "infrastructure",
+              "application",
+              "unknown"
+            ]
+          },
+          "persistence": {
+            "type": "string",
+            "enum": [
+              "transient",
+              "persistent",
+              "unknown"
+            ]
+          },
+          "component": {
+            "type": "string",
+            "enum": [
+              "database",
+              "network",
+              "runtime",
+              "unknown"
+            ]
+          }
+        }
+      },
+      "ErrorGroup": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "group_hash",
+          "error_class",
+          "service",
+          "count",
+          "first_seen",
+          "last_seen",
+          "sample_message",
+          "severity",
+          "status",
+          "classification"
+        ],
+        "properties": {
+          "group_hash": {
+            "type": "string"
+          },
+          "error_class": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "first_seen": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_seen": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "sample_message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "severity": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "classification": {
+            "$ref": "#/components/schemas/ErrorGroupClassification"
+          }
+        }
+      },
+      "ErrorQueryByServiceResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "summary",
+          "service",
+          "window",
+          "total_errors",
+          "groups"
+        ],
+        "properties": {
+          "summary": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "window": {
+            "type": "string"
+          },
+          "total_errors": {
+            "type": "integer"
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ErrorGroup"
+            }
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ErrorQueryByClassResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "summary",
+          "error_class",
+          "window",
+          "total_errors",
+          "groups"
+        ],
+        "properties": {
+          "summary": {
+            "type": "string"
+          },
+          "error_class": {
+            "type": "string"
+          },
+          "window": {
+            "type": "string"
+          },
+          "total_errors": {
+            "type": "integer"
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ErrorGroup"
+            }
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ErrorClassAggregate": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error_class",
+          "total_count",
+          "service_count"
+        ],
+        "properties": {
+          "error_class": {
+            "type": "string"
+          },
+          "total_count": {
+            "type": "integer"
+          },
+          "service_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "ErrorClassesResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "window",
+          "groups"
+        ],
+        "properties": {
+          "window": {
+            "type": "string"
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ErrorClassAggregate"
+            }
+          }
+        }
+      },
+      "ErrorGroupSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "total_count",
+          "first_seen_at",
+          "last_seen_at",
+          "status"
+        ],
+        "properties": {
+          "total_count": {
+            "type": "integer"
+          },
+          "first_seen_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "ErrorDetailResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "summary",
+          "id",
+          "service",
+          "error_class",
+          "message",
+          "message_template",
+          "stack_trace",
+          "context",
+          "severity",
+          "environment",
+          "group_hash",
+          "created_at",
+          "group"
+        ],
+        "properties": {
+          "summary": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "error_class": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "message_template": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stack_trace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "context": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/JsonObject"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "severity": {
+            "type": "string"
+          },
+          "environment": {
+            "type": "string"
+          },
+          "group_hash": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "group": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ErrorGroupSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "HealthCheckSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "checked_at",
+          "result",
+          "status_code",
+          "latency_ms"
+        ],
+        "properties": {
+          "checked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "result": {
+            "type": "string"
+          },
+          "status_code": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "latency_ms": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      },
+      "HealthTarget": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "service",
+          "url",
+          "state",
+          "consecutive_failures",
+          "last_checked_at",
+          "last_success_at",
+          "latency_ms",
+          "tls_expires_at",
+          "recent_checks"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "up",
+              "degraded",
+              "down"
+            ]
+          },
+          "consecutive_failures": {
+            "type": "integer"
+          },
+          "last_checked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "last_success_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "latency_ms": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "tls_expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "recent_checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HealthCheckSummary"
+            }
+          }
+        }
+      },
+      "HealthStatusResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "summary",
+          "targets"
+        ],
+        "properties": {
+          "summary": {
+            "type": "string"
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HealthTarget"
+            }
+          }
+        }
+      },
+      "TargetCheck": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "checked_at",
+          "result",
+          "status_code",
+          "latency_ms",
+          "tls_expires_at",
+          "error_detail"
+        ],
+        "properties": {
+          "checked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "result": {
+            "type": "string"
+          },
+          "status_code": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "latency_ms": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "tls_expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "error_detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "TargetChecksResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target_id",
+          "window",
+          "checks"
+        ],
+        "properties": {
+          "target_id": {
+            "type": "string"
+          },
+          "window": {
+            "type": "string"
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TargetCheck"
+            }
+          }
+        }
+      },
+      "IncidentSignal": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "signal_type",
+          "signal_ref",
+          "attached_at",
+          "resolved_at"
+        ],
+        "properties": {
+          "signal_type": {
+            "type": "string"
+          },
+          "signal_ref": {
+            "type": "string"
+          },
+          "attached_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "resolved_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "Incident": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "service",
+          "state",
+          "severity",
+          "title",
+          "opened_at",
+          "resolved_at",
+          "signal_count",
+          "signals"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "investigating"
+            ]
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "medium",
+              "high"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "opened_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "resolved_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "signal_count": {
+            "type": "integer"
+          },
+          "signals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IncidentSignal"
+            }
+          }
+        }
+      },
+      "IncidentsResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "incidents"
+        ],
+        "properties": {
+          "incidents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Incident"
+            }
+          }
+        }
+      },
+      "Annotation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "incident_id",
+          "group_hash",
+          "agent",
+          "action",
+          "metadata",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "incident_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "group_hash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          },
+          "metadata": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/JsonObject"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "AnnotationsResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "annotations"
+        ],
+        "properties": {
+          "annotations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Annotation"
+            }
+          }
+        }
+      },
+      "AnnotationCreateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "agent",
+          "action"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/JsonObject"
+          }
+        }
+      },
+      "Target": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "service",
+          "url",
+          "method",
+          "interval_ms",
+          "timeout_ms",
+          "expected_status",
+          "active",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "GET",
+              "HEAD"
+            ]
+          },
+          "interval_ms": {
+            "type": "integer"
+          },
+          "timeout_ms": {
+            "type": "integer"
+          },
+          "expected_status": {
+            "type": "string"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "TargetsResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "targets"
+        ],
+        "properties": {
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Target"
+            }
+          }
+        }
+      },
+      "TargetCreateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "url"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "GET",
+              "HEAD"
+            ]
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "interval_ms": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "expected_status": {
+            "type": "string"
+          },
+          "body_contains": {
+            "type": "string"
+          },
+          "degraded_after": {
+            "type": "integer"
+          },
+          "down_after": {
+            "type": "integer"
+          },
+          "up_after": {
+            "type": "integer"
+          },
+          "allow_private": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SimpleStatusResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "paused",
+              "resumed",
+              "delivered",
+              "revoked"
+            ]
+          }
+        }
+      },
+      "Webhook": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "url",
+          "events",
+          "active",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebhookEvent"
+            }
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "WebhooksResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "webhooks"
+        ],
+        "properties": {
+          "webhooks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Webhook"
+            }
+          }
+        }
+      },
+      "WebhookCreateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "url",
+          "events"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebhookEvent"
+            }
+          }
+        }
+      },
+      "WebhookCreateResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "url",
+          "events",
+          "secret",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebhookEvent"
+            }
+          },
+          "secret": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "WebhookDelivery": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "delivery_id",
+          "webhook_id",
+          "event",
+          "status",
+          "attempt_count",
+          "reason",
+          "first_attempt_at",
+          "last_attempt_at",
+          "delivered_at",
+          "discarded_at",
+          "completed_at",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "delivery_id": {
+            "type": "string"
+          },
+          "webhook_id": {
+            "type": "string"
+          },
+          "event": {
+            "$ref": "#/components/schemas/WebhookEvent"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "retrying",
+              "delivered",
+              "discarded",
+              "suppressed"
+            ]
+          },
+          "attempt_count": {
+            "type": "integer"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "first_attempt_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "last_attempt_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "delivered_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "discarded_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "WebhookDeliveriesResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "returned_count",
+          "cursor",
+          "deliveries"
+        ],
+        "properties": {
+          "returned_count": {
+            "type": "integer"
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "deliveries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebhookDelivery"
+            }
+          }
+        }
+      },
+      "StatusTarget": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "url",
+          "state",
+          "consecutive_failures",
+          "last_checked_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "up",
+              "degraded",
+              "down"
+            ]
+          },
+          "consecutive_failures": {
+            "type": "integer"
+          },
+          "last_checked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "ErrorSummaryItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "service",
+          "total_count",
+          "unique_classes"
+        ],
+        "properties": {
+          "service": {
+            "type": "string"
+          },
+          "total_count": {
+            "type": "integer"
+          },
+          "unique_classes": {
+            "type": "integer"
+          }
+        }
+      },
+      "RecentTransition": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target_id",
+          "target_name",
+          "state",
+          "transitioned_at"
+        ],
+        "properties": {
+          "target_id": {
+            "type": "string"
+          },
+          "target_name": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "up",
+              "degraded",
+              "down",
+              "unknown"
+            ]
+          },
+          "transitioned_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SearchResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "service",
+          "error_class",
+          "message",
+          "group_hash",
+          "created_at",
+          "score"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "error_class": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "group_hash": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "score": {
+            "type": "number"
+          }
+        }
+      },
+      "ReportResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "summary",
+          "targets",
+          "error_groups",
+          "incidents",
+          "recent_transitions",
+          "truncated",
+          "cursor"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "healthy",
+              "degraded",
+              "warning",
+              "unhealthy",
+              "empty"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HealthTarget"
+            }
+          },
+          "error_groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ErrorGroup"
+            }
+          },
+          "incidents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Incident"
+            }
+          },
+          "recent_transitions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecentTransition"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "search_results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SearchResult"
+            }
+          }
+        }
+      },
+      "StatusResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "overall",
+          "summary",
+          "targets",
+          "error_summary"
+        ],
+        "properties": {
+          "overall": {
+            "type": "string",
+            "enum": [
+              "healthy",
+              "degraded",
+              "warning",
+              "unhealthy",
+              "empty"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatusTarget"
+            }
+          },
+          "error_summary": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ErrorSummaryItem"
+            }
+          }
+        }
+      },
+      "TimelineEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "service",
+          "event",
+          "entity_type",
+          "entity_ref",
+          "severity",
+          "summary",
+          "payload",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "event": {
+            "$ref": "#/components/schemas/BusinessEvent"
+          },
+          "entity_type": {
+            "type": "string",
+            "enum": [
+              "error_group",
+              "target",
+              "incident"
+            ]
+          },
+          "entity_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "severity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/JsonObject"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "TimelineResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "summary",
+          "returned_count",
+          "window",
+          "service",
+          "events",
+          "cursor"
+        ],
+        "properties": {
+          "summary": {
+            "type": "string"
+          },
+          "returned_count": {
+            "type": "integer"
+          },
+          "window": {
+            "type": "string"
+          },
+          "service": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TimelineEvent"
+            }
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ApiKey": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "key_prefix",
+          "active",
+          "created_at",
+          "revoked_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "key_prefix": {
+            "type": "string"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "revoked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "ApiKeysResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "keys"
+        ],
+        "properties": {
+          "keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApiKey"
+            }
+          }
+        }
+      },
+      "ApiKeyCreateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "ApiKeyCreateResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "key",
+          "key_prefix",
+          "created_at",
+          "warning"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "key_prefix": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "warning": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

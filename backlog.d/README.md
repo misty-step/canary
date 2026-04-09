@@ -1,6 +1,6 @@
 # Canary Backlog
 
-`backlog.d/` is the source of truth for active backlog work as of 2026-04-02.
+`backlog.d/` is the source of truth for active backlog work as of 2026-04-09.
 
 ## Priority Order
 
@@ -10,9 +10,9 @@
 | 002 | Timeline agent polling | high | done | S |
 | 003 | Triage diagnostic webhooks non-fatal | high | done | S |
 | 004 | Incident correlation failure paths | high | done | S |
-| 012 | Webhook delivery ledger + idempotency | high | ready | M |
+| 012 | Webhook delivery ledger + idempotency | high | done | M |
 | 013 | Self-observability metrics export | high | done | M |
-| 011 | OpenAPI spec + agent integration guide | high | ready | M |
+| 011 | OpenAPI spec + agent integration guide | high | done | M |
 | 006 | Split Query into read models | high | ready | L |
 | 005 | Connect-a-service workflow | medium | ready | M |
 | 014 | Backup/restore + DR validation | medium | ready | S |

@@ -42,6 +42,7 @@ defmodule CanaryWeb.Router do
 
     get "/healthz", HealthController, :healthz
     get "/readyz", HealthController, :readyz
+    get "/api/v1/openapi.json", OpenAPIController, :index
   end
 
   scope "/", CanaryWeb do

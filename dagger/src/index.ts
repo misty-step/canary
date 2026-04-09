@@ -253,20 +253,23 @@ async function elixirContainer(
 
 async function nodeContainer(
   source: Directory,
+  workdir: string,
   lockfilePath: string,
+  cacheNamespace: string,
 ): Promise<Container> {
   const digest = await lockfileDigest(source, lockfilePath)
   const imageKey = imageIdentity(NODE_IMAGE)
   const npmCache = dag.cacheVolume(
-    cacheVolumeName("canary-typescript-npm", imageKey, digest),
+    cacheVolumeName(`${cacheNamespace}-npm`, imageKey, digest),
   )
+  const packageDir = workdir === "." ? "/work" : `/work/${workdir}`
 
   return dag
     .container()
     .from(NODE_IMAGE)
     .withMountedDirectory("/work", source)
     .withMountedCache("/root/.npm", npmCache)
-    .withWorkdir("/work/clients/typescript")
+    .withWorkdir(packageDir)
     .withExec(["npm", "ci", "--ignore-scripts"])
 }
 
@@ -341,16 +344,28 @@ export class Ci {
   }
 
   private async typescriptQualityContainer(source: Directory): Promise<Container> {
-    return (await nodeContainer(source, "clients/typescript/package-lock.json"))
+    return (
+      await nodeContainer(
+        source,
+        "clients/typescript",
+        "clients/typescript/package-lock.json",
+        "canary-typescript",
+      )
+    )
       .withExec(["npm", "run", "typecheck"])
       .withExec(["npm", "run", "test:ci"])
       .withExec(["npm", "run", "build"])
   }
 
   private async typescriptFastContainer(source: Directory): Promise<Container> {
-    return (await nodeContainer(source, "clients/typescript/package-lock.json")).withExec(
-      ["npm", "run", "typecheck"],
-    )
+    return (
+      await nodeContainer(
+        source,
+        "clients/typescript",
+        "clients/typescript/package-lock.json",
+        "canary-typescript",
+      )
+    ).withExec(["npm", "run", "typecheck"])
   }
 
   private async rootAdvisoryContainer(source: Directory): Promise<Container> {
@@ -372,12 +387,20 @@ export class Ci {
   }
 
   private async typescriptAdvisoryContainer(source: Directory): Promise<Container> {
-    return (await nodeContainer(source, "clients/typescript/package-lock.json")).withExec([
-      "npm",
-      "audit",
-      "--audit-level",
-      "high",
-    ])
+    return (
+      await nodeContainer(
+        source,
+        "clients/typescript",
+        "clients/typescript/package-lock.json",
+        "canary-typescript",
+      )
+    ).withExec(["npm", "audit", "--audit-level", "high"])
+  }
+
+  private async openapiContractContainer(source: Directory): Promise<Container> {
+    return (
+      await nodeContainer(source, "dagger", "dagger/package-lock.json", "canary-dagger")
+    ).withExec(["npx", "redocly", "lint", "/work/priv/openapi/openapi.json"])
   }
 
   @func()
@@ -480,6 +503,30 @@ export class Ci {
     source?: Directory,
   ): Promise<void> {
     await ciContractContainer(source!).sync()
+  }
+
+  @func()
+  @check()
+  async openapiContract(
+    @argument({
+      defaultPath: "/",
+      ignore: [
+        ".git",
+        "_build",
+        "deps",
+        "cover",
+        "canary_sdk/_build",
+        "canary_sdk/deps",
+        "canary_sdk/cover",
+        "clients/typescript/node_modules",
+        "clients/typescript/dist",
+        "clients/typescript/coverage",
+        "dagger/node_modules",
+      ],
+    })
+    source?: Directory,
+  ): Promise<void> {
+    await (await this.openapiContractContainer(source!)).sync()
   }
 
   @func()

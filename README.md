@@ -123,7 +123,11 @@ GitHub Actions mirrors that strict path by running `dagger call codex-agent-role
 
 ## API
 
-All endpoints require `Authorization: Bearer sk_live_...` except `/healthz` and `/readyz`.
+The machine-readable contract lives at `GET /api/v1/openapi.json`. That
+endpoint, `/healthz`, and `/readyz` are public. The contract embeds the
+canonical agent replay guide in `info.x-agent-guide`.
+
+All other endpoints require `Authorization: Bearer sk_live_...`.
 
 ### Error Ingestion
 
