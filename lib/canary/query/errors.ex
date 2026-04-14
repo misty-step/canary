@@ -103,7 +103,7 @@ defmodule Canary.Query.Errors do
           },
           group_by: g.error_class,
           order_by: [desc: sum(g.total_count)],
-          limit: 50
+          limit: ^@max_groups
         )
         |> Canary.Repos.read_repo().all()
 
@@ -119,9 +119,12 @@ defmodule Canary.Query.Errors do
     end
   end
 
-  @spec error_groups(String.t()) :: {:ok, [map()]} | {:error, :invalid_window}
-  def error_groups(window) do
-    with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
+  @spec error_groups(String.t(), keyword()) ::
+          {:ok, [map()]} | {:error, :invalid_window}
+  def error_groups(window, opts \\ []) do
+    now = Keyword.get(opts, :at, DateTime.utc_now())
+
+    with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window, now) do
       groups =
         from(g in ErrorGroup,
           where: g.last_seen_at >= ^cutoff and g.status == "active",
@@ -136,9 +139,12 @@ defmodule Canary.Query.Errors do
     end
   end
 
-  @spec error_summary(String.t()) :: {:ok, [map()]} | {:error, :invalid_window}
-  def error_summary(window) do
-    with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
+  @spec error_summary(String.t(), keyword()) ::
+          {:ok, [map()]} | {:error, :invalid_window}
+  def error_summary(window, opts \\ []) do
+    now = Keyword.get(opts, :at, DateTime.utc_now())
+
+    with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window, now) do
       summary =
         from(g in ErrorGroup,
           where: g.last_seen_at >= ^cutoff and g.status == "active",

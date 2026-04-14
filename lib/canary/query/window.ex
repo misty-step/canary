@@ -3,8 +3,11 @@ defmodule Canary.Query.Window do
 
   @allowed_windows ~w(1h 6h 24h 7d 30d)
 
-  @spec to_cutoff(String.t()) :: {:ok, String.t()} | {:error, :invalid_window}
-  def to_cutoff(window) when window in @allowed_windows do
+  @spec to_cutoff(String.t(), DateTime.t()) ::
+          {:ok, String.t()} | {:error, :invalid_window}
+  def to_cutoff(window, now \\ DateTime.utc_now())
+
+  def to_cutoff(window, %DateTime{} = now) when window in @allowed_windows do
     seconds =
       case window do
         "1h" -> 3_600
@@ -15,12 +18,12 @@ defmodule Canary.Query.Window do
       end
 
     cutoff =
-      DateTime.utc_now()
+      now
       |> DateTime.add(-seconds, :second)
       |> DateTime.to_iso8601()
 
     {:ok, cutoff}
   end
 
-  def to_cutoff(_window), do: {:error, :invalid_window}
+  def to_cutoff(_window, _now), do: {:error, :invalid_window}
 end

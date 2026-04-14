@@ -10,7 +10,7 @@ defmodule Canary.Query.Incidents do
   @doc "Returns active incidents, optionally filtered by annotation."
   @spec active_incidents(keyword()) :: [map()]
   def active_incidents(opts \\ []) do
-    now = DateTime.utc_now() |> DateTime.to_iso8601()
+    now = Keyword.get(opts, :at, DateTime.utc_now())
 
     from(i in Incident,
       where: i.state != "resolved",
@@ -142,12 +142,13 @@ defmodule Canary.Query.Incidents do
     if recent_count >= 3, do: "high", else: "medium"
   end
 
-  defp within_incident_window?(timestamp, now) do
-    with {:ok, timestamp_dt, _} <- DateTime.from_iso8601(timestamp),
-         {:ok, now_dt, _} <- DateTime.from_iso8601(now) do
-      DateTime.diff(now_dt, timestamp_dt, :second) <= @incident_active_window_seconds
-    else
-      _ -> false
+  defp within_incident_window?(timestamp, %DateTime{} = now) do
+    case DateTime.from_iso8601(timestamp) do
+      {:ok, timestamp_dt, _} ->
+        DateTime.diff(now, timestamp_dt, :second) <= @incident_active_window_seconds
+
+      _ ->
+        false
     end
   end
 end

@@ -33,14 +33,16 @@ defmodule Canary.Query do
 
   @spec report_slice(String.t()) :: {:ok, map()} | {:error, :invalid_window}
   def report_slice(window) do
-    with {:ok, groups} <- Canary.Query.Errors.error_groups(window),
-         {:ok, summary} <- Canary.Query.Errors.error_summary(window),
-         {:ok, transitions} <- Canary.Query.Health.recent_transitions(window) do
+    now = DateTime.utc_now()
+
+    with {:ok, groups} <- Canary.Query.Errors.error_groups(window, at: now),
+         {:ok, summary} <- Canary.Query.Errors.error_summary(window, at: now),
+         {:ok, transitions} <- Canary.Query.Health.recent_transitions(window, at: now) do
       {:ok,
        %{
          error_groups: groups,
          error_summary: summary,
-         incidents: active_incidents(),
+         incidents: active_incidents(at: now),
          recent_transitions: transitions
        }}
     end

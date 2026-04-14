@@ -58,9 +58,12 @@ defmodule Canary.Query.Health do
     %{summary: summary, targets: targets}
   end
 
-  @spec recent_transitions(String.t()) :: {:ok, [map()]} | {:error, :invalid_window}
-  def recent_transitions(window) do
-    with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
+  @spec recent_transitions(String.t(), keyword()) ::
+          {:ok, [map()]} | {:error, :invalid_window}
+  def recent_transitions(window, opts \\ []) do
+    now = Keyword.get(opts, :at, DateTime.utc_now())
+
+    with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window, now) do
       transitions =
         from(t in Target,
           join: s in TargetState,
