@@ -13,7 +13,7 @@
 | 012 | Webhook delivery ledger + idempotency | high | done | M |
 | 013 | Self-observability metrics export | high | done | M |
 | 011 | OpenAPI spec + agent integration guide | high | done | M |
-| 006 | Split Query into read models | high | ready | L |
+| 006 | Split Query into read models | high | done | L |
 | 005 | Connect-a-service workflow | medium | ready | M |
 | 014 | Backup/restore + DR validation | medium | ready | S |
 | 008 | Security + governance baseline | medium | ready | S |
