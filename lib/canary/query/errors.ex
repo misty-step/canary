@@ -16,7 +16,7 @@ defmodule Canary.Query.Errors do
       query =
         from(g in ErrorGroup,
           where: g.service == ^service and g.last_seen_at >= ^cutoff,
-          order_by: [desc: g.total_count],
+          order_by: [desc: g.total_count, asc: g.group_hash],
           limit: ^@max_groups
         )
 
@@ -55,7 +55,7 @@ defmodule Canary.Query.Errors do
       query =
         from(g in ErrorGroup,
           where: g.error_class == ^error_class and g.last_seen_at >= ^cutoff,
-          order_by: [desc: g.total_count],
+          order_by: [desc: g.total_count, asc: g.group_hash],
           limit: ^@max_groups
         )
 
@@ -256,7 +256,11 @@ defmodule Canary.Query.Errors do
 
   defp paginate_cursor(groups) do
     if length(groups) == @max_groups do
-      groups |> List.last() |> Map.get(:group_hash) |> Base.encode64()
+      last = List.last(groups)
+
+      %{total_count: last.total_count, group_hash: last.group_hash}
+      |> Jason.encode!()
+      |> Base.url_encode64(padding: false)
     end
   end
 
@@ -299,14 +303,38 @@ defmodule Canary.Query.Errors do
   defp apply_cursor(query, nil), do: query
 
   defp apply_cursor(query, cursor) do
-    case Base.decode64(cursor) do
-      {:ok, after_hash} ->
+    case decode_cursor(cursor) do
+      {:ok, %{group_hash: after_hash, total_count: after_count}} ->
+        from(g in query,
+          where:
+            g.total_count < ^after_count or
+              (g.total_count == ^after_count and g.group_hash > ^after_hash)
+        )
+
+      {:ok, after_hash} when is_binary(after_hash) ->
         from(g in query, where: g.group_hash > ^after_hash)
 
       _ ->
         query
     end
   end
+
+  defp decode_cursor(cursor) do
+    with {:ok, json} <- Base.url_decode64(cursor, padding: false),
+         {:ok, decoded} <- Jason.decode(json),
+         {:ok, structured_cursor} <- validate_cursor(decoded) do
+      {:ok, structured_cursor}
+    else
+      _ -> Base.decode64(cursor)
+    end
+  end
+
+  defp validate_cursor(%{"group_hash" => group_hash, "total_count" => total_count})
+       when is_binary(group_hash) and is_integer(total_count) do
+    {:ok, %{group_hash: group_hash, total_count: total_count}}
+  end
+
+  defp validate_cursor(_decoded), do: :error
 
   defp safe_decode_json(nil), do: nil
 

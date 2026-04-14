@@ -1,7 +1,7 @@
 defmodule Canary.IncidentsTest do
   use Canary.DataCase
 
-  alias Canary.{Incidents, Report}
+  alias Canary.{Incidents, Query, Report}
   alias Canary.Schemas.{ErrorGroup, Incident, ServiceEvent, TargetState, Webhook}
 
   import Canary.Fixtures
@@ -253,6 +253,28 @@ defmodule Canary.IncidentsTest do
 
       assert {:ok, report} = Report.generate(window: "1h")
       assert report.incidents == []
+    end
+
+    test "keeps active incidents while omitting stale error-only incidents from query reads" do
+      create_target_with_state("alpha", "degraded")
+      create_error_group("alpha", "TimeoutError", 1)
+
+      {:ok, _incident} = Incidents.correlate(:health_transition, "TGT-alpha", "alpha")
+
+      {:ok, _incident} =
+        Incidents.correlate(:error_group, group_hash("alpha", "TimeoutError"), "alpha")
+
+      create_error_group("bravo", "TimeoutError", 1)
+      stale_hash = group_hash("bravo", "TimeoutError")
+      {:ok, _incident} = Incidents.correlate(:error_group, stale_hash, "bravo")
+
+      stale = DateTime.utc_now() |> DateTime.add(-10 * 60, :second) |> DateTime.to_iso8601()
+
+      Repo.get!(ErrorGroup, stale_hash)
+      |> ErrorGroup.changeset(%{last_seen_at: stale})
+      |> Repo.update!()
+
+      assert [%{service: "alpha", signal_count: 2}] = Query.active_incidents()
     end
   end
 
