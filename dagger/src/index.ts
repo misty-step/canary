@@ -47,200 +47,6 @@ for path, exc in errors:
 sys.exit(1)
 `
 
-const CI_CONTRACT_VALIDATION = `
-import os
-from pathlib import Path
-import re
-import subprocess
-import sys
-import tempfile
-
-root = Path("/work")
-workflow = (root / ".github/workflows/ci.yml").read_text()
-dagger_config = (root / "dagger.json").read_text()
-
-errors = []
-
-def require(condition, message):
-    if not condition:
-        errors.append(message)
-
-match = re.search(r'"engineVersion"\\s*:\\s*"v([^"]+)"', dagger_config)
-required_dagger_version = match.group(1) if match else None
-require(required_dagger_version is not None,
-        "dagger.json must define engineVersion")
-
-with tempfile.TemporaryDirectory() as tmp:
-    tmp_path = Path(tmp)
-    log_path = tmp_path / "dagger.log"
-    ssh_log_path = tmp_path / "ssh.log"
-    dagger_path = tmp_path / "dagger"
-    dagger_path.write_text(
-        "#!/usr/bin/env bash\\n"
-        "if [[ \\"$1\\" == \\"version\\" ]]; then\\n"
-        "  if [[ -v DAGGER_STUB_VERSION ]]; then version=\\"$DAGGER_STUB_VERSION\\"; else version=\\"\\"; fi\\n"
-        f"  if [[ -z \\"$version\\" ]]; then version=\\"{required_dagger_version}\\"; fi\\n"
-        "  printf 'dagger v%s (image://registry.dagger.io/engine:v%s) darwin/arm64/v8\\\\n' \\"$version\\" \\"$version\\"\\n"
-        "  exit 0\\n"
-        "fi\\n"
-        f"printf '%s\\\\n' \\"$*\\" >> \\"{log_path}\\"\\n"
-        "if [[ \\"$EXPECT_DOCKER_CALL\\" == \\"1\\" ]]; then\\n"
-        "  docker version >/dev/null\\n"
-        "fi\\n"
-    )
-    dagger_path.chmod(0o755)
-
-    env = os.environ.copy()
-    env["PATH"] = f"{tmp}:{env['PATH']}"
-    env["HOME"] = tmp
-
-    colima_dir = tmp_path / ".colima"
-    colima_dir.mkdir()
-    (colima_dir / "ssh_config").write_text("Host colima\\n")
-    colima_path = tmp_path / "colima"
-    colima_path.write_text(
-        "#!/usr/bin/env bash\\n"
-        "if [[ \\"$1\\" == \\"status\\" ]]; then\\n"
-        "  exit 0\\n"
-        "fi\\n"
-        "exit 1\\n"
-    )
-    colima_path.chmod(0o755)
-    ssh_path = tmp_path / "ssh"
-    ssh_path.write_text(
-        "#!/usr/bin/env bash\\n"
-        f"printf '%s\\\\n' \\"$*\\" >> \\"{ssh_log_path}\\"\\n"
-    )
-    ssh_path.chmod(0o755)
-
-    def run(command):
-        return subprocess.run(
-            command,
-            cwd=root,
-            env=env,
-            text=True,
-            capture_output=True,
-        )
-
-    def read_calls():
-        if not log_path.exists():
-            return []
-        return [line.strip() for line in log_path.read_text().splitlines() if line.strip()]
-
-    def reset_calls():
-        log_path.write_text("")
-        ssh_log_path.write_text("")
-
-    reset_calls()
-    result = run(["bash", "bin/validate", "--fast"])
-    require(result.returncode == 0,
-            "bin/validate --fast must succeed with a valid dagger binary on PATH")
-    require(read_calls() == ["call --progress=plain fast"],
-            "bin/validate --fast must call dagger fast exactly once")
-
-    reset_calls()
-    result = run(["bash", "bin/validate", "--advisories"])
-    require(result.returncode == 0,
-            "bin/validate --advisories must succeed with a valid dagger binary on PATH")
-    require(read_calls() == ["call --progress=plain advisories"],
-            "bin/validate --advisories must call advisories exactly once")
-
-    reset_calls()
-    result = run(["bash", "bin/validate", "--strict"])
-    require(result.returncode == 0,
-            "bin/validate --strict must succeed with a valid dagger binary on PATH")
-    require(
-        read_calls() == [
-            "call --progress=plain codex-agent-roles",
-            "check --progress=plain",
-            "call --progress=plain advisories",
-        ],
-        "bin/validate --strict must run codex-agent-roles, check, then advisories",
-    )
-
-    reset_calls()
-    result = run(["bash", ".githooks/pre-commit"])
-    require(result.returncode == 0,
-            "pre-commit hook must succeed with a valid dagger binary on PATH")
-    require(read_calls() == ["call --progress=plain fast"],
-            "pre-commit hook must delegate to the fast validation path")
-
-    reset_calls()
-    result = run(["bash", ".githooks/pre-push"])
-    require(result.returncode == 0,
-            "pre-push hook must succeed with a valid dagger binary on PATH")
-    require(
-        read_calls() == [
-            "call --progress=plain codex-agent-roles",
-            "check --progress=plain",
-            "call --progress=plain advisories",
-        ],
-        "pre-push hook must delegate to the strict validation path",
-    )
-
-    reset_calls()
-    env["CANARY_DAGGER_DOCKER_TRANSPORT"] = "colima-ssh"
-    env["EXPECT_DOCKER_CALL"] = "1"
-    result = run(["bash", "bin/dagger", "call", "fast"])
-    require(result.returncode == 0,
-            "bin/dagger must support the Colima transport override")
-    require(read_calls() == ["call fast"],
-            "bin/dagger must still delegate to the installed dagger binary under the Colima transport override")
-    ssh_calls = [line.strip() for line in ssh_log_path.read_text().splitlines() if line.strip()]
-    require(
-        ssh_calls == [f"-F {colima_dir / 'ssh_config'} -T colima docker version"],
-        "bin/dagger must route Docker calls through Colima over SSH",
-    )
-    env.pop("CANARY_DAGGER_DOCKER_TRANSPORT", None)
-    env.pop("EXPECT_DOCKER_CALL", None)
-
-    reset_calls()
-    stale_version = "0.20.4"
-    env["DAGGER_STUB_VERSION"] = stale_version
-    result = run(["bash", "bin/dagger", "call", "fast"])
-    require(result.returncode != 0,
-            "bin/dagger must fail fast when the installed CLI version drifts from dagger.json")
-    require(
-        f"Installed dagger CLI version v{stale_version} does not match repo-required version v{required_dagger_version}" in result.stderr,
-        "bin/dagger must explain the pinned-version mismatch",
-    )
-    require(read_calls() == [],
-            "bin/dagger must stop before delegating when the installed CLI version does not match dagger.json")
-    env.pop("DAGGER_STUB_VERSION", None)
-
-require("steps.dagger_version.outputs.version" in workflow,
-        "GitHub workflow must source the Dagger version from dagger.json")
-require(
-    re.search(
-        r"name:\\s+Run Dagger codex role validation[\\s\\S]*?uses:\\s+dagger/dagger-for-github@[\\s\\S]*?verb:\\s+call[\\s\\S]*?args:\\s+codex-agent-roles",
-        workflow,
-    ),
-    "GitHub workflow must run codex-agent-roles through the Dagger action",
-)
-require(
-    re.search(
-        r"name:\\s+Run Dagger CI[\\s\\S]*?uses:\\s+dagger/dagger-for-github@[\\s\\S]*?verb:\\s+check",
-        workflow,
-    ),
-    "GitHub workflow must run dagger check through the Dagger action",
-)
-require(
-    re.search(
-        r"name:\\s+Run Dagger advisories[\\s\\S]*?uses:\\s+dagger/dagger-for-github@[\\s\\S]*?verb:\\s+call[\\s\\S]*?args:\\s+advisories",
-        workflow,
-    ),
-    "GitHub workflow must run advisories through the Dagger action",
-)
-
-if not errors:
-    sys.exit(0)
-
-for error in errors:
-    print(error, file=sys.stderr)
-
-sys.exit(1)
-`
-
 function digestSuffix(digest: string): string {
   return digest.replace(DIGEST_PREFIX, "").slice(0, 16)
 }
@@ -354,7 +160,7 @@ function ciContractContainer(source: Directory): Container {
     .from(PYTHON_IMAGE)
     .withMountedDirectory("/work", source)
     .withWorkdir("/work")
-    .withExec(["python", "-c", CI_CONTRACT_VALIDATION])
+    .withExec(["python", "dagger/scripts/ci_contract_validation.py"])
 }
 
 @object()
@@ -522,6 +328,38 @@ export class Ci {
     await (await this.rootAdvisoryContainer(repo)).sync()
     await (await this.sdkAdvisoryContainer(repo)).sync()
     await (await this.typescriptAdvisoryContainer(repo)).sync()
+  }
+
+  @func()
+  async strict(
+    @argument({
+      defaultPath: "/",
+      ignore: [
+        ".git",
+        "_build",
+        "deps",
+        "cover",
+        "canary_sdk/_build",
+        "canary_sdk/deps",
+        "canary_sdk/cover",
+        "clients/typescript/node_modules",
+        "clients/typescript/dist",
+        "clients/typescript/coverage",
+        "dagger/node_modules",
+      ],
+    })
+    source?: Directory,
+  ): Promise<void> {
+    const repo = source!
+
+    await this.codexAgentRoles(repo)
+    await this.ciContract(repo)
+    await this.openapiContract(repo)
+    await this.rootQuality(repo)
+    await this.rootDialyzer(repo)
+    await this.sdkQuality(repo)
+    await this.typescriptQuality(repo)
+    await this.advisories(repo)
   }
 
   @func()
