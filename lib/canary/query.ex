@@ -33,13 +33,15 @@ defmodule Canary.Query do
 
   @spec report_slice(String.t()) :: {:ok, map()} | {:error, :invalid_window}
   def report_slice(window) do
-    with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
+    with {:ok, groups} <- Canary.Query.Errors.error_groups(window),
+         {:ok, summary} <- Canary.Query.Errors.error_summary(window),
+         {:ok, transitions} <- Canary.Query.Health.recent_transitions(window) do
       {:ok,
        %{
-         error_groups: Canary.Query.Errors.error_groups_since(cutoff),
-         error_summary: Canary.Query.Errors.error_summary_since(cutoff),
+         error_groups: groups,
+         error_summary: summary,
          incidents: active_incidents(),
-         recent_transitions: Canary.Query.Health.recent_transitions_since(cutoff)
+         recent_transitions: transitions
        }}
     end
   end

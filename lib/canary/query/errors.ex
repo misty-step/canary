@@ -122,42 +122,38 @@ defmodule Canary.Query.Errors do
   @spec error_groups(String.t()) :: {:ok, [map()]} | {:error, :invalid_window}
   def error_groups(window) do
     with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
-      {:ok, error_groups_since(cutoff)}
+      groups =
+        from(g in ErrorGroup,
+          where: g.last_seen_at >= ^cutoff and g.status == "active",
+          order_by: [desc: g.total_count, asc: g.service, asc: g.error_class],
+          limit: ^@max_groups
+        )
+        |> select_group_with_classification()
+        |> Canary.Repos.read_repo().all()
+        |> Enum.map(&format_group/1)
+
+      {:ok, groups}
     end
   end
 
   @spec error_summary(String.t()) :: {:ok, [map()]} | {:error, :invalid_window}
   def error_summary(window) do
     with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
-      {:ok, error_summary_since(cutoff)}
+      summary =
+        from(g in ErrorGroup,
+          where: g.last_seen_at >= ^cutoff and g.status == "active",
+          group_by: g.service,
+          select: %{
+            service: g.service,
+            total_count: sum(g.total_count),
+            unique_classes: count(g.group_hash)
+          },
+          order_by: [desc: sum(g.total_count)]
+        )
+        |> Canary.Repos.read_repo().all()
+
+      {:ok, summary}
     end
-  end
-
-  @doc false
-  def error_groups_since(cutoff) do
-    from(g in ErrorGroup,
-      where: g.last_seen_at >= ^cutoff and g.status == "active",
-      order_by: [desc: g.total_count, asc: g.service, asc: g.error_class],
-      limit: ^@max_groups
-    )
-    |> select_group_with_classification()
-    |> Canary.Repos.read_repo().all()
-    |> Enum.map(&format_group/1)
-  end
-
-  @doc false
-  def error_summary_since(cutoff) do
-    from(g in ErrorGroup,
-      where: g.last_seen_at >= ^cutoff and g.status == "active",
-      group_by: g.service,
-      select: %{
-        service: g.service,
-        total_count: sum(g.total_count),
-        unique_classes: count(g.group_hash)
-      },
-      order_by: [desc: sum(g.total_count)]
-    )
-    |> Canary.Repos.read_repo().all()
   end
 
   defp build_error_detail(error) do

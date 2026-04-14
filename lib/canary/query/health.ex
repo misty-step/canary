@@ -61,7 +61,22 @@ defmodule Canary.Query.Health do
   @spec recent_transitions(String.t()) :: {:ok, [map()]} | {:error, :invalid_window}
   def recent_transitions(window) do
     with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window) do
-      {:ok, recent_transitions_since(cutoff)}
+      transitions =
+        from(t in Target,
+          join: s in TargetState,
+          on: t.id == s.target_id,
+          where: s.last_transition_at >= ^cutoff,
+          order_by: [desc: s.last_transition_at, asc: t.name],
+          select: %{
+            target_id: t.id,
+            target_name: t.name,
+            state: s.state,
+            transitioned_at: s.last_transition_at
+          }
+        )
+        |> Canary.Repos.read_repo().all()
+
+      {:ok, transitions}
     end
   end
 
@@ -79,23 +94,6 @@ defmodule Canary.Query.Health do
 
       {:ok, checks}
     end
-  end
-
-  @doc false
-  def recent_transitions_since(cutoff) do
-    from(t in Target,
-      join: s in TargetState,
-      on: t.id == s.target_id,
-      where: s.last_transition_at >= ^cutoff,
-      order_by: [desc: s.last_transition_at, asc: t.name],
-      select: %{
-        target_id: t.id,
-        target_name: t.name,
-        state: s.state,
-        transitioned_at: s.last_transition_at
-      }
-    )
-    |> Canary.Repos.read_repo().all()
   end
 
   # Batch-fetch top-N recent checks per target using ROW_NUMBER window function.
