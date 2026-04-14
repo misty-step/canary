@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SELF_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
 TRANSPORT="${CANARY_DAGGER_DOCKER_TRANSPORT:-auto}"
 
@@ -41,6 +42,35 @@ find_dagger_bin() {
   done
 
   return 1
+}
+
+required_dagger_version() {
+  sed -n 's/.*"engineVersion":[[:space:]]*"v\([^"]*\)".*/\1/p' "$ROOT/dagger.json" | head -n 1
+}
+
+installed_dagger_version() {
+  local dagger_bin="$1"
+  "$dagger_bin" version 2>/dev/null | sed -n 's/^dagger v\([^ ]*\).*/\1/p' | head -n 1
+}
+
+require_pinned_dagger_version() {
+  local dagger_bin="$1"
+  local required_version installed_version
+
+  required_version="$(required_dagger_version)"
+  [[ -n "$required_version" ]] || return 0
+
+  installed_version="$(installed_dagger_version "$dagger_bin" || true)"
+
+  if [[ -z "$installed_version" ]]; then
+    printf 'Unable to determine the installed dagger CLI version from %s. Expected v%s from dagger.json.\n' "$dagger_bin" "$required_version" >&2
+    exit 1
+  fi
+
+  if [[ "$installed_version" != "$required_version" ]]; then
+    printf 'Installed dagger CLI version v%s does not match repo-required version v%s from dagger.json. Upgrade or downgrade dagger before running repo-local validation.\n' "$installed_version" "$required_version" >&2
+    exit 1
+  fi
 }
 
 require_colima() {
@@ -99,6 +129,8 @@ if [[ -z "$dagger_bin" ]]; then
   printf 'dagger CLI is required for repo validation. Install it before running hooks or validation.\n' >&2
   exit 1
 fi
+
+require_pinned_dagger_version "$dagger_bin"
 
 case "$TRANSPORT" in
   auto)

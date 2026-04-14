@@ -57,12 +57,18 @@ import tempfile
 
 root = Path("/work")
 workflow = (root / ".github/workflows/ci.yml").read_text()
+dagger_config = (root / "dagger.json").read_text()
 
 errors = []
 
 def require(condition, message):
     if not condition:
         errors.append(message)
+
+match = re.search(r'"engineVersion"\\s*:\\s*"v([^"]+)"', dagger_config)
+required_dagger_version = match.group(1) if match else None
+require(required_dagger_version is not None,
+        "dagger.json must define engineVersion")
 
 with tempfile.TemporaryDirectory() as tmp:
     tmp_path = Path(tmp)
@@ -71,6 +77,12 @@ with tempfile.TemporaryDirectory() as tmp:
     dagger_path = tmp_path / "dagger"
     dagger_path.write_text(
         "#!/usr/bin/env bash\\n"
+        "if [[ \\"$1\\" == \\"version\\" ]]; then\\n"
+        "  if [[ -v DAGGER_STUB_VERSION ]]; then version=\\"$DAGGER_STUB_VERSION\\"; else version=\\"\\"; fi\\n"
+        f"  if [[ -z \\"$version\\" ]]; then version=\\"{required_dagger_version}\\"; fi\\n"
+        "  printf 'dagger v%s (image://registry.dagger.io/engine:v%s) darwin/arm64/v8\\\\n' \\"$version\\" \\"$version\\"\\n"
+        "  exit 0\\n"
+        "fi\\n"
         f"printf '%s\\\\n' \\"$*\\" >> \\"{log_path}\\"\\n"
         "if [[ \\"$EXPECT_DOCKER_CALL\\" == \\"1\\" ]]; then\\n"
         "  docker version >/dev/null\\n"
@@ -181,6 +193,20 @@ with tempfile.TemporaryDirectory() as tmp:
     )
     env.pop("CANARY_DAGGER_DOCKER_TRANSPORT", None)
     env.pop("EXPECT_DOCKER_CALL", None)
+
+    reset_calls()
+    stale_version = "0.20.4"
+    env["DAGGER_STUB_VERSION"] = stale_version
+    result = run(["bash", "bin/dagger", "call", "fast"])
+    require(result.returncode != 0,
+            "bin/dagger must fail fast when the installed CLI version drifts from dagger.json")
+    require(
+        f"Installed dagger CLI version v{stale_version} does not match repo-required version v{required_dagger_version}" in result.stderr,
+        "bin/dagger must explain the pinned-version mismatch",
+    )
+    require(read_calls() == [],
+            "bin/dagger must stop before delegating when the installed CLI version does not match dagger.json")
+    env.pop("DAGGER_STUB_VERSION", None)
 
 require("steps.dagger_version.outputs.version" in workflow,
         "GitHub workflow must source the Dagger version from dagger.json")
