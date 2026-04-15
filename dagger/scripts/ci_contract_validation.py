@@ -6,15 +6,33 @@ import subprocess
 import sys
 import tempfile
 
-root = Path("/work")
-workflow = (root / ".github/workflows/ci.yml").read_text()
-dagger_source = (root / "dagger/src/index.ts").read_text()
-dagger_config = (root / "dagger.json").read_text()
-real_path = os.environ["PATH"]
+errors = []
+
+
+def workspace_root():
+    candidate = os.environ.get("GITHUB_WORKSPACE")
+
+    if candidate:
+        return Path(candidate)
+
+    return Path.cwd()
+
+
+def read_required_text(path, label):
+    try:
+        return path.read_text()
+    except OSError as exc:
+        errors.append(f"unable to read {label} at {path}: {exc}")
+        return ""
+
+
+root = workspace_root()
+workflow = read_required_text(root / ".github/workflows/ci.yml", "GitHub workflow")
+dagger_source = read_required_text(root / "dagger/src/index.ts", "Dagger source")
+dagger_config = read_required_text(root / "dagger.json", "Dagger config")
+real_path = os.environ.get("PATH", "")
 real_bash = shutil.which("bash", path=real_path) or "/bin/bash"
 real_uname = shutil.which("uname", path=real_path) or "/usr/bin/uname"
-
-errors = []
 
 
 def require(condition, message):
@@ -22,22 +40,21 @@ def require(condition, message):
         errors.append(message)
 
 
-def path_with_shims(shim_dir, *excluded_commands):
-    excluded_dirs = set()
+def path_with_shims(*shim_dirs):
+    entries = [str(path) for path in shim_dirs if path]
+    entries.extend(entry for entry in real_path.split(os.pathsep) if entry)
+    return os.pathsep.join(dict.fromkeys(entries))
 
-    for command_name in excluded_commands:
-        resolved = shutil.which(command_name, path=real_path)
 
-        if resolved:
-            excluded_dirs.add(str(Path(resolved).parent))
+def shadow_missing_command(shim_dir, command_name):
+    shadow_path = shim_dir / command_name
+    shadow_path.write_text("#!/usr/bin/env bash\nexit 127\n")
+    shadow_path.chmod(0o755)
 
-    entries = [str(shim_dir)]
-    entries.extend(
-        entry
-        for entry in real_path.split(os.pathsep)
-        if entry and entry not in excluded_dirs
-    )
-    return os.pathsep.join(entries)
+
+def reset_shadow_commands(shim_dir):
+    for shadow_path in shim_dir.iterdir():
+        shadow_path.unlink()
 
 
 def extract_method_body(source_text, signature):
@@ -118,6 +135,8 @@ require(
 
 with tempfile.TemporaryDirectory() as tmp:
     tmp_path = Path(tmp)
+    shadow_path = tmp_path / "shadow"
+    shadow_path.mkdir()
     log_path = tmp_path / "dagger.log"
     docker_log_path = tmp_path / "docker.log"
     ssh_log_path = tmp_path / "ssh.log"
@@ -160,6 +179,9 @@ with tempfile.TemporaryDirectory() as tmp:
     colima_path = tmp_path / "colima"
     colima_path.write_text(
         "#!/usr/bin/env bash\n"
+        "if [[ \"$1\" == \"version\" && \"$COLIMA_VERSION_STATUS\" != \"fail\" ]]; then\n"
+        "  exit 0\n"
+        "fi\n"
         "if [[ \"$1\" == \"status\" && \"$COLIMA_STATUS\" != \"fail\" ]]; then\n"
         "  exit 0\n"
         "fi\n"
@@ -206,7 +228,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
     env = os.environ.copy()
     env["HOME"] = tmp
-    env["PATH"] = path_with_shims(tmp_path)
+    env["PATH"] = path_with_shims(shadow_path, tmp_path)
 
     def run(*command):
         return subprocess.run(
@@ -241,6 +263,7 @@ with tempfile.TemporaryDirectory() as tmp:
     )
 
     reset_logs()
+    reset_shadow_commands(shadow_path)
     stale_version = "0.20.4"
     env["DAGGER_STUB_VERSION"] = stale_version
     result = run("bin/dagger", "call", "fast")
@@ -314,6 +337,7 @@ with tempfile.TemporaryDirectory() as tmp:
     )
 
     reset_logs()
+    reset_shadow_commands(shadow_path)
     env["UNAME_OVERRIDE"] = "Linux"
     result = run("bin/dagger", "call", "fast")
     require(
@@ -335,6 +359,7 @@ with tempfile.TemporaryDirectory() as tmp:
     env.pop("UNAME_OVERRIDE", None)
 
     reset_logs()
+    reset_shadow_commands(shadow_path)
     env["UNAME_OVERRIDE"] = "Darwin"
     result = run("bin/dagger", "call", "fast")
     require(
@@ -356,6 +381,7 @@ with tempfile.TemporaryDirectory() as tmp:
     env.pop("UNAME_OVERRIDE", None)
 
     reset_logs()
+    reset_shadow_commands(shadow_path)
     env["UNAME_OVERRIDE"] = "Darwin"
     env["CANARY_DAGGER_DOCKER_TRANSPORT"] = "direct"
     result = run("bin/dagger", "call", "fast")
@@ -379,15 +405,11 @@ with tempfile.TemporaryDirectory() as tmp:
     env.pop("CANARY_DAGGER_DOCKER_TRANSPORT", None)
 
     reset_logs()
+    reset_shadow_commands(shadow_path)
     env["UNAME_OVERRIDE"] = "Darwin"
     env["EXPECT_DOCKER_CALL"] = "1"
-    env["PATH"] = path_with_shims(tmp_path, "docker", "colima")
-    docker_disabled_path = tmp_path / "docker.disabled"
-    docker_path.rename(docker_disabled_path)
-    try:
-        result = run("bin/dagger", "call", "fast")
-    finally:
-        docker_disabled_path.rename(docker_path)
+    shadow_missing_command(shadow_path, "docker")
+    result = run("bin/dagger", "call", "fast")
     require(
         result.returncode == 0,
         "bin/dagger auto mode must fall back to Colima over SSH when the docker binary is unavailable",
@@ -404,22 +426,16 @@ with tempfile.TemporaryDirectory() as tmp:
         read_lines(ssh_log_path) == [f"-F {colima_dir / 'ssh_config'} -T colima docker version"],
         "bin/dagger auto mode must route Docker calls through Colima over SSH when the docker binary is unavailable",
     )
-    env["PATH"] = path_with_shims(tmp_path)
+    reset_shadow_commands(shadow_path)
     env.pop("UNAME_OVERRIDE", None)
     env.pop("EXPECT_DOCKER_CALL", None)
 
     reset_logs()
+    reset_shadow_commands(shadow_path)
     env["UNAME_OVERRIDE"] = "Darwin"
-    env["PATH"] = path_with_shims(tmp_path, "docker", "colima")
-    docker_disabled_path = tmp_path / "docker.disabled"
-    colima_disabled_path = tmp_path / "colima.disabled"
-    docker_path.rename(docker_disabled_path)
-    colima_path.rename(colima_disabled_path)
-    try:
-        result = run("bin/dagger", "call", "fast")
-    finally:
-        docker_disabled_path.rename(docker_path)
-        colima_disabled_path.rename(colima_path)
+    shadow_missing_command(shadow_path, "docker")
+    shadow_missing_command(shadow_path, "colima")
+    result = run("bin/dagger", "call", "fast")
     require(
         result.returncode != 0,
         "bin/dagger auto mode must fail when neither direct Docker nor the Colima fallback is available",
@@ -428,10 +444,11 @@ with tempfile.TemporaryDirectory() as tmp:
         "no Colima fallback is installed" in result.stderr,
         "bin/dagger auto mode must explain when the Colima fallback is unavailable",
     )
-    env["PATH"] = path_with_shims(tmp_path)
+    reset_shadow_commands(shadow_path)
     env.pop("UNAME_OVERRIDE", None)
 
     reset_logs()
+    reset_shadow_commands(shadow_path)
     env["UNAME_OVERRIDE"] = "Darwin"
     env["DOCKER_VERSION_STATUS"] = "fail"
     env["EXPECT_DOCKER_CALL"] = "1"
@@ -457,15 +474,11 @@ with tempfile.TemporaryDirectory() as tmp:
     env.pop("EXPECT_DOCKER_CALL", None)
 
     reset_logs()
+    reset_shadow_commands(shadow_path)
     env["UNAME_OVERRIDE"] = "Darwin"
     env["COLIMA_STATUS"] = "fail"
-    env["PATH"] = path_with_shims(tmp_path, "docker", "colima")
-    docker_disabled_path = tmp_path / "docker.disabled"
-    docker_path.rename(docker_disabled_path)
-    try:
-        result = run("bin/dagger", "call", "fast")
-    finally:
-        docker_disabled_path.rename(docker_path)
+    shadow_missing_command(shadow_path, "docker")
+    result = run("bin/dagger", "call", "fast")
     require(
         result.returncode != 0,
         "bin/dagger auto mode must fail when the Colima fallback is installed but not running",
@@ -474,11 +487,12 @@ with tempfile.TemporaryDirectory() as tmp:
         "Colima fallback is not running" in result.stderr,
         "bin/dagger auto mode must explain when the Colima fallback is installed but not running",
     )
-    env["PATH"] = path_with_shims(tmp_path)
+    reset_shadow_commands(shadow_path)
     env.pop("UNAME_OVERRIDE", None)
     env.pop("COLIMA_STATUS", None)
 
     reset_logs()
+    reset_shadow_commands(shadow_path)
     env["UNAME_OVERRIDE"] = "Darwin"
     env["DOCKER_VERSION_DELAY_SECONDS"] = "4"
     env["EXPECT_DOCKER_CALL"] = "1"
@@ -504,6 +518,7 @@ with tempfile.TemporaryDirectory() as tmp:
     env.pop("EXPECT_DOCKER_CALL", None)
 
     reset_logs()
+    reset_shadow_commands(shadow_path)
     env["CANARY_DAGGER_DOCKER_TRANSPORT"] = "colima-ssh"
     env["EXPECT_DOCKER_CALL"] = "1"
     result = run("bin/dagger", "call", "fast")
@@ -527,6 +542,7 @@ with tempfile.TemporaryDirectory() as tmp:
     env.pop("EXPECT_DOCKER_CALL", None)
 
     reset_logs()
+    reset_shadow_commands(shadow_path)
     env["UNAME_OVERRIDE"] = "Darwin"
     result = run("bin/bootstrap")
     require(
@@ -548,17 +564,11 @@ with tempfile.TemporaryDirectory() as tmp:
     env.pop("UNAME_OVERRIDE", None)
 
     reset_logs()
+    reset_shadow_commands(shadow_path)
     env["UNAME_OVERRIDE"] = "Darwin"
-    env["PATH"] = path_with_shims(tmp_path, "docker", "colima")
-    docker_disabled_path = tmp_path / "docker.disabled"
-    colima_disabled_path = tmp_path / "colima.disabled"
-    docker_path.rename(docker_disabled_path)
-    colima_path.rename(colima_disabled_path)
-    try:
-        result = run("bin/bootstrap")
-    finally:
-        docker_disabled_path.rename(docker_path)
-        colima_disabled_path.rename(colima_path)
+    shadow_missing_command(shadow_path, "docker")
+    shadow_missing_command(shadow_path, "colima")
+    result = run("bin/bootstrap")
     require(
         result.returncode == 0,
         "bin/bootstrap must succeed when Docker and Colima are both unavailable",
@@ -567,19 +577,15 @@ with tempfile.TemporaryDirectory() as tmp:
         "macOS local validation needs a working Docker runtime" in result.stdout,
         "bin/bootstrap must explain how to restore local validation when no Docker runtime is available on macOS",
     )
-    env["PATH"] = path_with_shims(tmp_path)
+    reset_shadow_commands(shadow_path)
     env.pop("UNAME_OVERRIDE", None)
 
     reset_logs()
+    reset_shadow_commands(shadow_path)
     env["UNAME_OVERRIDE"] = "Darwin"
     env["COLIMA_STATUS"] = "fail"
-    env["PATH"] = path_with_shims(tmp_path, "docker", "colima")
-    docker_disabled_path = tmp_path / "docker.disabled"
-    docker_path.rename(docker_disabled_path)
-    try:
-        result = run("bin/bootstrap")
-    finally:
-        docker_disabled_path.rename(docker_path)
+    shadow_missing_command(shadow_path, "docker")
+    result = run("bin/bootstrap")
     require(
         result.returncode == 0,
         "bin/bootstrap must succeed when Colima is installed but not running",
@@ -588,7 +594,7 @@ with tempfile.TemporaryDirectory() as tmp:
         "no working Docker runtime detected" in result.stdout,
         "bin/bootstrap must direct Colima users to start Colima when Docker probing fails on macOS",
     )
-    env["PATH"] = path_with_shims(tmp_path)
+    reset_shadow_commands(shadow_path)
     env.pop("UNAME_OVERRIDE", None)
     env.pop("COLIMA_STATUS", None)
 
