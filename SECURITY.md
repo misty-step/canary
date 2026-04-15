@@ -28,3 +28,9 @@ Include:
 
 We follow coordinated disclosure. We will credit reporters unless
 they prefer to remain anonymous.
+
+## Related Policy
+
+- Review routing: [`.github/CODEOWNERS`](.github/CODEOWNERS)
+- Branch protection, secret scanning, and Dependabot expectations:
+  [`docs/governance.md`](docs/governance.md)
