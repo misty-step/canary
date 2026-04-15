@@ -611,10 +611,10 @@ require(
 )
 require(
     re.search(
-        r"name:\s+Run Dagger CI[\s\S]*?uses:\s+dagger/dagger-for-github@[\s\S]*?verb:\s+check",
+        r"name:\s+Run Dagger strict CI[\s\S]*?uses:\s+dagger/dagger-for-github@[\s\S]*?verb:\s+call[\s\S]*?args:\s+strict",
         workflow,
     ),
-    "GitHub workflow must run dagger check through the Dagger action",
+    "GitHub workflow must run the strict Dagger CI entrypoint through the Dagger action",
 )
 require(
     re.search(

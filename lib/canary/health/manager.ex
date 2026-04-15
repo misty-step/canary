@@ -23,6 +23,11 @@ defmodule Canary.Health.Manager do
     GenServer.call(__MODULE__, {:add_target, attrs})
   end
 
+  @spec track_target(Target.t()) :: :ok
+  def track_target(%Target{} = target) do
+    GenServer.call(__MODULE__, {:track_target, target})
+  end
+
   @spec remove_target(String.t()) :: {:ok, Target.t()} | {:error, :not_found | Ecto.Changeset.t()}
   def remove_target(target_id) do
     GenServer.call(__MODULE__, {:remove_target, target_id})
@@ -96,13 +101,18 @@ defmodule Canary.Health.Manager do
 
     case %Target{id: id} |> Target.changeset(Map.drop(atom_attrs, [:id])) |> Repo.insert() do
       {:ok, target} ->
-        ensure_target_state(target.id)
-        HealthSup.start_checker(target)
+        start_target_tracking(target)
         {:reply, {:ok, target}, state}
 
       {:error, cs} ->
         {:reply, {:error, cs}, state}
     end
+  end
+
+  @impl true
+  def handle_call({:track_target, %Target{} = target}, _from, state) do
+    start_target_tracking(target)
+    {:reply, :ok, state}
   end
 
   @impl true
@@ -164,6 +174,11 @@ defmodule Canary.Health.Manager do
       _ ->
         :ok
     end
+  end
+
+  defp start_target_tracking(target) do
+    ensure_target_state(target.id)
+    HealthSup.start_checker(target)
   end
 
   defp atomize_keys(map) do

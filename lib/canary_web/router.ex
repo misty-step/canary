@@ -103,6 +103,7 @@ defmodule CanaryWeb.Router do
     end
 
     # Admin: targets
+    post "/service-onboarding", ServiceOnboardingController, :create
     get "/targets", TargetController, :index
     post "/targets", TargetController, :create
     delete "/targets/:id", TargetController, :delete

@@ -1,12 +1,14 @@
 defmodule CanaryWeb.TargetController do
   use CanaryWeb, :controller
 
+  alias Canary.ChangesetErrors
   alias Canary.Health.Manager
   alias Canary.Health.SSRFGuard
+  alias Canary.TargetResponse
 
   def index(conn, _params) do
     targets = Manager.list_targets()
-    json(conn, %{targets: Enum.map(targets, &target_json/1)})
+    json(conn, %{targets: Enum.map(targets, &TargetResponse.render/1)})
   end
 
   def create(conn, params) do
@@ -24,7 +26,7 @@ defmodule CanaryWeb.TargetController do
 
         case Manager.add_target(attrs) do
           {:ok, target} ->
-            conn |> put_status(201) |> json(target_json(target))
+            conn |> put_status(201) |> json(TargetResponse.render(target))
 
           {:error, changeset} ->
             CanaryWeb.Plugs.ProblemDetails.render_error(
@@ -32,7 +34,7 @@ defmodule CanaryWeb.TargetController do
               422,
               "validation_error",
               "Invalid target configuration.",
-              %{errors: format_errors(changeset)}
+              %{errors: ChangesetErrors.format(changeset)}
             )
         end
 
@@ -89,28 +91,5 @@ defmodule CanaryWeb.TargetController do
           "Target not found."
         )
     end
-  end
-
-  defp target_json(target) do
-    %{
-      id: target.id,
-      name: target.name,
-      service: Canary.Schemas.Target.service_name(target),
-      url: target.url,
-      method: target.method,
-      interval_ms: target.interval_ms,
-      timeout_ms: target.timeout_ms,
-      expected_status: target.expected_status,
-      active: target.active == 1,
-      created_at: target.created_at
-    }
-  end
-
-  defp format_errors(%Ecto.Changeset{} = cs) do
-    Ecto.Changeset.traverse_errors(cs, fn {msg, opts} ->
-      Regex.replace(~r"%{(\w+)}", msg, fn _, key ->
-        opts |> Keyword.get(String.to_existing_atom(key), key) |> to_string()
-      end)
-    end)
   end
 end

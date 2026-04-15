@@ -175,9 +175,11 @@ export class Ci {
   }
 
   private async rootDialyzerContainer(source: Directory): Promise<Container> {
-    return (await elixirContainer(source, ".", "dev", "canary-root-dev", "mix.lock")).withExec(
-      ["mix", "dialyzer"],
+    return (
+      await elixirContainer(source, ".", "dev", "canary-root-dev", "mix.lock")
     )
+      .withEnvVariable("ERL_FLAGS", "+S 2:2")
+      .withExec(["mix", "dialyzer"])
   }
 
   private async rootFastContainer(source: Directory): Promise<Container> {
@@ -275,6 +277,16 @@ export class Ci {
     ).withExec(["npx", "redocly", "lint", "/work/priv/openapi/openapi.json"])
   }
 
+  private async apiContractsContainer(
+    source: Directory,
+  ): Promise<Container> {
+    return (
+      await elixirContainer(source, ".", "test", "canary-root-contract-test", "mix.lock")
+    ).withExec(
+      ["mix", "test", "--only", "contract"],
+    )
+  }
+
   @func()
   async fast(
     @argument({
@@ -355,6 +367,7 @@ export class Ci {
     await this.codexAgentRoles(repo)
     await this.ciContract(repo)
     await this.openapiContract(repo)
+    await this.apiContracts(repo)
     await this.rootQuality(repo)
     await this.rootDialyzer(repo)
     await this.sdkQuality(repo)
@@ -431,6 +444,30 @@ export class Ci {
     source?: Directory,
   ): Promise<void> {
     await (await this.openapiContractContainer(source!)).sync()
+  }
+
+  @func()
+  @check()
+  async apiContracts(
+    @argument({
+      defaultPath: "/",
+      ignore: [
+        ".git",
+        "_build",
+        "deps",
+        "cover",
+        "canary_sdk/_build",
+        "canary_sdk/deps",
+        "canary_sdk/cover",
+        "clients/typescript/node_modules",
+        "clients/typescript/dist",
+        "clients/typescript/coverage",
+        "dagger/node_modules",
+      ],
+    })
+    source?: Directory,
+  ): Promise<void> {
+    await (await this.apiContractsContainer(source!)).sync()
   }
 
   @func()

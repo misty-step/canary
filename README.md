@@ -266,6 +266,26 @@ window as the rest of the report:
 }
 ```
 
+### Connect a Service
+
+Use the onboarding endpoint when you want one opinionated flow that creates a
+health target, generates a fresh ingest key, and returns exact copy/paste
+snippets for reporting errors and verifying the service in Canary.
+
+```bash
+curl -X POST https://canary-obs.fly.dev/api/v1/service-onboarding \
+  -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"service": "my-api", "url": "https://my-api.fly.dev/health", "environment": "production"}'
+```
+
+The response includes:
+
+- a one-time raw API key for the new service
+- the created target metadata
+- exact snippets for `POST /api/v1/errors`, service-scoped queries, and `GET /api/v1/report`
+- direct links to `/dashboard` and the unified report
+
 ### Target Management
 
 ```bash

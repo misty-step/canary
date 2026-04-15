@@ -58,6 +58,9 @@
     },
     {
       "name": "Keys"
+    },
+    {
+      "name": "Onboarding"
     }
   ],
   "paths": {
@@ -842,6 +845,45 @@
           },
           "422": {
             "$ref": "#/components/responses/ValidationProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/service-onboarding": {
+      "post": {
+        "tags": [
+          "Onboarding"
+        ],
+        "summary": "Connect a service and return onboarding snippets",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServiceOnboardingRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Service connected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceOnboardingResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalProblem"
           }
         }
       }
@@ -3069,6 +3111,109 @@
           },
           "warning": {
             "type": "string"
+          }
+        }
+      },
+      "ServiceOnboardingRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "service",
+          "url"
+        ],
+        "properties": {
+          "service": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "environment": {
+            "type": "string"
+          },
+          "interval_ms": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "allow_private": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ServiceOnboardingLinks": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "dashboard",
+          "report",
+          "service_query"
+        ],
+        "properties": {
+          "dashboard": {
+            "type": "string"
+          },
+          "report": {
+            "type": "string"
+          },
+          "service_query": {
+            "type": "string"
+          }
+        }
+      },
+      "ServiceOnboardingSnippets": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error_ingest_curl",
+          "report_curl",
+          "service_query_curl",
+          "elixir_logger",
+          "typescript_init"
+        ],
+        "properties": {
+          "error_ingest_curl": {
+            "type": "string"
+          },
+          "report_curl": {
+            "type": "string"
+          },
+          "service_query_curl": {
+            "type": "string"
+          },
+          "elixir_logger": {
+            "type": "string"
+          },
+          "typescript_init": {
+            "type": "string"
+          }
+        }
+      },
+      "ServiceOnboardingResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "service",
+          "api_key",
+          "target",
+          "links",
+          "snippets"
+        ],
+        "properties": {
+          "service": {
+            "type": "string"
+          },
+          "api_key": {
+            "$ref": "#/components/schemas/ApiKeyCreateResponse"
+          },
+          "target": {
+            "$ref": "#/components/schemas/Target"
+          },
+          "links": {
+            "$ref": "#/components/schemas/ServiceOnboardingLinks"
+          },
+          "snippets": {
+            "$ref": "#/components/schemas/ServiceOnboardingSnippets"
           }
         }
       }

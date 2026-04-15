@@ -2,6 +2,8 @@ defmodule Canary.Schemas.ApiKey do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @type t :: %__MODULE__{}
+
   @primary_key {:id, :string, autogenerate: false}
   schema "api_keys" do
     field :name, :string
