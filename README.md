@@ -46,9 +46,11 @@ Supported local toolchains are pinned in `.tool-versions`:
 - Elixir `1.17.3-otp-27`
 - Node.js `22.22.0`
 
-Local validation also requires the `dagger` CLI. On macOS, repo-local Dagger
-execution assumes Colima and routes Docker calls into the Colima VM over SSH.
-GitHub Actions and git hooks delegate to the same Dagger surface.
+Local validation also requires the `dagger` CLI, pinned to the version declared
+in `dagger.json`. On macOS, repo-local Dagger uses the active local Docker
+client first and falls back to Colima-over-SSH if direct Docker access is
+unavailable. GitHub Actions and git hooks delegate to the same pinned Dagger
+surface.
 
 The production Dockerfile also builds on Elixir `1.17`, and CI uses the same pinned toolchain versions.
 
@@ -78,7 +80,10 @@ Run the canonical repo-local quality gate from the repo root:
 `./bin/validate` defaults to the deterministic Dagger gate and automatically
 uses the repo-local `./bin/dagger` wrapper.
 
-On macOS, start Colima first:
+`./bin/dagger` refuses local CLI version drift so local runs match the Dagger
+version pinned for CI in `dagger.json`.
+
+On macOS, make sure the active Docker client works. If you use Colima:
 
 ```bash
 colima start --runtime docker

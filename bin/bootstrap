@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CI_MODE=0
 
+. "$ROOT/bin/lib/docker_probe.sh"
+
 require_command() {
   local command_name="$1"
   local help_text="$2"
@@ -31,13 +33,17 @@ note_colima() {
     return 0
   fi
 
-  if ! command -v colima >/dev/null 2>&1; then
-    printf '==> tooling: macOS local validation uses Colima. Install it before running ./bin/validate.\n'
+  if docker_available; then
+    return 0
+  fi
+
+  if ! colima version >/dev/null 2>&1; then
+    printf '==> tooling: macOS local validation needs a working Docker runtime. Start Docker Desktop or install/start Colima before running ./bin/validate.\n'
     return 0
   fi
 
   if ! colima status >/dev/null 2>&1; then
-    printf '==> tooling: start Colima before running local validation: colima start --runtime docker\n'
+    printf '==> tooling: no working Docker runtime detected. If you use Colima, start it before running local validation: colima start --runtime docker\n'
   fi
 }
 

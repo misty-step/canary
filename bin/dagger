@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SELF_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
 TRANSPORT="${CANARY_DAGGER_DOCKER_TRANSPORT:-auto}"
+
+. "$ROOT/bin/lib/docker_probe.sh"
 
 usage() {
   cat <<'EOF'
@@ -10,7 +13,8 @@ Usage: bin/dagger <dagger-args...>
 
 Repo-local Dagger wrapper.
 
-- On macOS, the default transport is Colima over SSH.
+- On macOS, the default transport uses the active local Docker client first.
+- If direct Docker access is unavailable, it falls back to Colima over SSH.
 - On Linux/CI, the installed Dagger CLI is used directly.
 
 Environment:
@@ -43,19 +47,58 @@ find_dagger_bin() {
   return 1
 }
 
+required_dagger_version() {
+  local config_path="$ROOT/dagger.json"
+  local version
+
+  [[ -f "$config_path" ]] || return 1
+
+  version="$(sed -n 's/.*"engineVersion":[[:space:]]*"v\([^"]*\)".*/\1/p' "$config_path" | head -n 1)"
+  [[ -n "$version" ]] || return 1
+
+  printf '%s\n' "$version"
+}
+
+installed_dagger_version() {
+  local dagger_bin="$1"
+  "$dagger_bin" version 2>/dev/null | sed -n 's/^dagger v\([^ ]*\).*/\1/p' | head -n 1
+}
+
+require_pinned_dagger_version() {
+  local dagger_bin="$1"
+  local required_version installed_version
+
+  if ! required_version="$(required_dagger_version)"; then
+    printf 'Unable to parse the repo-required Dagger version from %s. Expected an "engineVersion" value like "v0.20.5".\n' "$ROOT/dagger.json" >&2
+    exit 1
+  fi
+
+  installed_version="$(installed_dagger_version "$dagger_bin" || true)"
+
+  if [[ -z "$installed_version" ]]; then
+    printf 'Unable to determine the installed dagger CLI version from %s. Expected v%s from dagger.json.\n' "$dagger_bin" "$required_version" >&2
+    exit 1
+  fi
+
+  if [[ "$installed_version" != "$required_version" ]]; then
+    printf 'Installed dagger CLI version v%s does not match repo-required version v%s from dagger.json. Upgrade or downgrade dagger before running repo-local validation.\n' "$installed_version" "$required_version" >&2
+    exit 1
+  fi
+}
+
 require_colima() {
-  if ! command -v colima >/dev/null 2>&1; then
-    printf "Colima is required for repo-local Dagger execution on macOS. Install it and run 'colima start --runtime docker'.\n" >&2
+  if ! colima version >/dev/null 2>&1; then
+    printf "Repo-local Dagger could not use the active Docker client and no Colima fallback is installed. Start your Docker runtime or install Colima and run 'colima start --runtime docker'.\n" >&2
     exit 1
   fi
 
   if [[ ! -f "${HOME}/.colima/ssh_config" ]]; then
-    printf "Missing %s. Start Colima with 'colima start --runtime docker' before running repo-local validation.\n" "${HOME}/.colima/ssh_config" >&2
+    printf "Repo-local Dagger could not use the active Docker client and the Colima fallback is not ready. Missing %s. Start your Docker runtime or start Colima with 'colima start --runtime docker'.\n" "${HOME}/.colima/ssh_config" >&2
     exit 1
   fi
 
   if ! colima status >/dev/null 2>&1; then
-    printf "Colima is not running. Start it with 'colima start --runtime docker' before running repo-local validation.\n" >&2
+    printf "Repo-local Dagger could not use the active Docker client and the Colima fallback is not running. Start your Docker runtime or start Colima with 'colima start --runtime docker'.\n" >&2
     exit 1
   fi
 }
@@ -100,9 +143,15 @@ if [[ -z "$dagger_bin" ]]; then
   exit 1
 fi
 
+require_pinned_dagger_version "$dagger_bin"
+
 case "$TRANSPORT" in
   auto)
     if [[ "$(uname -s)" == "Darwin" ]]; then
+      if docker_available; then
+        exec "$dagger_bin" "$@"
+      fi
+
       require_colima
       run_with_colima "$dagger_bin" "$@"
       exit $?
