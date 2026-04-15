@@ -1,0 +1,21 @@
+# Ownership and review routing for this repository.
+#
+# Canary is a solo-maintained project. A single owner is listed so that
+# GitHub auto-requests review on every pull request. Add additional owners
+# alongside @phrazzld as the team grows; prefer directory-scoped rules
+# over per-file rules to keep this file readable.
+
+*                                    @phrazzld
+
+# Security and governance surfaces — keep review tight on policy files.
+/SECURITY.md                         @phrazzld
+/.github/                            @phrazzld
+/.github/CODEOWNERS                  @phrazzld
+/docs/governance.md                  @phrazzld
+
+# CI and deployment control plane — treat as protected infrastructure.
+/.github/workflows/                  @phrazzld
+/dagger.json                         @phrazzld
+/dagger/                             @phrazzld
+/fly.toml                            @phrazzld
+/Dockerfile                          @phrazzld
