@@ -99,6 +99,15 @@ Use the wrapper directly when you want raw Dagger entrypoints from the repo:
 ./bin/dagger call fast
 ```
 
+`dagger/scripts/sync_source_arguments.py` is the single source of truth for
+the repo-source `ignore` lists on Dagger `Directory` arguments. Dagger's
+TypeScript introspector still requires inline literals in `dagger/src/index.ts`,
+so update the policy table and run:
+
+```bash
+python3 dagger/scripts/sync_source_arguments.py --write
+```
+
 The deterministic portion of that gate enforces checks across the maintained
 packages:
 

@@ -30,6 +30,7 @@ root = workspace_root()
 workflow = read_required_text(root / ".github/workflows/ci.yml", "GitHub workflow")
 dagger_source = read_required_text(root / "dagger/src/index.ts", "Dagger source")
 dagger_config = read_required_text(root / "dagger.json", "Dagger config")
+source_argument_sync = root / "dagger/scripts/sync_source_arguments.py"
 real_path = os.environ.get("PATH", "")
 real_bash = shutil.which("bash", path=real_path) or "/bin/bash"
 real_uname = shutil.which("uname", path=real_path) or "/usr/bin/uname"
@@ -130,6 +131,45 @@ require(
 require(
     required_dagger_version is not None,
     "dagger.json must define engineVersion",
+)
+require(
+    source_argument_sync.is_file(),
+    "dagger/scripts/sync_source_arguments.py must exist",
+)
+require(
+    "async function cachePlatformKey()" in dagger_source,
+    "dagger/src/index.ts must derive a cache platform key",
+)
+require(
+    "await dag.defaultPlatform()" in dagger_source,
+    "dagger/src/index.ts must scope cache volumes by dag.defaultPlatform()",
+)
+require(
+    dagger_source.count("const platformKey = await cachePlatformKey()") == 2,
+    "Each Dagger dependency container must compute a platform cache key once",
+)
+require(
+    dagger_source.count("platformKey, imageKey, digest") == 5,
+    "Every Dagger cache volume must scope its key by platform, image, and lockfile digest",
+)
+
+sync_result = subprocess.run(
+    [sys.executable, str(source_argument_sync), "--check"],
+    cwd=root,
+    text=True,
+    capture_output=True,
+)
+require(
+    sync_result.returncode == 0,
+    (
+        "Dagger source arguments must stay in sync with "
+        "dagger/scripts/sync_source_arguments.py"
+        + (
+            f": {(sync_result.stderr or sync_result.stdout).strip()}"
+            if (sync_result.stderr or sync_result.stdout).strip()
+            else ""
+        )
+    ),
 )
 
 

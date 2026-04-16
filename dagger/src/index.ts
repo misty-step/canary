@@ -63,12 +63,29 @@ function imageIdentity(image: string): string {
   return image.replace(/[^a-z0-9]+/gi, "-").slice(0, 16).toLowerCase()
 }
 
-function cacheVolumeName(namespace: string, ...parts: string[]): string {
-  return [namespace, ...parts.map(digestSuffix)].join("-")
+function cacheIdentityPart(part: string): string {
+  if (part.startsWith(DIGEST_PREFIX)) {
+    return digestSuffix(part)
+  }
+
+  return part
+    .replace(/[^a-z0-9]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32)
+    .toLowerCase()
 }
 
-// Dagger's TypeScript introspector evaluates @argument values in isolation.
-// Keep the ignore list literal inline at each parameter site or defaultPath breaks.
+function cacheVolumeName(namespace: string, ...parts: string[]): string {
+  return [cacheIdentityPart(namespace), ...parts.map(cacheIdentityPart)].join("-")
+}
+
+// Dagger's TypeScript introspector evaluates @argument metadata in isolation.
+// Keep the ignore lists literal in this file and sync them from
+// dagger/scripts/sync_source_arguments.py.
+async function cachePlatformKey(): Promise<string> {
+  return cacheIdentityPart(await dag.defaultPlatform())
+}
+
 async function lockfileDigest(
   source: Directory,
   path: string,
@@ -85,18 +102,19 @@ async function elixirContainer(
   lockfilePath: string,
 ): Promise<Container> {
   const digest = await lockfileDigest(source, lockfilePath)
+  const platformKey = await cachePlatformKey()
   const imageKey = imageIdentity(ELIXIR_IMAGE)
   const depsCache = dag.cacheVolume(
-    cacheVolumeName(`${cacheNamespace}-deps`, imageKey, digest),
+    cacheVolumeName(`${cacheNamespace}-deps`, platformKey, imageKey, digest),
   )
   const buildCache = dag.cacheVolume(
-    cacheVolumeName(`${cacheNamespace}-build`, imageKey, digest),
+    cacheVolumeName(`${cacheNamespace}-build`, platformKey, imageKey, digest),
   )
   const hexCache = dag.cacheVolume(
-    cacheVolumeName(`${cacheNamespace}-hex-home`, imageKey, digest),
+    cacheVolumeName(`${cacheNamespace}-hex-home`, platformKey, imageKey, digest),
   )
   const rebarCache = dag.cacheVolume(
-    cacheVolumeName(`${cacheNamespace}-rebar-home`, imageKey, digest),
+    cacheVolumeName(`${cacheNamespace}-rebar-home`, platformKey, imageKey, digest),
   )
   const packageDir = workdir === "." ? "/work" : `/work/${workdir}`
 
@@ -132,9 +150,10 @@ async function nodeContainer(
   cacheNamespace: string,
 ): Promise<Container> {
   const digest = await lockfileDigest(source, lockfilePath)
+  const platformKey = await cachePlatformKey()
   const imageKey = imageIdentity(NODE_IMAGE)
   const npmCache = dag.cacheVolume(
-    cacheVolumeName(`${cacheNamespace}-npm`, imageKey, digest),
+    cacheVolumeName(`${cacheNamespace}-npm`, platformKey, imageKey, digest),
   )
   const packageDir = workdir === "." ? "/work" : `/work/${workdir}`
 

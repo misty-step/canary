@@ -15,11 +15,11 @@
 | 011 | OpenAPI spec + agent integration guide | high | done | M |
 | 006 | Split Query into read models | high | done | L |
 | 005 | Connect-a-service workflow | medium | done | M |
-| 014 | Backup/restore + DR validation | medium | ready | S |
+| 014 | Backup/restore + DR validation | medium | done | S |
 | 008 | Security + governance baseline | medium | done | S |
 | 007 | Networked service dogfooding | medium | ready | L |
 | 016 | Immutable CI control plane | medium | ready | M |
-| 017 | Dagger source contract + cache portability | medium | ready | M |
+| 017 | Dagger source contract + cache portability | medium | done | M |
 | 015 | Product security controls (scoped keys) | low | ready | M |
 | 009 | Desktop health semantics research | low | blocked | M |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
