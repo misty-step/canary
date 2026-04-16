@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/bin/lib/dr.sh"
+
+APP="$(dr_default_app)"
+DB_PATH="$(dr_default_db_path)"
+
+usage() {
+  cat <<'EOF'
+Usage: bin/dr-restore-check [--app <fly-app>] [--db-path <path>] [-h|--help]
+
+Run a non-destructive restore drill on the remote Fly app by restoring the
+replica to a temporary file and listing the recovered database.
+
+This restores the replica to a temporary file and never overwrites the live database.
+EOF
+}
+
+while (($#)); do
+  case "$1" in
+    --app)
+      if (($# < 2)); then
+        usage >&2
+        exit 1
+      fi
+      APP="$2"
+      shift 2
+      ;;
+    --db-path)
+      if (($# < 2)); then
+        usage >&2
+        exit 1
+      fi
+      DB_PATH="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+dr_require_command flyctl
+
+dr_fly_ssh "$APP" "$(dr_restore_remote_command "$DB_PATH")"

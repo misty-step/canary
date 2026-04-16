@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/bin/lib/dr.sh"
+
+APP="$(dr_default_app)"
+
+usage() {
+  cat <<'EOF'
+Usage: bin/dr-status [--app <fly-app>] [-h|--help]
+
+Show the running Fly app's Litestream replication status.
+
+This is a read-only preflight. It exits non-zero when Litestream backup
+configuration is missing or when the remote command cannot run.
+EOF
+}
+
+while (($#)); do
+  case "$1" in
+    --app)
+      if (($# < 2)); then
+        usage >&2
+        exit 1
+      fi
+      APP="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+dr_require_command flyctl
+
+dr_fly_ssh "$APP" "$(dr_status_remote_command)"

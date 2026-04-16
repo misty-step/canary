@@ -20,6 +20,8 @@ const NODE_IMAGE =
   "node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94"
 const PYTHON_IMAGE =
   "python:3.13-slim-bookworm@sha256:f13a6b7565175da40695e8109f64cbc4d2e65f4c9ef2e3b321c3a44fa3c06fe7"
+const GITLEAKS_IMAGE =
+  "zricethezav/gitleaks:latest@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f"
 const DIGEST_PREFIX = "sha256:"
 
 const CODEX_AGENT_ROLE_VALIDATION = `
@@ -163,6 +165,20 @@ function ciContractContainer(source: Directory): Container {
     .withExec(["python", "dagger/scripts/ci_contract_validation.py"])
 }
 
+function secretsContainer(source: Directory, mode: "dir" | "git"): Container {
+  const args =
+    mode === "git"
+      ? ["gitleaks", "git", ".", "--redact"]
+      : ["gitleaks", "dir", ".", "--redact"]
+
+  return dag
+    .container()
+    .from(GITLEAKS_IMAGE)
+    .withMountedDirectory("/work", source)
+    .withWorkdir("/work")
+    .withExec(args)
+}
+
 @object()
 export class Ci {
   private async rootQualityContainer(source: Directory): Promise<Container> {
@@ -172,6 +188,8 @@ export class Ci {
       .withExec(["mix", "credo", "--strict"])
       .withExec(["mix", "sobelow", "--config", "--exit", "--threshold", "medium"])
       .withExec(["mix", "test", "--cover"])
+      .withExec(["bash", "test/bin/entrypoint_test.sh"])
+      .withExec(["bash", "test/bin/dr_test.sh"])
   }
 
   private async rootDialyzerContainer(source: Directory): Promise<Container> {
@@ -186,6 +204,8 @@ export class Ci {
     return (await elixirContainer(source, ".", "test", "canary-root-test", "mix.lock"))
       .withExec(["mix", "format", "--check-formatted"])
       .withExec(["mix", "compile", "--warnings-as-errors"])
+      .withExec(["bash", "test/bin/entrypoint_test.sh"])
+      .withExec(["bash", "test/bin/dr_test.sh"])
   }
 
   private async sdkQualityContainer(source: Directory): Promise<Container> {
@@ -335,7 +355,7 @@ export class Ci {
     })
     source?: Directory,
   ): Promise<void> {
-    const repo = source!
+    const repo = source!.withoutDirectory(".git")
 
     await (await this.rootAdvisoryContainer(repo)).sync()
     await (await this.sdkAdvisoryContainer(repo)).sync()
@@ -347,7 +367,6 @@ export class Ci {
     @argument({
       defaultPath: "/",
       ignore: [
-        ".git",
         "_build",
         "deps",
         "cover",
@@ -365,13 +384,8 @@ export class Ci {
     const repo = source!
 
     await this.codexAgentRoles(repo)
-    await this.ciContract(repo)
-    await this.openapiContract(repo)
-    await this.apiContracts(repo)
-    await this.rootQuality(repo)
-    await this.rootDialyzer(repo)
-    await this.sdkQuality(repo)
-    await this.typescriptQuality(repo)
+    await this.deterministic(repo)
+    await this.secretsHistory(repo)
     await this.advisories(repo)
   }
 
@@ -395,11 +409,45 @@ export class Ci {
     })
     source?: Directory,
   ): Promise<void> {
-    await codexAgentRolesContainer(source!).sync()
+    const repo = source!.withoutDirectory(".git")
+
+    await codexAgentRolesContainer(repo).sync()
   }
 
   @func()
   @check()
+  async deterministic(
+    @argument({
+      defaultPath: "/",
+      ignore: [
+        ".git",
+        "_build",
+        "deps",
+        "cover",
+        "canary_sdk/_build",
+        "canary_sdk/deps",
+        "canary_sdk/cover",
+        "clients/typescript/node_modules",
+        "clients/typescript/dist",
+        "clients/typescript/coverage",
+        "dagger/node_modules",
+      ],
+    })
+    source?: Directory,
+  ): Promise<void> {
+    const repo = source!.withoutDirectory(".git")
+
+    await this.ciContract(repo)
+    await this.openapiContract(repo)
+    await this.apiContracts(repo)
+    await this.rootQuality(repo)
+    await this.rootDialyzer(repo)
+    await this.sdkQuality(repo)
+    await this.typescriptQuality(repo)
+    await this.secrets(repo)
+  }
+
+  @func()
   async ciContract(
     @argument({
       defaultPath: "/",
@@ -423,7 +471,6 @@ export class Ci {
   }
 
   @func()
-  @check()
   async openapiContract(
     @argument({
       defaultPath: "/",
@@ -447,7 +494,6 @@ export class Ci {
   }
 
   @func()
-  @check()
   async apiContracts(
     @argument({
       defaultPath: "/",
@@ -471,7 +517,6 @@ export class Ci {
   }
 
   @func()
-  @check()
   async rootQuality(
     @argument({
       defaultPath: "/",
@@ -495,7 +540,6 @@ export class Ci {
   }
 
   @func()
-  @check()
   async rootDialyzer(
     @argument({
       defaultPath: "/",
@@ -519,7 +563,6 @@ export class Ci {
   }
 
   @func()
-  @check()
   async sdkQuality(
     @argument({
       defaultPath: "/",
@@ -543,7 +586,6 @@ export class Ci {
   }
 
   @func()
-  @check()
   async typescriptQuality(
     @argument({
       defaultPath: "/",
@@ -564,5 +606,50 @@ export class Ci {
     source?: Directory,
   ): Promise<void> {
     await (await this.typescriptQualityContainer(source!)).sync()
+  }
+
+  @func()
+  async secrets(
+    @argument({
+      defaultPath: "/",
+      ignore: [
+        "_build",
+        "deps",
+        "cover",
+        "canary_sdk/_build",
+        "canary_sdk/deps",
+        "canary_sdk/cover",
+        "clients/typescript/node_modules",
+        "clients/typescript/dist",
+        "clients/typescript/coverage",
+        "dagger/node_modules",
+      ],
+    })
+    source?: Directory,
+  ): Promise<void> {
+    await secretsContainer(source!, "dir").sync()
+  }
+
+  @func()
+  @check()
+  async secretsHistory(
+    @argument({
+      defaultPath: "/",
+      ignore: [
+        "_build",
+        "deps",
+        "cover",
+        "canary_sdk/_build",
+        "canary_sdk/deps",
+        "canary_sdk/cover",
+        "clients/typescript/node_modules",
+        "clients/typescript/dist",
+        "clients/typescript/coverage",
+        "dagger/node_modules",
+      ],
+    })
+    source?: Directory,
+  ): Promise<void> {
+    await secretsContainer(source!, "git").sync()
   }
 }

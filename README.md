@@ -12,7 +12,7 @@ Existing tools (Sentry, Uptime Robot) are designed around humans staring at dash
 - **Agent-first responses** with natural-language summaries and bounded payloads
 - **Timelines and incidents** — deterministic correlation without an LLM in the loop
 - **Generic webhooks** — consumers define their own behavior
-- **Self-hosted** on Fly.io with SQLite + Litestream backup
+- **Self-hosted** on Fly.io with SQLite + Litestream + Fly Tigris backup
 
 ## Quick Start
 
@@ -77,8 +77,9 @@ Run the canonical repo-local quality gate from the repo root:
 ./bin/validate
 ```
 
-`./bin/validate` defaults to the deterministic Dagger gate and automatically
-uses the repo-local `./bin/dagger` wrapper.
+`./bin/validate` defaults to the canonical Dagger check, which runs the
+deterministic package gates plus the git-history secrets scan, and
+automatically uses the repo-local `./bin/dagger` wrapper.
 
 `./bin/dagger` refuses local CLI version drift so local runs match the Dagger
 version pinned for CI in `dagger.json`.
@@ -98,15 +99,16 @@ Use the wrapper directly when you want raw Dagger entrypoints from the repo:
 ./bin/dagger call fast
 ```
 
-The canonical Dagger gate is deterministic and enforces checks across the
-maintained packages:
+The deterministic portion of that gate enforces checks across the maintained
+packages:
 
 - core: compile, format, credo, sobelow, coverage, dialyzer
 - Elixir SDK: compile, format, coverage
 - TypeScript SDK: typecheck, coverage, build
 
-Run live dependency advisory scans explicitly when you want current registry
-state as part of a stricter local release check:
+The default gate also includes the git-history secrets scan. Run live
+dependency advisory scans explicitly when you want current registry state as
+part of a stricter local release check:
 
 ```bash
 ./bin/validate --advisories
@@ -140,8 +142,8 @@ The pre-push hook runs the full Dagger gate before local pushes:
 ./bin/validate --strict
 ```
 
-GitHub Actions mirrors that strict path by running `dagger call codex-agent-roles`,
-`dagger check`, and `dagger call advisories` through the same pinned Dagger action.
+GitHub Actions mirrors that strict path by running `dagger call strict`
+through the same pinned Dagger action.
 
 ## API
 
@@ -356,11 +358,21 @@ All webhooks are HMAC-SHA256 signed. Secret returned on subscription creation.
 
 ## Deployment
 
-Deployed to Fly.io with SQLite persistence and Litestream S3 replication.
+Deployed to Fly.io with SQLite persistence and a Fly Tigris-backed Litestream
+restore path.
 
 ```bash
 flyctl deploy --app canary-obs
 ```
+
+DR verification and restore procedures live in [docs/backup-restore-dr.md](docs/backup-restore-dr.md).
+Use `bin/dr-status` for a read-only Litestream preflight and
+`bin/dr-restore-check` for a non-destructive restore drill against the running
+Fly app.
+On a fresh Fly app, enable the same path with
+`flyctl storage create --app canary-obs --name canary-obs-backups --yes`, then
+re-run the two verification commands. See the DR runbook for the latest live
+verification status.
 
 See `fly.toml`, `Dockerfile`, `litestream.yml`, and `bin/entrypoint.sh`.
 
@@ -371,7 +383,7 @@ See `fly.toml`, `Dockerfile`, `litestream.yml`, and `bin/entrypoint.sh`.
 - **SQLite** — WAL mode, write-serialized, Ecto abstraction preserves Postgres migration path
 - **Oban** — Webhook delivery retries, retention pruning, TLS scanning
 - **Req/Finch** — Connection-pooled HTTP probes
-- **Litestream** — Continuous SQLite replication to S3
+- **Litestream + Fly Tigris** — Continuous SQLite replication to Fly-managed object storage
 
 ## License
 

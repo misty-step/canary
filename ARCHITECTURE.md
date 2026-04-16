@@ -1,6 +1,6 @@
 # Architecture
 
-Canary is a single Elixir/OTP application deployed as one Docker container. No microservices, no message queues, no external dependencies beyond S3 for backups.
+Canary is a single Elixir/OTP application deployed as one Docker container. No microservices, no message queues, no external dependencies beyond Fly Tigris for backups.
 
 ## Supervision Tree
 
@@ -149,7 +149,7 @@ GenServer timer fires
 
 ## Persistence
 
-Single SQLite file at `/data/canary.db` with WAL mode. Litestream continuously replicates to S3. Recovery is restore-based, not failover.
+Single SQLite file at `/data/canary.db` with WAL mode. Litestream continuously replicates to Fly Tigris object storage. Recovery is restore-based, not failover.
 
 Tables: `errors`, `error_groups`, `targets`, `target_checks`, `target_state`, `webhooks`, `api_keys`, `seed_runs`, plus Ecto and Oban internal tables.
 

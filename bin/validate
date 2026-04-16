@@ -11,7 +11,7 @@ Usage: bin/validate [--fast|--advisories|--strict] [-h|--help]
 Runs the canonical repo-local validation through Dagger.
   --fast        Run the reduced hook-oriented validation set.
   --advisories  Run live dependency advisory scans only.
-  --strict      Run the deterministic gate followed by advisory scans.
+  --strict      Run the deterministic gate, git-history secrets scan, then advisory scans.
   -h, --help    Show this help message.
 EOF
 }

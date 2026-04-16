@@ -1,0 +1,4 @@
+373af947cc4015bda5bfa096629f75ac44666b0d:.claude/skills/autopilot/references/pr-fix-code-review-checklist.md:generic-api-key:177
+df04c2290a8ecd9dd02a8796abf774e351c92aca:.claude/skills/autopilot/references/pr-fix-code-review-checklist.md:generic-api-key:177
+738ff1679e2d1abd1793c29fe5301abbd7fc87c9:test/canary/auth_test.exs:stripe-access-token:27
+738ff1679e2d1abd1793c29fe5301abbd7fc87c9:spec.md:stripe-access-token:610

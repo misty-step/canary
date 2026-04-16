@@ -53,6 +53,7 @@ thinktank.log
 # Harness output (Codex/Pi mirrors)
 /.agents/
 /.codex/
+/.spellbook/
 
 # Generated artifacts
 design-catalog.html

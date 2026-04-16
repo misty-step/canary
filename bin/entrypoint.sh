@@ -5,16 +5,15 @@ DB_PATH="${CANARY_DB_PATH:-/data/canary.db}"
 
 # --- Litestream env validation ---
 LITESTREAM_READY=0
-if [ -z "$LITESTREAM_S3_BUCKET" ]; then
-  echo "WARNING: Litestream replication NOT configured — running without backups" >&2
+if [ -z "${BUCKET_NAME:-}" ]; then
+  echo "WARNING: Litestream replication NOT configured — BUCKET_NAME missing, running without backups" >&2
 else
   MISSING=""
-  [ -z "$LITESTREAM_ACCESS_KEY_ID" ] && MISSING="$MISSING LITESTREAM_ACCESS_KEY_ID"
-  [ -z "$LITESTREAM_SECRET_ACCESS_KEY" ] && MISSING="$MISSING LITESTREAM_SECRET_ACCESS_KEY"
-  [ -z "$LITESTREAM_S3_REGION" ] && MISSING="$MISSING LITESTREAM_S3_REGION"
+  [ -z "${AWS_ACCESS_KEY_ID:-}" ] && MISSING="$MISSING AWS_ACCESS_KEY_ID"
+  [ -z "${AWS_SECRET_ACCESS_KEY:-}" ] && MISSING="$MISSING AWS_SECRET_ACCESS_KEY"
 
   if [ -n "$MISSING" ]; then
-    echo "WARNING: Litestream S3 bucket set but missing required variables:$MISSING" >&2
+    echo "WARNING: Fly Tigris bucket set but missing required variables:$MISSING" >&2
   else
     LITESTREAM_READY=1
   fi
@@ -24,6 +23,11 @@ fi
 if [ ! -f "$DB_PATH" ] && [ "$LITESTREAM_READY" = "1" ]; then
   echo "Restoring database from Litestream..."
   litestream restore -if-replica-exists -o "$DB_PATH" -config /etc/litestream.yml "$DB_PATH"
+
+  if [ ! -s "$DB_PATH" ]; then
+    echo "ERROR: Litestream restore did not materialize $DB_PATH — refusing to start on an empty database" >&2
+    exit 1
+  fi
 fi
 
 # Start app under Litestream (continuous replication)

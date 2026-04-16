@@ -604,24 +604,18 @@ require(
 )
 require(
     re.search(
-        r"name:\s+Run Dagger codex role validation[\s\S]*?uses:\s+dagger/dagger-for-github@[\s\S]*?verb:\s+call[\s\S]*?args:\s+codex-agent-roles",
-        workflow,
-    ),
-    "GitHub workflow must run codex-agent-roles through the Dagger action",
-)
-require(
-    re.search(
         r"name:\s+Run Dagger strict CI[\s\S]*?uses:\s+dagger/dagger-for-github@[\s\S]*?verb:\s+call[\s\S]*?args:\s+strict",
         workflow,
     ),
     "GitHub workflow must run the strict Dagger CI entrypoint through the Dagger action",
 )
 require(
-    re.search(
-        r"name:\s+Run Dagger advisories[\s\S]*?uses:\s+dagger/dagger-for-github@[\s\S]*?verb:\s+call[\s\S]*?args:\s+advisories",
-        workflow,
-    ),
-    "GitHub workflow must run advisories through the Dagger action",
+    "Run Dagger codex role validation" not in workflow,
+    "GitHub workflow must not duplicate codex-agent-roles outside the strict Dagger entrypoint",
+)
+require(
+    "Run Dagger advisories" not in workflow,
+    "GitHub workflow must not duplicate advisories outside the strict Dagger entrypoint",
 )
 
 if not errors:
