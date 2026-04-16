@@ -58,6 +58,32 @@ defmodule CanaryWeb.OpenAPIControllerTest do
     end)
   end
 
+  test "documents API key scopes and forbidden responses", %{conn: conn} do
+    body = openapi_body(conn)
+
+    assert get_in(body, ["components", "schemas", "ApiKeyScope", "enum"]) ==
+             ["admin", "ingest-only", "read-only"]
+
+    assert get_in(body, ["components", "schemas", "ApiKey", "properties", "scope", "$ref"]) ==
+             "#/components/schemas/ApiKeyScope"
+
+    assert get_in(body, [
+             "components",
+             "schemas",
+             "ApiKeyCreateRequest",
+             "properties",
+             "scope",
+             "$ref"
+           ]) ==
+             "#/components/schemas/ApiKeyScope"
+
+    assert get_in(body, ["paths", "/api/v1/errors", "post", "responses", "403", "$ref"]) ==
+             "#/components/responses/ForbiddenProblem"
+
+    assert get_in(body, ["paths", "/api/v1/keys", "post", "responses", "403", "$ref"]) ==
+             "#/components/responses/ForbiddenProblem"
+  end
+
   defp openapi_body(conn) do
     conn
     |> get("/api/v1/openapi.json")

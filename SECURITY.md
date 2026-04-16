@@ -34,3 +34,5 @@ they prefer to remain anonymous.
 - Review routing: [`.github/CODEOWNERS`](.github/CODEOWNERS)
 - Branch protection, secret scanning, and Dependabot expectations:
   [`docs/governance.md`](docs/governance.md)
+- API key scope and manual rotation procedure:
+  [`docs/api-key-rotation.md`](docs/api-key-rotation.md)

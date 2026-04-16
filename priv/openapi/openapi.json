@@ -157,6 +157,9 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
@@ -193,14 +196,17 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
           "413": {
             "$ref": "#/components/responses/PayloadTooLargeProblem"
           },
-          "429": {
-            "$ref": "#/components/responses/RateLimitedProblem"
-          },
           "422": {
             "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
           },
           "500": {
             "$ref": "#/components/responses/InternalProblem"
@@ -290,11 +296,14 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
-          "429": {
-            "$ref": "#/components/responses/RateLimitedProblem"
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
           },
           "422": {
             "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
           }
         }
       }
@@ -329,11 +338,14 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
-          "429": {
-            "$ref": "#/components/responses/RateLimitedProblem"
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
           },
           "404": {
             "$ref": "#/components/responses/NotFoundProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
           }
         }
       }
@@ -390,11 +402,14 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
-          "429": {
-            "$ref": "#/components/responses/RateLimitedProblem"
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
           },
           "422": {
             "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
           }
         }
       }
@@ -449,11 +464,14 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
-          "429": {
-            "$ref": "#/components/responses/RateLimitedProblem"
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
           },
           "422": {
             "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
           }
         }
       }
@@ -518,11 +536,14 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
-          "429": {
-            "$ref": "#/components/responses/RateLimitedProblem"
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
           },
           "422": {
             "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
           }
         }
       }
@@ -552,11 +573,14 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
-          "429": {
-            "$ref": "#/components/responses/RateLimitedProblem"
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
           },
           "422": {
             "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
           }
         }
       }
@@ -580,6 +604,9 @@
           },
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
           },
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
@@ -620,11 +647,14 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
-          "429": {
-            "$ref": "#/components/responses/RateLimitedProblem"
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
           },
           "422": {
             "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
           }
         }
       }
@@ -665,6 +695,9 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
@@ -701,11 +734,14 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
-          "429": {
-            "$ref": "#/components/responses/RateLimitedProblem"
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
           },
           "404": {
             "$ref": "#/components/responses/NotFoundProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
           }
         }
       },
@@ -748,14 +784,17 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
-          "429": {
-            "$ref": "#/components/responses/RateLimitedProblem"
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
           },
           "404": {
             "$ref": "#/components/responses/NotFoundProblem"
           },
           "422": {
             "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
           }
         }
       }
@@ -790,11 +829,14 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
-          "429": {
-            "$ref": "#/components/responses/RateLimitedProblem"
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
           },
           "404": {
             "$ref": "#/components/responses/NotFoundProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
           }
         }
       },
@@ -837,14 +879,17 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
-          "429": {
-            "$ref": "#/components/responses/RateLimitedProblem"
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
           },
           "404": {
             "$ref": "#/components/responses/NotFoundProblem"
           },
           "422": {
             "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
           }
         }
       }
@@ -879,6 +924,9 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
           "422": {
             "$ref": "#/components/responses/ValidationProblem"
           },
@@ -907,6 +955,9 @@
           },
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
           }
         }
       },
@@ -939,6 +990,9 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
           "422": {
             "$ref": "#/components/responses/ValidationProblem"
           }
@@ -967,6 +1021,9 @@
           },
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
           },
           "404": {
             "$ref": "#/components/responses/NotFoundProblem"
@@ -1004,6 +1061,9 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
           "404": {
             "$ref": "#/components/responses/NotFoundProblem"
           }
@@ -1040,6 +1100,9 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
           "404": {
             "$ref": "#/components/responses/NotFoundProblem"
           }
@@ -1065,6 +1128,9 @@
           },
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
           }
         }
       },
@@ -1097,6 +1163,9 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
           "422": {
             "$ref": "#/components/responses/ValidationProblem"
           }
@@ -1125,6 +1194,9 @@
           },
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
           },
           "404": {
             "$ref": "#/components/responses/NotFoundProblem"
@@ -1162,6 +1234,9 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
           "404": {
             "$ref": "#/components/responses/NotFoundProblem"
           },
@@ -1190,6 +1265,9 @@
           },
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
           }
         }
       },
@@ -1221,6 +1299,9 @@
           },
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
           },
           "500": {
             "$ref": "#/components/responses/InternalProblem"
@@ -1258,6 +1339,9 @@
           "401": {
             "$ref": "#/components/responses/UnauthorizedProblem"
           },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
           "404": {
             "$ref": "#/components/responses/NotFoundProblem"
           }
@@ -1271,7 +1355,7 @@
         "type": "http",
         "scheme": "bearer",
         "bearerFormat": "API key",
-        "description": "Send `Authorization: Bearer sk_live_...`."
+        "description": "Send `Authorization: Bearer sk_live_...` with an `ingest-only`, `read-only`, or `admin` API key."
       }
     },
     "parameters": {
@@ -1376,6 +1460,16 @@
       },
       "WebhookDeliveryFailedProblem": {
         "description": "Test webhook delivery failed.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProblemDetails"
+            }
+          }
+        }
+      },
+      "ForbiddenProblem": {
+        "description": "API key is valid but lacks the required scope.",
         "content": {
           "application/problem+json": {
             "schema": {
@@ -3026,6 +3120,7 @@
         "required": [
           "id",
           "name",
+          "scope",
           "key_prefix",
           "active",
           "created_at",
@@ -3054,6 +3149,9 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ApiKeyScope"
           }
         }
       },
@@ -3078,6 +3176,9 @@
         "properties": {
           "name": {
             "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ApiKeyScope"
           }
         }
       },
@@ -3087,6 +3188,7 @@
         "required": [
           "id",
           "name",
+          "scope",
           "key",
           "key_prefix",
           "created_at",
@@ -3111,6 +3213,9 @@
           },
           "warning": {
             "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ApiKeyScope"
           }
         }
       },
@@ -3216,6 +3321,15 @@
             "$ref": "#/components/schemas/ServiceOnboardingSnippets"
           }
         }
+      },
+      "ApiKeyScope": {
+        "type": "string",
+        "enum": [
+          "admin",
+          "ingest-only",
+          "read-only"
+        ],
+        "description": "Authorization scope attached to an API key."
       }
     }
   }

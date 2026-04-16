@@ -35,8 +35,8 @@ defmodule CanaryWeb.ConnCase do
   end
 
   @doc "Creates an API key and returns {raw_key, api_key}."
-  def create_api_key(name \\ "test") do
-    {:ok, key, raw_key} = Canary.Auth.generate_key(name)
+  def create_api_key(name \\ "test", scope \\ "admin") do
+    {:ok, key, raw_key} = Canary.Auth.generate_key(name, "live", scope)
     {raw_key, key}
   end
 

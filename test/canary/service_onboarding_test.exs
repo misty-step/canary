@@ -31,6 +31,7 @@ defmodule Canary.ServiceOnboardingTest do
 
       assert result.service == "billing-api"
       assert result.api_key.name == "billing-api-ingest"
+      assert result.api_key.scope == "ingest-only"
       assert result.target.name == "billing-api"
       assert result.target.interval_ms == 30_000
       assert result.links.dashboard == "https://canary.example.com/dashboard"
@@ -41,6 +42,8 @@ defmodule Canary.ServiceOnboardingTest do
       assert result.snippets.error_ingest_curl =~ "\"service\":\"billing-api\""
       assert result.snippets.error_ingest_curl =~ "\"environment\":\"staging\""
 
+      assert result.snippets.report_curl =~ "Authorization: Bearer $CANARY_READ_KEY"
+      assert result.snippets.service_query_curl =~ "Authorization: Bearer $CANARY_READ_KEY"
       assert result.snippets.service_query_curl =~ "service=billing-api&window=1h"
       assert result.snippets.elixir_logger =~ "service: \"billing-api\""
       assert result.snippets.elixir_logger =~ "environment: \"staging\""
@@ -49,7 +52,7 @@ defmodule Canary.ServiceOnboardingTest do
     end
 
     test "rolls back the target when key generation fails" do
-      failing_key_generator = fn _name, _env ->
+      failing_key_generator = fn _name, _env, _scope ->
         {:error, Ecto.Changeset.change(%ApiKey{}, %{name: nil})}
       end
 
@@ -162,6 +165,7 @@ defmodule Canary.ServiceOnboardingTest do
       api_key = %ApiKey{
         id: "KEY-billing-api",
         name: "billing-api-ingest",
+        scope: "ingest-only",
         key_prefix: "cnry_live",
         created_at: now
       }
@@ -177,10 +181,12 @@ defmodule Canary.ServiceOnboardingTest do
 
       assert payload.service == "billing-api"
       assert payload.api_key.key == "raw-key-123"
+      assert payload.api_key.scope == "ingest-only"
       assert payload.target.id == "TGT-billing-api"
       assert payload.links.dashboard == "https://canary.example.com/dashboard"
       assert payload.links.service_query =~ "service=billing-api&window=1h"
       assert payload.snippets.error_ingest_curl =~ "Authorization: Bearer raw-key-123"
+      assert payload.snippets.report_curl =~ "Authorization: Bearer $CANARY_READ_KEY"
       assert payload.snippets.typescript_init =~ "environment: \"staging\""
     end
   end

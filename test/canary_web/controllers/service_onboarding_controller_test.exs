@@ -33,6 +33,7 @@ defmodule CanaryWeb.ServiceOnboardingControllerTest do
 
       assert body["service"] == "billing-api"
       assert body["api_key"]["name"] == "billing-api-ingest"
+      assert body["api_key"]["scope"] == "ingest-only"
       assert body["target"]["name"] == "billing-api"
       assert body["target"]["service"] == "billing-api"
       assert body["target"]["interval_ms"] == 30_000
@@ -45,7 +46,9 @@ defmodule CanaryWeb.ServiceOnboardingControllerTest do
 
       assert body["snippets"]["error_ingest_curl"] =~ "\"service\":\"billing-api\""
       assert body["snippets"]["error_ingest_curl"] =~ "\"environment\":\"staging\""
+      assert body["snippets"]["report_curl"] =~ "Authorization: Bearer $CANARY_READ_KEY"
       assert body["snippets"]["report_curl"] =~ "/api/v1/report?window=1h"
+      assert body["snippets"]["service_query_curl"] =~ "Authorization: Bearer $CANARY_READ_KEY"
       assert body["snippets"]["service_query_curl"] =~ "service=billing-api&window=1h"
       assert body["snippets"]["elixir_logger"] =~ "service: \"billing-api\""
       assert body["snippets"]["typescript_init"] =~ "service: \"billing-api\""

@@ -5,6 +5,7 @@ defmodule Canary.Seeds do
   """
 
   alias Canary.{Auth, Repo}
+  alias Canary.Schemas.ApiKey
 
   require Logger
 
@@ -12,7 +13,7 @@ defmodule Canary.Seeds do
     Logger.info("Running initial seeds...")
     now = DateTime.utc_now() |> DateTime.to_iso8601()
 
-    case Auth.generate_key("bootstrap") do
+    case Auth.generate_key("bootstrap", "live", ApiKey.default_scope()) do
       {:ok, _key, raw_key} ->
         Logger.info("Bootstrap API key: #{raw_key}")
         Logger.info("Store this key securely — it will not be shown again.")

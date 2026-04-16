@@ -1,7 +1,8 @@
 defmodule CanaryWeb.KeyController do
   use CanaryWeb, :controller
 
-  alias Canary.Auth
+  alias Canary.{Auth, ChangesetErrors}
+  alias Canary.Schemas.ApiKey
 
   def index(conn, _params) do
     keys = Auth.list_keys()
@@ -12,6 +13,7 @@ defmodule CanaryWeb.KeyController do
           %{
             id: k.id,
             name: k.name,
+            scope: k.scope,
             key_prefix: k.key_prefix,
             active: Canary.Schemas.ApiKey.active?(k),
             created_at: k.created_at,
@@ -23,26 +25,29 @@ defmodule CanaryWeb.KeyController do
 
   def create(conn, params) do
     name = params["name"] || "unnamed"
+    scope = params["scope"] || ApiKey.default_scope()
 
-    case Auth.generate_key(name) do
+    case Auth.generate_key(name, "live", scope) do
       {:ok, key, raw_key} ->
         conn
         |> put_status(201)
         |> json(%{
           id: key.id,
           name: key.name,
+          scope: key.scope,
           key: raw_key,
           key_prefix: key.key_prefix,
           created_at: key.created_at,
           warning: "Store this key securely. It will not be shown again."
         })
 
-      {:error, _} ->
+      {:error, %Ecto.Changeset{} = changeset} ->
         CanaryWeb.Plugs.ProblemDetails.render_error(
           conn,
-          500,
-          "internal_error",
-          "Failed to generate API key."
+          422,
+          "validation_error",
+          "Invalid API key request.",
+          %{errors: ChangesetErrors.format(changeset)}
         )
     end
   end

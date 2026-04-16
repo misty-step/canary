@@ -32,6 +32,7 @@ defmodule CanaryWeb.Plugs.ProblemDetails do
 
   defp title_for("invalid_request"), do: "Invalid Request"
   defp title_for("invalid_api_key"), do: "Invalid API Key"
+  defp title_for("insufficient_scope"), do: "Insufficient Scope"
   defp title_for("not_found"), do: "Not Found"
   defp title_for("payload_too_large"), do: "Payload Too Large"
   defp title_for("validation_error"), do: "Validation Error"

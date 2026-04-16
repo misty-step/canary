@@ -60,10 +60,11 @@ defmodule CanaryWeb.ServiceOnboardingContractTest do
       assert body["service"] == "billing api"
 
       assert Enum.sort(Map.keys(body["api_key"])) ==
-               ~w(created_at id key key_prefix name warning)
+               ~w(created_at id key key_prefix name scope warning)
 
       assert body["api_key"]["id"] =~ ~r/^KEY-/
       assert body["api_key"]["name"] == "billing api-ingest"
+      assert body["api_key"]["scope"] == "ingest-only"
       assert body["api_key"]["key"] =~ ~r/^sk_live_/
       assert body["api_key"]["key_prefix"] =~ ~r/^sk_live_/
       assert body["api_key"]["warning"] == "Store this key securely. It will not be shown again."
@@ -95,14 +96,14 @@ defmodule CanaryWeb.ServiceOnboardingContractTest do
       assert body["snippets"]["report_curl"] ==
                """
                curl "#{body["links"]["report"]}" \\
-                 -H "Authorization: Bearer #{raw_key}"
+                 -H "Authorization: Bearer $CANARY_READ_KEY"
                """
                |> String.trim()
 
       assert body["snippets"]["service_query_curl"] ==
                """
                curl "#{body["links"]["service_query"]}" \\
-                 -H "Authorization: Bearer #{raw_key}"
+                 -H "Authorization: Bearer $CANARY_READ_KEY"
                """
                |> String.trim()
 
@@ -197,6 +198,9 @@ defmodule CanaryWeb.ServiceOnboardingContractTest do
 
       assert get_in(operation, ["responses", "401", "$ref"]) ==
                "#/components/responses/UnauthorizedProblem"
+
+      assert get_in(operation, ["responses", "403", "$ref"]) ==
+               "#/components/responses/ForbiddenProblem"
 
       assert get_in(operation, ["responses", "422", "$ref"]) ==
                "#/components/responses/ValidationProblem"

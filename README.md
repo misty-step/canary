@@ -160,13 +160,19 @@ The machine-readable contract lives at `GET /api/v1/openapi.json`. That
 endpoint, `/healthz`, and `/readyz` are public. The contract embeds the
 canonical agent replay guide in `info.x-agent-guide`.
 
-All other endpoints require `Authorization: Bearer sk_live_...`.
+All other endpoints require a scoped API key:
+
+- `ingest-only` for `POST /api/v1/errors`
+- `read-only` for query/report/timeline-style reads
+- `admin` for onboarding, key management, target/webhook management, metrics, and other operator mutations
+
+Manual rotation steps live in [docs/api-key-rotation.md](docs/api-key-rotation.md).
 
 ### Error Ingestion
 
 ```bash
 curl -X POST https://canary-obs.fly.dev/api/v1/errors \
-  -H "Authorization: Bearer $CANARY_API_KEY" \
+  -H "Authorization: Bearer $CANARY_INGEST_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "service": "cadence",
@@ -188,18 +194,18 @@ Response: `201 Created`
 ```bash
 # Recent errors for a service
 curl "https://canary-obs.fly.dev/api/v1/query?service=cadence&window=1h" \
-  -H "Authorization: Bearer $CANARY_API_KEY"
+  -H "Authorization: Bearer $CANARY_READ_KEY"
 
 # Error detail
 curl "https://canary-obs.fly.dev/api/v1/errors/ERR-a1b2c3" \
-  -H "Authorization: Bearer $CANARY_API_KEY"
+  -H "Authorization: Bearer $CANARY_READ_KEY"
 ```
 
 ### Health Status
 
 ```bash
 curl "https://canary-obs.fly.dev/api/v1/health-status" \
-  -H "Authorization: Bearer $CANARY_API_KEY"
+  -H "Authorization: Bearer $CANARY_READ_KEY"
 ```
 
 Response includes natural-language summary:
@@ -214,7 +220,7 @@ Response includes natural-language summary:
 
 ```bash
 curl "https://canary-obs.fly.dev/api/v1/report?window=1h" \
-  -H "Authorization: Bearer $CANARY_API_KEY"
+  -H "Authorization: Bearer $CANARY_READ_KEY"
 ```
 
 Response combines the current health view, active error groups, recent transitions,
@@ -243,7 +249,7 @@ and correlated incidents in one bounded payload:
 
 ```bash
 curl "https://canary-obs.fly.dev/api/v1/timeline?service=volume&window=24h&limit=50" \
-  -H "Authorization: Bearer $CANARY_API_KEY"
+  -H "Authorization: Bearer $CANARY_READ_KEY"
 ```
 
 Timeline events are canonical observability facts. The same payloads drive both
@@ -253,7 +259,7 @@ Optional free-text error search stays on the same endpoint:
 
 ```bash
 curl "https://canary-obs.fly.dev/api/v1/report?window=1h&q=timeout" \
-  -H "Authorization: Bearer $CANARY_API_KEY"
+  -H "Authorization: Bearer $CANARY_READ_KEY"
 ```
 
 When `q` is present, the response adds `search_results`, scoped to the same
@@ -292,9 +298,9 @@ curl -X POST https://canary-obs.fly.dev/api/v1/service-onboarding \
 
 The response includes:
 
-- a one-time raw API key for the new service
+- a one-time raw `ingest-only` API key for the new service
 - the created target metadata
-- exact snippets for `POST /api/v1/errors`, service-scoped queries, and `GET /api/v1/report`
+- exact snippets for `POST /api/v1/errors`, plus report/query verification commands that expect a separate read/admin key
 - direct links to `/dashboard` and the unified report
 
 ### Target Management
@@ -302,12 +308,12 @@ The response includes:
 ```bash
 # Add target
 curl -X POST https://canary-obs.fly.dev/api/v1/targets \
-  -H "Authorization: Bearer $CANARY_API_KEY" \
+  -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{"name": "my-api", "service": "my-api", "url": "https://my-api.fly.dev/health", "interval_ms": 60000}'
 
 # List / pause / resume / delete
-curl https://canary-obs.fly.dev/api/v1/targets -H "Authorization: Bearer $CANARY_API_KEY"
+curl https://canary-obs.fly.dev/api/v1/targets -H "Authorization: Bearer $CANARY_ADMIN_KEY"
 curl -X POST .../targets/:id/pause
 curl -X POST .../targets/:id/resume
 curl -X DELETE .../targets/:id
@@ -317,21 +323,21 @@ curl -X DELETE .../targets/:id
 
 ```bash
 curl -X POST https://canary-obs.fly.dev/api/v1/webhooks \
-  -H "Authorization: Bearer $CANARY_API_KEY" \
+  -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{"url": "https://example.com/hook", "events": ["health_check.down", "error.new_class"]}'
 
 curl "https://canary-obs.fly.dev/api/v1/webhook-deliveries?webhook_id=WHK-abc123&limit=20" \
-  -H "Authorization: Bearer $CANARY_API_KEY"
+  -H "Authorization: Bearer $CANARY_READ_KEY"
 ```
 
 ### API Key Management
 
 ```bash
 curl -X POST https://canary-obs.fly.dev/api/v1/keys \
-  -H "Authorization: Bearer $CANARY_API_KEY" \
+  -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name": "cadence-prod"}'
+  -d '{"name": "cadence-prod", "scope": "read-only"}'
 ```
 
 ## Webhook Events

@@ -68,9 +68,9 @@ defmodule Canary.ServiceOnboarding.Connect do
   end
 
   defp generate_key(service, opts) do
-    generate_key = Keyword.get(opts, :generate_key, &Auth.generate_key/2)
+    generate_key = Keyword.get(opts, :generate_key, &Auth.generate_key/3)
 
-    case generate_key.("#{service}-ingest", "live") do
+    case generate_key.("#{service}-ingest", "live", ApiKey.ingest_scope()) do
       {:ok, api_key, raw_key} -> {:ok, api_key, raw_key}
       {:error, _reason} -> {:error, :internal}
     end

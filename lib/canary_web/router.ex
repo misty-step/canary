@@ -15,6 +15,18 @@ defmodule CanaryWeb.Router do
     plug CanaryWeb.Plugs.Auth
   end
 
+  pipeline :scope_admin do
+    plug CanaryWeb.Plugs.RequireScope, :admin
+  end
+
+  pipeline :scope_ingest do
+    plug CanaryWeb.Plugs.RequireScope, :ingest
+  end
+
+  pipeline :scope_read do
+    plug CanaryWeb.Plugs.RequireScope, :read
+  end
+
   pipeline :ingest_rate_limit do
     plug CanaryWeb.Plugs.RateLimit, type: :ingest
   end
@@ -46,7 +58,7 @@ defmodule CanaryWeb.Router do
   end
 
   scope "/", CanaryWeb do
-    pipe_through [:api, :authenticated, :query_rate_limit]
+    pipe_through [:api, :authenticated, :scope_admin, :query_rate_limit]
 
     get "/metrics", MetricsController, :index
   end
@@ -76,13 +88,13 @@ defmodule CanaryWeb.Router do
 
     # Error ingest
     scope "/" do
-      pipe_through :ingest_rate_limit
+      pipe_through [:scope_ingest, :ingest_rate_limit]
       post "/errors", ErrorController, :create
     end
 
     # Query API
     scope "/" do
-      pipe_through :query_rate_limit
+      pipe_through [:scope_read, :query_rate_limit]
       get "/query", QueryController, :query
       get "/errors/:id", QueryController, :show
       get "/report", ReportController, :index
@@ -97,12 +109,17 @@ defmodule CanaryWeb.Router do
 
       # Annotations
       get "/incidents/:incident_id/annotations", AnnotationController, :index
-      post "/incidents/:incident_id/annotations", AnnotationController, :create
       get "/groups/:group_hash/annotations", AnnotationController, :group_index
+    end
+
+    scope "/" do
+      pipe_through [:scope_admin, :query_rate_limit]
+      post "/incidents/:incident_id/annotations", AnnotationController, :create
       post "/groups/:group_hash/annotations", AnnotationController, :group_create
     end
 
     # Admin: targets
+    pipe_through :scope_admin
     post "/service-onboarding", ServiceOnboardingController, :create
     get "/targets", TargetController, :index
     post "/targets", TargetController, :create

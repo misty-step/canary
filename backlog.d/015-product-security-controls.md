@@ -1,7 +1,7 @@
 # Product security controls
 
 Priority: low
-Status: ready
+Status: done
 Estimate: M
 
 ## Goal
@@ -24,3 +24,16 @@ Codex identified this during the 2026-04-01 audit. Currently all API keys have f
 access to all endpoints. As consumer count grows beyond solo-operator use, different
 services should have different access levels (e.g., ingest-only for error reporters,
 read-only for dashboards, admin for target/webhook management).
+
+## What Was Built
+
+- Added first-class API key scopes: `admin`, `read-only`, and `ingest-only`
+- Enforced scope checks at the router boundary so ingest, read, and admin paths fail with deterministic `403 insufficient_scope` responses
+- Updated service onboarding to mint `ingest-only` keys and stopped emitting read/report snippets that reuse the ingest credential
+- Extended key management and OpenAPI contracts to expose `scope` in requests and responses
+- Documented manual zero-downtime key rotation in `docs/api-key-rotation.md`
+
+## Verification
+
+- `mix test test/canary/auth_test.exs test/canary/service_onboarding_test.exs test/canary_web/controllers/key_controller_test.exs test/canary_web/controllers/service_onboarding_controller_test.exs test/canary_web/controllers/service_onboarding_contract_test.exs test/canary_web/controllers/api_key_scope_test.exs test/canary_web/controllers/openapi_controller_test.exs`
+- `./bin/validate --strict`

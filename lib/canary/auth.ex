@@ -10,9 +10,9 @@ defmodule Canary.Auth do
 
   @prefix_len 12
 
-  @spec generate_key(String.t(), String.t()) ::
+  @spec generate_key(String.t(), String.t(), String.t()) ::
           {:ok, %ApiKey{}, String.t()} | {:error, Ecto.Changeset.t()}
-  def generate_key(name, env \\ "live") do
+  def generate_key(name, env \\ "live", scope \\ ApiKey.default_scope()) do
     raw_key = "sk_#{env}_#{Nanoid.generate(24)}"
     prefix = String.slice(raw_key, 0, @prefix_len)
     hash = Bcrypt.hash_pwd_salt(raw_key)
@@ -21,6 +21,7 @@ defmodule Canary.Auth do
     attrs = %{
       id: ID.key_id(),
       name: name,
+      scope: scope,
       key_prefix: prefix,
       key_hash: hash,
       created_at: now

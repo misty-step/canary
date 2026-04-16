@@ -3,15 +3,27 @@ defmodule Canary.AuthTest do
 
   alias Canary.Auth
 
-  describe "generate_key/1" do
+  describe "generate_key/3" do
     test "creates API key and returns raw key" do
       {:ok, key, raw_key} = Auth.generate_key("test-key")
 
       assert key.name == "test-key"
+      assert key.scope == "admin"
       assert String.starts_with?(raw_key, "sk_live_")
       assert String.starts_with?(key.key_prefix, "sk_live_")
       assert key.key_hash != raw_key
       assert is_nil(key.revoked_at)
+    end
+
+    test "stores the requested scope" do
+      {:ok, key, _raw_key} = Auth.generate_key("reader", "live", "read-only")
+
+      assert key.scope == "read-only"
+    end
+
+    test "rejects unknown scopes" do
+      assert {:error, changeset} = Auth.generate_key("bad", "live", "superuser")
+      assert errors_on(changeset) == %{scope: ["is invalid"]}
     end
   end
 
@@ -21,6 +33,7 @@ defmodule Canary.AuthTest do
 
       assert {:ok, verified} = Auth.verify_key(raw_key)
       assert verified.name == "test-key"
+      assert verified.scope == "admin"
     end
 
     test "rejects invalid key" do
@@ -38,10 +51,11 @@ defmodule Canary.AuthTest do
   describe "list_keys/0" do
     test "lists all keys" do
       {:ok, _, _} = Auth.generate_key("key-1")
-      {:ok, _, _} = Auth.generate_key("key-2")
+      {:ok, _, _} = Auth.generate_key("key-2", "live", "read-only")
 
       keys = Auth.list_keys()
       assert length(keys) >= 2
+      assert Enum.any?(keys, &(&1.scope == "read-only"))
     end
   end
 end

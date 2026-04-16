@@ -9,21 +9,30 @@ defmodule CanaryWeb.KeyControllerTest do
 
   describe "POST /api/v1/keys" do
     test "returns raw key on creation", %{conn: conn} do
-      conn = post(conn, "/api/v1/keys", %{"name" => "new-key"})
+      conn = post(conn, "/api/v1/keys", %{"name" => "new-key", "scope" => "read-only"})
 
       body = json_response(conn, 201)
       assert body["id"] =~ ~r/^KEY-/
       assert body["name"] == "new-key"
+      assert body["scope"] == "read-only"
       assert body["key"] =~ ~r/^sk_live_/
       assert body["key_prefix"]
       assert body["warning"] =~ "Store this key"
+    end
+
+    test "returns validation errors for an unknown scope", %{conn: conn} do
+      conn = post(conn, "/api/v1/keys", %{"name" => "bad-key", "scope" => "superuser"})
+      body = json_response(conn, 422)
+
+      assert body["code"] == "validation_error"
+      assert body["errors"] == %{"scope" => ["is invalid"]}
     end
   end
 
   describe "GET /api/v1/keys" do
     test "returns prefixes, not raw keys", %{conn: conn} do
       # Create a key via API so it exists
-      post(conn, "/api/v1/keys", %{"name" => "listed-key"})
+      post(conn, "/api/v1/keys", %{"name" => "listed-key", "scope" => "ingest-only"})
 
       conn = get(conn, "/api/v1/keys")
       body = json_response(conn, 200)
@@ -32,6 +41,7 @@ defmodule CanaryWeb.KeyControllerTest do
       assert length(body["keys"]) >= 2
 
       Enum.each(body["keys"], fn k ->
+        assert k["scope"]
         assert k["key_prefix"]
         refute Map.has_key?(k, "key")
         refute Map.has_key?(k, "key_hash")
