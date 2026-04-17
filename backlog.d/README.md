@@ -23,7 +23,8 @@
 | 018 | Local Docker probe hardening | medium | done | M |
 | 019 | Dagger strict contract hardening | medium | done | S |
 | 015 | Product security controls (scoped keys) | low | done | M |
-| 009 | Desktop health semantics research | low | ready | M |
+| 009 | Desktop health semantics research | low | done | M |
+| 021 | Check-in monitors for non-HTTP runtimes | medium | ready | M |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
 
@@ -40,6 +41,7 @@
 004 (correlation paths) — prerequisite for sprite signal quality
 006 (query split) — enables cleaner annotation-aware queries
 007 (dogfooding) — validates 001+002 on real workloads and unblocks 009
+009 (desktop health semantics) — selects the non-HTTP model and unblocks 021
 011 (OpenAPI) — contract for SDK convergence and agent self-discovery
 013 (metrics) — self-observability for dogfooding credibility
 014 (DR) — data durability assurance
@@ -51,7 +53,7 @@
 **Lane 2 (contract + observability):** 011 (OpenAPI) + 013 (metrics) — parallel, no deps
 **Lane 3 (structural):** 006 (query split) → 005 (connect-a-service)
 **Lane 4 (hardening):** 008, 014, 016, 017, 018, 019 (independent, small, can ship anytime)
-**Lane 5 (future):** 015 (scoped keys), 009 (desktop health semantics), 020 (Adminifi HTTP surface verification)
+**Lane 5 (future):** 015 (scoped keys), 021 (non-HTTP check-in monitors), 020 (Adminifi HTTP surface verification)
 
 ## Migration Notes
 

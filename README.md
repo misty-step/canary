@@ -313,6 +313,14 @@ Use [docs/networked-service-dogfooding.md](/Users/phaedrus/Development/canary/do
 and `bin/dogfood-audit --strict` to verify the checked-in owned HTTP service
 set against a live Canary instance.
 
+### Non-HTTP Runtime Health
+
+Use [docs/non-http-health-semantics.md](/Users/phaedrus/Development/canary/docs/non-http-health-semantics.md)
+for the selected health model for desktop apps, cron jobs, and workers. The
+short version: keep HTTP polling for `Target`s, and model non-HTTP runtimes as
+future check-in monitors instead of inventing fake URLs or overloading error
+ingest.
+
 ### Target Management
 
 ```bash
