@@ -1,7 +1,7 @@
 # Dagger strict contract hardening
 
 Priority: medium
-Status: ready
+Status: done
 Estimate: S
 
 ## Goal
@@ -25,3 +25,14 @@ the new source parser as intentionally narrow: it scans raw text, assumes
 specific `await this.<name>(repo)` call shapes, and does not understand
 TypeScript syntax. A second pass should replace that with a more structural
 assertion.
+
+## What Was Built
+
+- Replaced the `Ci.strict` source-text scrape in `dagger/scripts/ci_contract_validation.py` with a structural parser that walks the `Ci` class, discovers `@check()` methods from class shape, and extracts top-level `await this.<gate>(repo)` calls without depending on exact formatting.
+- Added parser fixtures that cover semicolonless `strict` bodies, multiline call formatting, decorator spacing, and newly-added `@check()` gates so harmless TypeScript refactors stay green.
+- Upgraded strict contract failures to report the expected and actual gate order plus missing or extra gates, so drift is diagnosable from one error message.
+
+## Verification
+
+- `python3 dagger/scripts/ci_contract_validation.py`
+- `./bin/validate --strict`

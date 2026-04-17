@@ -58,46 +58,71 @@ def reset_shadow_commands(shim_dir):
         shadow_path.unlink()
 
 
-def extract_method_body(source_text, signature):
-    start = source_text.find(signature)
+class ContractParseError(ValueError):
+    pass
 
-    if start == -1:
-        errors.append(f"missing method signature: {signature}")
-        return ""
 
-    params_start = source_text.find("(", start)
+CLASS_METHOD_MODIFIERS = {
+    "private",
+    "protected",
+    "public",
+    "readonly",
+    "static",
+    "async",
+}
 
-    if params_start == -1:
-        errors.append(f"missing parameter list for signature: {signature}")
-        return ""
 
-    depth = 0
-    params_end = None
+def is_identifier_start(char):
+    return char.isalpha() or char in {"_", "$"}
 
-    for index in range(params_start, len(source_text)):
+
+def is_identifier_part(char):
+    return char.isalnum() or char in {"_", "$"}
+
+
+def skip_line_comment(source_text, index):
+    while index < len(source_text) and source_text[index] != "\n":
+        index += 1
+    return index
+
+
+def skip_block_comment(source_text, index):
+    end = source_text.find("*/", index + 2)
+
+    if end == -1:
+        raise ContractParseError("unterminated block comment")
+
+    return end + 2
+
+
+def skip_quoted_string(source_text, index, quote):
+    index += 1
+
+    while index < len(source_text):
         char = source_text[index]
 
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth == 0:
-                params_end = index
-                break
+        if char == "\\":
+            index += 2
+            continue
 
-    if params_end is None:
-        errors.append(f"unterminated parameter list for signature: {signature}")
-        return ""
+        if char == quote:
+            return index + 1
 
-    brace_start = source_text.find("{", params_end)
+        index += 1
 
-    if brace_start == -1:
-        errors.append(f"missing method body for signature: {signature}")
-        return ""
+    raise ContractParseError(f"unterminated string literal starting with {quote}")
 
-    depth = 0
 
-    for index in range(brace_start, len(source_text)):
+def skip_template_expression(source_text, index):
+    depth = 1
+
+    while index < len(source_text):
+        new_index = skip_non_code(source_text, index)
+
+        if new_index != index:
+            index = new_index
+            continue
+
         char = source_text[index]
 
         if char == "{":
@@ -105,15 +130,567 @@ def extract_method_body(source_text, signature):
         elif char == "}":
             depth -= 1
             if depth == 0:
-                return source_text[brace_start + 1 : index]
+                return index + 1
 
-    errors.append(f"unterminated method body for signature: {signature}")
-    return ""
+        index += 1
+
+    raise ContractParseError("unterminated template expression")
 
 
-check_methods = re.findall(r"@check\(\)\s+async\s+(\w+)\(", dagger_source)
-strict_body = extract_method_body(dagger_source, "async strict(")
-strict_calls = re.findall(r"await this\.([A-Za-z0-9_]+)\(repo\)", strict_body)
+def skip_template_literal(source_text, index):
+    index += 1
+
+    while index < len(source_text):
+        char = source_text[index]
+
+        if char == "\\":
+            index += 2
+            continue
+
+        if char == "`":
+            return index + 1
+
+        if char == "$" and index + 1 < len(source_text) and source_text[index + 1] == "{":
+            index = skip_template_expression(source_text, index + 2)
+            continue
+
+        index += 1
+
+    raise ContractParseError("unterminated template literal")
+
+
+def skip_non_code(source_text, index):
+    if source_text.startswith("//", index):
+        return skip_line_comment(source_text, index)
+
+    if source_text.startswith("/*", index):
+        return skip_block_comment(source_text, index)
+
+    char = source_text[index]
+
+    if char in {"'", '"'}:
+        return skip_quoted_string(source_text, index, char)
+
+    if char == "`":
+        return skip_template_literal(source_text, index)
+
+    return index
+
+
+def skip_space_and_comments(source_text, index):
+    while index < len(source_text):
+        char = source_text[index]
+
+        if char.isspace():
+            index += 1
+            continue
+
+        new_index = skip_non_code(source_text, index)
+
+        if new_index != index and source_text[index] in {"/", "'", '"', "`"}:
+            index = new_index
+            continue
+
+        return index
+
+    return index
+
+
+def read_identifier(source_text, index):
+    if index >= len(source_text) or not is_identifier_start(source_text[index]):
+        return None, index
+
+    end = index + 1
+
+    while end < len(source_text) and is_identifier_part(source_text[end]):
+        end += 1
+
+    return source_text[index:end], end
+
+
+def find_matching(source_text, index, open_char, close_char):
+    if index >= len(source_text) or source_text[index] != open_char:
+        raise ContractParseError(f"expected {open_char} at offset {index}")
+
+    depth = 1
+    index += 1
+
+    while index < len(source_text):
+        new_index = skip_non_code(source_text, index)
+
+        if new_index != index:
+            index = new_index
+            continue
+
+        char = source_text[index]
+
+        if char == open_char:
+            depth += 1
+        elif char == close_char:
+            depth -= 1
+            if depth == 0:
+                return index
+
+        index += 1
+
+    raise ContractParseError(f"unterminated {open_char}{close_char} block")
+
+
+def find_class_body(source_text, class_name):
+    class_match = re.search(rf"\bclass\s+{re.escape(class_name)}\b", source_text)
+
+    if class_match is None:
+        raise ContractParseError(f"missing class {class_name}")
+
+    brace_start = source_text.find("{", class_match.end())
+
+    if brace_start == -1:
+        raise ContractParseError(f"missing body for class {class_name}")
+
+    brace_end = find_matching(source_text, brace_start, "{", "}")
+    return source_text[brace_start + 1 : brace_end]
+
+
+def parse_decorator(source_text, index):
+    index += 1
+    index = skip_space_and_comments(source_text, index)
+    name, index = read_identifier(source_text, index)
+
+    if name is None:
+        raise ContractParseError("decorator is missing its name")
+
+    index = skip_space_and_comments(source_text, index)
+
+    if index < len(source_text) and source_text[index] == "(":
+        index = find_matching(source_text, index, "(", ")") + 1
+
+    return name, index
+
+
+def find_method_body_start(source_text, index):
+    index = skip_space_and_comments(source_text, index)
+
+    if index >= len(source_text):
+        raise ContractParseError("method signature is missing a body")
+
+    if source_text[index] == "{":
+        return index
+
+    if source_text[index] != ":":
+        raise ContractParseError("method signature is missing a return type/body separator")
+
+    index += 1
+    paren_depth = 0
+    bracket_depth = 0
+    angle_depth = 0
+
+    while index < len(source_text):
+        new_index = skip_non_code(source_text, index)
+
+        if new_index != index:
+            index = new_index
+            continue
+
+        char = source_text[index]
+
+        if char == "(":
+            paren_depth += 1
+        elif char == ")":
+            paren_depth = max(paren_depth - 1, 0)
+        elif char == "[":
+            bracket_depth += 1
+        elif char == "]":
+            bracket_depth = max(bracket_depth - 1, 0)
+        elif char == "<":
+            angle_depth += 1
+        elif char == ">":
+            angle_depth = max(angle_depth - 1, 0)
+        elif (
+            char == "{"
+            and paren_depth == 0
+            and bracket_depth == 0
+            and angle_depth == 0
+        ):
+            return index
+
+        index += 1
+
+    raise ContractParseError("method signature is missing its body")
+
+
+def parse_class_method(source_text, index, decorators):
+    cursor = index
+    modifiers = []
+
+    while True:
+        cursor = skip_space_and_comments(source_text, cursor)
+        modifier, next_cursor = read_identifier(source_text, cursor)
+
+        if modifier in CLASS_METHOD_MODIFIERS:
+            modifiers.append(modifier)
+            cursor = next_cursor
+            continue
+
+        break
+
+    name, cursor = read_identifier(source_text, cursor)
+
+    if name is None:
+        return None, index + 1
+
+    cursor = skip_space_and_comments(source_text, cursor)
+
+    if cursor >= len(source_text) or source_text[cursor] != "(":
+        return None, index + 1
+
+    params_end = find_matching(source_text, cursor, "(", ")")
+    body_start = find_method_body_start(source_text, params_end + 1)
+    body_end = find_matching(source_text, body_start, "{", "}")
+
+    return (
+        {
+            "name": name,
+            "decorators": tuple(decorators),
+            "modifiers": tuple(modifiers),
+            "body": source_text[body_start + 1 : body_end],
+        },
+        body_end + 1,
+    )
+
+
+def parse_ci_methods(source_text):
+    class_body = find_class_body(source_text, "Ci")
+    methods = []
+    index = 0
+
+    while index < len(class_body):
+        index = skip_space_and_comments(class_body, index)
+
+        if index >= len(class_body):
+            break
+
+        decorators = []
+
+        while index < len(class_body) and class_body[index] == "@":
+            decorator_name, index = parse_decorator(class_body, index)
+            decorators.append(decorator_name)
+            index = skip_space_and_comments(class_body, index)
+
+        method, next_index = parse_class_method(class_body, index, decorators)
+
+        if method is None:
+            index += 1
+            continue
+
+        methods.append(method)
+        index = next_index
+
+    return methods
+
+
+def compact_expression(source_text):
+    compact = []
+    index = 0
+
+    while index < len(source_text):
+        new_index = skip_non_code(source_text, index)
+
+        if new_index != index:
+            index = new_index
+            continue
+
+        char = source_text[index]
+
+        if not char.isspace():
+            compact.append(char)
+
+        index += 1
+
+    return "".join(compact)
+
+
+def parse_await_this_call(source_text, index=0):
+    index = skip_space_and_comments(source_text, index)
+    first_ident, index = read_identifier(source_text, index)
+
+    if first_ident != "await":
+        return None, index
+
+    index = skip_space_and_comments(source_text, index)
+    receiver, index = read_identifier(source_text, index)
+
+    if receiver != "this":
+        return None, index
+
+    index = skip_space_and_comments(source_text, index)
+
+    if index >= len(source_text) or source_text[index] != ".":
+        return None, index
+
+    index += 1
+    index = skip_space_and_comments(source_text, index)
+    method_name, index = read_identifier(source_text, index)
+
+    if method_name is None:
+        raise ContractParseError("awaited this-call is missing its method name")
+
+    index = skip_space_and_comments(source_text, index)
+
+    if index >= len(source_text) or source_text[index] != "(":
+        raise ContractParseError(f"await this.{method_name} call is missing its argument list")
+
+    args_end = find_matching(source_text, index, "(", ")")
+    args = compact_expression(source_text[index + 1 : args_end]).rstrip(",")
+
+    if args != "repo":
+        return None, args_end + 1
+
+    return method_name, args_end + 1
+
+
+def extract_strict_calls(strict_body):
+    calls = []
+    index = 0
+    paren_depth = 0
+    bracket_depth = 0
+    brace_depth = 0
+
+    while index < len(strict_body):
+        new_index = skip_non_code(strict_body, index)
+
+        if new_index != index:
+            index = new_index
+            continue
+
+        char = strict_body[index]
+
+        if char == "(":
+            paren_depth += 1
+            index += 1
+            continue
+
+        if char == ")":
+            paren_depth = max(paren_depth - 1, 0)
+            index += 1
+            continue
+
+        if char == "[":
+            bracket_depth += 1
+            index += 1
+            continue
+
+        if char == "]":
+            bracket_depth = max(bracket_depth - 1, 0)
+            index += 1
+            continue
+
+        if char == "{":
+            brace_depth += 1
+            index += 1
+            continue
+
+        if char == "}":
+            brace_depth = max(brace_depth - 1, 0)
+            index += 1
+            continue
+
+        if (
+            paren_depth == 0
+            and bracket_depth == 0
+            and brace_depth == 0
+            and is_identifier_start(char)
+        ):
+            identifier, next_index = read_identifier(strict_body, index)
+
+            if identifier == "await":
+                call_name, call_end = parse_await_this_call(strict_body, index)
+
+                if call_name is not None:
+                    calls.append(call_name)
+                    index = call_end
+                    continue
+
+            index = next_index
+            continue
+
+        index += 1
+
+    return calls
+
+
+def extract_ci_contract(source_text):
+    methods = parse_ci_methods(source_text)
+    check_methods = [method["name"] for method in methods if "check" in method["decorators"]]
+    strict_method = next((method for method in methods if method["name"] == "strict"), None)
+
+    if strict_method is None:
+        raise ContractParseError("missing Ci.strict method")
+
+    return {
+        "check_methods": check_methods,
+        "strict_calls": extract_strict_calls(strict_method["body"]),
+    }
+
+
+def format_call_sequence(calls):
+    return " -> ".join(calls) if calls else "(none)"
+
+
+def strict_contract_message(expected_calls, actual_calls):
+    message_parts = [
+        "Ci.strict must execute codexAgentRoles, every @check gate in source order, then advisories",
+        f"expected: {format_call_sequence(expected_calls)}",
+        f"actual: {format_call_sequence(actual_calls)}",
+    ]
+    missing = [call for call in expected_calls if call not in actual_calls]
+    extra = [call for call in actual_calls if call not in expected_calls]
+
+    if missing:
+        message_parts.append(f"missing: {', '.join(missing)}")
+
+    if extra:
+        message_parts.append(f"extra: {', '.join(extra)}")
+
+    if not missing and not extra and expected_calls != actual_calls:
+        out_of_order = []
+
+        for index, expected in enumerate(expected_calls):
+            actual = actual_calls[index] if index < len(actual_calls) else "(missing)"
+
+            if actual != expected:
+                out_of_order.append(f"step {index + 1}: expected {expected}, got {actual}")
+
+        if out_of_order:
+            message_parts.append("order: " + "; ".join(out_of_order))
+
+    return "; ".join(message_parts)
+
+
+def require_parser_fixture(label, source_text, expected_checks, expected_calls):
+    try:
+        contract = extract_ci_contract(source_text)
+    except ContractParseError as exc:
+        errors.append(f"{label}: parser raised {exc}")
+        return
+
+    require(
+        contract["check_methods"] == expected_checks,
+        f"{label}: expected @check gates {expected_checks}, got {contract['check_methods']}",
+    )
+    require(
+        contract["strict_calls"] == expected_calls,
+        f"{label}: expected strict calls {expected_calls}, got {contract['strict_calls']}",
+    )
+
+
+fixture_reformatted_ci = """
+@object()
+export class Ci {
+  @func()
+  async strict(
+    source?: Directory,
+  ): Promise<void> {
+    const repo = source!
+
+    await this.codexAgentRoles(
+      repo,
+    )
+    await this.deterministic(
+      repo,
+    )
+    await this.secretsHistory(
+      repo,
+    )
+    await this.advisories(repo)
+  }
+
+  @func()
+  @check()
+  async deterministic(
+    source?: Directory,
+  ): Promise<void> {
+    await this.rootQuality(source!)
+  }
+
+  @func()
+  @check()
+  public async secretsHistory(
+    source?: Directory,
+  ): Promise<void> {
+    await this.secrets(source!)
+  }
+}
+"""
+
+fixture_added_gate = """
+@object()
+export class Ci {
+  @func()
+  async strict(source?: Directory): Promise<void> {
+    const repo = source!
+    await this.codexAgentRoles(repo)
+    await this.deterministic(repo)
+    await this.openapiContract(repo)
+    await this.secretsHistory(repo)
+    await this.advisories(repo)
+  }
+
+  @func()
+  @check()
+  async deterministic(source?: Directory): Promise<void> {
+    await this.rootQuality(source!)
+  }
+
+  @func()
+  @check()
+  async openapiContract(source?: Directory): Promise<void> {
+    await this.ciContract(source!)
+  }
+
+  @func()
+  @check()
+  async secretsHistory(source?: Directory): Promise<void> {
+    await this.secrets(source!)
+  }
+}
+"""
+
+require_parser_fixture(
+    "parser handles reformatted strict and decorator spacing",
+    fixture_reformatted_ci,
+    ["deterministic", "secretsHistory"],
+    ["codexAgentRoles", "deterministic", "secretsHistory", "advisories"],
+)
+require_parser_fixture(
+    "parser discovers newly-added @check gates from class structure",
+    fixture_added_gate,
+    ["deterministic", "openapiContract", "secretsHistory"],
+    [
+        "codexAgentRoles",
+        "deterministic",
+        "openapiContract",
+        "secretsHistory",
+        "advisories",
+    ],
+)
+require(
+    "missing: secretsHistory" in strict_contract_message(
+        ["codexAgentRoles", "deterministic", "secretsHistory", "advisories"],
+        ["codexAgentRoles", "deterministic", "advisories"],
+    ),
+    "strict contract mismatch messages must name missing gates",
+)
+
+ci_contract = None
+
+if dagger_source:
+    try:
+        ci_contract = extract_ci_contract(dagger_source)
+    except ContractParseError as exc:
+        errors.append(f"unable to parse Dagger source contract: {exc}")
+
+check_methods = ci_contract["check_methods"] if ci_contract is not None else []
+strict_calls = ci_contract["strict_calls"] if ci_contract is not None else []
 expected_strict_calls = ["codexAgentRoles", *check_methods, "advisories"]
 dagger_version_match = re.search(r'"engineVersion"\s*:\s*"v([^"]+)"', dagger_config)
 required_dagger_version = (
@@ -126,7 +703,7 @@ require(
 )
 require(
     strict_calls == expected_strict_calls,
-    "Ci.strict must execute codexAgentRoles, every @check gate in source order, then advisories",
+    strict_contract_message(expected_strict_calls, strict_calls),
 )
 require(
     required_dagger_version is not None,

@@ -20,6 +20,8 @@
 | 007 | Networked service dogfooding | medium | ready | L |
 | 016 | Immutable CI control plane | medium | ready | M |
 | 017 | Dagger source contract + cache portability | medium | done | M |
+| 018 | Local Docker probe hardening | medium | ready | M |
+| 019 | Dagger strict contract hardening | medium | done | S |
 | 015 | Product security controls (scoped keys) | low | done | M |
 | 009 | Desktop health semantics research | low | blocked | M |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
@@ -47,7 +49,7 @@
 **Lane 1 (agent readiness):** 012 (delivery ledger) → bb/011 (triage sprite) → 010 (ramp)
 **Lane 2 (contract + observability):** 011 (OpenAPI) + 013 (metrics) — parallel, no deps
 **Lane 3 (structural):** 006 (query split) → 005 (connect-a-service)
-**Lane 4 (hardening):** 008, 014, 016, 017 (independent, small, can ship anytime)
+**Lane 4 (hardening):** 008, 014, 016, 017, 018, 019 (independent, small, can ship anytime)
 **Lane 5 (future):** 015 (scoped keys), 009 (desktop health, blocked on 007)
 
 ## Migration Notes
