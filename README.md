@@ -151,8 +151,12 @@ The pre-push hook runs the full Dagger gate before local pushes:
 ./bin/validate --strict
 ```
 
-GitHub Actions mirrors that strict path by running `dagger call strict`
-through the same pinned Dagger action.
+GitHub Actions mirrors that strict path through an immutable control plane: the
+workflow runs in the base-branch context, checks out a trusted base snapshot
+plus the candidate snapshot separately, and executes `dagger call strict
+--source=../candidate` from the trusted checkout. That keeps required CI
+definition outside the candidate diff while preserving the same strict Dagger
+entrypoint. See [docs/ci-control-plane.md](docs/ci-control-plane.md).
 
 ## API
 

@@ -18,7 +18,7 @@
 | 014 | Backup/restore + DR validation | medium | done | S |
 | 008 | Security + governance baseline | medium | done | S |
 | 007 | Networked service dogfooding | medium | ready | L |
-| 016 | Immutable CI control plane | medium | ready | M |
+| 016 | Immutable CI control plane | medium | done | M |
 | 017 | Dagger source contract + cache portability | medium | done | M |
 | 018 | Local Docker probe hardening | medium | done | M |
 | 019 | Dagger strict contract hardening | medium | done | S |

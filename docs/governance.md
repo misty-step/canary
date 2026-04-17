@@ -29,7 +29,9 @@ migration.
 - Do not allow deletions.
 
 Rationale: master is the deploy branch for `canary-obs`. The CI check is the
-only supported path to it.
+only supported path to it. Pull request enforcement must run through the
+immutable control plane documented in [`docs/ci-control-plane.md`](ci-control-plane.md),
+so candidate diffs cannot redefine the required workflow or Dagger module.
 
 ### Secret scanning
 

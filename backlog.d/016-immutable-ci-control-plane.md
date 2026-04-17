@@ -1,7 +1,7 @@
 # Immutable CI control plane
 
 Priority: medium
-Status: ready
+Status: done
 Estimate: M
 
 ## Goal
@@ -25,3 +25,17 @@ in-repo Dagger module and workflow definition. That is acceptable for now but
 not sufficient for a hardened control plane. Likely solutions include a pinned
 reusable workflow in a trusted repo, a pinned external Dagger module, or a
 branch-independent verification layer owned outside this repository.
+
+## What Was Built
+
+- Switched GitHub pull request enforcement from `pull_request` to `pull_request_target`, so the workflow definition now runs from the base-branch context instead of the candidate diff.
+- Split the workflow into a trusted control-plane checkout (`.ci/trusted`) and a separate candidate checkout (`.ci/candidate`), both with `persist-credentials: false`, then ran `dagger call strict --source=../candidate` from the trusted checkout.
+- Kept Dagger version pinning on the trusted side by reading `.ci/trusted/dagger.json`, so candidate edits cannot select a different engine or module for required checks.
+- Expanded `dagger/scripts/ci_contract_validation.py` to enforce the immutable workflow shape, and documented the rollout model in `docs/ci-control-plane.md`.
+
+## Verification
+
+- `python3 -m py_compile dagger/scripts/ci_contract_validation.py`
+- `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/ci.yml"); puts "workflow ok"'`
+- `python3 dagger/scripts/ci_contract_validation.py`
+- `./bin/validate --strict`

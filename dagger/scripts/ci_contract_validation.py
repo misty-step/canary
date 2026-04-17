@@ -1264,11 +1264,43 @@ require(
     "GitHub workflow must source the Dagger version from dagger.json",
 )
 require(
+    "pull_request_target:" in workflow and "\npull_request:" not in workflow,
+    "GitHub workflow must enforce pull requests from the base-branch context with pull_request_target",
+)
+require(
     re.search(
-        r"name:\s+Run Dagger strict CI[\s\S]*?uses:\s+dagger/dagger-for-github@[\s\S]*?verb:\s+call[\s\S]*?args:\s+strict",
+        r"group:\s+ci-\$\{\{\s*github\.workflow\s*\}\}-\$\{\{\s*github\.event\.pull_request\.number\s*\|\|\s*github\.ref\s*\}\}",
         workflow,
     ),
-    "GitHub workflow must run the strict Dagger CI entrypoint through the Dagger action",
+    "GitHub workflow concurrency must isolate pull requests by number instead of collapsing them onto the base ref",
+)
+require(
+    re.search(
+        r"name:\s+Checkout trusted CI control plane[\s\S]*?uses:\s+actions/checkout@[\s\S]*?path:\s+\.ci/trusted[\s\S]*?ref:\s+\$\{\{\s*github\.event\.pull_request\.base\.sha\s*\|\|\s*github\.sha\s*\}\}[\s\S]*?persist-credentials:\s+false",
+        workflow,
+    ),
+    "GitHub workflow must checkout the trusted CI control plane from the base SHA without persisting credentials",
+)
+require(
+    re.search(
+        r"name:\s+Checkout candidate source[\s\S]*?uses:\s+actions/checkout@[\s\S]*?path:\s+\.ci/candidate[\s\S]*?repository:\s+\$\{\{\s*github\.event\.pull_request\.head\.repo\.full_name\s*\|\|\s*github\.repository\s*\}\}[\s\S]*?ref:\s+\$\{\{\s*github\.event\.pull_request\.head\.sha\s*\|\|\s*github\.sha\s*\}\}[\s\S]*?persist-credentials:\s+false",
+        workflow,
+    ),
+    "GitHub workflow must checkout the candidate source separately from the trusted control plane without persisting credentials",
+)
+require(
+    re.search(
+        r"name:\s+Read trusted Dagger engine version[\s\S]*?\.ci/trusted/dagger\.json",
+        workflow,
+    ),
+    "GitHub workflow must read the Dagger engine version from the trusted control-plane checkout",
+)
+require(
+    re.search(
+        r"name:\s+Run trusted Dagger strict CI[\s\S]*?uses:\s+dagger/dagger-for-github@[\s\S]*?workdir:\s+\.ci/trusted[\s\S]*?verb:\s+call[\s\S]*?args:\s+strict\s+--source=\.\./candidate",
+        workflow,
+    ),
+    "GitHub workflow must run the strict Dagger CI entrypoint from the trusted checkout against the separately checked-out candidate source",
 )
 require(
     "Run Dagger codex role validation" not in workflow,
