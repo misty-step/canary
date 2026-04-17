@@ -1043,6 +1043,10 @@ with tempfile.TemporaryDirectory() as tmp:
         read_lines(ssh_log_path) == [f"-F {colima_dir / 'ssh_config'} -T colima docker version"],
         "bin/dagger auto mode must route Docker calls through Colima over SSH when the docker binary is unavailable",
     )
+    require(
+        "Docker was unavailable; using Colima over SSH for repo-local Dagger." in result.stderr,
+        "bin/dagger auto mode must announce when it falls back to Colima because Docker is unavailable",
+    )
     reset_shadow_commands(shadow_path)
     env.pop("UNAME_OVERRIDE", None)
     env.pop("EXPECT_DOCKER_CALL", None)
@@ -1085,6 +1089,10 @@ with tempfile.TemporaryDirectory() as tmp:
     require(
         read_lines(ssh_log_path) == [f"-F {colima_dir / 'ssh_config'} -T colima docker version"],
         "bin/dagger auto mode must route Docker calls through Colima over SSH after a failed direct probe",
+    )
+    require(
+        "direct Docker access failed; using Colima over SSH for repo-local Dagger." in result.stderr,
+        "bin/dagger auto mode must announce the Colima fallback after a failed direct Docker probe",
     )
     env.pop("UNAME_OVERRIDE", None)
     env.pop("DOCKER_VERSION_STATUS", None)
@@ -1130,8 +1138,44 @@ with tempfile.TemporaryDirectory() as tmp:
         read_lines(ssh_log_path) == [f"-F {colima_dir / 'ssh_config'} -T colima docker version"],
         "bin/dagger auto mode must route Docker calls through Colima over SSH after a hung direct probe",
     )
+    require(
+        "direct Docker probe timed out; using Colima over SSH for repo-local Dagger." in result.stderr,
+        "bin/dagger auto mode must announce the Colima fallback after a timed-out direct Docker probe",
+    )
     env.pop("UNAME_OVERRIDE", None)
     env.pop("DOCKER_VERSION_DELAY_SECONDS", None)
+    env.pop("EXPECT_DOCKER_CALL", None)
+
+    reset_logs()
+    reset_shadow_commands(shadow_path)
+    env["UNAME_OVERRIDE"] = "Darwin"
+    env["DOCKER_VERSION_DELAY_SECONDS"] = "2"
+    env["CANARY_DOCKER_PROBE_TIMEOUT_SECONDS"] = "1"
+    env["EXPECT_DOCKER_CALL"] = "1"
+    result = run("bin/dagger", "call", "fast")
+    require(
+        result.returncode == 0,
+        "bin/dagger auto mode must honor the configurable Docker probe timeout when deciding to fall back",
+    )
+    require(
+        read_lines(log_path) == ["call fast"],
+        "bin/dagger auto mode must still delegate after a timeout-driven Colima fallback",
+    )
+    require(
+        read_lines(docker_log_path) == ["version"],
+        "bin/dagger auto mode must still attempt the direct Docker probe before applying a custom timeout",
+    )
+    require(
+        read_lines(ssh_log_path) == [f"-F {colima_dir / 'ssh_config'} -T colima docker version"],
+        "bin/dagger auto mode must route through Colima when the configured Docker probe timeout is exceeded",
+    )
+    require(
+        "direct Docker probe timed out; using Colima over SSH for repo-local Dagger." in result.stderr,
+        "bin/dagger auto mode must report timeout-driven Colima fallback when the probe timeout is configured",
+    )
+    env.pop("UNAME_OVERRIDE", None)
+    env.pop("DOCKER_VERSION_DELAY_SECONDS", None)
+    env.pop("CANARY_DOCKER_PROBE_TIMEOUT_SECONDS", None)
     env.pop("EXPECT_DOCKER_CALL", None)
 
     reset_logs()

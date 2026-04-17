@@ -33,18 +33,7 @@ note_colima() {
     return 0
   fi
 
-  if docker_available; then
-    return 0
-  fi
-
-  if ! colima version >/dev/null 2>&1; then
-    printf '==> tooling: macOS local validation needs a working Docker runtime. Start Docker Desktop or install/start Colima before running ./bin/validate.\n'
-    return 0
-  fi
-
-  if ! colima status >/dev/null 2>&1; then
-    printf '==> tooling: no working Docker runtime detected. If you use Colima, start it before running local validation: colima start --runtime docker\n'
-  fi
+  docker_runtime_bootstrap_note
 }
 
 while (($#)); do

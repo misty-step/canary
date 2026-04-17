@@ -20,7 +20,7 @@
 | 007 | Networked service dogfooding | medium | ready | L |
 | 016 | Immutable CI control plane | medium | ready | M |
 | 017 | Dagger source contract + cache portability | medium | done | M |
-| 018 | Local Docker probe hardening | medium | ready | M |
+| 018 | Local Docker probe hardening | medium | done | M |
 | 019 | Dagger strict contract hardening | medium | done | S |
 | 015 | Product security controls (scoped keys) | low | done | M |
 | 009 | Desktop health semantics research | low | blocked | M |

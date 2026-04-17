@@ -19,6 +19,7 @@ Repo-local Dagger wrapper.
 
 Environment:
   CANARY_DAGGER_DOCKER_TRANSPORT=auto|colima-ssh|direct
+  CANARY_DOCKER_PROBE_TIMEOUT_SECONDS=<integer seconds>
 EOF
 }
 
@@ -86,23 +87,6 @@ require_pinned_dagger_version() {
   fi
 }
 
-require_colima() {
-  if ! colima version >/dev/null 2>&1; then
-    printf "Repo-local Dagger could not use the active Docker client and no Colima fallback is installed. Start your Docker runtime or install Colima and run 'colima start --runtime docker'.\n" >&2
-    exit 1
-  fi
-
-  if [[ ! -f "${HOME}/.colima/ssh_config" ]]; then
-    printf "Repo-local Dagger could not use the active Docker client and the Colima fallback is not ready. Missing %s. Start your Docker runtime or start Colima with 'colima start --runtime docker'.\n" "${HOME}/.colima/ssh_config" >&2
-    exit 1
-  fi
-
-  if ! colima status >/dev/null 2>&1; then
-    printf "Repo-local Dagger could not use the active Docker client and the Colima fallback is not running. Start your Docker runtime or start Colima with 'colima start --runtime docker'.\n" >&2
-    exit 1
-  fi
-}
-
 run_with_colima() {
   local dagger_bin="$1"
   shift
@@ -111,11 +95,11 @@ run_with_colima() {
   local status=0
   tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/canary-dagger.XXXXXX")"
 
-  cat >"$tmpdir/docker" <<'EOF'
+  cat >"$tmpdir/docker" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
-exec ssh -F "$HOME/.colima/ssh_config" -T colima docker "$@"
+exec ssh -F "$(colima_ssh_config_path)" -T colima docker "\$@"
 EOF
 
   chmod +x "$tmpdir/docker"
@@ -148,19 +132,35 @@ require_pinned_dagger_version "$dagger_bin"
 case "$TRANSPORT" in
   auto)
     if [[ "$(uname -s)" == "Darwin" ]]; then
-      if docker_available; then
-        exec "$dagger_bin" "$@"
+      if ! docker_runtime_auto_backend; then
+        docker_runtime_auto_error_message >&2
+        exit 1
       fi
 
-      require_colima
-      run_with_colima "$dagger_bin" "$@"
-      exit $?
+      case "${DOCKER_RUNTIME_BACKEND:-}" in
+        direct)
+          exec "$dagger_bin" "$@"
+          ;;
+        colima-ssh)
+          docker_runtime_auto_note >&2
+          run_with_colima "$dagger_bin" "$@"
+          exit $?
+          ;;
+        *)
+          printf 'Unknown Docker runtime backend selected: %s\n' "${DOCKER_RUNTIME_BACKEND:-}" >&2
+          exit 1
+          ;;
+      esac
     fi
 
     exec "$dagger_bin" "$@"
     ;;
   colima-ssh)
-    require_colima
+    if ! colima_ready; then
+      docker_runtime_auto_error_message >&2
+      exit 1
+    fi
+
     run_with_colima "$dagger_bin" "$@"
     ;;
   direct)
