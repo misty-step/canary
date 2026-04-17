@@ -1,0 +1,45 @@
+{
+  "active_services": [
+    {
+      "service": "chrondle",
+      "target_url": "https://www.chrondle.app/api/health"
+    },
+    {
+      "service": "linejam",
+      "target_url": "https://www.linejam.app/api/health"
+    },
+    {
+      "service": "volume",
+      "target_url": "https://www.volume.fitness/api/health"
+    },
+    {
+      "service": "vulcan",
+      "target_url": "https://adminifi-vulcan-orchestrator.fly.dev/health"
+    }
+  ],
+  "pending_services": [
+    {
+      "service": "adminifi-web",
+      "target_url": "https://apollo-app-service.azurewebsites.net/health",
+      "reason": "Azure origin resolved during the 2026-04-17 audit, but the documented /health path returned 404 and the public adminifi.app host timed out from the operator environment."
+    },
+    {
+      "service": "consumer-portal",
+      "target_url": "https://my-public-adminifi.azurewebsites.net/api/health",
+      "reason": "The repo README documents this production host and /api/health path, but the hostname did not resolve during the 2026-04-17 operator audit."
+    }
+  ],
+  "follow_on_services": [
+    {
+      "service": "time-tracker",
+      "reason": "Desktop app with non-HTTP health semantics. Tracked separately in backlog item 009."
+    },
+    {
+      "service": "cerberus",
+      "reason": "Has a Canary sink implementation, but no verified public HTTP health surface was pinned during the 2026-04-17 audit."
+    }
+  ],
+  "ignore_targets": [
+    "canary-self"
+  ]
+}

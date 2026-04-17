@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+MANIFEST="$ROOT/priv/dogfood/owned_services.json"
+WINDOW="24h"
+ENDPOINT="${CANARY_ENDPOINT:-}"
+API_KEY="${CANARY_API_KEY:-}"
+STRICT=0
+
+usage() {
+  cat <<'EOF'
+Usage: bin/dogfood-audit [--endpoint <url>] [--api-key <key>] [--window <window>] [--manifest <path>] [--strict] [-h|--help]
+
+Audit Canary's owned-service dogfood set against the checked-in manifest.
+
+By default the command reads `CANARY_ENDPOINT` and `CANARY_API_KEY` from the
+environment, verifies the active HTTP services listed in
+`priv/dogfood/owned_services.json`, and prints:
+
+- Canary's current summary for the requested window
+- whether each active service target exists under the expected URL
+- current target health state and error totals per service
+- pending and follow-on services that are intentionally not expected yet
+- extra live targets outside the owned-service dogfood set
+
+`--strict` exits non-zero when any active service target is missing, duplicated,
+or pointed at the wrong URL.
+EOF
+}
+
+require_command() {
+  local command_name="$1"
+
+  if command -v "$command_name" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  printf 'Missing required command: %s\n' "$command_name" >&2
+  exit 1
+}
+
+urlencode() {
+  jq -nr --arg value "$1" '$value | @uri'
+}
+
+api_get() {
+  local path="$1"
+  curl -fsS -H "Authorization: Bearer $API_KEY" "${ENDPOINT%/}$path"
+}
+
+fail() {
+  printf '%s\n' "$1" >&2
+  exit 1
+}
+
+while (($#)); do
+  case "$1" in
+    --endpoint)
+      if (($# < 2)); then
+        usage >&2
+        exit 1
+      fi
+      ENDPOINT="$2"
+      shift 2
+      ;;
+    --api-key)
+      if (($# < 2)); then
+        usage >&2
+        exit 1
+      fi
+      API_KEY="$2"
+      shift 2
+      ;;
+    --window)
+      if (($# < 2)); then
+        usage >&2
+        exit 1
+      fi
+      WINDOW="$2"
+      shift 2
+      ;;
+    --manifest)
+      if (($# < 2)); then
+        usage >&2
+        exit 1
+      fi
+      MANIFEST="$2"
+      shift 2
+      ;;
+    --strict)
+      STRICT=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+require_command curl
+require_command jq
+
+[[ -n "$ENDPOINT" ]] || fail "Missing Canary endpoint. Set CANARY_ENDPOINT or pass --endpoint."
+[[ -n "$API_KEY" ]] || fail "Missing Canary API key. Set CANARY_API_KEY or pass --api-key."
+[[ -f "$MANIFEST" ]] || fail "Manifest not found: $MANIFEST"
+
+jq -e '
+  (.active_services | type) == "array" and
+  (.pending_services | type) == "array" and
+  (.follow_on_services | type) == "array" and
+  (.ignore_targets | type) == "array"
+' "$MANIFEST" >/dev/null
+
+targets_json="$(api_get "/api/v1/targets")"
+report_json="$(api_get "/api/v1/report?window=$(urlencode "$WINDOW")")"
+overall_summary="$(jq -r '.summary' <<<"$report_json")"
+overall_status="$(jq -r '.status' <<<"$report_json")"
+
+printf 'Canary dogfood audit (%s)\n' "$WINDOW"
+printf 'status: %s\n' "$overall_status"
+printf 'summary: %s\n' "$overall_summary"
+printf '\n'
+
+printf 'Active HTTP services\n'
+printf '%-18s %-9s %-8s %-10s %-6s %s\n' "service" "target" "url" "health" "errors" "expected"
+printf '%-18s %-9s %-8s %-10s %-6s %s\n' "-------" "------" "---" "------" "------" "--------"
+
+strict_failures=0
+
+while IFS= read -r service_json; do
+  service="$(jq -r '.service' <<<"$service_json")"
+  expected_url="$(jq -r '.target_url' <<<"$service_json")"
+  query_json="$(api_get "/api/v1/query?service=$(urlencode "$service")&window=$(urlencode "$WINDOW")")"
+
+  target_count="$(
+    jq -r --arg service "$service" '
+      [.targets[] | select(.service == $service)] | length
+    ' <<<"$targets_json"
+  )"
+
+  actual_url="$(
+    jq -r --arg service "$service" '
+      [.targets[] | select(.service == $service) | .url][0] // ""
+    ' <<<"$targets_json"
+  )"
+
+  health_state="$(
+    jq -r --arg service "$service" '
+      [.targets[] | select(.service == $service) | .state][0] // "missing"
+    ' <<<"$report_json"
+  )"
+
+  total_errors="$(jq -r '.total_errors // 0' <<<"$query_json")"
+  summary="$(jq -r '.summary' <<<"$query_json")"
+
+  target_state="present"
+  url_state="yes"
+
+  if [[ "$target_count" == "0" ]]; then
+    target_state="missing"
+    url_state="n/a"
+    strict_failures=$((strict_failures + 1))
+  elif [[ "$target_count" != "1" ]]; then
+    target_state="duplicate"
+    url_state="no"
+    strict_failures=$((strict_failures + 1))
+  elif [[ "$actual_url" != "$expected_url" ]]; then
+    url_state="no"
+    strict_failures=$((strict_failures + 1))
+  fi
+
+  printf '%-18s %-9s %-8s %-10s %-6s %s\n' \
+    "$service" \
+    "$target_state" \
+    "$url_state" \
+    "$health_state" \
+    "$total_errors" \
+    "$expected_url"
+  printf '  %s\n' "$summary"
+done < <(jq -c '.active_services[]' "$MANIFEST")
+
+printf '\nPending verification\n'
+printf '%-18s %s\n' "service" "reason"
+printf '%-18s %s\n' "-------" "------"
+
+while IFS= read -r service_json; do
+  service="$(jq -r '.service' <<<"$service_json")"
+  expected_url="$(jq -r '.target_url' <<<"$service_json")"
+  reason="$(jq -r '.reason' <<<"$service_json")"
+  printf '%-18s %s\n' "$service" "$reason"
+  printf '  expected: %s\n' "$expected_url"
+done < <(jq -c '.pending_services[]' "$MANIFEST")
+
+printf '\nFollow-on / out of scope\n'
+printf '%-18s %s\n' "service" "reason"
+printf '%-18s %s\n' "-------" "------"
+
+while IFS= read -r service_json; do
+  service="$(jq -r '.service' <<<"$service_json")"
+  reason="$(jq -r '.reason' <<<"$service_json")"
+  printf '%-18s %s\n' "$service" "$reason"
+done < <(jq -c '.follow_on_services[]' "$MANIFEST")
+
+extra_targets="$(
+  jq -r \
+    --argjson manifest "$(jq -c '[.active_services[].service, .pending_services[].service, .follow_on_services[].service, .ignore_targets[]]' "$MANIFEST")" '
+      .targets
+      | map(select((.service as $service | $manifest | index($service)) | not))
+      | map({service, url})
+    ' <<<"$targets_json"
+)"
+
+extra_count="$(jq -r 'length' <<<"$extra_targets")"
+
+printf '\nExtra live targets\n'
+if [[ "$extra_count" == "0" ]]; then
+  printf 'none\n'
+else
+  jq -r '.[] | "  \(.service) -> \(.url)"' <<<"$extra_targets"
+fi
+
+if ((STRICT == 1 && strict_failures > 0)); then
+  printf '\nStrict audit failed: %s active service target issue(s).\n' "$strict_failures" >&2
+  exit 1
+fi

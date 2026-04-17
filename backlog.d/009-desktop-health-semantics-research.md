@@ -1,7 +1,7 @@
 # Desktop health semantics research
 
 Priority: low
-Status: blocked
+Status: ready
 Estimate: M
 
 ## Goal
@@ -18,5 +18,5 @@ Choose the canonical Canary health model for non-HTTP runtimes such as desktop a
 - [ ] Given the decision is made, when the item closes, then a follow-up implementation item is created or the desktop-health lane is explicitly rejected
 
 ## Notes
-Blocked on: stronger product-loop dogfooding with HTTP services first (007).
+Unblocked on 2026-04-17 when `007` closed with a verified live HTTP dogfood set.
 Migrated from .backlog.d/009.

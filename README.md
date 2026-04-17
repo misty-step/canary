@@ -307,6 +307,12 @@ The response includes:
 - exact snippets for `POST /api/v1/errors`, plus report/query verification commands that expect a separate read/admin key
 - direct links to `/dashboard` and the unified report
 
+### Owned Service Dogfooding
+
+Use [docs/networked-service-dogfooding.md](/Users/phaedrus/Development/canary/docs/networked-service-dogfooding.md)
+and `bin/dogfood-audit --strict` to verify the checked-in owned HTTP service
+set against a live Canary instance.
+
 ### Target Management
 
 ```bash
