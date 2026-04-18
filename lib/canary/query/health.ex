@@ -1,7 +1,7 @@
 defmodule Canary.Query.Health do
   @moduledoc false
 
-  alias Canary.Schemas.{Target, TargetCheck, TargetState}
+  alias Canary.Schemas.{Monitor, MonitorState, Target, TargetCheck, TargetState}
 
   import Ecto.Query
 
@@ -51,11 +51,41 @@ defmodule Canary.Query.Health do
     end)
   end
 
+  @spec health_monitors() :: [map()]
+  def health_monitors do
+    repo = Canary.Repos.read_repo()
+
+    from(m in Monitor,
+      left_join: s in MonitorState,
+      on: m.id == s.monitor_id,
+      order_by: m.name,
+      select: {m, s}
+    )
+    |> repo.all()
+    |> Enum.map(fn {monitor, state} ->
+      %{
+        id: monitor.id,
+        name: monitor.name,
+        service: Monitor.service_name(monitor),
+        mode: monitor.mode,
+        expected_every_ms: monitor.expected_every_ms,
+        grace_ms: monitor.grace_ms,
+        state: (state && state.state) || "unknown",
+        last_check_in_status: state && state.last_check_in_status,
+        last_check_in_at: state && state.last_check_in_at,
+        last_success_at: state && state.last_success_at,
+        last_failure_at: state && state.last_failure_at,
+        deadline_at: state && state.deadline_at
+      }
+    end)
+  end
+
   @spec health_status() :: map()
   def health_status do
     targets = health_targets()
-    summary = Canary.Summary.health_status(%{targets: targets})
-    %{summary: summary, targets: targets}
+    monitors = health_monitors()
+    summary = Canary.Summary.health_status(%{targets: targets, monitors: monitors})
+    %{summary: summary, targets: targets, monitors: monitors}
   end
 
   @spec recent_transitions(String.t(), keyword()) ::
@@ -64,20 +94,64 @@ defmodule Canary.Query.Health do
     now = Keyword.get(opts, :at, DateTime.utc_now())
 
     with {:ok, cutoff} <- Canary.Query.Window.to_cutoff(window, now) do
-      transitions =
+      target_transitions =
         from(t in Target,
           join: s in TargetState,
           on: t.id == s.target_id,
           where: s.last_transition_at >= ^cutoff,
-          order_by: [desc: s.last_transition_at, asc: t.name],
           select: %{
-            target_id: t.id,
-            target_name: t.name,
+            id: t.id,
+            name: t.name,
+            service: t.service,
             state: s.state,
             transitioned_at: s.last_transition_at
           }
         )
         |> Canary.Repos.read_repo().all()
+        |> Enum.map(fn transition ->
+          %{
+            entity_type: "target",
+            entity_ref: transition.id,
+            name: transition.name,
+            service: transition.service || transition.name,
+            state: transition.state,
+            transitioned_at: transition.transitioned_at
+          }
+        end)
+
+      monitor_transitions =
+        from(m in Monitor,
+          join: s in MonitorState,
+          on: m.id == s.monitor_id,
+          where: s.last_transition_at >= ^cutoff,
+          select: %{
+            id: m.id,
+            name: m.name,
+            service: m.service,
+            state: s.state,
+            transitioned_at: s.last_transition_at
+          }
+        )
+        |> Canary.Repos.read_repo().all()
+        |> Enum.map(fn transition ->
+          %{
+            entity_type: "monitor",
+            entity_ref: transition.id,
+            name: transition.name,
+            service: transition.service || transition.name,
+            state: transition.state,
+            transitioned_at: transition.transitioned_at
+          }
+        end)
+
+      transitions =
+        (target_transitions ++ monitor_transitions)
+        |> Enum.sort_by(
+          fn transition ->
+            {transition.transitioned_at, transition.entity_type, transition.name}
+          end,
+          :desc
+        )
 
       {:ok, transitions}
     end

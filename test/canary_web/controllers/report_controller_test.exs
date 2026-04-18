@@ -28,6 +28,7 @@ defmodule CanaryWeb.ReportControllerTest do
                "cursor",
                "error_groups",
                "incidents",
+               "monitors",
                "recent_transitions",
                "status",
                "summary",
@@ -38,6 +39,7 @@ defmodule CanaryWeb.ReportControllerTest do
       assert body["status"] == "degraded"
       assert [%{"service" => "volume"}] = body["error_groups"]
       assert [%{"service" => "volume", "signal_count" => 2}] = body["incidents"]
+      assert body["monitors"] == []
       assert is_list(body["targets"])
       assert is_list(body["recent_transitions"])
       assert body["truncated"] == false
@@ -72,6 +74,7 @@ defmodule CanaryWeb.ReportControllerTest do
       assert body["status"] == "healthy"
       assert body["error_groups"] == []
       assert body["incidents"] == []
+      assert body["monitors"] == []
       assert length(body["targets"]) == 2
       assert is_binary(body["summary"])
       assert body["truncated"] == false
@@ -195,6 +198,15 @@ defmodule CanaryWeb.ReportControllerTest do
       assert response(conn, 200) =~ "section,position,id,name,service,error_class,url,state,count"
       assert response(conn, 200) =~ "targets,1,TGT-alpha,alpha"
       assert response(conn, 200) =~ "error_groups,1,"
+    end
+
+    test "returns monitor rows when monitors exist", %{conn: conn} do
+      create_monitor_with_state("desktop-active-timer", "degraded")
+
+      conn = get(conn, "/api/v1/report")
+      body = json_response(conn, 200)
+
+      assert [%{"name" => "desktop-active-timer", "state" => "degraded"}] = body["monitors"]
     end
   end
 

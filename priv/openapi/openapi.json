@@ -54,6 +54,9 @@
       "name": "Targets"
     },
     {
+      "name": "Monitors"
+    },
+    {
       "name": "Webhooks"
     },
     {
@@ -210,6 +213,51 @@
           },
           "500": {
             "$ref": "#/components/responses/InternalProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/check-ins": {
+      "post": {
+        "tags": [
+          "Monitors"
+        ],
+        "summary": "Ingest a non-HTTP monitor check-in",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckInRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Check-in stored and monitor state updated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckInResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLargeProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
           }
         }
       }
@@ -1109,6 +1157,101 @@
         }
       }
     },
+    "/api/v1/monitors": {
+      "get": {
+        "tags": [
+          "Monitors"
+        ],
+        "summary": "List non-HTTP health monitors",
+        "responses": {
+          "200": {
+            "description": "Monitor list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MonitorsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Monitors"
+        ],
+        "summary": "Create a non-HTTP health monitor",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MonitorCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Monitor created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Monitor"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/monitors/{id}": {
+      "delete": {
+        "tags": [
+          "Monitors"
+        ],
+        "summary": "Delete a monitor",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Monitor deleted."
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          }
+        }
+      }
+    },
     "/api/v1/webhooks": {
       "get": {
         "tags": [
@@ -1718,6 +1861,81 @@
           }
         }
       },
+      "CheckInRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "monitor",
+          "status"
+        ],
+        "properties": {
+          "monitor": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "alive",
+              "in_progress",
+              "ok",
+              "error"
+            ]
+          },
+          "check_in_id": {
+            "type": "string"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ttl_ms": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "summary": {
+            "type": "string"
+          },
+          "context": {
+            "type": "object",
+            "additionalProperties": {}
+          }
+        }
+      },
+      "CheckInResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "monitor_id",
+          "check_in_id",
+          "state",
+          "observed_at",
+          "sequence"
+        ],
+        "properties": {
+          "monitor_id": {
+            "type": "string"
+          },
+          "check_in_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "up",
+              "degraded",
+              "down"
+            ]
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "sequence": {
+            "type": "integer"
+          }
+        }
+      },
       "ErrorGroupClassification": {
         "type": "object",
         "additionalProperties": false,
@@ -2138,12 +2356,98 @@
           }
         }
       },
+      "HealthMonitor": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "service",
+          "mode",
+          "expected_every_ms",
+          "grace_ms",
+          "state",
+          "last_check_in_status",
+          "last_check_in_at",
+          "last_success_at",
+          "last_failure_at",
+          "deadline_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "schedule",
+              "ttl"
+            ]
+          },
+          "expected_every_ms": {
+            "type": "integer"
+          },
+          "grace_ms": {
+            "type": "integer"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "up",
+              "degraded",
+              "down"
+            ]
+          },
+          "last_check_in_status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_check_in_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "last_success_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "last_failure_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "deadline_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
       "HealthStatusResponse": {
         "type": "object",
         "additionalProperties": false,
         "required": [
           "summary",
-          "targets"
+          "targets",
+          "monitors"
         ],
         "properties": {
           "summary": {
@@ -2153,6 +2457,12 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/HealthTarget"
+            }
+          },
+          "monitors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HealthMonitor"
             }
           }
         }
@@ -2544,6 +2854,96 @@
           }
         }
       },
+      "Monitor": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "service",
+          "mode",
+          "expected_every_ms",
+          "grace_ms",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "schedule",
+              "ttl"
+            ]
+          },
+          "expected_every_ms": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "grace_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "MonitorsResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "monitors"
+        ],
+        "properties": {
+          "monitors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Monitor"
+            }
+          }
+        }
+      },
+      "MonitorCreateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "mode",
+          "expected_every_ms"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "schedule",
+              "ttl"
+            ]
+          },
+          "expected_every_ms": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "grace_ms": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
       "SimpleStatusResponse": {
         "type": "object",
         "additionalProperties": false,
@@ -2824,6 +3224,67 @@
           }
         }
       },
+      "StatusMonitor": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "service",
+          "mode",
+          "state",
+          "last_check_in_status",
+          "last_check_in_at",
+          "deadline_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "schedule",
+              "ttl"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "up",
+              "degraded",
+              "down"
+            ]
+          },
+          "last_check_in_status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_check_in_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "deadline_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
       "ErrorSummaryItem": {
         "type": "object",
         "additionalProperties": false,
@@ -2848,16 +3309,28 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "target_id",
-          "target_name",
+          "entity_type",
+          "entity_ref",
+          "name",
+          "service",
           "state",
           "transitioned_at"
         ],
         "properties": {
-          "target_id": {
+          "entity_type": {
+            "type": "string",
+            "enum": [
+              "target",
+              "monitor"
+            ]
+          },
+          "entity_ref": {
             "type": "string"
           },
-          "target_name": {
+          "name": {
+            "type": "string"
+          },
+          "service": {
             "type": "string"
           },
           "state": {
@@ -2919,6 +3392,7 @@
           "status",
           "summary",
           "targets",
+          "monitors",
           "error_groups",
           "incidents",
           "recent_transitions",
@@ -2943,6 +3417,12 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/HealthTarget"
+            }
+          },
+          "monitors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HealthMonitor"
             }
           },
           "error_groups": {
@@ -2987,6 +3467,7 @@
           "overall",
           "summary",
           "targets",
+          "monitors",
           "error_summary"
         ],
         "properties": {
@@ -3007,6 +3488,12 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/StatusTarget"
+            }
+          },
+          "monitors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatusMonitor"
             }
           },
           "error_summary": {
@@ -3046,6 +3533,7 @@
             "enum": [
               "error_group",
               "target",
+              "monitor",
               "incident"
             ]
           },

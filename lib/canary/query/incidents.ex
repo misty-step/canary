@@ -1,7 +1,7 @@
 defmodule Canary.Query.Incidents do
   @moduledoc false
 
-  alias Canary.Schemas.{ErrorGroup, Incident, IncidentSignal, TargetState}
+  alias Canary.Schemas.{ErrorGroup, Incident, IncidentSignal, MonitorState, TargetState}
 
   import Ecto.Query
 
@@ -106,12 +106,12 @@ defmodule Canary.Query.Incidents do
     }
   end
 
-  defp load_signal_lookups(_repo, []), do: %{error_groups: %{}, target_states: %{}}
+  defp load_signal_lookups(_repo, []), do: %{error_groups: %{}, health_states: %{}}
 
   defp load_signal_lookups(repo, incidents) do
     %{
       error_groups: load_error_groups(repo, incidents),
-      target_states: load_target_states(repo, incidents)
+      health_states: load_health_states(repo, incidents)
     }
   end
 
@@ -121,10 +121,12 @@ defmodule Canary.Query.Incidents do
     |> fetch_lookup(repo, ErrorGroup, :group_hash)
   end
 
-  defp load_target_states(repo, incidents) do
-    incidents
-    |> signal_refs("health_transition")
+  defp load_health_states(repo, incidents) do
+    refs = signal_refs(incidents, "health_transition")
+
+    refs
     |> fetch_lookup(repo, TargetState, :target_id)
+    |> Map.merge(fetch_lookup(refs, repo, MonitorState, :monitor_id))
   end
 
   defp signal_refs(incidents, signal_type) do
@@ -156,11 +158,11 @@ defmodule Canary.Query.Incidents do
   defp signal_active_for_report?(
          %IncidentSignal{signal_type: "health_transition", signal_ref: ref},
          _now,
-         %{target_states: target_states}
+         %{health_states: health_states}
        ) do
-    case Map.get(target_states, ref) do
-      %TargetState{state: "up"} -> false
-      %TargetState{} -> true
+    case Map.get(health_states, ref) do
+      %{state: "up"} -> false
+      %{} -> true
       nil -> false
     end
   end

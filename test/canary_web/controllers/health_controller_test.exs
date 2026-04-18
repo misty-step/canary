@@ -30,6 +30,7 @@ defmodule CanaryWeb.HealthControllerTest do
       body = json_response(conn, 200)
       assert is_binary(body["summary"])
       assert is_list(body["targets"])
+      assert is_list(body["monitors"])
     end
 
     test "401 without auth", %{conn: conn} do

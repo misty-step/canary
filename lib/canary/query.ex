@@ -12,6 +12,7 @@ defmodule Canary.Query do
   defdelegate error_summary(window), to: Canary.Query.Errors
 
   defdelegate health_targets(), to: Canary.Query.Health
+  defdelegate health_monitors(), to: Canary.Query.Health
   defdelegate health_status(), to: Canary.Query.Health
   defdelegate target_checks(target_id, window), to: Canary.Query.Health
   defdelegate recent_transitions(window), to: Canary.Query.Health

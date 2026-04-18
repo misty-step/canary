@@ -17,9 +17,10 @@ defmodule Canary.StatusTest do
 
       assert result.overall == "healthy"
       assert length(result.targets) == 3
+      assert result.monitors == []
       assert Enum.all?(result.targets, &(&1.state == "up"))
       assert result.error_summary == []
-      assert result.summary =~ "All 3 targets healthy"
+      assert result.summary =~ "All 3 health surfaces healthy"
     end
 
     test "target down with errors for that service" do
@@ -45,6 +46,7 @@ defmodule Canary.StatusTest do
 
       assert result.overall == "empty"
       assert result.targets == []
+      assert result.monitors == []
       assert result.error_summary == []
       assert result.summary =~ "No services configured"
     end
@@ -76,6 +78,16 @@ defmodule Canary.StatusTest do
 
       assert result.overall == "warning"
       assert result.summary =~ "error"
+    end
+
+    test "monitors participate in overall health without pretending to be targets" do
+      create_monitor_with_state("desktop-active-timer", "down")
+
+      assert {:ok, result} = Status.combined()
+
+      assert result.overall == "unhealthy"
+      assert result.targets == []
+      assert [%{name: "desktop-active-timer", state: "down"}] = result.monitors
     end
 
     test "unknown target state treated as degraded" do

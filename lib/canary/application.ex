@@ -24,6 +24,7 @@ defmodule Canary.Application do
         {Registry, keys: :unique, name: Canary.Health.Registry},
         Canary.Health.Supervisor,
         Canary.Health.Manager,
+        Canary.Monitors.Manager,
         CanaryWeb.Endpoint
       ]
 

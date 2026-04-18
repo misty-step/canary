@@ -2,7 +2,7 @@ defmodule Canary.Schemas.ServiceEvent do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @entity_types ~w(error_group target incident)
+  @entity_types ~w(error_group target monitor incident)
   @events Canary.Webhooks.EventTypes.business()
 
   @primary_key {:id, :string, autogenerate: false}

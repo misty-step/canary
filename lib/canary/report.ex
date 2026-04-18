@@ -21,24 +21,30 @@ defmodule Canary.Report do
          {:ok, slice} <- Query.report_slice(window),
          {:ok, search_results} <- search_results(search_query, window) do
       targets = Query.health_targets()
-      status = Status.from_snapshot(targets, slice.error_summary, window)
+      monitors = Query.health_monitors()
+      status = Status.from_snapshot(targets, monitors, slice.error_summary, window)
       {targets, next_targets_offset} = paginate_targets(targets, pagination)
+      {monitors, next_monitors_offset} = paginate_monitors(monitors, pagination)
 
       {error_groups, next_error_groups_offset} =
         paginate_error_groups(slice.error_groups, pagination)
 
-      truncated = not is_nil(next_targets_offset) or not is_nil(next_error_groups_offset)
+      truncated =
+        not is_nil(next_targets_offset) or not is_nil(next_monitors_offset) or
+          not is_nil(next_error_groups_offset)
 
       {:ok,
        %{
          status: status.overall,
          summary: status.summary,
          targets: targets,
+         monitors: monitors,
          error_groups: error_groups,
          incidents: slice.incidents,
          recent_transitions: slice.recent_transitions,
          truncated: truncated,
-         cursor: encode_cursor(next_targets_offset, next_error_groups_offset)
+         cursor:
+           encode_cursor(next_targets_offset, next_monitors_offset, next_error_groups_offset)
        }
        |> maybe_put_search_results(search_results)}
     end
@@ -51,6 +57,7 @@ defmodule Canary.Report do
        %{
          limit: limit,
          target_offset: cursor.targets_offset,
+         monitor_offset: cursor.monitor_offset,
          error_group_offset: cursor.error_groups_offset
        }}
     end
@@ -68,16 +75,25 @@ defmodule Canary.Report do
 
   defp parse_limit(_), do: {:error, :invalid_limit}
 
-  defp decode_cursor(nil), do: {:ok, %{targets_offset: 0, error_groups_offset: 0}}
-  defp decode_cursor(""), do: {:ok, %{targets_offset: 0, error_groups_offset: 0}}
+  defp decode_cursor(nil),
+    do: {:ok, %{targets_offset: 0, monitor_offset: 0, error_groups_offset: 0}}
+
+  defp decode_cursor(""),
+    do: {:ok, %{targets_offset: 0, monitor_offset: 0, error_groups_offset: 0}}
 
   defp decode_cursor(cursor) when is_binary(cursor) do
     with {:ok, decoded} <- Base.url_decode64(cursor, padding: false),
          {:ok, offsets} <- decode_cursor_payload(decoded),
          {:ok, targets_offset} <- parse_cursor_offset(Map.get(offsets, "targets_offset")),
+         {:ok, monitor_offset} <- parse_cursor_offset(Map.get(offsets, "monitor_offset")),
          {:ok, error_groups_offset} <-
            parse_cursor_offset(Map.get(offsets, "error_groups_offset")) do
-      {:ok, %{targets_offset: targets_offset, error_groups_offset: error_groups_offset}}
+      {:ok,
+       %{
+         targets_offset: targets_offset,
+         monitor_offset: monitor_offset,
+         error_groups_offset: error_groups_offset
+       }}
     else
       _ -> {:error, :invalid_cursor}
     end
@@ -117,6 +133,14 @@ defmodule Canary.Report do
   defp paginate_targets(targets, %{limit: limit, target_offset: offset}),
     do: paginate(targets, limit, offset)
 
+  defp paginate_monitors(_monitors, %{monitor_offset: nil}), do: {[], nil}
+
+  defp paginate_monitors(monitors, %{limit: nil, monitor_offset: offset}),
+    do: {Enum.drop(monitors, offset), nil}
+
+  defp paginate_monitors(monitors, %{limit: limit, monitor_offset: offset}),
+    do: paginate(monitors, limit, offset)
+
   defp paginate_error_groups(_error_groups, %{error_group_offset: nil}), do: {[], nil}
 
   defp paginate_error_groups(error_groups, %{limit: nil, error_group_offset: offset}),
@@ -132,11 +156,12 @@ defmodule Canary.Report do
     {page, next_offset}
   end
 
-  defp encode_cursor(nil, nil), do: nil
+  defp encode_cursor(nil, nil, nil), do: nil
 
-  defp encode_cursor(targets_offset, error_groups_offset) do
+  defp encode_cursor(targets_offset, monitor_offset, error_groups_offset) do
     %{
       targets_offset: targets_offset,
+      monitor_offset: monitor_offset,
       error_groups_offset: error_groups_offset
     }
     |> Jason.encode!()

@@ -6,7 +6,7 @@ defmodule Canary.Incidents do
   import Ecto.Query
 
   alias Canary.{ID, Repo, Timeline}
-  alias Canary.Schemas.{ErrorGroup, Incident, IncidentSignal, TargetState}
+  alias Canary.Schemas.{ErrorGroup, Incident, IncidentSignal, MonitorState, TargetState}
 
   @active_window_seconds 300
   @open_incident_service_constraints [
@@ -280,9 +280,9 @@ defmodule Canary.Incidents do
   end
 
   defp signal_active?("health_transition", target_id, _now) do
-    case Repo.get(TargetState, target_id) do
-      %TargetState{state: "up"} -> false
-      %TargetState{} -> true
+    case Repo.get(TargetState, target_id) || Repo.get(MonitorState, target_id) do
+      %{state: "up"} -> false
+      %{} -> true
       nil -> false
     end
   end

@@ -166,9 +166,9 @@ canonical agent replay guide in `info.x-agent-guide`.
 
 All other endpoints require a scoped API key:
 
-- `ingest-only` for `POST /api/v1/errors`
+- `ingest-only` for `POST /api/v1/errors` and `POST /api/v1/check-ins`
 - `read-only` for query/report/timeline-style reads
-- `admin` for onboarding, key management, target/webhook management, metrics, and other operator mutations
+- `admin` for onboarding, key management, target/monitor/webhook management, metrics, and other operator mutations
 
 Manual rotation steps live in [docs/api-key-rotation.md](docs/api-key-rotation.md).
 
@@ -215,8 +215,9 @@ curl "https://canary-obs.fly.dev/api/v1/health-status" \
 Response includes natural-language summary:
 ```json
 {
-  "summary": "3 targets monitored. 2 up, 1 degraded (cadence-api: 2 consecutive failures).",
-  "targets": [...]
+  "summary": "4 health surfaces monitored. 3 up, 1 degraded (desktop-active-timer).",
+  "targets": [...],
+  "monitors": [...]
 }
 ```
 
@@ -233,8 +234,9 @@ and correlated incidents in one bounded payload:
 ```json
 {
   "status": "degraded",
-  "summary": "2 targets monitored. 1 degraded (volume). 14 errors across 1 service in the last hour.",
+  "summary": "3 health surfaces monitored. 1 degraded (volume). 14 errors across 1 service in the last hour.",
   "targets": [...],
+  "monitors": [...],
   "error_groups": [...],
   "incidents": [
     {
@@ -272,7 +274,8 @@ window as the rest of the report:
 ```json
 {
   "status": "degraded",
-  "summary": "2 targets monitored. 1 degraded (volume). 14 errors across 1 service in the last hour.",
+  "summary": "3 health surfaces monitored. 1 degraded (volume). 14 errors across 1 service in the last hour.",
+  "monitors": [...],
   "search_results": [
     {
       "id": "ERR-a1b2c3",
@@ -316,10 +319,35 @@ set against a live Canary instance.
 ### Non-HTTP Runtime Health
 
 Use [docs/non-http-health-semantics.md](/Users/phaedrus/Development/canary/docs/non-http-health-semantics.md)
-for the selected health model for desktop apps, cron jobs, and workers. The
-short version: keep HTTP polling for `Target`s, and model non-HTTP runtimes as
-future check-in monitors instead of inventing fake URLs or overloading error
-ingest.
+for the decision record behind Canary's non-HTTP health model. Canary now keeps
+HTTP polling for `Target`s and models desktop apps, cron jobs, and workers as
+check-in monitors managed separately from URL-backed targets.
+
+```bash
+# Create a schedule-based monitor
+curl -X POST https://canary-obs.fly.dev/api/v1/monitors \
+  -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "desktop-active-timer",
+    "service": "time-tracker",
+    "mode": "schedule",
+    "expected_every_ms": 300000,
+    "grace_ms": 60000
+  }'
+
+# Report a healthy check-in
+curl -X POST https://canary-obs.fly.dev/api/v1/check-ins \
+  -H "Authorization: Bearer $CANARY_INGEST_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "monitor_id": "MON-...",
+    "status": "alive"
+  }'
+```
+
+Healthy check-ins advance the monitor state without creating error groups.
+Crash or exception telemetry still belongs on `POST /api/v1/errors`.
 
 ### Target Management
 
@@ -335,6 +363,18 @@ curl https://canary-obs.fly.dev/api/v1/targets -H "Authorization: Bearer $CANARY
 curl -X POST .../targets/:id/pause
 curl -X POST .../targets/:id/resume
 curl -X DELETE .../targets/:id
+```
+
+### Monitor Management
+
+```bash
+# List / create / delete monitors
+curl https://canary-obs.fly.dev/api/v1/monitors -H "Authorization: Bearer $CANARY_ADMIN_KEY"
+curl -X POST https://canary-obs.fly.dev/api/v1/monitors \
+  -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "desktop-active-timer", "mode": "ttl", "expected_every_ms": 60000, "grace_ms": 15000}'
+curl -X DELETE .../monitors/:id
 ```
 
 ### Webhook Management
@@ -362,9 +402,9 @@ curl -X POST https://canary-obs.fly.dev/api/v1/keys \
 
 | Event | Fires When |
 |-------|-----------|
-| `health_check.degraded` | Target transitions to degraded |
-| `health_check.down` | Target transitions to down |
-| `health_check.recovered` | Target recovers to up |
+| `health_check.degraded` | Target or monitor transitions to degraded |
+| `health_check.down` | Target or monitor transitions to down |
+| `health_check.recovered` | Target or monitor recovers to up |
 | `health_check.tls_expiring` | TLS cert expires in <14 days |
 | `error.new_class` | First occurrence of an error group |
 | `error.regression` | Error group recurs after 24h silence |

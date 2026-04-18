@@ -90,6 +90,7 @@ defmodule CanaryWeb.Router do
     scope "/" do
       pipe_through [:scope_ingest, :ingest_rate_limit]
       post "/errors", ErrorController, :create
+      post "/check-ins", CheckInController, :create
     end
 
     # Query API
@@ -126,6 +127,11 @@ defmodule CanaryWeb.Router do
     delete "/targets/:id", TargetController, :delete
     post "/targets/:id/pause", TargetController, :pause
     post "/targets/:id/resume", TargetController, :resume
+
+    # Admin: monitors
+    get "/monitors", MonitorController, :index
+    post "/monitors", MonitorController, :create
+    delete "/monitors/:id", MonitorController, :delete
 
     # Admin: webhooks
     get "/webhooks", WebhookController, :index

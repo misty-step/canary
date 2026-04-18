@@ -4,6 +4,7 @@ defmodule CanaryWeb.OpenAPIControllerTest do
   @rate_limited_operations [
     {"/metrics", "get"},
     {"/api/v1/errors", "post"},
+    {"/api/v1/check-ins", "post"},
     {"/api/v1/query", "get"},
     {"/api/v1/errors/{id}", "get"},
     {"/api/v1/report", "get"},

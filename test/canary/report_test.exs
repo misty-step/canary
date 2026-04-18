@@ -15,6 +15,7 @@ defmodule Canary.ReportTest do
   describe "generate/1" do
     test "includes health and error signals for the same service" do
       create_target_with_state("volume", "degraded")
+      create_monitor_with_state("desktop-active-timer", "up")
       create_target_with_state("api", "up")
       create_error_group("volume", "ConnectionError", 12)
       {:ok, _incident} = Incidents.correlate(:health_transition, "TGT-volume", "volume")
@@ -32,6 +33,10 @@ defmodule Canary.ReportTest do
 
       assert Enum.any?(result.targets, fn target ->
                target.name == "volume" and target.state == "degraded"
+             end)
+
+      assert Enum.any?(result.monitors, fn monitor ->
+               monitor.name == "desktop-active-timer" and monitor.state == "up"
              end)
 
       assert Enum.any?(result.error_groups, fn group ->
@@ -68,7 +73,7 @@ defmodule Canary.ReportTest do
       assert Enum.map(result.error_groups, & &1.service) == ["recent"]
       assert result.incidents == []
 
-      assert Enum.map(result.recent_transitions, & &1.target_name) == ["recent"]
+      assert Enum.map(result.recent_transitions, & &1.name) == ["recent"]
       assert hd(result.recent_transitions).transitioned_at == two_hours_ago
     end
 
@@ -99,6 +104,7 @@ defmodule Canary.ReportTest do
 
       assert result.status == "empty"
       assert result.targets == []
+      assert result.monitors == []
       assert result.error_groups == []
       assert result.recent_transitions == []
       assert result.summary == "No services configured."
@@ -122,6 +128,7 @@ defmodule Canary.ReportTest do
 
     test "applies a default limit to error groups but not targets" do
       for name <- ~w(alpha bravo), do: create_target_with_state(name, "up")
+      create_monitor_with_state("desktop-active-timer", "up")
 
       for index <- 1..30 do
         create_error_group("svc-#{index}", "Error#{index}", 100 - index)
@@ -130,6 +137,7 @@ defmodule Canary.ReportTest do
       assert {:ok, result} = Report.generate(window: "1h")
 
       assert length(result.targets) == 2
+      assert length(result.monitors) == 1
       assert length(result.error_groups) == 25
       assert result.truncated == true
       assert is_binary(result.cursor)

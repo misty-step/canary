@@ -6,7 +6,7 @@ defmodule Canary.Timeline do
   import Ecto.Query
 
   alias Canary.{ID, Repo}
-  alias Canary.Schemas.{Error, Incident, ServiceEvent, Target, TargetState}
+  alias Canary.Schemas.{Error, Incident, Monitor, MonitorState, ServiceEvent, Target, TargetState}
 
   @default_limit 50
   @max_limit 200
@@ -89,6 +89,56 @@ defmodule Canary.Timeline do
       entity_ref: target.id,
       severity: health_severity(new_state),
       summary: "#{Target.service_name(target)}: #{target.name} #{to_string(new_state)}",
+      payload: payload,
+      created_at: now
+    })
+
+    payload
+  end
+
+  @spec record_monitor_transition!(
+          String.t(),
+          Monitor.t(),
+          String.t() | atom(),
+          String.t() | atom(),
+          MonitorState.t() | nil,
+          integer(),
+          String.t()
+        ) :: map()
+  def record_monitor_transition!(
+        event,
+        %Monitor{} = monitor,
+        old_state,
+        new_state,
+        state,
+        seq,
+        now
+      ) do
+    payload = %{
+      "event" => event,
+      "monitor" => %{
+        "name" => monitor.name,
+        "service" => Monitor.service_name(monitor),
+        "mode" => monitor.mode,
+        "expected_every_ms" => monitor.expected_every_ms,
+        "grace_ms" => monitor.grace_ms
+      },
+      "state" => to_string(new_state),
+      "previous_state" => to_string(old_state),
+      "last_check_in_at" => state && state.last_check_in_at,
+      "last_check_in_status" => state && state.last_check_in_status,
+      "deadline_at" => state && state.deadline_at,
+      "sequence" => seq,
+      "timestamp" => now
+    }
+
+    insert_event!(%{
+      service: Monitor.service_name(monitor),
+      event: event,
+      entity_type: "monitor",
+      entity_ref: monitor.id,
+      severity: health_severity(new_state),
+      summary: "#{Monitor.service_name(monitor)}: #{monitor.name} #{to_string(new_state)}",
       payload: payload,
       created_at: now
     })
@@ -242,6 +292,9 @@ defmodule Canary.Timeline do
   defp health_severity(:down), do: "error"
   defp health_severity(:degraded), do: "warning"
   defp health_severity(:up), do: "info"
+  defp health_severity("down"), do: "error"
+  defp health_severity("degraded"), do: "warning"
+  defp health_severity("up"), do: "info"
   defp health_severity(_), do: "info"
 
   defp incident_payload(incident) do

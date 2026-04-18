@@ -19,6 +19,7 @@ defmodule CanaryWeb.StatusControllerTest do
 
       assert body["overall"] == "healthy"
       assert length(body["targets"]) == 3
+      assert body["monitors"] == []
       assert body["error_summary"] == []
       assert is_binary(body["summary"])
     end
@@ -42,6 +43,7 @@ defmodule CanaryWeb.StatusControllerTest do
 
       assert body["overall"] == "empty"
       assert body["targets"] == []
+      assert body["monitors"] == []
       assert body["error_summary"] == []
       assert body["summary"] =~ "No services configured"
     end

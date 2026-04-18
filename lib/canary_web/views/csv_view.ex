@@ -28,6 +28,7 @@ defmodule CanaryWeb.CsvView do
     rows =
       [@headers]
       |> Kernel.++(target_rows(data))
+      |> Kernel.++(monitor_rows(data))
       |> Kernel.++(error_group_rows(data))
 
     Enum.map_join(rows, "\n", &encode_row/1) <> "\n"
@@ -77,6 +78,31 @@ defmodule CanaryWeb.CsvView do
         group.status,
         nil,
         nil,
+        data.cursor,
+        data.truncated
+      ]
+    end)
+  end
+
+  defp monitor_rows(data) do
+    Enum.with_index(Map.get(data, :monitors, []), 1)
+    |> Enum.map(fn {monitor, position} ->
+      [
+        "monitors",
+        position,
+        monitor.id,
+        monitor.name,
+        monitor.service,
+        nil,
+        nil,
+        monitor.state,
+        nil,
+        nil,
+        nil,
+        nil,
+        monitor.last_check_in_status,
+        nil,
+        monitor.last_check_in_at,
         data.cursor,
         data.truncated
       ]

@@ -22,45 +22,34 @@ defmodule Canary.Summary do
   end
 
   @spec health_status(map()) :: String.t()
-  def health_status(%{targets: targets}) do
-    total = length(targets)
-    by_state = Enum.group_by(targets, & &1.state)
-    up = length(by_state["up"] || [])
+  def health_status(%{targets: targets} = snapshot) do
+    monitors =
+      if Map.has_key?(snapshot, :monitors), do: Map.get(snapshot, :monitors, []), else: nil
 
-    [
-      "#{total} targets monitored. #{up} up",
-      describe_group(by_state["degraded"], "degraded"),
-      describe_group(by_state["down"], "down")
-    ]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.join(", ")
-    |> Kernel.<>(".")
+    case monitors do
+      nil -> summarize_health(targets, "targets")
+      monitors -> summarize_health(targets ++ monitors, "health surfaces")
+    end
   end
 
   @spec combined_status(String.t(), list(), list()) :: String.t()
   def combined_status(overall, targets, error_summary) do
-    combined_status(overall, targets, error_summary, "1h")
+    combined_status_legacy(overall, targets, error_summary, "1h")
   end
 
   @spec combined_status(String.t(), list(), list(), String.t()) :: String.t()
-  def combined_status("empty", _targets, _errors, _window), do: "No services configured."
-
-  def combined_status("healthy", targets, _errors, window) do
-    "All #{length(targets)} targets healthy. No errors in the last #{window_label(window)}."
+  def combined_status(overall, targets, error_summary, window) when is_binary(window) do
+    combined_status_legacy(overall, targets, error_summary, window)
   end
 
-  def combined_status(_overall, targets, error_summary, window) do
-    by_state = Enum.group_by(targets, & &1.state)
-    total_errors = Enum.reduce(error_summary, 0, &(&1.total_count + &2))
+  @spec combined_status(String.t(), list(), list(), list()) :: String.t()
+  def combined_status(overall, targets, monitors, error_summary) do
+    combined_status_surfaces(overall, targets, monitors, error_summary, "1h")
+  end
 
-    [
-      "#{length(targets)} targets monitored.",
-      describe_group(by_state["down"], "down", " "),
-      describe_group(by_state["degraded"], "degraded", " "),
-      errors_part(total_errors, error_summary, window)
-    ]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.join()
+  @spec combined_status(String.t(), list(), list(), list(), String.t()) :: String.t()
+  def combined_status(overall, targets, monitors, error_summary, window) do
+    combined_status_surfaces(overall, targets, monitors, error_summary, window)
   end
 
   @spec error_class_query(map()) :: String.t()
@@ -105,6 +94,56 @@ defmodule Canary.Summary do
     svc_count = length(error_summary)
     svc_word = if svc_count == 1, do: "service", else: "services"
     " #{total} errors across #{svc_count} #{svc_word} in the last #{window_label(window)}."
+  end
+
+  defp summarize_health(surfaces, label) do
+    total = length(surfaces)
+    by_state = Enum.group_by(surfaces, & &1.state)
+    up = length(by_state["up"] || [])
+
+    [
+      "#{total} #{label} monitored. #{up} up",
+      describe_group(by_state["degraded"], "degraded"),
+      describe_group(by_state["down"], "down")
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(", ")
+    |> Kernel.<>(".")
+  end
+
+  defp combined_status_legacy("empty", _targets, _errors, _window), do: "No services configured."
+
+  defp combined_status_legacy("healthy", targets, _errors, window) do
+    "All #{length(targets)} targets healthy. No errors in the last #{window_label(window)}."
+  end
+
+  defp combined_status_legacy(overall, targets, error_summary, window) do
+    combined_status_body(overall, targets, error_summary, window, "targets")
+  end
+
+  defp combined_status_surfaces("empty", _targets, _monitors, _errors, _window),
+    do: "No services configured."
+
+  defp combined_status_surfaces("healthy", targets, monitors, _errors, window) do
+    "All #{length(targets ++ monitors)} health surfaces healthy. No errors in the last #{window_label(window)}."
+  end
+
+  defp combined_status_surfaces(overall, targets, monitors, error_summary, window) do
+    combined_status_body(overall, targets ++ monitors, error_summary, window, "health surfaces")
+  end
+
+  defp combined_status_body(_overall, surfaces, error_summary, window, label) do
+    by_state = Enum.group_by(surfaces, & &1.state)
+    total_errors = Enum.reduce(error_summary, 0, &(&1.total_count + &2))
+
+    [
+      "#{length(surfaces)} #{label} monitored.",
+      describe_group(by_state["down"], "down", " "),
+      describe_group(by_state["degraded"], "degraded", " "),
+      errors_part(total_errors, error_summary, window)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join()
   end
 
   defp window_label("1h"), do: "hour"
