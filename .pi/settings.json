@@ -1,0 +1,18 @@
+{
+  "_doc": "Pi harness settings for Canary. Emitted by /tailor for cross-harness parity. Pi is not currently in active use here; file exists so the harness is swappable without re-tailoring.",
+  "skills": [
+    ".agents/skills/**/SKILL.md"
+  ],
+  "agents": [
+    ".claude/agents/*.md"
+  ],
+  "gate": {
+    "command": "./bin/validate",
+    "fast": "./bin/validate --fast",
+    "strict": "./bin/validate --strict"
+  },
+  "conventions": {
+    "merge-strategy": "linear-no-squash",
+    "commit-scopes": ["feat", "fix", "refactor", "chore", "docs", "build", "test"]
+  }
+}

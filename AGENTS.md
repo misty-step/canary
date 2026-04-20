@@ -12,7 +12,7 @@ Self-hosted observability substrate for AI agents (not humans). Phoenix/Elixir +
 | CI module | Single source of truth for the gate (Dagger TS) | `dagger/` |
 | Bin scripts | Operator API — validate, dagger, bootstrap, DR | `bin/` |
 | Backlog | File-driven work with `_done/` archive + priority map | `backlog.d/` |
-| Harness | Claude Code + Codex; filesystem-primary | `.claude/`, `.codex/` |
+| Harness | Shared skill root + bridges; Claude Code + Codex | `.agents/skills/` (canonical), `.claude/skills/` + `.codex/skills/` (symlink bridges), `.claude/agents/` + `.codex/agents/` (harness-native) |
 
 External responders (e.g. bitterblossom) consume Canary's signed webhooks and query back. They live **outside this repo**.
 
@@ -75,7 +75,13 @@ All other tracked items are shipped and archived under `backlog.d/_done/`. Prior
 
 ## Harness index
 
-**Workflow skills (rewritten for canary).** All under `.claude/skills/<name>/`.
+**Skill layout.** Canonical copies live at `.agents/skills/<name>/` with a
+`.spellbook` marker (`installed-by: tailor`). Per-harness skill directories
+(`.claude/skills/<name>`, `.codex/skills/<name>`) are **relative symlinks**
+back to that shared root. Edit the `.agents/skills/` copy; both harnesses
+pick it up.
+
+**Workflow skills (rewritten for canary).** All under `.agents/skills/<name>/`.
 
 | Skill | What it does here |
 |---|---|
@@ -101,7 +107,8 @@ All other tracked items are shipped and archived under `backlog.d/_done/`. Prior
 
 **Pre-existing project-local skills (untouched by this tailor pass):** `canary`, `database`, `observability`, `security-scan`, `cli-reference`, `external-integration-patterns`, `github-cli-hygiene`, `git-mastery`, `design`, `design-review`, `high-end-visual-design`, `redesign-existing-projects`.
 
-**Agents (personas for subagent dispatch).** All under `.claude/agents/`.
+**Agents (personas for subagent dispatch).** Under `.claude/agents/` and
+`.codex/agents/` (harness-native; no documented shared-agent convention yet).
 
 | Agent | Role |
 |---|---|

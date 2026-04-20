@@ -50,10 +50,12 @@ thinktank.log
 # OS
 .DS_Store
 
-# Harness output (Codex/Pi mirrors)
-/.agents/
-/.codex/
-/.spellbook/
+# Harness primitives are version-controlled. Skills, agents, per-harness
+# settings, and the repo brief are code — they ship with the repo so every
+# clone and every harness (Claude Code, Codex, Pi) gets the same contract.
+# Only per-run transient state under .spellbook/ is ignored.
+/.spellbook/*/
+!/.spellbook/repo-brief.md
 
 # Generated artifacts
 design-catalog.html
