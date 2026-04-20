@@ -50,6 +50,8 @@ allow = [
   "mix setup",
   "mix phx.server",
   "mix compile",
+  "mix cmd",
+  "python3 dagger/scripts/",
 
   # TypeScript SDK
   "npm test",

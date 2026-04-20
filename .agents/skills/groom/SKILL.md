@@ -153,22 +153,10 @@ and production infrastructure' north star?"
 | **Simplifier** | Radical simplicity | From-scratch perspective on the target. For Canary, the simplifier anchor is `PRINCIPLES.md` #7 "Code is a liability" and the v1 constraint of "one Docker image, one SQLite file, one config." "What layers can be deleted without violating an invariant?" | Plan |
 | **Scout** | External perspectives | Invokes `/research thinktank` on the target. For health/probing: "what have Uptime Robot / Pingdom / Better Stack learned about probe scheduling and consensus?" For alerter: "how do Sentry / PagerDuty handle flapping and cooldown?" For ingest: "what are the patterns agent-first observability should borrow from OpenTelemetry?" | general-purpose |
 
-### Investigator output format (shared)
-
-Every investigator returns this exact shape:
-
-```markdown
-## [Name] Report
-### Top 3 findings
-1. <finding> — Evidence: <file:line / commit SHA / metric>. Impact: high | med | low.
-2. ...
-3. ...
-### Strategic theme
-<one sentence: the overarching theme these findings point to>
-### Single recommendation
-<one concrete action. Not a list. Not "consider." A specific thing to do
-in Canary's codebase, cited to files.>
-```
+Each investigator returns: **top-3 findings with file-cited evidence**, a
+**one-sentence strategic theme**, and a **single concrete recommendation**
+(not a list, not "consider"). File paths under `lib/canary/**`, commit
+SHAs, or metrics — not prose.
 
 ## Synthesis protocol
 
@@ -199,75 +187,27 @@ requires product judgment and the responder-boundary test.
    Vision-alignment gets 2× weight — Canary's ranking function is
    "easier for an AI agent to {understand, diagnose, act}." If a theme
    doesn't score there, drop it to the bottom or reject.
-6. **Present.** One theme at a time. Evidence from investigators,
-   recommended action, rough effort (S/M/L/XL). Ask the user: explore
-   deeper, write backlog item, or skip?
+6. **Present.** One theme at a time, with evidence-cited-to-investigator,
+   recommendation, rough effort (S/M/L/XL), and which of
+   `{understand, diagnose, act}` it improves. Ask: explore deeper / write
+   item / skip.
 
-Output format:
+## Workflows
 
-```markdown
-## Grooming synthesis
+**Explore.** Context → parallel fanout → boundary-gated synthesis → one
+theme at a time → write approved items. Each written item updates
+`backlog.d/README.md` (priority row + dep-map edge + lane assignment)
+in the same `chore(backlog):` commit. Every Oracle prefers executable
+verification: a `curl` against `canary-obs.fly.dev`, a `mix test` against
+a specific test file, a `dagger call fast|strict` invocation, a webhook
+delivery that produces an `X-Delivery-Id`.
 
-### Investigator convergence
-<findings from 2+ investigators — highest signal>
-
-### Theme 1: <Name>
-**Evidence:** Archaeologist found X, Strategist found Y, Velocity confirms Z.
-**Responder boundary:** <"clean — canary-side only" | "split — Y half goes
- to bitterblossom">
-**Recommendation:** <one concrete action, cited to files>
-**Effort:** S | M | L | XL
-**Agent impact:** <which of {understand, diagnose, act} does this improve>
-
-### Theme 2: ...
-
-### Dependency order
-Theme A enables Theme B. Recommend executing A first.
-```
-
-## Workflow: explore
-
-Phase-gated. Each phase must complete before the next begins.
-
-### 1. CONTEXT — load baseline (see Context loading)
-### 2. INVESTIGATE — launch all three explore investigators in parallel
-Gate: all three returned structured reports.
-### 3. SYNTHESIZE — cross-reference, theme, rank, boundary-gate
-Gate: themes extracted with evidence, recommendations, and clean boundary.
-### 4. DISCUSS — present one theme at a time. Recommend, don't list.
-Gate: user decides per theme (explore deeper / write item / skip).
-### 5. WRITE — create `backlog.d/NNN-<slug>.md` for approved themes
-Each item: Goal + Non-Goals + Oracle + Notes. Every Oracle prefers
-executable verification: a `curl` against `canary-obs.fly.dev`, a
-`mix test` against a specific test file, a `dagger call fast/strict`
-invocation, a webhook delivery that produces a `X-Delivery-Id`.
-
-Update `backlog.d/README.md` in the same commit:
-- Add the row to the priority table.
-- Add the dep-map edge if any.
-- Add to the appropriate Lane (1 agent readiness / 2 contract + obs /
-  3 structural / 4 hardening / 5 future).
-
-Gate: every item has Goal + Non-Goals + Oracle; `README.md` table
-updated; conventional-commit scoped `chore(backlog):`.
-
-### 6. PRIORITIZE — reorder `backlog.d/README.md` table by value/effort
-
-## Workflow: rethink
-
-### 1. CONTEXT — load baseline + user specifies the target system
-(e.g. "rethink `lib/canary/health/*`", "rethink the alerter")
-### 2. INVESTIGATE — launch all three rethink investigators in parallel
-Gate: all three returned structured reports.
-### 3. SYNTHESIZE — distill into 2–3 architectural options with honest tradeoffs
-Always include "do nothing" as a viable option. Each option is checked
-against the invariants list in `AGENTS.md`: pool_size:1, pure StateMachine,
-RFC 9457 Problem Details, scoped API keys, responder boundary, no
-hardcoded service names, Target vs Monitor distinction.
-### 4. RECOMMEND — pick one option. Argue for it. Be opinionated.
-Gate: one clear recommendation with reasoning anchored to the invariants.
-### 5. DISCUSS — user approves, modifies, or rejects
-### 6. WRITE — one `backlog.d/NNN-*.md` item for the recommended change
+**Rethink.** User specifies target system (e.g. "rethink
+`lib/canary/health/*`"). Parallel Mapper + Simplifier + Scout → 2–3
+options including "do nothing," each checked against the invariants list
+in `AGENTS.md` (pool_size:1, pure StateMachine, RFC 9457, scoped keys,
+responder boundary, no hardcoded service names, Target vs Monitor). Pick
+one; argue for it; write one backlog item.
 
 ## Workflow: tidy
 

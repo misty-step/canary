@@ -42,21 +42,26 @@ mechanism must target both — filesystem + SKILL.md is the primary layer;
 harness-native runtime features (Claude `enabledPlugins`, Codex `/plugins`)
 are optimizations on top.
 
-- **`.claude/skills/`** — installed skills. Mix of tailored workflow skills
-  (ci, deploy, deliver, settle, implement, diagnose, groom, flywheel, qa,
-  harness, refactor, code-review, monitor, shape, ceo-review, office-hours,
-  reflect, research, model-research, agent-readiness, deps), spellbook
-  universals (unmodified), and pre-existing project-specific skills
-  (`canary`, `database`, `observability`, `security-scan`, `cli-reference`,
-  `external-integration-patterns`, `github-cli-hygiene`, `git-mastery`,
-  `design`, `design-review`, `high-end-visual-design`,
-  `redesign-existing-projects`).
+- **`.agents/skills/<name>/`** — **canonical skill root.** Every workflow
+  skill (ci, deploy, deliver, settle, implement, diagnose, groom, flywheel,
+  qa, harness, refactor, code-review, monitor, shape, ceo-review,
+  office-hours, reflect, research, model-research, agent-readiness, deps,
+  yeet, demo), every universal (unmodified spellbook copy), and every
+  pre-existing project-specific skill (`canary`, `database`, `observability`,
+  `security-scan`, `cli-reference`, `external-integration-patterns`,
+  `github-cli-hygiene`, `git-mastery`, `design`, `design-review`,
+  `high-end-visual-design`, `redesign-existing-projects`) lives here. Edit
+  here; both harnesses pick it up.
+- **`.claude/skills/<name>` and `.codex/skills/<name>`** — relative
+  symlink bridges back to `.agents/skills/<name>`. Harness-specific scan
+  surface. Don't edit; don't scaffold content here.
 - **`.claude/agents/`** — installed personas. Core bench: `beck`, `builder`,
   `carmack`, `critic`, `grug`, `ousterhout`, `planner`. Specialist bench:
   `aesthetician`, `api-design-specialist`, `data-integrity-guardian`,
   `design-systems-architect`, `error-handling-specialist`, `fowler`,
   `infrastructure-guardian`, `observability-advocate`, `security-sentinel`,
-  `test-strategy-architect`.
+  `test-strategy-architect`. Agents stay harness-native (no shared-agent
+  root yet) — a matching `.codex/agents/<name>.toml` per specialist.
 - **`.claude/settings.local.json`** — permissions allowlist. Currently
   minimal (five specific `Bash(...)` entries). Add specifically, not broadly.
   `Bash(*)` is a Red Line.
@@ -84,8 +89,9 @@ the next `/tailor` run silently reverts it.
 
 - *Create a workflow skill:* author under
   `spellbook/skills/<name>/SKILL.md`, then `/tailor` pulls a canary-tuned
-  body into `.claude/skills/<name>/`. Never scaffold a tailored skill
-  directly in `.claude/skills/`.
+  body into `.agents/skills/<name>/` and refreshes the bridge symlinks.
+  Never scaffold a tailored skill directly in any bridge dir
+  (`.claude/skills/`, `.codex/skills/`) — those are symlinks.
 - *Update a workflow skill:* edit in spellbook, re-run `/tailor`. The
   tailored body should name `./bin/validate`, coverage thresholds
   (**81%** core, **90%** `canary_sdk`), responder boundary, and other
@@ -99,9 +105,10 @@ the next `/tailor` run silently reverts it.
   `external-integration-patterns`, `github-cli-hygiene`, `git-mastery`,
   `design`, `design-review`, `high-end-visual-design`,
   `redesign-existing-projects`) are owned in-repo — they do not round-trip
-  through spellbook. Edit them in `.claude/skills/<name>/` directly.
+  through spellbook. Edit them in `.agents/skills/<name>/` directly; the
+  bridge symlinks propagate to both harnesses.
 
-If `.claude/skills/<x>/SKILL.md` is byte-identical to
+If `.agents/skills/<x>/SKILL.md` is byte-identical to
 `spellbook/skills/<x>/SKILL.md` for a tailored workflow, the rewriter didn't
 run — re-invoke `/tailor` for that skill.
 
@@ -138,8 +145,9 @@ the common denominator and the primary layer.
   `./bin/validate --strict` locally to confirm `dagger call
   codex-agent-roles` passes before commit (pre-push will block otherwise).
 - New workflow skill: spellbook author → `/tailor` → lands in
-  `.claude/skills/<name>/`. Codex discovers it via the same filesystem —
-  no per-harness wiring needed at the primary layer.
+  `.agents/skills/<name>/` with `.claude/skills/<name>` and
+  `.codex/skills/<name>` symlinks refreshed. Both harnesses discover it via
+  the same filesystem — no per-harness wiring at the primary layer.
 - If a proposed mechanism only works inside one harness's runtime (Claude
   plugin manifest, Codex `/plugins` command), find the filesystem-level
   equivalent first. Runtime-only designs are a bug.
@@ -159,9 +167,9 @@ When auditing installed skills, flag any of these as drift:
   Canary (responder boundary violation).
 - Skill sources scripts from `$REPO_ROOT/…` or escapes its tree via
   `../..` (breaks symlink distribution — see `skills/<name>/lib/…` rule).
-- `.claude/skills/` contains two SKILL.md files with the same frontmatter
+- `.agents/skills/` contains two SKILL.md files with the same frontmatter
   `name:`. Rename upstream in spellbook and re-`/tailor`; never rename in
-  `.claude/`.
+  the bridge dirs.
 - Specialist persona present in `.claude/agents/` with no matching
   `.codex/agents/*.toml` (or vice versa).
 - `.claude/settings.local.json` contains `Bash(*)` or other broad wildcards.
@@ -203,8 +211,9 @@ evaluates, and lints.
 - Stale AGENTS.md instructions cause more harm than missing ones.
 - After any model upgrade, re-eval skills — some become dead weight.
 - Regexes over agent prose are proof the boundary is wrong.
-- Editing `.claude/skills/<x>/SKILL.md` for a tailored workflow instead of
-  spellbook → silently reverted on next `/tailor`.
+- Editing `.agents/skills/<x>/SKILL.md` (or worse, the bridge symlinks) for
+  a tailored workflow instead of spellbook → silently reverted on next
+  `/tailor`.
 - Adding a `.claude/agents/<name>.md` specialist without the matching
   `.codex/agents/<name>.toml` → `./bin/validate --strict` blocks pre-push.
 - Rewriting `CLAUDE.md` instead of appending → load-bearing footguns lost,
