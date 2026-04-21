@@ -28,6 +28,7 @@
 | 022 | Contract hygiene + shallow-module collapse | high | done | M |
 | 023 | Incident as atomic agent unit (detail API) | high | ready | M |
 | 024 | Signal-agnostic annotations | medium | blocked | M |
+| 025 | Audit test helpers for Ecto PK cast-drop | low | ready | S |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
 
