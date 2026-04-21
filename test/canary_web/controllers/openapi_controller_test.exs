@@ -14,6 +14,7 @@ defmodule CanaryWeb.OpenAPIControllerTest do
     {"/api/v1/health-status", "get"},
     {"/api/v1/targets/{id}/checks", "get"},
     {"/api/v1/incidents", "get"},
+    {"/api/v1/incidents/{id}", "get"},
     {"/api/v1/incidents/{incident_id}/annotations", "get"},
     {"/api/v1/incidents/{incident_id}/annotations", "post"},
     {"/api/v1/groups/{group_hash}/annotations", "get"},
@@ -45,6 +46,9 @@ defmodule CanaryWeb.OpenAPIControllerTest do
     assert guide["crash_recovery"] =~ "persisted cursor"
     assert guide["cursor_precedence"] =~ "`after`"
     assert guide["cursor_precedence"] =~ "`cursor`"
+    assert is_binary(guide["incident_entrypoint"])
+    assert guide["incident_entrypoint"] =~ "`GET /api/v1/incidents/{id}`"
+    assert guide["incident_entrypoint"] =~ "incident.opened"
   end
 
   test "avoids unconstrained additionalProperties escape hatches", %{conn: conn} do

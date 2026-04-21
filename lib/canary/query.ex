@@ -18,6 +18,7 @@ defmodule Canary.Query do
   defdelegate recent_transitions(window), to: Canary.Query.Health
 
   defdelegate active_incidents(opts \\ []), to: Canary.Query.Incidents
+  defdelegate incident_detail(incident_id, opts \\ []), to: Canary.Query.Incidents, as: :detail
 
   @spec search(String.t(), keyword()) :: {:ok, list(map())} | {:error, atom()}
   def search(query, opts \\ []) do

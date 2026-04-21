@@ -82,6 +82,56 @@ defmodule Canary.Summary do
     base <> top_part <> truncated_part
   end
 
+  @spec incidents_list([map()]) :: String.t()
+  def incidents_list([]), do: "No active incidents."
+
+  def incidents_list(incidents) when is_list(incidents) do
+    count = length(incidents)
+    services = incidents |> Enum.map(& &1.service) |> Enum.uniq() |> length()
+    high = Enum.count(incidents, &(&1.severity == "high"))
+
+    severity_part =
+      if high > 0,
+        do: " #{high} high-severity #{pluralize(high, "incident", "incidents")}.",
+        else: ""
+
+    newest = Enum.max_by(incidents, & &1.opened_at, fn -> nil end)
+
+    newest_part =
+      case newest do
+        %{service: service, opened_at: opened_at} ->
+          " Newest: #{service} at #{opened_at}."
+
+        _ ->
+          ""
+      end
+
+    "#{count} open #{pluralize(count, "incident", "incidents")} across #{services} #{pluralize(services, "service", "services")}.#{severity_part}#{newest_part}"
+  end
+
+  @spec incident_detail(map()) :: String.t()
+  def incident_detail(%{
+        incident: incident,
+        signal_count: signal_count,
+        annotation_count: annotation_count
+      }) do
+    state_label = if incident.state == "resolved", do: "Resolved", else: "Investigating"
+
+    signal_part =
+      case signal_count do
+        0 -> "No active signals."
+        n -> "#{n} correlated #{pluralize(n, "signal", "signals")}."
+      end
+
+    annotation_part =
+      case annotation_count do
+        0 -> " No prior triage annotations."
+        n -> " #{n} prior triage #{pluralize(n, "annotation", "annotations")}."
+      end
+
+    "#{state_label}. #{incident.severity}-severity incident opened at #{incident.opened_at} on service #{incident.service}. #{signal_part}#{annotation_part}"
+  end
+
   @spec error_detail(map()) :: String.t()
   def error_detail(%{
         error_class: error_class,
@@ -169,8 +219,10 @@ defmodule Canary.Summary do
     |> Enum.join()
   end
 
-  defp pluralize(1, singular, _plural), do: singular
-  defp pluralize(_n, _singular, plural), do: plural
+  @doc "Returns `singular` when `n` is 1, otherwise `plural`. Shared helper for deterministic templates."
+  @spec pluralize(integer(), String.t(), String.t()) :: String.t()
+  def pluralize(1, singular, _plural), do: singular
+  def pluralize(_n, _singular, plural), do: plural
 
   defp window_label("1h"), do: "hour"
   defp window_label("6h"), do: "6 hours"

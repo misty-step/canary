@@ -156,6 +156,18 @@ defmodule Canary.Query.Errors do
     end
   end
 
+  defp incident_ids_for_group(nil), do: []
+
+  defp incident_ids_for_group(group_hash) do
+    from(s in Canary.Schemas.IncidentSignal,
+      where: s.signal_type == "error_group" and s.signal_ref == ^group_hash,
+      select: s.incident_id,
+      distinct: true,
+      order_by: s.incident_id
+    )
+    |> Canary.Repos.read_repo().all()
+  end
+
   @spec error_groups(String.t(), keyword()) ::
           {:ok, [map()]} | {:error, :invalid_window}
   def error_groups(window, opts \\ []) do
@@ -224,7 +236,8 @@ defmodule Canary.Query.Errors do
       environment: error.environment,
       group_hash: error.group_hash,
       created_at: error.created_at,
-      group: group_summary(group)
+      group: group_summary(group),
+      incident_ids: incident_ids_for_group(error.group_hash)
     }
   end
 
