@@ -59,3 +59,4 @@ thinktank.log
 
 # Generated artifacts
 design-catalog.html
+.claude/scheduled_tasks.lock
