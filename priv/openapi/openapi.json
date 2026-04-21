@@ -2123,12 +2123,20 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
+          "summary",
           "window",
+          "total_errors",
           "groups"
         ],
         "properties": {
+          "summary": {
+            "type": "string"
+          },
           "window": {
             "type": "string"
+          },
+          "total_errors": {
+            "type": "integer"
           },
           "groups": {
             "type": "array",

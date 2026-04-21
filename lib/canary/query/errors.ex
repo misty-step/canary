@@ -107,7 +107,22 @@ defmodule Canary.Query.Errors do
         )
         |> Canary.Repos.read_repo().all()
 
-      {:ok, %{window: window, groups: groups}}
+      total = Enum.reduce(groups, 0, &((&1.total_count || 0) + &2))
+
+      summary =
+        Canary.Summary.error_class_aggregate(%{
+          total: total,
+          window: window,
+          groups: groups
+        })
+
+      {:ok,
+       %{
+         summary: summary,
+         window: window,
+         total_errors: total,
+         groups: groups
+       }}
     end
   end
 
