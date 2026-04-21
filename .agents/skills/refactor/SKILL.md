@@ -238,9 +238,10 @@ If `--apply` is explicitly set:
 - Commit scope matches the hot module: `refactor(query):`, `refactor(health):`,
   `refactor(webhooks):`, `refactor(alerter):`, `refactor(incidents):`,
   `refactor(ingest):`, `refactor(timeline):`, `refactor(correlation):`.
-- Linear history. No squash on `master`. If the refactor is a sequence of
-  extractions (as in PR #125: three commits, one per extracted read model),
-  preserve each as a standalone commit.
+- Squash-merge on land. If the refactor is a sequence of extractions
+  (as in PR #125: three branch commits, one per extracted read model),
+  keep the slices for PR review — they squash into one master commit at
+  merge time, but reviewers still read each extraction separately.
 - Gate: `./bin/validate --strict` before push. Hosted CI re-runs the same
   Dagger entrypoint; local and CI share the control plane by design.
 

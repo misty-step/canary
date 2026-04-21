@@ -267,8 +267,8 @@ Never skip justification. "Just try X" is a red flag.
    at `.ci/trusted/` (see `docs/ci-control-plane.md`); a green local strict
    run is the contract for a green CI run.
 6. **Commit with scoped prefix** — `fix(health):`, `fix(ingest):`,
-   `fix(webhooks):`, `fix(ci):`, `fix(query):` etc. Linear history; do
-   not squash on master.
+   `fix(webhooks):`, `fix(ci):`, `fix(query):` etc. The PR title carries
+   the same prefix — that's what becomes the squash commit on master.
 7. **If 3+ fixes failed** — STOP. Question the architecture. See
    `references/systematic-debugging.md`.
 

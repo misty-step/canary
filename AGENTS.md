@@ -98,10 +98,10 @@ pick it up.
 | `/implement` | TDD on narrow tests: `mix test test/canary/<area>/<area>_test.exs --trace --max-failures 3`. Custom PKs on struct not cast. RFC 9457, deterministic summaries, single-writer. Stops at green. |
 | `/monitor` | **Harness-side** post-deploy signal watch — not `Canary.Monitors` (product concept). Polls `/healthz`, `/readyz`, `flyctl status`, Canary's own `/api/v1/query?service=canary`, health targets, circuit-breaker state. Grace window default 5m. |
 | `/qa` | API-first (curl against `canary-obs.fly.dev` or local `mix phx.server`). Endpoint matrix with `$CANARY_*_KEY` scope enforcement. `bin/dogfood-audit --strict` for owned services. Dashboard is secondary. |
-| `/refactor` | Branch mode: simplify the diff against `origin/master`. Master mode: whole-repo hunt. Cites PR #125 query split as exemplar. `refactor(<scope>):` linear-history commits. |
-| `/settle` | Merges with **linear-history, no-squash**. `git merge --ff-only` or `gh pr merge --merge` (never `--squash`). Multi-commit branches must pass gate per-commit via `git rebase -x './bin/validate --strict'`. |
+| `/refactor` | Branch mode: simplify the diff against `origin/master`. Master mode: whole-repo hunt. Cites PR #125 query split as exemplar. Branch commits use `refactor(<scope>):`; squash-merge collapses them into one master commit. |
+| `/settle` | Lands a PR via `gh pr merge --squash` with PR title/body → single master commit. No `--merge`, no `--rebase`. Runs `./bin/validate --strict` once on branch head before merging; no per-commit gate needed. |
 | `/shape` | Produces `backlog.d/NNN-<slug>.md` context packets. Lanes 1–5. `#NNN` dependency IDs. Enforces responder boundary + OpenAPI-router-scope-pipeline contract in acceptance criteria. |
-| `/yeet` | Worktree → semantically-split conventional commits → `git push`. Classifies paths (signal/debris/drift/evidence/secret-risk). Refuses on `gentle-working-tundra/` / `polished-marching-river/` / `sunlit-moving-walnut/` leakage, `*.db*`, `erl_crash.dump`, Fly/Tigris tokens, Dagger pin drift, OpenAPI↔router desync. Hooks run: `./bin/validate --fast` (commit), `--strict` (push). Linear-no-squash. Distinct from `/settle` (branch landing). |
+| `/yeet` | Worktree → semantically-split conventional commits → `git push`. Classifies paths (signal/debris/drift/evidence/secret-risk). Refuses on `gentle-working-tundra/` / `polished-marching-river/` / `sunlit-moving-walnut/` leakage, `*.db*`, `erl_crash.dump`, Fly/Tigris tokens, Dagger pin drift, OpenAPI↔router desync. Hooks run: `./bin/validate --fast` (commit), `--strict` (push). Branch commits stay clean for PR review; master keeps one squash commit per PR via `/settle`. Distinct from `/settle` (branch landing). |
 
 **Universal skills (verbatim from spellbook):** `/research`, `/model-research`, `/office-hours`, `/ceo-review`, `/reflect`, `/groom`.
 
@@ -123,7 +123,7 @@ pick it up.
 
 ## Outer loop
 
-User-ratified composition: **`/settle → /refactor → /code-review → merge`.** Linear history on master, conventional commits with scope (`feat(health):`, `fix(ci):`, `refactor(query):`, `chore(governance):`, `docs(ops):`, `build:`). Narrow test idiom: `mix test test/canary/<area>/<area>_test.exs --trace --max-failures 3`.
+User-ratified composition: **`/settle → /refactor → /code-review → merge`.** Master keeps one squash commit per PR via `gh pr merge --squash`; PR title + body become that commit. Conventional-with-scope prefix on the PR title / squash subject (`feat(health):`, `fix(ci):`, `refactor(query):`, `chore(governance):`, `docs(ops):`, `build:`). Narrow test idiom: `mix test test/canary/<area>/<area>_test.exs --trace --max-failures 3`.
 
 ## Self-monitoring
 

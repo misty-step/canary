@@ -18,7 +18,8 @@ argument-hint: "[backlog-item|issue-id] [--resume <ulid>] [--abandon <ulid>] [--
 Inner-loop composer. One backlog item from `backlog.d/NNN-*.md` → merge-ready
 commits on a feature branch. **Delivered ≠ shipped.** The outer loop
 (`/flywheel`) consumes the receipt and decides whether to land and deploy to
-`canary-obs`. Humans merge; master keeps linear history with no squash.
+`canary-obs`. Humans merge; PRs land on master as one squash commit via
+`gh pr merge --squash`.
 
 ## Invariants
 
@@ -165,8 +166,8 @@ Rules:
 - Reference the backlog item ID in the commit body or subject where the
   diff maps one-to-one, e.g. `#021` for `feat(health): add non-http
   check-in monitors` (see `git log`).
-- Linear history; no squash on master. Land commits as they were authored.
-  `/deliver` emits the commits; `/settle` lands them without flattening.
+- Squash-merge on land. Branch keeps the sliced commits for PR review;
+  `/settle` squashes them into one master commit via `gh pr merge --squash`.
 
 ## Archival on Completion
 
@@ -191,8 +192,8 @@ same commit. If it doesn't, `/reflect` will flag the drift.
 
 ## Cross-Cutting Invariants
 
-- **Feature branch only.** Never commit to master. Linear history is
-  preserved by authored commits, not by squashing at merge time.
+- **Feature branch only.** Never commit to master. All changes land
+  via `gh pr merge --squash` as one master commit per PR.
 - **Never push.** `/deliver` stops at merge-ready. `/settle` lands.
 - **Never merge.** Humans merge. CODEOWNERS routes review to `@phrazzld`.
 - **Never deploy.** `flyctl deploy --app canary-obs --remote-only` is fired
@@ -329,5 +330,5 @@ backlog.d/_done/` when appropriate). Do not collapse it into the brief.
 ## Related
 
 - Consumer: `/flywheel` — outer loop passes `--state-dir` under its cycle tree and reads `receipt.json`.
-- Lander: `/settle` — takes a `merge_ready` receipt, runs `./bin/validate --strict` one more time if stale, and lands the branch with linear history. `/deliver` never calls `/settle`.
+- Lander: `/settle` — takes a `merge_ready` receipt, runs `./bin/validate --strict` one more time if stale, and lands the branch via `gh pr merge --squash`. `/deliver` never calls `/settle`.
 - Phases: `/shape`, `/implement`, `/code-review`, `/ci`, `/refactor`, `/qa`.

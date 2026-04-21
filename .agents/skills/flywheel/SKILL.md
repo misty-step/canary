@@ -36,11 +36,11 @@ the canary-specific invariants that aren't inferable from the leaf names.
 3. **Land.** `/settle` is the canary-ratified merge step. It runs
    `./bin/validate --strict` (full `dagger call strict` gate: 81% core
    coverage, 90% `canary_sdk`, format/credo/sobelow/dialyzer, live
-   advisories, `.codex/agents/*.toml` role validation), then lands with
-   `git merge --ff-only` onto `master` (linear history, no squash), then
-   archives: `git mv backlog.d/NNN-item.md backlog.d/_done/`. Commit
-   scope follows conventional-with-scope (e.g. `feat(health):`,
-   `fix(ci):`, `refactor(query):`).
+   advisories, `.codex/agents/*.toml` role validation), then lands via
+   `gh pr merge --squash --delete-branch` with a pre-composed subject
+   carrying the conventional-with-scope prefix (e.g. `feat(health):`,
+   `fix(ci):`, `refactor(query):`), then archives:
+   `git mv backlog.d/NNN-item.md backlog.d/_done/`.
 4. **Deploy.** Hosted CI auto-deploys via `.github/workflows/deploy.yml`
    after `ci.yml` green — that workflow fires `flyctl deploy --app
    canary-obs --remote-only`. If the dispatch didn't fire (workflow

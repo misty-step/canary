@@ -30,9 +30,9 @@ skill's scope is: worktree → commits → remote.
    `git status --short` still shows modified, staged, or untracked paths.
    Resolve every path by commit, ignore, move out of the repo, or delete.
 3. **Reviewability is the product.** A stack of three focused commits beats
-   one 2,000-line "wip" commit. Canary runs linear history with **no squash
-   on master** — every commit lands on `master` as written and must stand
-   alone. Slice accordingly.
+   one 2,000-line "wip" commit. Canary squash-merges PRs, so branch commits
+   don't land on `master` — but reviewers read them, and one squash commit
+   per PR means the PR title carries the master history. Slice accordingly.
 4. **Never lose work.** Untracked scratch that might be the user's in-flight
    thinking gets moved (`~/vault/canary/scratch/…`), not deleted, unless it's
    unambiguous debris.
@@ -50,8 +50,8 @@ skill's scope is: worktree → commits → remote.
 - `--dry-run`: report the plan (commit boundaries, messages, skips), do not
   execute. Skips hooks entirely.
 - `--single-commit`: skip the split pass; one commit for everything that
-  belongs. Use sparingly — multi-concern single commits violate the
-  linear-no-squash-on-master contract.
+  belongs. Use sparingly — multi-concern single commits are harder to review
+  even though they'll squash into one master commit at merge time.
 - `--no-push`: commit locally but don't push. `./bin/validate --fast` still
   runs (pre-commit); `--strict` does not (no push).
 
@@ -136,8 +136,9 @@ For each changed / untracked path, assign one of:
 
 ### 3. Group signals into semantic commits
 
-**One concern per commit.** Canary's linear-no-squash policy means every
-commit lands on `master` as written. Each commit must pass
+**One concern per commit.** Canary squash-merges PRs, so branch commits
+don't appear on `master` — but reviewers read them individually. Each
+commit should still pass
 `./bin/validate --strict` standalone. For multi-commit branches, verify
 per-commit before push:
 
@@ -275,9 +276,9 @@ convention has changed, match the new convention.
      non-trivially.
   3. Retry push once.
   4. On second rejection, stop and surface — something stranger is going on.
-- **Never force-push.** Linear history is load-bearing. If the user's
-  branch needs force-push semantics, that's a `/settle` rewrite concern,
-  not `/yeet`.
+- **Never force-push.** Branch history integrity is load-bearing for
+  review even though the branch commits don't reach `master`. Force-push
+  semantics are a `/settle` rewrite concern, not `/yeet`.
 - After push: `git status --short --untracked-files=all`. Any visible path
   means `/yeet` isn't done — continue classifying.
 
@@ -319,7 +320,7 @@ Stop and surface to the user instead of committing:
 
 ## Safety rails (never)
 
-- Never force-push. Linear history on `master` is load-bearing.
+- Never force-push. Branch-commit integrity matters for PR review.
 - Never `--no-verify` to bypass `.githooks/pre-commit` or `.githooks/pre-push`.
   The gates ARE the product contract.
 - Never `--amend` a commit that was rejected by a hook — create a new
@@ -385,7 +386,7 @@ Ignored: design-catalog.html (regenerated QA artifact, already in .gitignore)
 Commits:
   abc1234 refactor(query): extract incident read model into Canary.Query.Incidents
   def5678 feat(query): add cursor pagination to incident read model (#010)
-  9012345 chore(governance): document linear-no-squash policy in AGENTS.md
+  9012345 chore(governance): document squash-merge policy in AGENTS.md
 
 Per-commit strict: green (git rebase -x './bin/validate --strict').
 Pushed feat/010-ramp-pattern-query-split → origin (3 new commits).

@@ -73,8 +73,8 @@ Do not try to fill in the gaps. Shape is a different skill's judgment.
 `git checkout -b <type>/<slug>` from the current branch. Use the commit-scope
 vocabulary for `<type>`: `feat`, `fix`, `refactor`, `chore`, `docs`, `build`.
 Builders never commit to `master`. If you forget, create the branch after
-and cherry-pick before handing off. Master is linear — do not squash,
-do not merge commits on top.
+and cherry-pick before handing off. All changes go through a PR and land
+as one squash commit via `gh pr merge --squash`.
 
 ### 3. Dispatch the builder
 
@@ -300,7 +300,7 @@ by widening tests — that's the job).
   `lib/canary_web/router.ex` or `lib/canary/query.ex` at once will merge-conflict
   and lose work. Partition by file ownership first.
 - **Branch drift.** Forgetting to `git checkout -b feat/<slug>` and
-  committing to `master`. Master is linear — always branch first.
+  committing to `master`. All changes go through a PR — always branch first.
 - **Scope creep from builders.** Builder adds "while I'm here" cleanups
   to `lib/canary/errors/ingest.ex`. The spec is the constraint — raise a
   blocker, don't silently expand the diff.

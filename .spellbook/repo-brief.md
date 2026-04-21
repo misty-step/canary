@@ -84,8 +84,10 @@ history + memory):
   a prose codex.
 - Single gate citation of `./bin/validate` (never "run CI" / "run the
   tests"); coverage names `81% core / 90% canary_sdk`;
-  conventional-commit scopes taken from `git log`; linear-no-squash on
-  master; responder boundary enforced in acceptance criteria.
+  conventional-commit scopes taken from `git log` (they land on the
+  PR-title / squash-subject, not necessarily every branch commit);
+  squash-merge via `gh pr merge --squash`; responder boundary enforced
+  in acceptance criteria.
 - Load-bearing footgun list stays in `CLAUDE.md`. Never duplicate into
   `AGENTS.md` or skill bodies — cite it.
 - Shared-root skill layout: `.agents/skills/<name>/` canonical;
