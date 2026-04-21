@@ -229,7 +229,9 @@ defmodule CanaryWeb.IncidentControllerTest do
       refute "note-1" in actions
     end
 
-    test "stays within a small query budget (≤ 8)", %{conn: conn} do
+    test "stays within a small query budget (≤ 10) that is constant in the number of signals", %{
+      conn: conn
+    } do
       create_target_with_state("budget-svc", "down")
       incident = create_incident("budget-svc")
       now = DateTime.utc_now() |> DateTime.to_iso8601()
