@@ -10,3 +10,4 @@
 {"date":"2026-04-14","pr":null,"correctness":9,"depth":9,"simplicity":8,"craft":9,"verdict":"ship","providers":["codex"]}
 {"date":"2026-04-15","pr":null,"correctness":9,"depth":8,"simplicity":9,"craft":9,"verdict":"ship","providers":["codex"]}
 {"date":"2026-04-16","pr":null,"correctness":9,"depth":8,"simplicity":9,"craft":9,"verdict":"ship","providers":["codex"]}
+{"date":"2026-04-21","pr":null,"branch":"chore/tailor-harness","correctness":9,"depth":8,"simplicity":9,"craft":9,"verdict":"ship","providers":["claude-panel"],"reviewers":["critic","grug","ousterhout"],"sha":"088781e19ce694a4bbd30dfbbecf1c6d9555b719","note":"harness refresh; critic+grug+ousterhout unanimous ship; .claude/settings.local.json debris cleaned post-panel"}
