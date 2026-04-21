@@ -2,18 +2,14 @@ defmodule Canary.Alerter.CircuitBreaker do
   @moduledoc """
   Per-subscription circuit breaker. After 10 consecutive delivery
   failures, mark subscription as suspended. Probe every 5 minutes.
-  """
 
-  use GenServer
+  Pure ETS accessors — the `:canary_circuit_breakers` table is owned by
+  `Canary.EtsTables`.
+  """
 
   @table :canary_circuit_breakers
   @failure_threshold 10
   @probe_interval_ms 300_000
-
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-  end
 
   @spec open?(String.t()) :: boolean()
   def open?(webhook_id) do
@@ -56,11 +52,5 @@ defmodule Canary.Alerter.CircuitBreaker do
     end
 
     :ok
-  end
-
-  @impl true
-  def init(_opts) do
-    :ets.new(@table, [:named_table, :public, :set, read_concurrency: true])
-    {:ok, %{}}
   end
 end
