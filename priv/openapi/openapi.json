@@ -2897,13 +2897,16 @@
         ],
         "properties": {
           "id": {
-            "type": "integer"
+            "type": "string"
           },
           "event": {
             "type": "string"
           },
           "severity": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "summary": {
             "type": "string"

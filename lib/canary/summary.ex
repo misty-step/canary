@@ -92,7 +92,7 @@ defmodule Canary.Summary do
 
     severity_part =
       if high > 0,
-        do: " #{high} #{pluralize(high, "high-severity", "high-severity")}.",
+        do: " #{high} high-severity #{pluralize(high, "incident", "incidents")}.",
         else: ""
 
     newest = Enum.max_by(incidents, & &1.opened_at, fn -> nil end)
@@ -219,8 +219,10 @@ defmodule Canary.Summary do
     |> Enum.join()
   end
 
-  defp pluralize(1, singular, _plural), do: singular
-  defp pluralize(_n, _singular, plural), do: plural
+  @doc "Returns `singular` when `n` is 1, otherwise `plural`. Shared helper for deterministic templates."
+  @spec pluralize(integer(), String.t(), String.t()) :: String.t()
+  def pluralize(1, singular, _plural), do: singular
+  def pluralize(_n, _singular, plural), do: plural
 
   defp window_label("1h"), do: "hour"
   defp window_label("6h"), do: "6 hours"

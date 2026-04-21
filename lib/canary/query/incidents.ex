@@ -223,24 +223,27 @@ defmodule Canary.Query.Incidents do
   def detail(incident_id, _opts \\ []) do
     repo = Canary.Repos.read_repo()
 
-    case fetch_incident_with_signals(repo, incident_id) do
+    case repo.get(Incident, incident_id) do
       nil ->
         {:error, :not_found}
 
       incident ->
-        {signals, signals_truncated} = bounded_signals(incident.signals)
+        total_signal_count = count_signals(repo, incident_id)
+        signals = fetch_top_signals(repo, incident_id, @max_signals)
+        signals_truncated = total_signal_count > length(signals)
+
         signal_context = load_signal_context(repo, signals)
         formatted_signals = Enum.map(signals, &format_signal(&1, signal_context))
 
         {annotations, annotations_truncated} = load_annotations(repo, incident_id)
         recent_timeline_events = load_recent_timeline_events(repo, incident_id)
 
-        incident_view = format_incident_for_detail(incident)
+        incident_view = format_incident_for_detail(incident, total_signal_count)
 
         summary =
           Canary.Summary.incident_detail(%{
             incident: incident_view,
-            signal_count: length(formatted_signals),
+            signal_count: total_signal_count,
             annotation_count: length(annotations)
           })
 
@@ -257,20 +260,24 @@ defmodule Canary.Query.Incidents do
     end
   end
 
-  defp fetch_incident_with_signals(repo, incident_id) do
-    from(i in Incident,
-      where: i.id == ^incident_id,
-      preload: [signals: ^from(s in IncidentSignal, order_by: [desc: s.attached_at, desc: s.id])]
+  defp count_signals(repo, incident_id) do
+    from(s in IncidentSignal,
+      where: s.incident_id == ^incident_id,
+      select: count(s.id)
     )
     |> repo.one()
   end
 
-  defp bounded_signals(signals) do
-    truncated = length(signals) > @max_signals
-    {Enum.take(signals, @max_signals), truncated}
+  defp fetch_top_signals(repo, incident_id, limit) do
+    from(s in IncidentSignal,
+      where: s.incident_id == ^incident_id,
+      order_by: [desc: s.attached_at, desc: s.id],
+      limit: ^limit
+    )
+    |> repo.all()
   end
 
-  defp format_incident_for_detail(%Incident{} = incident) do
+  defp format_incident_for_detail(%Incident{} = incident, total_signal_count) do
     %{
       id: incident.id,
       service: incident.service,
@@ -279,7 +286,7 @@ defmodule Canary.Query.Incidents do
       title: incident.title,
       opened_at: incident.opened_at,
       resolved_at: incident.resolved_at,
-      signal_count: length(incident.signals)
+      signal_count: total_signal_count
     }
   end
 
@@ -477,6 +484,5 @@ defmodule Canary.Query.Incidents do
 
   defp truncate_hash(hash), do: hash
 
-  defp pluralize(1, singular, _plural), do: singular
-  defp pluralize(_n, _singular, plural), do: plural
+  defp pluralize(n, singular, plural), do: Canary.Summary.pluralize(n, singular, plural)
 end

@@ -277,11 +277,14 @@ defmodule CanaryWeb.IncidentControllerTest do
       count = Agent.get(queries, & &1)
       Agent.stop(queries)
 
-      # Budget per ticket oracle: ~4 logical queries (incident+signals,
-      # signal context, annotations, timeline). Physical count includes
-      # Ecto preload splits + per-schema IN lookups. 8 is the upper ceiling
-      # that still precludes any N+1.
-      assert count <= 8, "expected ≤8 read queries for detail fetch, got #{count}"
+      # Budget per ticket oracle: ~4 logical queries (incident + signal
+      # count+rows, signal context, annotations, timeline). Physical count
+      # includes per-schema IN lookups for error-group / target / monitor
+      # context. 10 is the upper ceiling — importantly, it is constant in
+      # the number of signals: adding a 6th error_group signal below would
+      # not change the count because the context fetch batches by IN (…)
+      # across all signals.
+      assert count <= 10, "expected ≤10 read queries for detail fetch, got #{count}"
     end
   end
 end
