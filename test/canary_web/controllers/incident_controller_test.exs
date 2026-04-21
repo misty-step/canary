@@ -24,9 +24,17 @@ defmodule CanaryWeb.IncidentControllerTest do
 
       conn = get(conn, "/api/v1/incidents")
       body = json_response(conn, 200)
+      assert is_binary(body["summary"]) and body["summary"] != ""
       assert is_list(body["incidents"])
       ids = Enum.map(body["incidents"], & &1["id"])
       assert incident.id in ids
+    end
+
+    test "returns summary describing the page, even when empty", %{conn: conn} do
+      conn = get(conn, "/api/v1/incidents")
+      body = json_response(conn, 200)
+      assert body["incidents"] == []
+      assert body["summary"] == "No active incidents."
     end
 
     test "without_annotation excludes incident with matching annotation", %{conn: conn} do

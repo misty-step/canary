@@ -1,7 +1,7 @@
 defmodule CanaryWeb.IncidentController do
   use CanaryWeb, :controller
 
-  alias Canary.Query
+  alias Canary.{Query, Summary}
 
   def index(conn, params) do
     opts =
@@ -14,6 +14,6 @@ defmodule CanaryWeb.IncidentController do
       )
 
     incidents = Query.active_incidents(opts)
-    json(conn, %{incidents: incidents})
+    json(conn, %{summary: Summary.incidents_list(incidents), incidents: incidents})
   end
 end

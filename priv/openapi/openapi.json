@@ -2196,7 +2196,8 @@
           "environment",
           "group_hash",
           "created_at",
-          "group"
+          "group",
+          "incident_ids"
         ],
         "properties": {
           "summary": {
@@ -2261,6 +2262,12 @@
                 "type": "null"
               }
             ]
+          },
+          "incident_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -2644,9 +2651,13 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
+          "summary",
           "incidents"
         ],
         "properties": {
+          "summary": {
+            "type": "string"
+          },
           "incidents": {
             "type": "array",
             "items": {

@@ -105,6 +105,65 @@ defmodule CanaryWeb.QueryControllerTest do
       assert body["id"] == create_body["id"]
       assert body["error_class"] == "DetailError"
       assert body["service"] == "detail-test"
+      assert is_list(body["incident_ids"])
+    end
+
+    test "returns incident_ids for an error correlated into one or more incidents", %{conn: conn} do
+      create_body =
+        conn
+        |> post("/api/v1/errors", %{
+          "service" => "linked-svc",
+          "error_class" => "LinkedError",
+          "message" => "linked"
+        })
+        |> json_response(201)
+
+      # Ingest auto-correlates new error groups into incidents
+      [auto_incident_id] =
+        Canary.Schemas.IncidentSignal
+        |> Canary.Repo.all()
+        |> Enum.filter(&(&1.signal_ref == create_body["group_hash"]))
+        |> Enum.map(& &1.incident_id)
+        |> Enum.uniq()
+
+      conn = get(conn, "/api/v1/errors/#{create_body["id"]}")
+      body = json_response(conn, 200)
+      assert body["incident_ids"] == [auto_incident_id]
+    end
+
+    test "returns empty incident_ids for an error whose group has no incident signal", %{
+      conn: conn
+    } do
+      # Build an Error + ErrorGroup directly, without going through ingest (which correlates)
+      now = DateTime.utc_now() |> DateTime.to_iso8601()
+      error_id = Canary.ID.error_id()
+      group_hash = "grp-orphan-#{error_id}"
+
+      Canary.Repo.insert!(%Canary.Schemas.ErrorGroup{
+        group_hash: group_hash,
+        service: "orphan-svc",
+        error_class: "OrphanError",
+        severity: "error",
+        first_seen_at: now,
+        last_seen_at: now,
+        last_error_id: error_id,
+        total_count: 1,
+        status: "active"
+      })
+
+      %Canary.Schemas.Error{id: error_id}
+      |> Canary.Schemas.Error.changeset(%{
+        service: "orphan-svc",
+        error_class: "OrphanError",
+        message: "orphan",
+        group_hash: group_hash,
+        created_at: now
+      })
+      |> Canary.Repo.insert!()
+
+      conn = get(conn, "/api/v1/errors/#{error_id}")
+      body = json_response(conn, 200)
+      assert body["incident_ids"] == []
     end
 
     test "404 for missing error", %{conn: conn} do
