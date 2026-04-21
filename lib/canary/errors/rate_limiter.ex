@@ -2,9 +2,10 @@ defmodule Canary.Errors.RateLimiter do
   @moduledoc """
   ETS-backed token bucket rate limiter. Per-key limits for error
   ingest and query API. Returns seconds until retry on exhaustion.
-  """
 
-  use GenServer
+  Pure ETS accessors — the `:canary_rate_limits` table is owned and swept by
+  `Canary.EtsTables`.
+  """
 
   @table :canary_rate_limits
   @default_limit 100
@@ -13,11 +14,6 @@ defmodule Canary.Errors.RateLimiter do
   @burst_window_ms 10_000
   @query_limit 30
   @auth_fail_limit 10
-
-  @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-  end
 
   @spec check(String.t(), atom()) :: :ok | {:error, pos_integer()}
   def check(key, type \\ :ingest) do
@@ -45,39 +41,4 @@ defmodule Canary.Errors.RateLimiter do
   defp limits_for(:burst), do: {@burst_limit, @burst_window_ms}
   defp limits_for(:query), do: {@query_limit, @default_window_ms}
   defp limits_for(:auth_fail), do: {@auth_fail_limit, @default_window_ms}
-
-  # GenServer
-
-  @impl true
-  def init(_opts) do
-    :ets.new(@table, [
-      :named_table,
-      :public,
-      :set,
-      read_concurrency: true,
-      write_concurrency: true
-    ])
-
-    schedule_cleanup()
-    {:ok, %{}}
-  end
-
-  @impl true
-  def handle_info(:cleanup, state) do
-    now = System.monotonic_time(:millisecond)
-
-    :ets.foldl(
-      fn {key, _count, window_start}, acc ->
-        if now - window_start > 120_000, do: :ets.delete(@table, key)
-        acc
-      end,
-      nil,
-      @table
-    )
-
-    schedule_cleanup()
-    {:noreply, state}
-  end
-
-  defp schedule_cleanup, do: Process.send_after(self(), :cleanup, 60_000)
 end

@@ -59,6 +59,29 @@ defmodule Canary.Summary do
     "#{total} errors matching #{error_class} in the last #{window}. #{length(groups)} groups across #{service_count} services."
   end
 
+  @spec error_class_aggregate(map()) :: String.t()
+  def error_class_aggregate(%{
+        total: total,
+        class_count: class_count,
+        window: window,
+        groups: groups,
+        truncated: truncated
+      }) do
+    base =
+      "#{total} errors across #{class_count} #{pluralize(class_count, "error class", "error classes")} in the last #{window}."
+
+    top_part =
+      case Enum.sort_by(groups, & &1.total_count, :desc) do
+        [top | _] -> " Most frequent: #{top.error_class} (#{top.total_count} occurrences)."
+        [] -> ""
+      end
+
+    truncated_part =
+      if truncated, do: " Response truncated to top #{length(groups)} classes.", else: ""
+
+    base <> top_part <> truncated_part
+  end
+
   @spec error_detail(map()) :: String.t()
   def error_detail(%{
         error_class: error_class,
@@ -145,6 +168,9 @@ defmodule Canary.Summary do
     |> Enum.reject(&is_nil/1)
     |> Enum.join()
   end
+
+  defp pluralize(1, singular, _plural), do: singular
+  defp pluralize(_n, _singular, plural), do: plural
 
   defp window_label("1h"), do: "hour"
   defp window_label("6h"), do: "6 hours"

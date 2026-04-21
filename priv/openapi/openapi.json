@@ -2123,12 +2123,28 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
+          "summary",
           "window",
+          "total_errors",
+          "total_error_classes",
+          "truncated",
           "groups"
         ],
         "properties": {
+          "summary": {
+            "type": "string"
+          },
           "window": {
             "type": "string"
+          },
+          "total_errors": {
+            "type": "integer"
+          },
+          "total_error_classes": {
+            "type": "integer"
+          },
+          "truncated": {
+            "type": "boolean"
           },
           "groups": {
             "type": "array",
@@ -3738,14 +3754,10 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "dashboard",
           "report",
           "service_query"
         ],
         "properties": {
-          "dashboard": {
-            "type": "string"
-          },
           "report": {
             "type": "string"
           },

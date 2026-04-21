@@ -14,10 +14,10 @@ argument-hint: "[evidence-dir|feature|scaffold] [--format gif|video|launch] [upl
 
 # /demo — Canary
 
-Canary has no marketing surface. Every demo target is a functional product
-surface: the HTTP API (consumed by agents), the two SDKs, and the operator
-LiveView at `/dashboard`. "Make a demo" in this repo means pick the audience
-first, then capture the product surface they actually touch.
+Canary has no marketing surface and no human dashboard by design. Every demo
+target is a functional product surface: the HTTP API (consumed by agents) and
+the two SDKs. "Make a demo" in this repo means pick the audience first, then
+capture the product surface they actually touch.
 
 ## Execution Stance
 
@@ -27,19 +27,18 @@ You are the executive orchestrator.
 - Use a cold reviewer (fresh subagent, no capture context) for final quality judgment.
 - Demo artifacts are evidence layered *on top of* `./bin/validate --strict`. They do not replace the gate.
 
-## The Three Demo Modes
+## The Two Demo Modes
 
 Canary is a multi-audience product. Pick the mode that matches the change:
 
 | Mode | Audience | Surface | Primary artifact |
 |------|----------|---------|------------------|
 | 1. API / agent | AI agents, integration authors | HTTP API at `https://canary-obs.fly.dev` or `localhost:4000` | Shell script + asciinema/GIF of terminal flow |
-| 2. Dashboard | Operators | `/dashboard` LiveView | Screenshots + narrated screen recording |
-| 3. SDK + integration | Downstream engineers | `canary_sdk/` (Elixir), `clients/typescript/` (TS), check-in monitors | Sample script + resulting `201` + `ERR-nanoid` receipt |
+| 2. SDK + integration | Downstream engineers | `canary_sdk/` (Elixir), `clients/typescript/` (TS), check-in monitors | Sample script + resulting `201` + `ERR-nanoid` receipt |
 
 If the change touches more than one surface, capture all affected modes. A
-change to the ingest pipeline needs Mode 1; a change to `lib/canary_web/live/*`
-needs Mode 2; a change to the SDKs needs Mode 3. Do not conflate them.
+change to the ingest pipeline needs Mode 1; a change to the SDKs needs Mode 2.
+Do not conflate them.
 
 ## Mode 1: API / agent demo (primary)
 
@@ -131,51 +130,10 @@ reach the same final state. Verify by running it twice in the same window —
 first run shows `is_new_class: true`, second shows `is_new_class: false` on
 the repeated ingest.
 
-## Mode 2: Dashboard demo (secondary, operator-facing)
-
-`/dashboard` is an operator console, not a marketing landing page. Narrate it
-as such: this is for the on-call operator who wants to see one health
-snapshot and drill into the one incident they care about.
-
-### Access
-
-- Local dev: `/dashboard` is open (no `DASHBOARD_PASSWORD` set).
-- Staging/prod: requires `DASHBOARD_PASSWORD`; the demo rig must log in via
-  `/dashboard/login` before the capture reel starts. Do NOT include the
-  password entry in the captured reel.
-
-### Operator journey (shot list)
-
-1. `/dashboard` — overview tile: targets + monitors + open incidents.
-2. `/dashboard` → drill into a degraded target; show the state-machine
-   transition log and last N checks.
-3. `/dashboard/errors` — error group list, ordered by recency and count.
-4. `/dashboard/errors/:id` — single error group, occurrences, context.
-5. Incidents panel — an `INC-<nanoid>` with its attached signals.
-6. Webhook delivery ledger — `GET /api/v1/webhook-deliveries` rendered in
-   the operator console; show a retried delivery with its attempt count.
-
-Pair every "after" shot with a matching "before" where a state change
-occurred. Default-state screenshots prove nothing.
-
-### Capture
-
-Use the browser automation patterns from the upstream reference skill
-(`/Users/phaedrus/Development/spellbook/skills/demo/SKILL.md`) — viewport
-set to `1440x900`, deterministic fixtures seeded via
-`MIX_ENV=dev mix run priv/repo/demo_seeds.exs` if/when that seed exists,
-otherwise manually curate the demo instance state before recording.
-
-### Framing
-
-Narrate as an operator demo. Do not say "see how pretty our dashboard is."
-Say "the operator sees the degraded target, the state-machine transition
-that tripped it, and the incident with its attached signals — one page."
-
-## Mode 3: SDK + integration demo
+## Mode 2: SDK + integration demo
 
 Canary ships two first-party SDKs and a check-in monitor surface for
-non-HTTP runtimes. A change to any of these requires a Mode 3 capture.
+non-HTTP runtimes. A change to any of these requires a Mode 2 capture.
 
 ### Elixir SDK — `canary_sdk/`
 
@@ -261,9 +219,6 @@ description:
   `lib/canary/webhooks/delivery.ex` or any event payload builder, capture
   the before/after payload of the relevant event via
   `POST /api/v1/webhooks/:id/test` and the live event.
-- **Dashboard screenshots.** If the change touches
-  `lib/canary_web/live/*`, include before + after screenshots of the
-  affected LiveView.
 - **SDK transcript.** If the change touches `canary_sdk/` or
   `clients/typescript/`, include the integration run transcript with the
   resulting `201` payload.
@@ -299,9 +254,9 @@ See the upstream `references/pr-evidence-upload.md` for the full protocol.
 Each phase is a separate subagent. The critic inspects artifacts cold
 (no capture context) to prevent self-grading.
 
-1. **Plan.** Identify which of Modes 1/2/3 apply. Build a shot list tied to
-   specific endpoint paths, LiveView routes, or SDK call sites. Pick
-   target environment (live `canary-obs.fly.dev` vs local `mix phx.server`).
+1. **Plan.** Identify which of Modes 1/2 apply. Build a shot list tied to
+   specific endpoint paths or SDK call sites. Pick target environment
+   (live `canary-obs.fly.dev` vs local `mix phx.server`).
 2. **Capture.** Execute the plan. Every "after" has a paired "before."
    Redact on the way out, not as a post-processing step.
 3. **Critique.** Fresh subagent validates: correct mode for the change,
@@ -342,9 +297,9 @@ code is correct. Run `./bin/validate --strict` first, capture demos second.
 
 ## Gotchas
 
-- **Default-state evidence proves nothing.** A dashboard screenshot with no
-  incidents or a `GET /report` with an empty error list is not a demo — it
-  is a screenshot of the empty state. Seed the state deliberately.
+- **Default-state evidence proves nothing.** A `GET /report` with an empty
+  error list is not a demo — it is a snapshot of the empty state. Seed the
+  state deliberately.
 - **Self-grading is worthless.** The critic subagent inspects artifacts
   cold.
 - **The `summary` field is the whole point.** If the captured payload hides

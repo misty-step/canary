@@ -23,7 +23,6 @@ defmodule Canary.ServiceOnboarding.Payload do
       },
       target: TargetResponse.render(target),
       links: %{
-        dashboard: "#{base_url}/dashboard",
         report: "#{base_url}/api/v1/report?window=1h",
         service_query:
           "#{base_url}/api/v1/query?service=#{URI.encode_www_form(request.service)}&window=1h"
