@@ -17,9 +17,9 @@ argument-hint: "[PR-number|branch-name]"
 # /settle
 
 Take a canary branch from blocked to clean and (as `/land`) onto `master`
-with linear history. Plain `/settle` stops at merge-ready. `/land` is the
-landing mode of this same skill and continues through a fast-forward merge
-per canary's linear-history-no-squash policy.
+with one squash commit per PR. Plain `/settle` stops at merge-ready. `/land` is the
+landing mode of this same skill and continues through `gh pr merge --squash`
+per canary's squash-merge policy.
 
 Canary ships on the `/settle → /refactor → /code-review → merge` outer loop.
 `/settle` is the unblock + polish + land step. The gate it answers to is
@@ -63,10 +63,11 @@ Detection sequence:
 There is no separate `/land` skill. When invoked as `/land <branch>`, always use
 git-native mode regardless of whether a PR exists. `/land` validates the verdict
 ref (must exist and point at HEAD), rejects `dont-ship` verdicts, re-runs
-`./bin/validate --strict` when available, and lands the branch directly per
-canary policy: **linear history on master, no squash** — use `git merge --ff-only`
-to fast-forward a ticket branch into `master`. `SPELLBOOK_NO_REVIEW=1` bypasses
-the verdict gate for emergencies.
+`./bin/validate --strict` when available, and lands the branch per canary
+policy: **squash-merge**. In GitHub mode use `gh pr merge --squash` with a
+pre-composed `--subject`/`--body`; in git-native mode use
+`git merge --squash <branch> && git commit` on `master` then `git push`.
+`SPELLBOOK_NO_REVIEW=1` bypasses the verdict gate for emergencies.
 
 ## Objective
 
@@ -107,9 +108,10 @@ Read `references/pr-fix.md` and follow it completely.
 
 **Goal:** Get from blocked to green on `./bin/validate --strict`.
 
-1. **Conflicts** — rebase (preferred, keeps linear history) or merge, resolve
-   all conflicts. Prefer `git rebase origin/master` so the eventual
-   `git merge --ff-only` is a no-brainer.
+1. **Conflicts** — rebase or merge, resolve all conflicts. Either works under
+   squash-merge (the branch commits don't land on `master`; only the squash
+   commit does). `git rebase origin/master` is still convenient for review
+   readability.
 2. **Gate** — invoke `/ci` for gate ownership, which runs `./bin/validate`
    (default) or `./bin/validate --strict` before landing. In GitHub mode, also
    wait on the `dagger` check in `.github/workflows/ci.yml` — it runs
@@ -140,11 +142,10 @@ Read `references/pr-fix.md` and follow it completely.
 Dispatch fixes to smaller worker subagents when scope is clear and bounded —
 one Dagger lane failure per subagent, one review comment thread per subagent.
 
-6. **Per-commit gate (multi-commit branches)** — canary uses linear history, so
-   each commit on the branch will appear verbatim in `master` history. If the
-   branch has more than one commit, verify each commit *independently* passes
-   `./bin/validate --strict` (rebase with `git rebase -x './bin/validate --strict'
-   origin/master`). Bisect-cleanliness is a real requirement here, not a vanity.
+6. **Branch-head gate** — canary squash-merges, so only the squash-commit
+   state lands on `master`. Run `./bin/validate --strict` once against the
+   branch HEAD before merge. No per-commit gate; no bisect-cleanliness
+   requirement on the branch commits.
 7. **Merge-readiness verification** —
    - **GitHub mode:** `gh pr view --json reviews,statusCheckRollup` — at least
      one approving review, the `dagger` check passing
@@ -260,15 +261,17 @@ produces no changes. The outer loop above this skill is
 
 When invoked as `/land`, after all three phases are green:
 
-1. Re-confirm `./bin/validate --strict` on the tip commit.
-2. Fetch and rebase onto `origin/master` so the merge is a fast-forward.
-3. Land per canary policy — **linear history on master, no squash**:
-   - Local: `git checkout master && git merge --ff-only <branch> && git push origin master`
-   - GitHub: `gh pr merge <PR> --merge --delete-branch`
-     (**never** `--squash`, **never** `--rebase` unless explicitly requested —
-     canary preserves every commit from the branch)
-4. Verify linear history after push: `git log --oneline --graph origin/master | head` —
-   there should be no merge commits from feature branches.
+1. Re-confirm `./bin/validate --strict` on the branch HEAD.
+2. Fetch and rebase onto `origin/master` (optional — conflicts resolved
+   pre-squash make the PR diff clean for reviewers).
+3. Land per canary policy — **squash-merge**:
+   - GitHub: `gh pr merge <PR> --squash --subject "<conventional-with-scope subject>" --body "<summary>" --delete-branch`
+   - Git-native: `git checkout master && git merge --squash <branch> && git commit -m "<conventional-with-scope subject>" && git push origin master`
+4. The PR title / squash subject carries the conventional-with-scope prefix
+   (`feat(health):`, `fix(ci):`, etc.); branch commits stay for review
+   readability but don't land on `master`.
+5. Verify `git log --oneline -3 origin/master` shows the squash commit as
+   a single entry.
 
 ## Reviewer Artifact Policy
 
@@ -311,13 +314,17 @@ When settlement needs screenshots, videos, logs, or walkthrough proof:
   The control plane is immutable by design (`docs/ci-control-plane.md`): the
   workflow runs from the base snapshot in `.ci/trusted/`, so the edit in your
   PR does nothing for the required check. Fix the Dagger module or the code.
-- **Squashing on merge.** Canary is linear-history-no-squash. `--squash`
-  destroys bisectable history and drops conventional-commit scopes.
-- **Non-ff merge commits into `master`.** Rebase the branch first; then
-  `git merge --ff-only` (or `gh pr merge --merge` after a green fast-forward state).
-- **Landing a multi-commit branch without per-commit gate.** Every commit
-  that reaches `master` must independently pass `./bin/validate --strict`;
-  otherwise `git bisect` is broken for everyone.
+- **Using `--merge` or `--rebase`.** Canary lands one squash commit per PR.
+  `gh pr merge --merge` fills `master` with branch commits; `--rebase`
+  replays them. Neither matches policy.
+- **Squash subject without conventional-with-scope prefix.** The squash
+  commit IS the master history; it must carry `feat(health):` /
+  `fix(ci):` / etc. for `git log` readability and downstream tooling.
+- **Forgetting `--delete-branch` on the squash merge.** Branches left
+  dangling on the remote after a squash land are clutter.
+- **Relying on bisect-cleanliness of branch commits.** Branch commits
+  don't reach `master` under squash-merge; only the squash commit does.
+  Run `./bin/validate --strict` once on branch HEAD, not per commit.
 - Polish without re-running `./bin/validate --strict` afterward.
 - Refactoring without verifying invariants are preserved (pure
   `StateMachine.transition/4`, deterministic summaries, RFC 9457 shape,

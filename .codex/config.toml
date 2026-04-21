@@ -60,7 +60,7 @@ allow = [
   "npm ci",
   "npm run",
 
-  # Git (read + the linear-no-squash write set)
+  # Git (read + the squash-merge write set)
   "git status",
   "git diff",
   "git log",
@@ -122,7 +122,7 @@ commit-scopes = [
 ]
 # Canary-specific area suffixes seen on real commits: (health), (ci), (query),
 # (auth), (ops), (governance), (backlog), (dr), (onboarding).
-merge-strategy = "linear-no-squash"
+merge-strategy = "squash"
 
 [gate]
 # /ci skill and every gate-adjacent skill cites this verbatim.

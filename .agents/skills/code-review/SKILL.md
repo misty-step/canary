@@ -199,9 +199,10 @@ Skip if `scripts/lib/verdicts.sh` is absent (Spellbook-only feature).
 `/code-review` is the penultimate gate before `/settle` lands the branch.
 Expected upstream state: `/settle` has unblocked CI + reviews, `/refactor`
 has already simplified the diff. Expected downstream: a clean verdict ref
-and a green `./bin/validate --strict` so `/settle --land` can merge into
-`master` (linear history, no squash). Commit style is conventional-with-scope:
-`feat(health):`, `fix(ci):`, `refactor(query):`, `docs(ops):`.
+and a green `./bin/validate --strict` so `/settle --land` can squash-merge
+into `master` via `gh pr merge --squash`. The PR title / squash subject
+carries the conventional-with-scope prefix: `feat(health):`, `fix(ci):`,
+`refactor(query):`, `docs(ops):`.
 
 ## Gotchas
 

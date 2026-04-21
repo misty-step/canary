@@ -324,7 +324,8 @@ Evidence sections.
 
 **Merge gate.** `./bin/validate --strict` locally + hosted CI's
 `dagger call strict --source=../candidate` via the immutable control
-plane (`.github/workflows/ci.yml`). Linear history, no squash on master.
+plane (`.github/workflows/ci.yml`). Squash-merge on land via
+`gh pr merge --squash`.
 
 ## Gotchas
 

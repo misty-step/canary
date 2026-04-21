@@ -19,11 +19,12 @@ before responding to comments.
 ```text
 fetch origin
   │
-  ├─ Few commits, linear history matters, no downstream consumers → rebase
-  │    git rebase origin/main
+  ├─ Few commits, branch readable, no downstream consumers → rebase
+  │    git rebase origin/master
   │
   └─ Many commits, shared branch, complex conflicts → merge
-       git merge origin/main
+       git merge origin/master
+(Either works — branch gets squashed into one commit on master at merge.)
 ```
 
 **Always:**
