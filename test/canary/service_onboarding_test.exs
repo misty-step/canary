@@ -34,8 +34,8 @@ defmodule Canary.ServiceOnboardingTest do
       assert result.api_key.scope == "ingest-only"
       assert result.target.name == "billing-api"
       assert result.target.interval_ms == 30_000
-      assert result.links.dashboard == "https://canary.example.com/dashboard"
       assert result.links.report == "https://canary.example.com/api/v1/report?window=1h"
+      refute Map.has_key?(result.links, :dashboard)
 
       assert result.snippets.error_ingest_curl =~ "https://canary.example.com/api/v1/errors"
       assert result.snippets.error_ingest_curl =~ "Authorization: Bearer #{result.api_key.key}"
@@ -183,7 +183,7 @@ defmodule Canary.ServiceOnboardingTest do
       assert payload.api_key.key == "raw-key-123"
       assert payload.api_key.scope == "ingest-only"
       assert payload.target.id == "TGT-billing-api"
-      assert payload.links.dashboard == "https://canary.example.com/dashboard"
+      refute Map.has_key?(payload.links, :dashboard)
       assert payload.links.service_query =~ "service=billing-api&window=1h"
       assert payload.snippets.error_ingest_curl =~ "Authorization: Bearer raw-key-123"
       assert payload.snippets.report_curl =~ "Authorization: Bearer $CANARY_READ_KEY"

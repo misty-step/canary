@@ -3746,14 +3746,10 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "dashboard",
           "report",
           "service_query"
         ],
         "properties": {
-          "dashboard": {
-            "type": "string"
-          },
           "report": {
             "type": "string"
           },

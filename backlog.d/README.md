@@ -25,7 +25,7 @@
 | 015 | Product security controls (scoped keys) | low | done | M |
 | 009 | Desktop health semantics research | low | done | M |
 | 021 | Check-in monitors for non-HTTP runtimes | medium | done | M |
-| 022 | Contract hygiene + shallow-module collapse | high | ready | M |
+| 022 | Contract hygiene + shallow-module collapse | high | done | M |
 | 023 | Incident as atomic agent unit (detail API) | high | ready | M |
 | 024 | Signal-agnostic annotations | medium | blocked | M |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
@@ -65,11 +65,10 @@
 
 ### Active order (2026-04-21)
 
-1. **022** — contract hygiene (ship first; cheapest, highest hygiene ROI)
-2. **023** — incident detail endpoint (highest agent-first product impact)
-3. **024** — signal-agnostic annotations (completes the ramp substrate, blocked on 023)
+1. **023** — incident detail endpoint (highest agent-first product impact)
+2. **024** — signal-agnostic annotations (completes the ramp substrate, blocked on 023)
 
-010 stays blocked on bb/011. 020 stays blocked on Adminifi URLs.
+022 landed on 2026-04-21. 010 stays blocked on bb/011. 020 stays blocked on Adminifi URLs.
 
 ## Migration Notes
 

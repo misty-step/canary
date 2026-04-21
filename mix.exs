@@ -27,8 +27,6 @@ defmodule Canary.MixProject do
   defp deps do
     [
       {:phoenix, "~> 1.8"},
-      {:phoenix_html, "~> 4.0"},
-      {:phoenix_live_view, "~> 1.0"},
       {:phoenix_ecto, "~> 4.5"},
       {:ecto_sql, "~> 3.12"},
       {:ecto_sqlite3, "~> 0.17"},
@@ -47,8 +45,7 @@ defmodule Canary.MixProject do
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:sobelow, "~> 0.13", only: [:dev, :test], runtime: false},
       {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
-      {:bypass, "~> 2.1", only: :test},
-      {:lazy_html, ">= 0.1.0", only: :test}
+      {:bypass, "~> 2.1", only: :test}
     ]
   end
 

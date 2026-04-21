@@ -26,9 +26,13 @@ mix phx.server     # starts on localhost:4000
 No Docker required for local development. The repo also includes Elixir and
 TypeScript SDK packages.
 
-The operator console lives at `/dashboard`. Set `DASHBOARD_PASSWORD` to require
-login in non-local environments; leave it unset in dev/test to keep the
-dashboard open.
+Canary has no human dashboard by design — agents are the UI. Operators who
+need to look at current state use the query API directly (`GET
+/api/v1/status`, `GET /api/v1/report`, `GET /api/v1/query`, `GET
+/api/v1/errors/{id}`) or drop into the remote console with `flyctl ssh
+console --app canary-obs -C "bin/canary remote"`. See
+[`docs/operator-dashboard-removal.md`](/Users/phaedrus/Development/canary/docs/operator-dashboard-removal.md)
+for the decision record.
 
 ## Development
 
@@ -308,7 +312,7 @@ The response includes:
 - a one-time raw `ingest-only` API key for the new service
 - the created target metadata
 - exact snippets for `POST /api/v1/errors`, plus report/query verification commands that expect a separate read/admin key
-- direct links to `/dashboard` and the unified report
+- the unified `GET /api/v1/report` endpoint for post-onboarding verification
 
 ### Owned Service Dogfooding
 

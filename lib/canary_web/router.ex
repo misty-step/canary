@@ -35,19 +35,6 @@ defmodule CanaryWeb.Router do
     plug CanaryWeb.Plugs.RateLimit, type: :query
   end
 
-  pipeline :browser do
-    plug :accepts, ["html"]
-    plug :fetch_session
-    plug :fetch_live_flash
-    plug :put_root_layout, html: {CanaryWeb.Layouts, :root}
-    plug :protect_from_forgery
-
-    plug :put_secure_browser_headers, %{
-      "content-security-policy" =>
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' wss:"
-    }
-  end
-
   # Public health endpoints (no auth)
   scope "/", CanaryWeb do
     pipe_through :api
@@ -61,25 +48,6 @@ defmodule CanaryWeb.Router do
     pipe_through [:api, :authenticated, :scope_admin, :query_rate_limit]
 
     get "/metrics", MetricsController, :index
-  end
-
-  # Dashboard login (outside live_session — no on_mount gate)
-  scope "/dashboard", CanaryWeb do
-    pipe_through :browser
-
-    live "/login", LoginLive, :index
-    post "/login", LoginController, :create
-  end
-
-  # Dashboard (password-gated via on_mount hook)
-  scope "/dashboard", CanaryWeb do
-    pipe_through :browser
-
-    live_session :dashboard, on_mount: [CanaryWeb.DashboardAuth] do
-      live "/", DashboardLive, :index
-      live "/errors", ErrorsLive, :index
-      live "/errors/:id", ErrorDetailLive, :show
-    end
   end
 
   # Authenticated API

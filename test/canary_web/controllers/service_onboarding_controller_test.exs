@@ -2,7 +2,6 @@ defmodule CanaryWeb.ServiceOnboardingControllerTest do
   use CanaryWeb.ConnCase
 
   import Canary.Fixtures
-  import Phoenix.LiveViewTest
 
   alias Canary.Repo
   alias Canary.Schemas.{ApiKey, Target}
@@ -17,7 +16,7 @@ defmodule CanaryWeb.ServiceOnboardingControllerTest do
   end
 
   describe "POST /api/v1/service-onboarding" do
-    test "connects a service and makes it visible in report and dashboard", %{
+    test "connects a service and makes it visible via the query API", %{
       conn: conn,
       admin_raw_key: admin_raw_key
     } do
@@ -37,7 +36,7 @@ defmodule CanaryWeb.ServiceOnboardingControllerTest do
       assert body["target"]["name"] == "billing-api"
       assert body["target"]["service"] == "billing-api"
       assert body["target"]["interval_ms"] == 30_000
-      assert body["links"]["dashboard"] =~ "/dashboard"
+      refute Map.has_key?(body["links"], "dashboard")
       assert body["links"]["report"] =~ "/api/v1/report?window=1h"
       assert body["links"]["service_query"] =~ "service=billing-api&window=1h"
 
@@ -74,9 +73,6 @@ defmodule CanaryWeb.ServiceOnboardingControllerTest do
 
       assert Enum.any?(report["targets"], &(&1["service"] == "billing-api"))
       assert Enum.any?(report["error_groups"], &(&1["service"] == "billing-api"))
-
-      {:ok, _view, html} = live(build_conn(), "/dashboard")
-      assert html =~ "billing-api"
     end
 
     test "returns validation errors without creating partial artifacts", %{conn: conn} do

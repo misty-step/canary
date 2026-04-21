@@ -14,8 +14,8 @@ argument-hint: "[url|route|feature|scaffold]"
 
 Canary is an API-first observability substrate for agents. The "browser" here
 is `curl` (or `gh api`) against `https://canary-obs.fly.dev` for live, or
-`http://localhost:4000` after `mix phx.server`. The Phoenix LiveView at
-`/dashboard` is an operator console — secondary surface, not the primary UI.
+`http://localhost:4000` after `mix phx.server`. There is no human dashboard —
+operators read the same API agents do.
 
 QA effectiveness is about proving **the feature works end-to-end against live
 canary**, not about proving `mix test` is green. Those are different claims.
@@ -53,7 +53,6 @@ Coverage thresholds inside strict: core **81%** (see `mix.exs` `test_coverage`),
 | Run QA after an ingest/query change  | Use the [API + Webhook QA Matrix](#api--webhook-qa-matrix)                 |
 | Run QA after a health/state change   | Use the [Health + Monitor QA Matrix](#health--monitor-qa-matrix)           |
 | Run QA after a webhook change        | Use the [Webhook Delivery QA Matrix](#webhook-delivery-qa-matrix)          |
-| Run QA on the `/dashboard` LiveView  | Use the [Dashboard QA](#dashboard-qa-secondary) section — secondary scope  |
 | Verify live owned services           | Run `bin/dogfood-audit --strict` (see `docs/networked-service-dogfooding.md`) |
 
 ## Environment Setup
@@ -179,23 +178,6 @@ Hot modules to correlate: `lib/canary/webhooks/delivery.ex`,
 `lib/canary/alerter/circuit_breaker.ex`, `lib/canary/alerter/cooldown.ex`,
 `lib/canary/alerter/signer.ex`.
 
-## Dashboard QA (secondary)
-
-`/dashboard` is a thin Phoenix LiveView operator console protected by
-`DASHBOARD_PASSWORD` outside dev/test. **Scope is operator-only; do not treat
-it as a primary product surface.** When a LiveView file under
-`lib/canary_web/live/` is touched:
-
-1. Confirm the LiveView tests are green:
-   `mix test test/canary_web/live/ --trace --max-failures 3`.
-2. Start `mix phx.server`, browse `http://localhost:4000/dashboard`, log in
-   with `DASHBOARD_PASSWORD` (or leave unset in dev).
-3. QA for **functional correctness**: data is fresh, actions mutate what they
-   claim to mutate, no console errors. Not design polish — that's `/design-review`.
-4. Sanity-check the underlying API still returns the same `summary` the
-   LiveView renders (the LiveView should be a thin projection, not a parallel
-   implementation).
-
 ## Evidence Capture
 
 Write everything to `/tmp/qa-canary/` (create it first). For every finding,
@@ -206,7 +188,6 @@ keep the paired `curl` request + response so a subagent can reproduce cold.
 | API / router      | Request (method, path, headers with keys redacted, body) + response (status, body, latency)                   |
 | Webhook delivery  | `X-Delivery-Id`, signature header, raw payload, attempt number, delivery ledger row                           |
 | Health / state    | `transition/4` trace from `test/canary/health/state_machine_test.exs` + live `/api/v1/health-status` snapshot |
-| Dashboard         | Console output + network requests from browser devtools; LiveView test output                                 |
 | Dogfood           | Full `bin/dogfood-audit --strict` stdout                                                                      |
 
 Redact `CANARY_*_KEY`, webhook `secret`, and any bootstrap key from anything
@@ -237,8 +218,8 @@ fails:
 | Tier | Blocks ship? | Examples                                                                                 |
 |------|--------------|------------------------------------------------------------------------------------------|
 | P0   | Yes          | Scope bypass (ingest key accepted on read). Missing `summary`. Non-RFC 9457 error body. Webhook signature missing or wrong. Bootstrap key unrecoverable. Dogfood audit --strict exits non-zero on active service. |
-| P1   | Before merge | Summary template regression (wrong pluralization, stale counts). Retry dedupe broken on `X-Delivery-Id`. `/dashboard` renders but underlying API diverges. Coverage drops below 81% (core) / 90% (sdk). |
-| P2   | Log + backlog| Minor summary phrasing, LiveView polish (non-functional), extra target not in manifest.  |
+| P1   | Before merge | Summary template regression (wrong pluralization, stale counts). Retry dedupe broken on `X-Delivery-Id`. Coverage drops below 81% (core) / 90% (sdk). |
+| P2   | Log + backlog| Minor summary phrasing, extra target not in manifest.                                    |
 
 Log P1/P2 to `backlog.d/` with the usual `#NNN` form (see `backlog.d/README.md`).
 

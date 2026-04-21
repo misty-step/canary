@@ -85,7 +85,6 @@ defmodule CanaryWeb.ServiceOnboardingContractTest do
       assert is_binary(body["target"]["created_at"])
 
       assert body["links"] == %{
-               "dashboard" => "#{@base_url}/dashboard",
                "report" => "#{@base_url}/api/v1/report?window=1h",
                "service_query" => "#{@base_url}/api/v1/query?service=billing+api&window=1h"
              }
