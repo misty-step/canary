@@ -14,6 +14,7 @@ defmodule CanaryWeb.OpenAPIControllerTest do
     {"/api/v1/health-status", "get"},
     {"/api/v1/targets/{id}/checks", "get"},
     {"/api/v1/incidents", "get"},
+    {"/api/v1/incidents/{id}", "get"},
     {"/api/v1/incidents/{incident_id}/annotations", "get"},
     {"/api/v1/incidents/{incident_id}/annotations", "post"},
     {"/api/v1/groups/{group_hash}/annotations", "get"},

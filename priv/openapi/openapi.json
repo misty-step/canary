@@ -752,6 +752,49 @@
         }
       }
     },
+    "/api/v1/incidents/{id}": {
+      "get": {
+        "tags": [
+          "Incidents"
+        ],
+        "summary": "Get incident detail with bounded signals, annotations, and timeline",
+        "description": "One-call payload for responder agents: deterministic summary, incident metadata, up to 25 correlated signals, up to 20 newest annotations, and up to 5 most recent timeline events. Truncation is signalled by `signals_truncated` and `annotations_truncated`.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Incident detail.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentDetailResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          }
+        }
+      }
+    },
     "/api/v1/incidents/{incident_id}/annotations": {
       "get": {
         "tags": [
@@ -2662,6 +2705,254 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Incident"
+            }
+          }
+        }
+      },
+      "IncidentDetailIncident": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "service",
+          "state",
+          "severity",
+          "title",
+          "opened_at",
+          "resolved_at",
+          "signal_count"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "investigating",
+              "resolved"
+            ]
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "medium",
+              "high"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "opened_at": {
+            "type": "string"
+          },
+          "resolved_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "signal_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "IncidentDetailSignal": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/IncidentDetailSignalErrorGroup"
+          },
+          {
+            "$ref": "#/components/schemas/IncidentDetailSignalHealthTransition"
+          }
+        ]
+      },
+      "IncidentDetailSignalErrorGroup": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "summary",
+          "group_hash",
+          "error_class",
+          "total_count",
+          "first_seen_at",
+          "last_seen_at",
+          "attached_at",
+          "resolved_at"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "error_group"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          },
+          "group_hash": {
+            "type": "string"
+          },
+          "error_class": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "total_count": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "first_seen_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_seen_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "attached_at": {
+            "type": "string"
+          },
+          "resolved_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "IncidentDetailSignalHealthTransition": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "summary",
+          "current_state",
+          "attached_at",
+          "resolved_at"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "health_transition"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "target_name": {
+            "type": "string"
+          },
+          "monitor_id": {
+            "type": "string"
+          },
+          "monitor_name": {
+            "type": "string"
+          },
+          "current_state": {
+            "type": "string"
+          },
+          "consecutive_failures": {
+            "type": "integer"
+          },
+          "attached_at": {
+            "type": "string"
+          },
+          "resolved_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "IncidentDetailTimelineEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "event",
+          "severity",
+          "summary",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "event": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          }
+        }
+      },
+      "IncidentDetailResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "summary",
+          "incident",
+          "signals",
+          "signals_truncated",
+          "annotations",
+          "annotations_truncated",
+          "recent_timeline_events"
+        ],
+        "properties": {
+          "summary": {
+            "type": "string"
+          },
+          "incident": {
+            "$ref": "#/components/schemas/IncidentDetailIncident"
+          },
+          "signals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IncidentDetailSignal"
+            }
+          },
+          "signals_truncated": {
+            "type": "boolean"
+          },
+          "annotations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Annotation"
+            }
+          },
+          "annotations_truncated": {
+            "type": "boolean"
+          },
+          "recent_timeline_events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IncidentDetailTimelineEvent"
             }
           }
         }

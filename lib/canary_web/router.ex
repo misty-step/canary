@@ -75,6 +75,7 @@ defmodule CanaryWeb.Router do
 
       # Incidents
       get "/incidents", IncidentController, :index
+      get "/incidents/:id", IncidentController, :show
 
       # Annotations
       get "/incidents/:incident_id/annotations", AnnotationController, :index
