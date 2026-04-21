@@ -25,6 +25,9 @@
 | 015 | Product security controls (scoped keys) | low | done | M |
 | 009 | Desktop health semantics research | low | done | M |
 | 021 | Check-in monitors for non-HTTP runtimes | medium | done | M |
+| 022 | Contract hygiene + shallow-module collapse | high | ready | M |
+| 023 | Incident as atomic agent unit (detail API) | high | ready | M |
+| 024 | Signal-agnostic annotations | medium | blocked | M |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
 
@@ -45,15 +48,28 @@
 011 (OpenAPI) — contract for SDK convergence and agent self-discovery
 013 (metrics) — self-observability for dogfooding credibility
 014 (DR) — data durability assurance
+
+022 (contract hygiene) ──── ships independently; restores summary invariant + supervision-tree collapse
+023 (incident detail API) ──→ Canary-side substrate for bb/011 (and thus 010 ramp pattern)
+024 (signal-agnostic annotations) ──→ blocked on 023; completes the Ramp-loop writable-metadata primitive
 ```
 
 ## Execution Lanes
 
 **Lane 1 (agent readiness):** 012 (delivery ledger) → bb/011 (triage sprite) → 010 (ramp)
+  · **023 (incident detail API) → 024 (signal-agnostic annotations)** land the Canary-side substrate bb/011 consumes
 **Lane 2 (contract + observability):** 011 (OpenAPI) + 013 (metrics) — parallel, no deps
-**Lane 3 (structural):** 006 (query split) → 005 (connect-a-service)
+**Lane 3 (structural):** 006 (query split) → 005 (connect-a-service) · **022 (contract hygiene + shallow-module collapse)** — ship first of the active set; unblocks nothing but restores the summary invariant and sheds ~300 LOC of drift
 **Lane 4 (hardening):** 008, 014, 016, 017, 018, 019 (independent, small, can ship anytime)
 **Lane 5 (future):** 020 (Adminifi HTTP surface verification)
+
+### Active order (2026-04-21)
+
+1. **022** — contract hygiene (ship first; cheapest, highest hygiene ROI)
+2. **023** — incident detail endpoint (highest agent-first product impact)
+3. **024** — signal-agnostic annotations (completes the ramp substrate, blocked on 023)
+
+010 stays blocked on bb/011. 020 stays blocked on Adminifi URLs.
 
 ## Migration Notes
 
@@ -62,6 +78,7 @@
 - `.backlog.d/008` (monitor generation spike) superseded by 010-ramp-pattern.
 - Bitterblossom triage sprite tracked at `bitterblossom/backlog.d/011-canary-triage-sprite.md`.
 - 2026-04-02: Added 012–015 from multi-AI architecture audit. Promoted 006, 011 to high.
+- 2026-04-21: Added 022–024 from grooming investigation (three parallel investigators: archaeologist / strategist / scout). Three themes: contract hygiene, incident-as-atomic-agent-unit, signal-agnostic annotations. 022 ready to ship first; 023 + 024 land the Canary-side substrate for the ramp pattern.
 
 ## Status
 
