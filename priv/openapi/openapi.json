@@ -2126,6 +2126,8 @@
           "summary",
           "window",
           "total_errors",
+          "total_error_classes",
+          "truncated",
           "groups"
         ],
         "properties": {
@@ -2137,6 +2139,12 @@
           },
           "total_errors": {
             "type": "integer"
+          },
+          "total_error_classes": {
+            "type": "integer"
+          },
+          "truncated": {
+            "type": "boolean"
           },
           "groups": {
             "type": "array",

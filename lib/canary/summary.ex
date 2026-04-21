@@ -60,16 +60,26 @@ defmodule Canary.Summary do
   end
 
   @spec error_class_aggregate(map()) :: String.t()
-  def error_class_aggregate(%{total: total, window: window, groups: groups}) do
-    class_count = length(groups)
-
+  def error_class_aggregate(%{
+        total: total,
+        class_count: class_count,
+        window: window,
+        groups: groups,
+        truncated: truncated
+      }) do
     base =
       "#{total} errors across #{class_count} #{pluralize(class_count, "error class", "error classes")} in the last #{window}."
 
-    case Enum.sort_by(groups, & &1.total_count, :desc) do
-      [top | _] -> "#{base} Most frequent: #{top.error_class} (#{top.total_count} occurrences)."
-      [] -> base
-    end
+    top_part =
+      case Enum.sort_by(groups, & &1.total_count, :desc) do
+        [top | _] -> " Most frequent: #{top.error_class} (#{top.total_count} occurrences)."
+        [] -> ""
+      end
+
+    truncated_part =
+      if truncated, do: " Response truncated to top #{length(groups)} classes.", else: ""
+
+    base <> top_part <> truncated_part
   end
 
   @spec error_detail(map()) :: String.t()

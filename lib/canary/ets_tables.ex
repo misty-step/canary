@@ -87,33 +87,17 @@ defmodule Canary.EtsTables do
     :ok
   end
 
-  # Sweep races with writers benignly: `foldl` reads a tuple, then the guard
-  # tests `now - ts > ttl_ms`. A concurrent insert of the same key is either
-  # visited and its fresh timestamp rejects the delete, or it lands after the
-  # fold visits that key and survives untouched.
+  # `:ets.select_delete/2` runs entirely inside ERTS — atomic per row and
+  # faster than a `foldl` loop that interleaves reads with `:ets.delete/2`.
+  # The cutoff is snapshotted once; a row written after the snapshot has a
+  # timestamp beyond `cutoff` and survives untouched.
   defp sweep(%{name: name, shape: :ts, ttl_ms: ttl_ms}) do
-    now = System.monotonic_time(:millisecond)
-
-    :ets.foldl(
-      fn {key, ts}, acc ->
-        if now - ts > ttl_ms, do: :ets.delete(name, key)
-        acc
-      end,
-      nil,
-      name
-    )
+    cutoff = System.monotonic_time(:millisecond) - ttl_ms
+    :ets.select_delete(name, [{{:_, :"$1"}, [{:<, :"$1", cutoff}], [true]}])
   end
 
   defp sweep(%{name: name, shape: :rate_window, ttl_ms: ttl_ms}) do
-    now = System.monotonic_time(:millisecond)
-
-    :ets.foldl(
-      fn {key, _count, window_start}, acc ->
-        if now - window_start > ttl_ms, do: :ets.delete(name, key)
-        acc
-      end,
-      nil,
-      name
-    )
+    cutoff = System.monotonic_time(:millisecond) - ttl_ms
+    :ets.select_delete(name, [{{:_, :_, :"$1"}, [{:<, :"$1", cutoff}], [true]}])
   end
 end

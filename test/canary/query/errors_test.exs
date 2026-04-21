@@ -50,6 +50,8 @@ defmodule Canary.Query.ErrorsTest do
       assert is_binary(result.summary)
       assert byte_size(result.summary) > 0
       assert result.total_errors == 10
+      assert result.total_error_classes == 2
+      assert result.truncated == false
       assert result.window == "24h"
       assert length(result.groups) == 2
       assert result.summary =~ "10 errors"
@@ -61,7 +63,28 @@ defmodule Canary.Query.ErrorsTest do
       assert is_binary(result.summary)
       assert byte_size(result.summary) > 0
       assert result.total_errors == 0
+      assert result.total_error_classes == 0
+      assert result.truncated == false
       assert result.groups == []
+    end
+
+    test "total_errors and total_error_classes count every class, not just the top 50" do
+      # 52 unique classes, 3 errors each = 156 total errors
+      for i <- 1..52 do
+        insert_group!(%{
+          error_class: "Err#{String.pad_leading(to_string(i), 3, "0")}",
+          total_count: 3
+        })
+      end
+
+      assert {:ok, result} = Errors.errors_by_class("24h")
+      assert length(result.groups) == 50
+      assert result.total_errors == 156
+      assert result.total_error_classes == 52
+      assert result.truncated == true
+      assert result.summary =~ "156 errors"
+      assert result.summary =~ "52 error classes"
+      assert result.summary =~ "truncated to top 50"
     end
 
     test "returns invalid_window for bad window" do
@@ -93,7 +116,10 @@ defmodule Canary.Query.ErrorsTest do
         {:error_detail, Errors.error_detail(error.id)}
       ]
 
-      for {name, {:ok, result}} <- responses do
+      for {name, response} <- responses do
+        assert {:ok, result} = response,
+               "expected #{name} to return {:ok, _}, got: #{inspect(response)}"
+
         assert is_map(result), "expected #{name} to return a map"
 
         assert is_binary(result[:summary]),

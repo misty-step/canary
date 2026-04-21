@@ -1,6 +1,6 @@
 # Canary Backlog
 
-`backlog.d/` is the source of truth for active backlog work as of 2026-04-09.
+`backlog.d/` is the source of truth for active backlog work as of 2026-04-21.
 
 ## Priority Order
 

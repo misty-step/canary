@@ -107,13 +107,16 @@ defmodule Canary.Query.Errors do
         )
         |> Canary.Repos.read_repo().all()
 
-      total = Enum.reduce(groups, 0, &((&1.total_count || 0) + &2))
+      {total, class_count} = aggregate_by_class(cutoff)
+      truncated = class_count > length(groups)
 
       summary =
         Canary.Summary.error_class_aggregate(%{
           total: total,
+          class_count: class_count,
           window: window,
-          groups: groups
+          groups: groups,
+          truncated: truncated
         })
 
       {:ok,
@@ -121,8 +124,27 @@ defmodule Canary.Query.Errors do
          summary: summary,
          window: window,
          total_errors: total,
+         total_error_classes: class_count,
+         truncated: truncated,
          groups: groups
        }}
+    end
+  end
+
+  defp aggregate_by_class(cutoff) do
+    result =
+      from(g in ErrorGroup,
+        where: g.last_seen_at >= ^cutoff,
+        select: %{
+          total: coalesce(sum(g.total_count), 0),
+          class_count: count(g.error_class, :distinct)
+        }
+      )
+      |> Canary.Repos.read_repo().one()
+
+    case result do
+      %{total: total, class_count: class_count} -> {total || 0, class_count || 0}
+      _ -> {0, 0}
     end
   end
 

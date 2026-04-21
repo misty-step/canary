@@ -31,7 +31,7 @@ need to look at current state use the query API directly (`GET
 /api/v1/status`, `GET /api/v1/report`, `GET /api/v1/query`, `GET
 /api/v1/errors/{id}`) or drop into the remote console with `flyctl ssh
 console --app canary-obs -C "bin/canary remote"`. See
-[`docs/operator-dashboard-removal.md`](/Users/phaedrus/Development/canary/docs/operator-dashboard-removal.md)
+[`docs/operator-dashboard-removal.md`](docs/operator-dashboard-removal.md)
 for the decision record.
 
 ## Development

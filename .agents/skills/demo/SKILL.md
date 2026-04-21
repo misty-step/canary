@@ -219,9 +219,6 @@ description:
   `lib/canary/webhooks/delivery.ex` or any event payload builder, capture
   the before/after payload of the relevant event via
   `POST /api/v1/webhooks/:id/test` and the live event.
-- **Dashboard screenshots.** If the change touches
-  `lib/canary_web/live/*`, include before + after screenshots of the
-  affected LiveView.
 - **SDK transcript.** If the change touches `canary_sdk/` or
   `clients/typescript/`, include the integration run transcript with the
   resulting `201` payload.
@@ -257,9 +254,9 @@ See the upstream `references/pr-evidence-upload.md` for the full protocol.
 Each phase is a separate subagent. The critic inspects artifacts cold
 (no capture context) to prevent self-grading.
 
-1. **Plan.** Identify which of Modes 1/2/3 apply. Build a shot list tied to
-   specific endpoint paths, LiveView routes, or SDK call sites. Pick
-   target environment (live `canary-obs.fly.dev` vs local `mix phx.server`).
+1. **Plan.** Identify which of Modes 1/2 apply. Build a shot list tied to
+   specific endpoint paths or SDK call sites. Pick target environment
+   (live `canary-obs.fly.dev` vs local `mix phx.server`).
 2. **Capture.** Execute the plan. Every "after" has a paired "before."
    Redact on the way out, not as a post-processing step.
 3. **Critique.** Fresh subagent validates: correct mode for the change,
