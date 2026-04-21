@@ -16,10 +16,34 @@ defmodule Canary.EtsTables do
   use GenServer
 
   @tables [
-    %{name: :canary_cooldowns, sweep_ms: 300_000, ttl_ms: 300_000, shape: :ts},
-    %{name: :canary_circuit_breakers, sweep_ms: nil, ttl_ms: nil, shape: :never_sweep},
-    %{name: :canary_dedup_cache, sweep_ms: 60_000, ttl_ms: 60_000, shape: :ts},
-    %{name: :canary_rate_limits, sweep_ms: 60_000, ttl_ms: 120_000, shape: :rate_window}
+    %{
+      name: :canary_cooldowns,
+      sweep_ms: 300_000,
+      ttl_ms: 300_000,
+      shape: :ts,
+      write_concurrency: false
+    },
+    %{
+      name: :canary_circuit_breakers,
+      sweep_ms: nil,
+      ttl_ms: nil,
+      shape: :never_sweep,
+      write_concurrency: false
+    },
+    %{
+      name: :canary_dedup_cache,
+      sweep_ms: 60_000,
+      ttl_ms: 60_000,
+      shape: :ts,
+      write_concurrency: true
+    },
+    %{
+      name: :canary_rate_limits,
+      sweep_ms: 60_000,
+      ttl_ms: 120_000,
+      shape: :rate_window,
+      write_concurrency: true
+    }
   ]
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -50,30 +74,10 @@ defmodule Canary.EtsTables do
     end
   end
 
-  defp ensure_table(%{name: name, shape: :rate_window}) do
-    :ets.new(name, [
-      :named_table,
-      :public,
-      :set,
-      read_concurrency: true,
-      write_concurrency: true
-    ])
-  end
-
-  defp ensure_table(%{name: name, shape: :ts}) do
+  defp ensure_table(%{name: name, write_concurrency: write_concurrency}) do
     opts = [:named_table, :public, :set, read_concurrency: true]
-
-    opts =
-      case name do
-        :canary_dedup_cache -> [{:write_concurrency, true} | opts]
-        _ -> opts
-      end
-
+    opts = if write_concurrency, do: [{:write_concurrency, true} | opts], else: opts
     :ets.new(name, opts)
-  end
-
-  defp ensure_table(%{name: name}) do
-    :ets.new(name, [:named_table, :public, :set, read_concurrency: true])
   end
 
   defp schedule_sweep(%{shape: :never_sweep}), do: :ok
@@ -83,6 +87,10 @@ defmodule Canary.EtsTables do
     :ok
   end
 
+  # Sweep races with writers benignly: `foldl` reads a tuple, then the guard
+  # tests `now - ts > ttl_ms`. A concurrent insert of the same key is either
+  # visited and its fresh timestamp rejects the delete, or it lands after the
+  # fold visits that key and survives untouched.
   defp sweep(%{name: name, shape: :ts, ttl_ms: ttl_ms}) do
     now = System.monotonic_time(:millisecond)
 
