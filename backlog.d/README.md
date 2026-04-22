@@ -29,6 +29,10 @@
 | 023 | Incident as atomic agent unit (detail API) | high | done | M |
 | 024 | Signal-agnostic annotations | medium | ready | M |
 | 025 | Audit test helpers for Ecto PK cast-drop | low | ready | S |
+| 026 | Credo check: EctoPKViaCast | high | ready | S |
+| 027 | Credo check: PreloadThenTake | high | ready | S |
+| 028 | OpenAPI ↔ Ecto type-parity Dagger lane | medium | ready | M |
+| 029 | Code-review pattern catalog + reviewer wiring | medium | ready | S |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
 
@@ -64,11 +68,18 @@
 **Lane 4 (hardening):** 008, 014, 016, 017, 018, 019 (independent, small, can ship anytime)
 **Lane 5 (future):** 020 (Adminifi HTTP surface verification)
 
-### Active order (2026-04-21)
+### Active order (2026-04-22)
 
 1. **024** — signal-agnostic annotations (completes the ramp substrate, newly unblocked by 023)
+2. **026** — Credo check: EctoPKViaCast (prevent CLAUDE.md footgun #1 structurally)
+3. **027** — Credo check: PreloadThenTake (prevent bounded-payload antipattern)
+4. **029** — Code-review pattern catalog + reviewer wiring (ships independently, pure docs)
+5. **028** — OpenAPI ↔ Ecto type-parity Dagger lane (larger scope; ship after 026/027)
 
-022 + 023 landed on 2026-04-21. 010 stays blocked on bb/011. 020 stays blocked on Adminifi URLs.
+022 + 023 landed on 2026-04-21. 026-029 captured 2026-04-22 from /reflect
+prevent-coderabbit-patterns — codify CodeRabbit's recurring finds at the
+highest-leverage target in the Continuous Learning hierarchy. 010 stays
+blocked on bb/011. 020 stays blocked on Adminifi URLs.
 
 ## Migration Notes
 
@@ -78,6 +89,7 @@
 - Bitterblossom triage sprite tracked at `bitterblossom/backlog.d/011-canary-triage-sprite.md`.
 - 2026-04-02: Added 012–015 from multi-AI architecture audit. Promoted 006, 011 to high.
 - 2026-04-21: Added 022–024 from grooming investigation (three parallel investigators: archaeologist / strategist / scout). Three themes: contract hygiene, incident-as-atomic-agent-unit, signal-agnostic annotations. 022 ready to ship first; 023 + 024 land the Canary-side substrate for the ramp pattern.
+- 2026-04-22: Added 026–029 from `/reflect prevent-coderabbit-patterns` after shipping 022 + 023. Four structural prevention items for the classes of issue CodeRabbit surfaced: two Credo checks (PK-via-cast, preload-then-take), one Dagger lane (OpenAPI ↔ Ecto type parity), and one reviewer-wiring docs pass (canary-patterns.md catalog). Companion cross-repo convention in spellbook `#048` + `#049`.
 
 ## Status
 
