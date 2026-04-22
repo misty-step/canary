@@ -27,7 +27,7 @@
 | 021 | Check-in monitors for non-HTTP runtimes | medium | done | M |
 | 022 | Contract hygiene + shallow-module collapse | high | done | M |
 | 023 | Incident as atomic agent unit (detail API) | high | done | M |
-| 024 | Signal-agnostic annotations | medium | ready | M |
+| 024 | Signal-agnostic annotations | medium | done | M |
 | 025 | Audit test helpers for Ecto PK cast-drop | low | ready | S |
 | 026 | Credo check: EctoPKViaCast | high | ready | S |
 | 027 | Credo check: PreloadThenTake | high | ready | S |
@@ -70,16 +70,17 @@
 
 ### Active order (2026-04-22)
 
-1. **024** — signal-agnostic annotations (completes the ramp substrate, newly unblocked by 023)
-2. **026** — Credo check: EctoPKViaCast (prevent CLAUDE.md footgun #1 structurally)
-3. **027** — Credo check: PreloadThenTake (prevent bounded-payload antipattern)
-4. **029** — Code-review pattern catalog + reviewer wiring (ships independently, pure docs)
-5. **028** — OpenAPI ↔ Ecto type-parity Dagger lane (larger scope; ship after 026/027)
+1. **026** — Credo check: EctoPKViaCast (prevent CLAUDE.md footgun #1 structurally)
+2. **027** — Credo check: PreloadThenTake (prevent bounded-payload antipattern)
+3. **029** — Code-review pattern catalog + reviewer wiring (ships independently, pure docs)
+4. **028** — OpenAPI ↔ Ecto type-parity Dagger lane (larger scope; ship after 026/027)
 
-022 + 023 landed on 2026-04-21. 026-029 captured 2026-04-22 from /reflect
-prevent-coderabbit-patterns — codify CodeRabbit's recurring finds at the
-highest-leverage target in the Continuous Learning hierarchy. 010 stays
-blocked on bb/011. 020 stays blocked on Adminifi URLs.
+022 + 023 landed on 2026-04-21. 024 landed on 2026-04-22 — Ramp
+substrate now complete; bb/011 unblocks the north star. 026-029
+captured 2026-04-22 from /reflect prevent-coderabbit-patterns — codify
+CodeRabbit's recurring finds at the highest-leverage target in the
+Continuous Learning hierarchy. 010 stays blocked on bb/011. 020 stays
+blocked on Adminifi URLs.
 
 ## Migration Notes
 

@@ -5,6 +5,7 @@ defmodule Canary.Webhooks.EventTypes do
     health_check.degraded health_check.down health_check.recovered
     health_check.tls_expiring error.new_class error.regression
     incident.opened incident.updated incident.resolved
+    annotation.added
   )
 
   @diagnostic ~w(canary.ping)

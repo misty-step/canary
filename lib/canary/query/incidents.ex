@@ -233,7 +233,9 @@ defmodule Canary.Query.Incidents do
         signals_truncated = total_signal_count > length(signals)
 
         signal_context = load_signal_context(repo, signals)
-        formatted_signals = Enum.map(signals, &format_signal(&1, signal_context))
+        annotation_counts = load_signal_annotation_counts(signals)
+        context_with_counts = Map.put(signal_context, :annotation_counts, annotation_counts)
+        formatted_signals = Enum.map(signals, &format_signal(&1, context_with_counts))
 
         {annotations, annotations_truncated} = load_annotations(repo, incident_id)
         recent_timeline_events = load_recent_timeline_events(repo, incident_id)
@@ -290,6 +292,31 @@ defmodule Canary.Query.Incidents do
     }
   end
 
+  defp load_signal_annotation_counts([]), do: %{}
+
+  defp load_signal_annotation_counts(signals) do
+    signals
+    |> Enum.map(&signal_subject_key/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> Canary.Annotations.count_by_subject()
+  end
+
+  defp signal_subject_key(%IncidentSignal{signal_type: "error_group", signal_ref: ref})
+       when is_binary(ref),
+       do: {"error_group", ref}
+
+  defp signal_subject_key(%IncidentSignal{signal_type: "health_transition", signal_ref: ref})
+       when is_binary(ref) do
+    cond do
+      String.starts_with?(ref, "TGT-") -> {"target", ref}
+      String.starts_with?(ref, "MON-") -> {"monitor", ref}
+      true -> nil
+    end
+  end
+
+  defp signal_subject_key(_), do: nil
+
   defp load_signal_context(_repo, []),
     do: %{error_groups: %{}, target_states: %{}, targets: %{}, monitor_states: %{}, monitors: %{}}
 
@@ -324,7 +351,7 @@ defmodule Canary.Query.Incidents do
 
   defp format_signal(
          %IncidentSignal{signal_type: "error_group"} = signal,
-         %{error_groups: groups}
+         %{error_groups: groups} = context
        ) do
     group = Map.get(groups, signal.signal_ref)
 
@@ -332,7 +359,8 @@ defmodule Canary.Query.Incidents do
       type: "error_group",
       group_hash: signal.signal_ref,
       attached_at: signal.attached_at,
-      resolved_at: signal.resolved_at
+      resolved_at: signal.resolved_at,
+      annotation_count: annotation_count(signal, context)
     }
 
     case group do
@@ -372,22 +400,33 @@ defmodule Canary.Query.Incidents do
           summary: "Health transition on #{ref} (detail unavailable).",
           signal_ref: ref,
           attached_at: signal.attached_at,
-          resolved_at: signal.resolved_at
+          resolved_at: signal.resolved_at,
+          annotation_count: 0
         }
     end
   end
 
-  defp format_signal(%IncidentSignal{} = signal, _context) do
+  defp format_signal(%IncidentSignal{} = signal, context) do
     %{
       type: signal.signal_type,
       summary: "Signal of type #{signal.signal_type} on #{signal.signal_ref}.",
       signal_ref: signal.signal_ref,
       attached_at: signal.attached_at,
-      resolved_at: signal.resolved_at
+      resolved_at: signal.resolved_at,
+      annotation_count: annotation_count(signal, context)
     }
   end
 
-  defp format_target_signal(signal, %{target_states: states, targets: targets}) do
+  defp annotation_count(signal, context) do
+    counts = Map.get(context, :annotation_counts, %{})
+
+    case signal_subject_key(signal) do
+      nil -> 0
+      key -> Map.get(counts, key, 0)
+    end
+  end
+
+  defp format_target_signal(signal, %{target_states: states, targets: targets} = context) do
     state = Map.get(states, signal.signal_ref)
     target = Map.get(targets, signal.signal_ref)
 
@@ -412,11 +451,12 @@ defmodule Canary.Query.Incidents do
       current_state: state_label,
       consecutive_failures: consecutive_failures,
       attached_at: signal.attached_at,
-      resolved_at: signal.resolved_at
+      resolved_at: signal.resolved_at,
+      annotation_count: annotation_count(signal, context)
     }
   end
 
-  defp format_monitor_signal(signal, %{monitor_states: states, monitors: monitors}) do
+  defp format_monitor_signal(signal, %{monitor_states: states, monitors: monitors} = context) do
     state = Map.get(states, signal.signal_ref)
     monitor = Map.get(monitors, signal.signal_ref)
 
@@ -436,7 +476,8 @@ defmodule Canary.Query.Incidents do
       monitor_name: name,
       current_state: state_label,
       attached_at: signal.attached_at,
-      resolved_at: signal.resolved_at
+      resolved_at: signal.resolved_at,
+      annotation_count: annotation_count(signal, context)
     }
   end
 

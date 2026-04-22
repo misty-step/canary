@@ -132,6 +132,25 @@ defmodule Canary.Summary do
     "#{state_label}. #{incident.severity}-severity incident opened at #{incident.opened_at} on service #{incident.service}. #{signal_part}#{annotation_part}"
   end
 
+  @spec annotations_page(map()) :: String.t()
+  def annotations_page(%{
+        subject_type: subject_type,
+        subject_id: subject_id,
+        total_count: total_count,
+        latest: latest
+      }) do
+    label = "#{total_count} #{pluralize(total_count, "annotation", "annotations")}"
+    subject = "#{subject_type} #{truncate_subject_id(subject_id)}"
+
+    case latest do
+      nil ->
+        "#{label} on #{subject}."
+
+      %{agent: agent, created_at: created_at} ->
+        "#{label} on #{subject}; latest from #{agent} at #{created_at}."
+    end
+  end
+
   @spec error_detail(map()) :: String.t()
   def error_detail(%{
         error_class: error_class,
@@ -142,6 +161,12 @@ defmodule Canary.Summary do
       }) do
     "#{error_class} in #{service}. Seen #{count} times since #{first_seen}. Last occurrence: #{last_seen}."
   end
+
+  defp truncate_subject_id(id) when is_binary(id) and byte_size(id) > 16 do
+    String.slice(id, 0, 12) <> "…"
+  end
+
+  defp truncate_subject_id(id), do: id
 
   # --- Helpers ---
 

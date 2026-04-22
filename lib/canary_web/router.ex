@@ -78,12 +78,14 @@ defmodule CanaryWeb.Router do
       get "/incidents/:id", IncidentController, :show
 
       # Annotations
+      get "/annotations", AnnotationController, :unified_index
       get "/incidents/:incident_id/annotations", AnnotationController, :index
       get "/groups/:group_hash/annotations", AnnotationController, :group_index
     end
 
     scope "/" do
       pipe_through [:scope_admin, :query_rate_limit]
+      post "/annotations", AnnotationController, :unified_create
       post "/incidents/:incident_id/annotations", AnnotationController, :create
       post "/groups/:group_hash/annotations", AnnotationController, :group_create
     end

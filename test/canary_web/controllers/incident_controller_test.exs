@@ -157,6 +157,70 @@ defmodule CanaryWeb.IncidentControllerTest do
       assert err["group_hash"] == error_group.group_hash
       assert err["error_class"] == "DetailError"
       assert err["total_count"] == 4
+
+      # Per-signal annotation_count is 0 when no annotations target the signal's
+      # underlying error_group / target / monitor subject (only an incident
+      # annotation exists in this setup).
+      assert err["annotation_count"] == 0
+      assert health["annotation_count"] == 0
+    end
+
+    test "surfaces annotation_count per signal from the underlying subject (error_group, target, monitor)",
+         %{conn: conn} do
+      create_target_with_state("ramp-api", "down")
+      create_monitor_with_state("ramp-cron", "down")
+      error_group = create_error_group("ramp-api", "RampError", 2)
+
+      incident = create_incident("ramp-api")
+      now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+      Canary.Repo.insert!(%Canary.Schemas.IncidentSignal{
+        incident_id: incident.id,
+        signal_type: "error_group",
+        signal_ref: error_group.group_hash,
+        attached_at: now
+      })
+
+      Canary.Repo.insert!(%Canary.Schemas.IncidentSignal{
+        incident_id: incident.id,
+        signal_type: "health_transition",
+        signal_ref: "TGT-ramp-api",
+        attached_at: now
+      })
+
+      Canary.Repo.insert!(%Canary.Schemas.IncidentSignal{
+        incident_id: incident.id,
+        signal_type: "health_transition",
+        signal_ref: "MON-ramp-cron",
+        attached_at: now
+      })
+
+      # 3 annotations on the error_group, 1 on the target, 0 on the monitor.
+      for agent <- ["a", "b", "c"] do
+        create_annotation(:group, error_group.group_hash, agent: agent)
+      end
+
+      create_annotation(:target, "TGT-ramp-api", agent: "ops-bot")
+
+      conn = get(conn, "/api/v1/incidents/#{incident.id}")
+      body = json_response(conn, 200)
+
+      by_ref =
+        body["signals"]
+        |> Enum.group_by(fn
+          %{"type" => "error_group", "group_hash" => h} -> {"error_group", h}
+          %{"type" => "health_transition", "target_id" => t} when is_binary(t) -> {"target", t}
+          %{"type" => "health_transition", "monitor_id" => m} when is_binary(m) -> {"monitor", m}
+          sig -> {:unknown, sig}
+        end)
+
+      [err] = by_ref[{"error_group", error_group.group_hash}]
+      [tgt] = by_ref[{"target", "TGT-ramp-api"}]
+      [mon] = by_ref[{"monitor", "MON-ramp-cron"}]
+
+      assert err["annotation_count"] == 3
+      assert tgt["annotation_count"] == 1
+      assert mon["annotation_count"] == 0
     end
 
     test "returns 404 for unknown incident", %{conn: conn} do
@@ -210,6 +274,8 @@ defmodule CanaryWeb.IncidentControllerTest do
 
         %Canary.Schemas.Annotation{id: annotation_id}
         |> Canary.Schemas.Annotation.changeset(%{
+          subject_type: "incident",
+          subject_id: incident.id,
           incident_id: incident.id,
           agent: "test-agent",
           action: "note-#{i}",
