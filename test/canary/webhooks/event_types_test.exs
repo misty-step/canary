@@ -7,6 +7,7 @@ defmodule Canary.Webhooks.EventTypesTest do
     health_check.degraded health_check.down health_check.recovered
     health_check.tls_expiring error.new_class error.regression
     incident.opened incident.updated incident.resolved
+    annotation.added
   )
 
   describe "all/0" do
@@ -22,7 +23,7 @@ defmodule Canary.Webhooks.EventTypesTest do
   end
 
   describe "business/0" do
-    test "returns exactly the 9 business events" do
+    test "returns exactly the 10 business events" do
       assert Enum.sort(EventTypes.business()) == Enum.sort(@business_events)
     end
 

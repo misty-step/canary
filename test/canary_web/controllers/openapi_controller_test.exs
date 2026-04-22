@@ -18,7 +18,9 @@ defmodule CanaryWeb.OpenAPIControllerTest do
     {"/api/v1/incidents/{incident_id}/annotations", "get"},
     {"/api/v1/incidents/{incident_id}/annotations", "post"},
     {"/api/v1/groups/{group_hash}/annotations", "get"},
-    {"/api/v1/groups/{group_hash}/annotations", "post"}
+    {"/api/v1/groups/{group_hash}/annotations", "post"},
+    {"/api/v1/annotations", "get"},
+    {"/api/v1/annotations", "post"}
   ]
 
   test "serves the public OpenAPI contract and matches router operations", %{conn: conn} do

@@ -18,8 +18,10 @@ defmodule Canary.Annotations do
   @spec create(map()) :: {:ok, Annotation.t()} | {:error, term()}
   def create(attrs) when is_map(attrs) do
     with {:ok, {subject_type, subject_id}} <- parse_subject(attrs),
-         :ok <- subject_exists(subject_type, subject_id) do
-      build_and_insert(subject_type, subject_id, attrs)
+         :ok <- subject_exists(subject_type, subject_id),
+         {:ok, annotation} <- build_and_insert(subject_type, subject_id, attrs) do
+      enqueue_webhook(annotation)
+      {:ok, annotation}
     end
   end
 
@@ -152,6 +154,16 @@ defmodule Canary.Annotations do
   defp legacy_keys("incident", id), do: %{incident_id: id}
   defp legacy_keys("error_group", hash), do: %{group_hash: hash}
   defp legacy_keys(_, _), do: %{}
+
+  defp enqueue_webhook(%Annotation{} = annotation) do
+    payload = %{
+      "event" => "annotation.added",
+      "annotation" => format(annotation),
+      "timestamp" => annotation.created_at
+    }
+
+    Canary.Workers.WebhookDelivery.enqueue_for_event("annotation.added", payload)
+  end
 
   defp order_by(:asc), do: [asc: :created_at, asc: :id]
   defp order_by(:desc), do: [desc: :created_at, desc: :id]

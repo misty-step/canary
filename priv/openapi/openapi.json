@@ -986,6 +986,110 @@
         }
       }
     },
+    "/api/v1/annotations": {
+      "get": {
+        "tags": [
+          "Annotations"
+        ],
+        "summary": "List annotations for any signal subject",
+        "description": "Returns annotations attached to the specified subject. Supports subject_type: incident, error_group, target, monitor. Responders use this to read prior coordination signal on the underlying subject (e.g. has anyone already filed a PR for this error_group?).",
+        "parameters": [
+          {
+            "name": "subject_type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "incident",
+                "error_group",
+                "target",
+                "monitor"
+              ]
+            }
+          },
+          {
+            "name": "subject_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Annotations on the subject.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnotationsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Annotations"
+        ],
+        "summary": "Create an annotation on any signal subject",
+        "description": "Responders stamp opaque metadata (PR links, ack tokens, fix references) onto an incident, error_group, target, or monitor. Canary owns the surface; consumers own the content. Fires an annotation.added webhook with signed HMAC + X-Delivery-Id ledger entry.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnnotationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Annotation created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Annotation"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          }
+        }
+      }
+    },
     "/api/v1/service-onboarding": {
       "post": {
         "tags": [
@@ -2966,6 +3070,8 @@
         "additionalProperties": false,
         "required": [
           "id",
+          "subject_type",
+          "subject_id",
           "incident_id",
           "group_hash",
           "agent",
@@ -2977,17 +3083,31 @@
           "id": {
             "type": "string"
           },
+          "subject_type": {
+            "type": "string",
+            "enum": [
+              "incident",
+              "error_group",
+              "target",
+              "monitor"
+            ]
+          },
+          "subject_id": {
+            "type": "string"
+          },
           "incident_id": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Populated for subject_type=incident. Legacy compatibility field."
           },
           "group_hash": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Populated for subject_type=error_group. Legacy compatibility field."
           },
           "agent": {
             "type": "string"
@@ -3011,6 +3131,39 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "AnnotationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "subject_type",
+          "subject_id",
+          "agent",
+          "action"
+        ],
+        "properties": {
+          "subject_type": {
+            "type": "string",
+            "enum": [
+              "incident",
+              "error_group",
+              "target",
+              "monitor"
+            ]
+          },
+          "subject_id": {
+            "type": "string"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/JsonObject"
           }
         }
       },

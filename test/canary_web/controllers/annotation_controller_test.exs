@@ -169,6 +169,192 @@ defmodule CanaryWeb.AnnotationControllerTest do
     end
   end
 
+  describe "POST /api/v1/annotations (unified)" do
+    test "creates annotation on target subject and returns 201", %{conn: conn} do
+      create_target_with_state("api", "up")
+
+      conn =
+        post(conn, "/api/v1/annotations", %{
+          "subject_type" => "target",
+          "subject_id" => "TGT-api",
+          "agent" => "triage-bot",
+          "action" => "paged",
+          "metadata" => %{"ticket" => "OPS-1"}
+        })
+
+      body = json_response(conn, 201)
+      assert body["subject_type"] == "target"
+      assert body["subject_id"] == "TGT-api"
+      assert body["agent"] == "triage-bot"
+      assert body["metadata"] == %{"ticket" => "OPS-1"}
+    end
+
+    test "creates annotation on monitor subject", %{conn: conn} do
+      create_monitor_with_state("cron", "alive")
+
+      conn =
+        post(conn, "/api/v1/annotations", %{
+          "subject_type" => "monitor",
+          "subject_id" => "MON-cron",
+          "agent" => "ops-bot",
+          "action" => "silenced"
+        })
+
+      body = json_response(conn, 201)
+      assert body["subject_type"] == "monitor"
+      assert body["subject_id"] == "MON-cron"
+    end
+
+    test "creates annotation on error_group subject", %{conn: conn} do
+      group = create_error_group("svc", "RuntimeError", 3)
+
+      conn =
+        post(conn, "/api/v1/annotations", %{
+          "subject_type" => "error_group",
+          "subject_id" => group.group_hash,
+          "agent" => "fix-bot",
+          "action" => "linked",
+          "metadata" => %{"pr" => "https://github.com/org/repo/pull/42"}
+        })
+
+      body = json_response(conn, 201)
+      assert body["subject_type"] == "error_group"
+      assert body["subject_id"] == group.group_hash
+      assert body["group_hash"] == group.group_hash
+    end
+
+    test "returns 404 when subject does not exist", %{conn: conn} do
+      conn =
+        post(conn, "/api/v1/annotations", %{
+          "subject_type" => "target",
+          "subject_id" => "TGT-nope",
+          "agent" => "bot",
+          "action" => "ack"
+        })
+
+      body = json_response(conn, 404)
+      assert body["code"] == "not_found"
+    end
+
+    test "returns 422 for unknown subject_type", %{conn: conn} do
+      conn =
+        post(conn, "/api/v1/annotations", %{
+          "subject_type" => "spaceship",
+          "subject_id" => "X-1",
+          "agent" => "bot",
+          "action" => "ack"
+        })
+
+      body = json_response(conn, 422)
+      assert body["code"] == "validation_error"
+      assert body["errors"]["subject_type"] != nil
+    end
+
+    test "returns 422 when subject_type missing", %{conn: conn} do
+      conn =
+        post(conn, "/api/v1/annotations", %{
+          "subject_id" => "X-1",
+          "agent" => "bot",
+          "action" => "ack"
+        })
+
+      body = json_response(conn, 422)
+      assert body["errors"]["subject_type"] == ["is required"]
+    end
+
+    test "returns 422 when subject_id missing", %{conn: conn} do
+      conn =
+        post(conn, "/api/v1/annotations", %{
+          "subject_type" => "incident",
+          "agent" => "bot",
+          "action" => "ack"
+        })
+
+      body = json_response(conn, 422)
+      assert body["errors"]["subject_id"] == ["is required"]
+    end
+
+    test "returns 422 when agent missing", %{conn: conn} do
+      create_target_with_state("api", "up")
+
+      conn =
+        post(conn, "/api/v1/annotations", %{
+          "subject_type" => "target",
+          "subject_id" => "TGT-api",
+          "action" => "ack"
+        })
+
+      body = json_response(conn, 422)
+      assert body["errors"]["agent"] == ["is required"]
+    end
+  end
+
+  describe "GET /api/v1/annotations (unified)" do
+    test "lists annotations for a target subject", %{conn: conn} do
+      create_target_with_state("api", "up")
+
+      post(conn, "/api/v1/annotations", %{
+        "subject_type" => "target",
+        "subject_id" => "TGT-api",
+        "agent" => "alpha",
+        "action" => "paged"
+      })
+
+      post(conn, "/api/v1/annotations", %{
+        "subject_type" => "target",
+        "subject_id" => "TGT-api",
+        "agent" => "beta",
+        "action" => "silenced"
+      })
+
+      conn = get(conn, "/api/v1/annotations?subject_type=target&subject_id=TGT-api")
+      body = json_response(conn, 200)
+      assert length(body["annotations"]) == 2
+      agents = Enum.map(body["annotations"], & &1["agent"])
+      assert "alpha" in agents and "beta" in agents
+    end
+
+    test "returns 404 for nonexistent subject", %{conn: conn} do
+      conn = get(conn, "/api/v1/annotations?subject_type=target&subject_id=TGT-nope")
+      body = json_response(conn, 404)
+      assert body["code"] == "not_found"
+    end
+
+    test "returns 422 for unknown subject_type", %{conn: conn} do
+      conn = get(conn, "/api/v1/annotations?subject_type=spaceship&subject_id=X-1")
+      body = json_response(conn, 422)
+      assert body["code"] == "validation_error"
+    end
+  end
+
+  describe "scope enforcement for unified endpoints" do
+    test "POST /api/v1/annotations requires admin scope", %{conn: _conn} do
+      {raw_read_key, _} = create_api_key("read-only-key", "read-only")
+      conn = build_conn() |> authenticate(raw_read_key)
+
+      conn =
+        post(conn, "/api/v1/annotations", %{
+          "subject_type" => "incident",
+          "subject_id" => "INC-x",
+          "agent" => "bot",
+          "action" => "ack"
+        })
+
+      body = json_response(conn, 403)
+      assert body["code"] == "insufficient_scope"
+    end
+
+    test "GET /api/v1/annotations works with read scope", %{conn: _conn} do
+      create_target_with_state("api", "up")
+      {raw_read_key, _} = create_api_key("read-only-key-2", "read-only")
+      conn = build_conn() |> authenticate(raw_read_key)
+
+      conn = get(conn, "/api/v1/annotations?subject_type=target&subject_id=TGT-api")
+      body = json_response(conn, 200)
+      assert body["annotations"] == []
+    end
+  end
+
   describe "auth" do
     test "returns 401 without auth", %{conn: conn} do
       conn =
