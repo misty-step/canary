@@ -103,25 +103,30 @@ defmodule Canary.Fixtures do
     })
   end
 
-  def create_annotation(target_type, target_id, attrs) when target_type in [:incident, :group] do
+  def create_annotation(target_type, target_id, attrs)
+      when target_type in [:incident, :group, :target, :monitor] do
     id = Canary.ID.annotation_id()
     now = DateTime.utc_now() |> DateTime.to_iso8601()
 
+    {subject_type, legacy} =
+      case target_type do
+        :incident -> {"incident", %{incident_id: target_id}}
+        :group -> {"error_group", %{group_hash: target_id}}
+        :target -> {"target", %{}}
+        :monitor -> {"monitor", %{}}
+      end
+
     base = %{
+      subject_type: subject_type,
+      subject_id: target_id,
       agent: attrs[:agent] || "test-agent",
       action: attrs[:action] || "acknowledged",
       metadata: if(attrs[:metadata], do: Jason.encode!(attrs[:metadata])),
       created_at: now
     }
 
-    target_attrs =
-      case target_type do
-        :incident -> %{incident_id: target_id}
-        :group -> %{group_hash: target_id}
-      end
-
     %Canary.Schemas.Annotation{id: id}
-    |> Canary.Schemas.Annotation.changeset(Map.merge(base, target_attrs))
+    |> Canary.Schemas.Annotation.changeset(Map.merge(base, legacy))
     |> Canary.Repo.insert!()
   end
 end

@@ -210,6 +210,8 @@ defmodule CanaryWeb.IncidentControllerTest do
 
         %Canary.Schemas.Annotation{id: annotation_id}
         |> Canary.Schemas.Annotation.changeset(%{
+          subject_type: "incident",
+          subject_id: incident.id,
           incident_id: incident.id,
           agent: "test-agent",
           action: "note-#{i}",
