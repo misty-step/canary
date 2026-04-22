@@ -290,7 +290,7 @@ defmodule CanaryWeb.AnnotationControllerTest do
   end
 
   describe "GET /api/v1/annotations (unified)" do
-    test "lists annotations for a target subject", %{conn: conn} do
+    test "lists annotations newest-first with summary and cursor envelope", %{conn: conn} do
       create_target_with_state("api", "up")
 
       post(conn, "/api/v1/annotations", %{
@@ -299,6 +299,9 @@ defmodule CanaryWeb.AnnotationControllerTest do
         "agent" => "alpha",
         "action" => "paged"
       })
+
+      # Sleep 1ms to ensure distinct created_at ordering
+      Process.sleep(5)
 
       post(conn, "/api/v1/annotations", %{
         "subject_type" => "target",
@@ -309,9 +312,72 @@ defmodule CanaryWeb.AnnotationControllerTest do
 
       conn = get(conn, "/api/v1/annotations?subject_type=target&subject_id=TGT-api")
       body = json_response(conn, 200)
+
       assert length(body["annotations"]) == 2
-      agents = Enum.map(body["annotations"], & &1["agent"])
-      assert "alpha" in agents and "beta" in agents
+      # Newest-first: beta was posted second
+      assert hd(body["annotations"])["agent"] == "beta"
+      assert is_binary(body["summary"])
+      assert body["summary"] =~ "2 annotations"
+      assert body["summary"] =~ "target"
+      assert body["summary"] =~ "beta"
+      assert body["cursor"] == nil
+    end
+
+    test "paginates with cursor when total exceeds limit", %{conn: conn} do
+      create_target_with_state("api", "up")
+
+      for i <- 1..3 do
+        post(conn, "/api/v1/annotations", %{
+          "subject_type" => "target",
+          "subject_id" => "TGT-api",
+          "agent" => "bot-#{i}",
+          "action" => "ping"
+        })
+
+        Process.sleep(2)
+      end
+
+      conn1 = get(conn, "/api/v1/annotations?subject_type=target&subject_id=TGT-api&limit=2")
+      page1 = json_response(conn1, 200)
+
+      assert length(page1["annotations"]) == 2
+      assert is_binary(page1["cursor"])
+      # Newest-first — bot-3 is newest
+      assert Enum.map(page1["annotations"], & &1["agent"]) == ["bot-3", "bot-2"]
+      # Summary reflects the TOTAL on the subject, not the page size
+      assert page1["summary"] =~ "3 annotations"
+
+      conn2 =
+        get(
+          conn,
+          "/api/v1/annotations?subject_type=target&subject_id=TGT-api&limit=2&cursor=#{page1["cursor"]}"
+        )
+
+      page2 = json_response(conn2, 200)
+      assert length(page2["annotations"]) == 1
+      assert hd(page2["annotations"])["agent"] == "bot-1"
+      assert page2["cursor"] == nil
+    end
+
+    test "clamps limit above 50 and rejects zero", %{conn: conn} do
+      create_target_with_state("api", "up")
+
+      too_big = get(conn, "/api/v1/annotations?subject_type=target&subject_id=TGT-api&limit=51")
+      body = json_response(too_big, 422)
+      assert body["errors"]["limit"] == ["must be an integer between 1 and 50"]
+
+      zero = get(conn, "/api/v1/annotations?subject_type=target&subject_id=TGT-api&limit=0")
+      assert json_response(zero, 422)["code"] == "validation_error"
+    end
+
+    test "returns 422 for malformed cursor", %{conn: conn} do
+      create_target_with_state("api", "up")
+
+      conn =
+        get(conn, "/api/v1/annotations?subject_type=target&subject_id=TGT-api&cursor=not-base64")
+
+      body = json_response(conn, 422)
+      assert body["errors"]["cursor"] == ["is invalid"]
     end
 
     test "returns 404 for nonexistent subject", %{conn: conn} do

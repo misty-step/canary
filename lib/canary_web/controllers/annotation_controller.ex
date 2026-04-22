@@ -4,7 +4,12 @@ defmodule CanaryWeb.AnnotationController do
   alias Canary.Annotations
 
   def create(conn, %{"incident_id" => incident_id} = params) do
-    legacy_create(conn, &Annotations.create_for_incident(incident_id, &1), params, "Incident not found.")
+    legacy_create(
+      conn,
+      &Annotations.create_for_incident(incident_id, &1),
+      params,
+      "Incident not found."
+    )
   end
 
   def index(conn, %{"incident_id" => incident_id}) do
@@ -50,9 +55,15 @@ defmodule CanaryWeb.AnnotationController do
 
   def unified_index(conn, params) do
     with :ok <- require_subject(params) do
-      case Annotations.list(params["subject_type"], params["subject_id"]) do
-        {:ok, annotations} ->
-          json(conn, %{annotations: Enum.map(annotations, &Annotations.format/1)})
+      opts = [limit: params["limit"], cursor: params["cursor"]]
+
+      case Annotations.list_page(params["subject_type"], params["subject_id"], opts) do
+        {:ok, %{summary: summary, annotations: annotations, cursor: cursor}} ->
+          json(conn, %{
+            summary: summary,
+            annotations: Enum.map(annotations, &Annotations.format/1),
+            cursor: cursor
+          })
 
         {:error, :not_found} ->
           problem(conn, 404, "not_found", "Subject not found.")
@@ -60,6 +71,16 @@ defmodule CanaryWeb.AnnotationController do
         {:error, :invalid_subject_type} ->
           problem(conn, 422, "validation_error", "Unknown subject_type.", %{
             errors: %{subject_type: ["must be one of incident, error_group, target, monitor"]}
+          })
+
+        {:error, :invalid_limit} ->
+          problem(conn, 422, "validation_error", "Invalid limit.", %{
+            errors: %{limit: ["must be an integer between 1 and 50"]}
+          })
+
+        {:error, :invalid_cursor} ->
+          problem(conn, 422, "validation_error", "Invalid cursor.", %{
+            errors: %{cursor: ["is invalid"]}
           })
       end
     else
@@ -110,8 +131,7 @@ defmodule CanaryWeb.AnnotationController do
 
       is_nil(id) or id == "" ->
         {:error,
-         {422, "validation_error", "Missing subject.",
-          %{errors: %{subject_id: ["is required"]}}}}
+         {422, "validation_error", "Missing subject.", %{errors: %{subject_id: ["is required"]}}}}
 
       true ->
         :ok

@@ -15,6 +15,9 @@ defmodule Canary.Annotations do
 
   @type subject_type :: String.t()
 
+  @default_page_limit 50
+  @max_page_limit 50
+
   @spec create(map()) :: {:ok, Annotation.t()} | {:error, term()}
   def create(attrs) when is_map(attrs) do
     with {:ok, {subject_type, subject_id}} <- parse_subject(attrs),
@@ -30,7 +33,7 @@ defmodule Canary.Annotations do
   def list(subject_type, subject_id, opts \\ []) do
     with :ok <- validate_subject_type(subject_type),
          :ok <- subject_exists(subject_type, subject_id) do
-      order = Keyword.get(opts, :order, :asc)
+      order = Keyword.get(opts, :order, :desc)
 
       rows =
         from(a in Annotation,
@@ -41,6 +44,54 @@ defmodule Canary.Annotations do
 
       {:ok, rows}
     end
+  end
+
+  @spec list_page(subject_type(), String.t(), keyword()) ::
+          {:ok,
+           %{
+             summary: String.t(),
+             annotations: [Annotation.t()],
+             cursor: String.t() | nil
+           }}
+          | {:error, :not_found | :invalid_subject_type | :invalid_limit | :invalid_cursor}
+  def list_page(subject_type, subject_id, opts \\ []) do
+    with :ok <- validate_subject_type(subject_type),
+         :ok <- subject_exists(subject_type, subject_id),
+         {:ok, limit} <- parse_limit(Keyword.get(opts, :limit)),
+         {:ok, cursor} <- decode_cursor(Keyword.get(opts, :cursor)) do
+      repo = Canary.Repos.read_repo()
+
+      rows =
+        from(a in Annotation,
+          where: a.subject_type == ^subject_type and a.subject_id == ^subject_id,
+          order_by: [desc: a.created_at, desc: a.id]
+        )
+        |> maybe_apply_cursor(cursor)
+        |> limit(^(limit + 1))
+        |> repo.all()
+
+      {page, next_cursor} = paginate(rows, limit)
+      total = count_on_subject(subject_type, subject_id)
+
+      summary =
+        Canary.Summary.annotations_page(%{
+          subject_type: subject_type,
+          subject_id: subject_id,
+          total_count: total,
+          latest: latest_for_summary(subject_type, subject_id, page, cursor)
+        })
+
+      {:ok, %{summary: summary, annotations: page, cursor: next_cursor}}
+    end
+  end
+
+  @spec count_on_subject(subject_type(), String.t()) :: non_neg_integer()
+  def count_on_subject(subject_type, subject_id) do
+    from(a in Annotation,
+      where: a.subject_type == ^subject_type and a.subject_id == ^subject_id,
+      select: count(a.id)
+    )
+    |> Canary.Repos.read_repo().one()
   end
 
   @spec create_for_incident(String.t(), map()) :: {:ok, Annotation.t()} | {:error, term()}
@@ -167,6 +218,80 @@ defmodule Canary.Annotations do
 
   defp order_by(:asc), do: [asc: :created_at, asc: :id]
   defp order_by(:desc), do: [desc: :created_at, desc: :id]
+
+  defp parse_limit(nil), do: {:ok, @default_page_limit}
+
+  defp parse_limit(limit) when is_integer(limit) and limit > 0 and limit <= @max_page_limit,
+    do: {:ok, limit}
+
+  defp parse_limit(limit) when is_binary(limit) do
+    case Integer.parse(limit) do
+      {value, ""} when value > 0 and value <= @max_page_limit -> {:ok, value}
+      _ -> {:error, :invalid_limit}
+    end
+  end
+
+  defp parse_limit(_), do: {:error, :invalid_limit}
+
+  defp decode_cursor(nil), do: {:ok, nil}
+  defp decode_cursor(""), do: {:ok, nil}
+
+  defp decode_cursor(cursor) when is_binary(cursor) do
+    with {:ok, decoded} <- Base.url_decode64(cursor, padding: false),
+         {:ok, %{"created_at" => created_at, "id" => id}} <- Jason.decode(decoded),
+         true <- is_binary(created_at) and is_binary(id) do
+      {:ok, %{created_at: created_at, id: id}}
+    else
+      _ -> {:error, :invalid_cursor}
+    end
+  end
+
+  defp decode_cursor(_), do: {:error, :invalid_cursor}
+
+  defp maybe_apply_cursor(query, nil), do: query
+
+  defp maybe_apply_cursor(query, %{created_at: created_at, id: id}) do
+    from(a in query,
+      where:
+        a.created_at < ^created_at or
+          (a.created_at == ^created_at and a.id < ^id)
+    )
+  end
+
+  defp paginate(rows, limit) do
+    {page, rest} = Enum.split(rows, limit)
+
+    next_cursor =
+      case {rest, List.last(page)} do
+        {[], _} -> nil
+        {_, nil} -> nil
+        {_, last} -> encode_cursor(last)
+      end
+
+    {page, next_cursor}
+  end
+
+  defp encode_cursor(%Annotation{} = row) do
+    %{created_at: row.created_at, id: row.id}
+    |> Jason.encode!()
+    |> Base.url_encode64(padding: false)
+  end
+
+  defp latest_for_summary(_subject_type, _subject_id, [first | _], nil) do
+    %{agent: first.agent, created_at: first.created_at}
+  end
+
+  defp latest_for_summary(subject_type, subject_id, _page, _cursor) do
+    case from(a in Annotation,
+           where: a.subject_type == ^subject_type and a.subject_id == ^subject_id,
+           order_by: [desc: a.created_at, desc: a.id],
+           limit: 1
+         )
+         |> Canary.Repos.read_repo().one() do
+      nil -> nil
+      %Annotation{agent: agent, created_at: created_at} -> %{agent: agent, created_at: created_at}
+    end
+  end
 
   defp decode_metadata(nil), do: nil
 
