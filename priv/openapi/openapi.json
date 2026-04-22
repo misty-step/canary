@@ -2890,7 +2890,8 @@
           "first_seen_at",
           "last_seen_at",
           "attached_at",
-          "resolved_at"
+          "resolved_at",
+          "annotation_count"
         ],
         "properties": {
           "type": {
@@ -2937,6 +2938,10 @@
               "string",
               "null"
             ]
+          },
+          "annotation_count": {
+            "type": "integer",
+            "description": "Count of annotations on this signal's underlying error_group subject. Responders use this to skip re-investigation when prior coordination signal already exists."
           }
         }
       },
@@ -2948,7 +2953,8 @@
           "summary",
           "current_state",
           "attached_at",
-          "resolved_at"
+          "resolved_at",
+          "annotation_count"
         ],
         "properties": {
           "type": {
@@ -2986,6 +2992,10 @@
               "string",
               "null"
             ]
+          },
+          "annotation_count": {
+            "type": "integer",
+            "description": "Count of annotations on this signal's underlying target/monitor subject."
           }
         }
       },
