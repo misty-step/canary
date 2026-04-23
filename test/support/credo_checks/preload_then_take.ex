@@ -1,0 +1,240 @@
+defmodule Canary.Checks.PreloadThenTake do
+  use Credo.Check,
+    category: :warning,
+    base_priority: :high,
+    explanations: [
+      check: """
+      Canary read models must not advertise bounded payloads while loading
+      unbounded has-many preloads and trimming them in memory.
+
+      Push collection caps into SQL with a limited preload query, or split the
+      read model into an explicit count query plus a limited fetch query.
+      """
+    ]
+
+  alias Credo.{IssueMeta, SourceFile}
+  alias Credo.Execution.ExecutionIssues
+
+  @doc false
+  @impl true
+  def run_on_all_source_files(exec, source_files, params) do
+    Enum.each(source_files, fn source_file ->
+      source_file
+      |> issues_for_source_file(params)
+      |> then(&ExecutionIssues.append(exec, &1))
+    end)
+
+    :ok
+  end
+
+  @doc false
+  @impl true
+  def run(%SourceFile{} = _source_file, _params), do: []
+
+  defp issues_for_source_file(%SourceFile{} = source_file, params) do
+    if read_model_path?(source_file.filename) do
+      source_file
+      |> Credo.Code.prewalk(&walk/2, initial_state(source_file, params))
+      |> Map.fetch!(:issues)
+      |> Enum.reverse()
+    else
+      []
+    end
+  end
+
+  defp initial_state(source_file, params) do
+    %{
+      issue_meta: IssueMeta.for(source_file, params),
+      issues: [],
+      reported: MapSet.new()
+    }
+  end
+
+  defp walk({:|>, _, _} = ast, state) do
+    {ast, maybe_report_pipe(ast, state)}
+  end
+
+  defp walk(ast, state), do: {ast, state}
+
+  defp maybe_report_pipe(ast, state) do
+    stages = flatten_pipe(ast)
+
+    with {:ok, truncation} <- truncation_info(List.last(stages)),
+         {:ok, field} <- preloaded_field_for_truncation(stages, truncation),
+         false <- MapSet.member?(state.reported, {field, truncation.line_no}) do
+      state
+      |> add_issue(issue_for(state.issue_meta, field, truncation, truncation.line_no))
+      |> update_in([:reported], &MapSet.put(&1, {field, truncation.line_no}))
+    else
+      _ -> state
+    end
+  end
+
+  defp flatten_pipe({:|>, _, [left, right]}), do: flatten_pipe(left) ++ [right]
+  defp flatten_pipe(ast), do: [ast]
+
+  defp preloaded_field_for_truncation(stages, truncation) do
+    truncation_index = length(stages) - 1
+
+    stages
+    |> Enum.take(truncation_index)
+    |> Enum.with_index()
+    |> Enum.find_value(:error, fn {stage, index} ->
+      stage
+      |> unbounded_preload_fields()
+      |> Enum.find_value(fn field ->
+        if field_referenced_after?(stages, index, field) do
+          {:ok, field}
+        end
+      end)
+    end)
+    |> case do
+      {:ok, field} -> {:ok, field}
+      :error -> {:error, truncation}
+    end
+  end
+
+  defp field_referenced_after?(stages, preload_index, field) do
+    stages
+    |> Enum.drop(preload_index + 1)
+    |> Enum.any?(&references_field?(&1, field))
+  end
+
+  defp unbounded_preload_fields(stage) do
+    stage
+    |> preload_specs()
+    |> Enum.reject(fn {_field, bounded?} -> bounded? end)
+    |> Enum.map(fn {field, _bounded?} -> field end)
+  end
+
+  defp preload_specs({{:., _, [module_ast, :preload]}, _meta, args}) when is_list(args) do
+    if repo_module?(module_ast), do: args |> List.last() |> preload_specs_for_arg(), else: []
+  end
+
+  defp preload_specs({:preload, _meta, args}) when is_list(args) do
+    args |> List.last() |> preload_specs_for_arg()
+  end
+
+  defp preload_specs(_stage), do: []
+
+  defp preload_specs_for_arg(field) when is_atom(field), do: [{field, false}]
+
+  defp preload_specs_for_arg(fields) when is_list(fields) do
+    Enum.flat_map(fields, fn
+      {field, query_ast} when is_atom(field) ->
+        [{field, contains_limit?(query_ast)}]
+
+      field when is_atom(field) ->
+        [{field, false}]
+
+      _ ->
+        []
+    end)
+  end
+
+  defp preload_specs_for_arg(_arg), do: []
+
+  defp truncation_info(nil), do: :error
+
+  defp truncation_info(ast) do
+    {_ast, truncation} =
+      Macro.prewalk(ast, nil, fn
+        node, nil -> {node, truncation_call(node)}
+        node, truncation -> {node, truncation}
+      end)
+
+    case truncation do
+      nil -> :error
+      truncation -> {:ok, truncation}
+    end
+  end
+
+  defp truncation_call({{:., meta, [module_ast, function]}, call_meta, args})
+       when is_list(args) do
+    with {:ok, module} <- truncation_module(module_ast),
+         true <- truncation_function?(module, function, length(args)) do
+      %{
+        call: "#{inspect(module)}.#{function}/#{pipeline_arity(function, length(args))}",
+        line_no: call_meta[:line] || meta[:line] || 1
+      }
+    else
+      _ -> nil
+    end
+  end
+
+  defp truncation_call(_node), do: nil
+
+  defp truncation_module({:__aliases__, _, [:Enum]}), do: {:ok, Enum}
+  defp truncation_module({:__aliases__, _, [:Stream]}), do: {:ok, Stream}
+  defp truncation_module(_module_ast), do: :error
+
+  defp truncation_function?(Enum, :take, arity), do: arity in [1, 2]
+  defp truncation_function?(Enum, :slice, arity), do: arity in [2, 3]
+  defp truncation_function?(Stream, :take, arity), do: arity in [1, 2]
+  defp truncation_function?(_module, _function, _arity), do: false
+
+  defp pipeline_arity(:take, 1), do: 2
+  defp pipeline_arity(:slice, 2), do: 3
+  defp pipeline_arity(_function, arity), do: arity
+
+  defp references_field?(ast, field) do
+    field_name = Atom.to_string(field)
+
+    {_ast, found?} =
+      Macro.prewalk(ast, false, fn node, found? ->
+        {node, found? or node == field or node == field_name}
+      end)
+
+    found?
+  end
+
+  defp contains_limit?(ast) when is_list(ast) do
+    (Keyword.keyword?(ast) and Keyword.has_key?(ast, :limit)) or
+      Enum.any?(ast, &contains_limit?/1)
+  end
+
+  defp contains_limit?({key, _value}) when key == :limit, do: true
+
+  defp contains_limit?(tuple) when is_tuple(tuple) do
+    tuple
+    |> Tuple.to_list()
+    |> Enum.any?(&contains_limit?/1)
+  end
+
+  defp contains_limit?(_ast), do: false
+
+  defp repo_module?({:__aliases__, _, parts}), do: List.last(parts) == :Repo
+
+  defp repo_module?({name, _, context}) when is_atom(name),
+    do: is_atom(context) or is_nil(context)
+
+  defp repo_module?(_module_ast), do: false
+
+  defp read_model_path?(filename) when is_binary(filename) do
+    String.contains?(filename, "/lib/canary/query/") or
+      String.starts_with?(filename, "lib/canary/query/") or
+      Regex.match?(~r{(^|/)lib/canary/.*/query[^/]*\.ex$}, filename)
+  end
+
+  defp read_model_path?(_filename), do: false
+
+  defp issue_for(issue_meta, field, truncation, line_no) do
+    field_name = Atom.to_string(field)
+
+    format_issue(
+      issue_meta,
+      message:
+        "Bounded-payload antipattern at L#{line_no}: preload on `:#{field_name}` followed by " <>
+          "#{truncation.call} loads every row into memory before discarding most. " <>
+          "Push the cap into SQL: either `preload: [#{field_name}: ^from(r in Rel, order_by: ..., limit: ^max)]`, " <>
+          "or split into `count_#{field_name}/1` + `fetch_top_#{field_name}/2`. " <>
+          "See `lib/canary/query/incidents.ex:fetch_top_signals/3` for the reference shape.",
+      trigger: field_name,
+      line_no: line_no
+    )
+  end
+
+  defp add_issue(state, issue) do
+    %{state | issues: [issue | state.issues]}
+  end
+end
