@@ -29,7 +29,7 @@
 | 023 | Incident as atomic agent unit (detail API) | high | done | M |
 | 024 | Signal-agnostic annotations | medium | done | M |
 | 025 | Audit test helpers for Ecto PK cast-drop | low | ready | S |
-| 026 | Credo check: EctoPKViaCast | high | ready | S |
+| 026 | Credo check: EctoPKViaCast | high | done | S |
 | 027 | Credo check: PreloadThenTake | high | ready | S |
 | 028 | OpenAPI ↔ Ecto type-parity Dagger lane | medium | ready | M |
 | 029 | Code-review pattern catalog + reviewer wiring | medium | ready | S |
@@ -68,14 +68,14 @@
 **Lane 4 (hardening):** 008, 014, 016, 017, 018, 019 (independent, small, can ship anytime)
 **Lane 5 (future):** 020 (Adminifi HTTP surface verification)
 
-### Active order (2026-04-22)
+### Active order (2026-04-23)
 
-1. **026** — Credo check: EctoPKViaCast (prevent CLAUDE.md footgun #1 structurally)
-2. **027** — Credo check: PreloadThenTake (prevent bounded-payload antipattern)
-3. **029** — Code-review pattern catalog + reviewer wiring (ships independently, pure docs)
-4. **028** — OpenAPI ↔ Ecto type-parity Dagger lane (larger scope; ship after 026/027)
+1. **027** — Credo check: PreloadThenTake (prevent bounded-payload antipattern)
+2. **029** — Code-review pattern catalog + reviewer wiring (ships independently, pure docs)
+3. **028** — OpenAPI ↔ Ecto type-parity Dagger lane (larger scope; ship after 027)
 
-022 + 023 landed on 2026-04-21. 024 landed on 2026-04-22 — Ramp
+022 + 023 landed on 2026-04-21. 024 landed on 2026-04-22. 026 landed on
+2026-04-23 — Ramp
 substrate now complete; bb/011 unblocks the north star. 026-029
 captured 2026-04-22 from /reflect prevent-coderabbit-patterns — codify
 CodeRabbit's recurring finds at the highest-leverage target in the

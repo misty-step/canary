@@ -55,16 +55,18 @@ Skill/reference > AGENTS.md > Memory**.
 
 **Where it lives.**
 
-- Check module: `lib/credo_checks/ecto_pk_via_cast.ex` under
+- Check module: `test/support/credo_checks/ecto_pk_via_cast.ex` under
   `Canary.Checks.EctoPKViaCast` (implements `Credo.Check`, category
-  `:warning`, base priority `:high`).
+  `:warning`, base priority `:high`). `.credo.exs` loads it explicitly
+  via `requires` so `mix credo` sees it without shipping Credo-only code
+  in `lib/`.
 - Credo config: append to `.credo.exs` under
   `checks.enabled` — `{Canary.Checks.EctoPKViaCast, []}`.
 - Tests: `test/credo_checks/ecto_pk_via_cast_test.exs`.
-- `lib/credo_checks/` must be compiled for Credo to see it; since the
-  check is a Credo plugin it must load before `mix credo` runs. The
-  existing `elixirc_paths(:test)` behavior in `mix.exs` includes `lib`
-  in all envs — no change needed.
+- `mix credo` must load the check before it runs. `.credo.exs`
+  `requires` the file explicitly, and the existing `elixirc_paths(:test)`
+  behavior in `mix.exs` includes `test/support` so the ExUnit suite can
+  exercise the same module.
 
 **Detection shape (AST walk).**
 
