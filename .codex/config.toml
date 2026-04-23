@@ -6,108 +6,12 @@
 # .codex/skills/<name> point back. Either path resolves.
 root = ".codex/skills"
 
-[permissions]
-# Parity with .claude/settings.local.json allowlist. Keep in sync when
-# adding a shell command to either file. See AGENTS.md > Gate contract.
-allow = [
-  # Canary gate — single source of truth
-  "./bin/validate",
-  "./bin/validate --fast",
-  "./bin/validate --strict",
-  "./bin/validate --advisories",
-  "./bin/dagger",
-  "./bin/dagger check",
-  "./bin/dagger fast",
-  "./bin/dagger strict",
-  "./bin/bootstrap",
-  "./bin/dogfood-audit",
-  "./bin/dogfood-audit --strict",
-  "./bin/dr-status",
-  "./bin/dr-restore-check",
-
-  # Dagger (cli respects dagger.json pin)
-  "dagger call",
-  "dagger functions",
-  "dagger develop",
-
-  # Elixir
-  "mix test",
-  "mix format",
-  "mix credo",
-  "mix sobelow",
-  "mix dialyzer",
-  "mix deps.get",
-  "mix deps.update",
-  "mix deps.clean",
-  "mix hex.outdated",
-  "mix audit",
-  "mix ecto.migrate",
-  "mix ecto.reset",
-  "mix ecto.create",
-  "mix ecto.drop",
-  "mix ecto.gen.migration",
-  "mix ecto.rollback",
-  "mix setup",
-  "mix phx.server",
-  "mix compile",
-  "mix cmd",
-  "python3 dagger/scripts/",
-
-  # TypeScript SDK
-  "npm test",
-  "npm outdated",
-  "npm audit",
-  "npm ci",
-  "npm run",
-
-  # Git (read + the squash-merge write set)
-  "git status",
-  "git diff",
-  "git log",
-  "git show",
-  "git branch",
-  "git fetch",
-  "git add",
-  "git commit",
-  "git mv",
-  "git rebase",
-  "git merge --ff-only",
-  "git pull --ff-only",
-  "git checkout",
-  "git stash",
-  "git restore",
-
-  # GitHub CLI
-  "gh pr view",
-  "gh pr list",
-  "gh pr checks",
-  "gh pr diff",
-  "gh pr create",
-  "gh pr edit",
-  "gh pr merge",
-  "gh issue view",
-  "gh issue list",
-  "gh issue create",
-  "gh run list",
-  "gh run view",
-  "gh run watch",
-  "gh workflow list",
-  "gh workflow view",
-  "gh api",
-
-  # Fly (read-only + ssh console for nuclear reset)
-  "flyctl status",
-  "flyctl logs",
-  "flyctl releases",
-  "flyctl machines list",
-  "flyctl machines status",
-  "flyctl secrets list",
-  "flyctl storage list",
-  "flyctl ssh console",
-
-  # HTTP probing (for /qa, /monitor, /demo, /diagnose)
-  "curl",
-]
+# Command allowlist lives in .claude/settings.local.json (Claude Code's
+# permission model). Codex does not honor per-command allowlists in
+# config.toml — it uses top-level `approval_policy` + `sandbox_mode`
+# (configured globally in ~/.codex/config.toml). The `[permissions]`
+# key in Codex's schema is a FilesystemPermissionsToml struct (path
+# scopes), not a command array, so emitting one here fails config load.
 
 [conventions]
 # Canonical commit scope vocabulary derived from `git log`. Match exactly.
