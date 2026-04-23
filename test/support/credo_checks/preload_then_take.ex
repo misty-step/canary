@@ -59,8 +59,15 @@ defmodule Canary.Checks.PreloadThenTake do
   defp maybe_report_pipe(ast, state) do
     stages = flatten_pipe(ast)
 
-    with {:ok, truncation} <- truncation_info(List.last(stages)),
-         {:ok, field} <- preloaded_field_for_truncation(stages, truncation),
+    stages
+    |> truncations_by_stage()
+    |> Enum.reduce(state, fn {truncation, truncation_index}, acc ->
+      maybe_report_truncation(stages, truncation, truncation_index, acc)
+    end)
+  end
+
+  defp maybe_report_truncation(stages, truncation, truncation_index, state) do
+    with {:ok, field} <- preloaded_field_for_truncation(stages, truncation_index),
          false <- MapSet.member?(state.reported, {field, truncation.line_no}) do
       state
       |> add_issue(issue_for(state.issue_meta, field, truncation, truncation.line_no))
@@ -73,9 +80,18 @@ defmodule Canary.Checks.PreloadThenTake do
   defp flatten_pipe({:|>, _, [left, right]}), do: flatten_pipe(left) ++ [right]
   defp flatten_pipe(ast), do: [ast]
 
-  defp preloaded_field_for_truncation(stages, truncation) do
-    truncation_index = length(stages) - 1
+  defp truncations_by_stage(stages) do
+    stages
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {stage, index} ->
+      case truncation_info(stage) do
+        {:ok, truncation} -> [{truncation, index}]
+        :error -> []
+      end
+    end)
+  end
 
+  defp preloaded_field_for_truncation(stages, truncation_index) do
     stages
     |> Enum.take(truncation_index)
     |> Enum.with_index()
@@ -83,20 +99,20 @@ defmodule Canary.Checks.PreloadThenTake do
       stage
       |> unbounded_preload_fields()
       |> Enum.find_value(fn field ->
-        if field_referenced_after?(stages, index, field) do
+        if field_referenced_before_truncation?(stages, index, truncation_index, field) do
           {:ok, field}
         end
       end)
     end)
     |> case do
       {:ok, field} -> {:ok, field}
-      :error -> {:error, truncation}
+      :error -> :error
     end
   end
 
-  defp field_referenced_after?(stages, preload_index, field) do
+  defp field_referenced_before_truncation?(stages, preload_index, truncation_index, field) do
     stages
-    |> Enum.drop(preload_index + 1)
+    |> Enum.slice(preload_index + 1, truncation_index - preload_index)
     |> Enum.any?(&references_field?(&1, field))
   end
 
@@ -209,20 +225,21 @@ defmodule Canary.Checks.PreloadThenTake do
 
   defp field_key?(key, field), do: key == field or key == Atom.to_string(field)
 
-  defp contains_limit?(ast) when is_list(ast) do
-    (Keyword.keyword?(ast) and Keyword.has_key?(ast, :limit)) or
-      Enum.any?(ast, &contains_limit?/1)
-  end
+  defp contains_limit?({:from, _meta, args}) when is_list(args),
+    do: Enum.any?(args, &from_limit_arg?/1)
 
-  defp contains_limit?({key, _value}) when key == :limit, do: true
+  defp contains_limit?({:limit, _meta, args}) when is_list(args),
+    do: length(args) in [1, 2]
 
-  defp contains_limit?(tuple) when is_tuple(tuple) do
-    tuple
-    |> Tuple.to_list()
-    |> Enum.any?(&contains_limit?/1)
-  end
+  defp contains_limit?({:|>, _meta, [left, right]}),
+    do: contains_limit?(left) or contains_limit?(right)
 
   defp contains_limit?(_ast), do: false
+
+  defp from_limit_arg?(arg) when is_list(arg),
+    do: Keyword.keyword?(arg) and Keyword.has_key?(arg, :limit)
+
+  defp from_limit_arg?(_arg), do: false
 
   defp repo_module?({:__aliases__, _, parts}), do: List.last(parts) == :Repo
   defp repo_module?(_module_ast), do: false

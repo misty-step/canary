@@ -43,6 +43,23 @@ defmodule Canary.Checks.PreloadThenTakeTest do
     |> assert_issue(%{trigger: "signals"})
   end
 
+  test "reports truncation before later pipeline stages" do
+    """
+    defmodule Canary.Query.Sample do
+      def signals(incident) do
+        incident
+        |> Canary.Repo.preload(:signals)
+        |> Map.get(:signals)
+        |> Enum.take(25)
+        |> Enum.reverse()
+      end
+    end
+    """
+    |> to_source_file("lib/canary/query/sample.ex")
+    |> run_check(PreloadThenTake)
+    |> assert_issue(%{trigger: "signals"})
+  end
+
   test "reports issues in the root read-model module" do
     """
     defmodule Canary.Query do
@@ -145,6 +162,23 @@ defmodule Canary.Checks.PreloadThenTakeTest do
     |> to_source_file("lib/canary/query/sample.ex")
     |> run_check(PreloadThenTake)
     |> refute_issues()
+  end
+
+  test "reports preload queries with incidental limit metadata" do
+    """
+    defmodule Canary.Query.Sample do
+      def detail(incident) do
+        Canary.Repo.preload(
+          incident,
+          signals: %{metadata: %{limit: 25}}
+        )
+        |> Map.update!(:signals, &Enum.take(&1, 25))
+      end
+    end
+    """
+    |> to_source_file("lib/canary/query/sample.ex")
+    |> run_check(PreloadThenTake)
+    |> assert_issue(%{trigger: "signals"})
   end
 
   test "ignores truncation outside read-model paths" do
