@@ -15,6 +15,8 @@ defmodule Canary.Checks.PreloadThenTake do
   alias Credo.{IssueMeta, SourceFile}
   alias Credo.Execution.ExecutionIssues
 
+  @function_definitions [:def, :defp, :defmacro, :defmacrop]
+
   @doc false
   @impl true
   def run_on_all_source_files(exec, source_files, params) do
@@ -34,7 +36,8 @@ defmodule Canary.Checks.PreloadThenTake do
   defp issues_for_source_file(%SourceFile{} = source_file, params) do
     if read_model_path?(source_file.filename) do
       source_file
-      |> Credo.Code.prewalk(&walk/2, initial_state(source_file, params))
+      |> SourceFile.ast()
+      |> traverse(initial_state(source_file, params))
       |> Map.fetch!(:issues)
       |> Enum.reverse()
     else
@@ -44,22 +47,113 @@ defmodule Canary.Checks.PreloadThenTake do
 
   defp initial_state(source_file, params) do
     %{
+      ecto_query_aliases: MapSet.new(),
       ecto_query_imported?: false,
       issue_meta: IssueMeta.for(source_file, params),
+      local_preload_arities: MapSet.new(),
       issues: [],
       reported: MapSet.new()
     }
   end
 
-  defp walk({:import, _, [{:__aliases__, _, [:Ecto, :Query]} | _args]} = ast, state) do
-    {ast, %{state | ecto_query_imported?: true}}
+  defp traverse(ast, state) when is_list(ast) do
+    Enum.reduce(ast, state, &traverse/2)
   end
 
-  defp walk({:|>, _, _} = ast, state) do
-    {ast, maybe_report_pipe(ast, state)}
+  defp traverse({:defmodule, _meta, [_module, [do: body]]}, state) do
+    state
+    |> module_state(body)
+    |> then(&traverse(body, &1))
+    |> merge_scoped_state(state)
   end
 
-  defp walk(ast, state), do: {ast, state}
+  defp traverse({kind, _meta, args}, state)
+       when kind in @function_definitions and is_list(args) do
+    args
+    |> function_body()
+    |> traverse(state)
+    |> merge_scoped_state(state)
+  end
+
+  defp traverse({:import, _, [{:__aliases__, _, [:Ecto, :Query]} | _args]}, state) do
+    %{state | ecto_query_imported?: true}
+  end
+
+  defp traverse({:alias, _, [{:__aliases__, _, [:Ecto, :Query]} | args]}, state) do
+    %{state | ecto_query_aliases: MapSet.put(state.ecto_query_aliases, ecto_query_alias(args))}
+  end
+
+  defp traverse({:|>, _, _} = ast, state) do
+    ast
+    |> maybe_report_pipe(state)
+    |> then(&traverse_children(ast, &1))
+  end
+
+  defp traverse(ast, state) when is_tuple(ast) do
+    ast
+    |> Tuple.to_list()
+    |> traverse(state)
+  end
+
+  defp traverse(_ast, state), do: state
+
+  defp traverse_children(ast, state) do
+    ast
+    |> Tuple.to_list()
+    |> traverse(state)
+  end
+
+  defp module_state(state, body) do
+    %{
+      state
+      | ecto_query_aliases: MapSet.new(),
+        ecto_query_imported?: false,
+        local_preload_arities: local_preload_arities(body)
+    }
+  end
+
+  defp merge_scoped_state(scoped_state, parent_state) do
+    %{parent_state | issues: scoped_state.issues, reported: scoped_state.reported}
+  end
+
+  defp function_body([_head, body]) when is_list(body), do: Keyword.get(body, :do)
+  defp function_body(_args), do: nil
+
+  defp ecto_query_alias([[as: {:__aliases__, _, alias_parts}]]), do: alias_parts
+  defp ecto_query_alias(_args), do: [:Query]
+
+  defp local_preload_arities(ast), do: collect_local_preload_arities(ast, MapSet.new())
+
+  defp collect_local_preload_arities(ast, arities) when is_list(ast) do
+    Enum.reduce(ast, arities, &collect_local_preload_arities/2)
+  end
+
+  defp collect_local_preload_arities({:defmodule, _meta, _args}, arities), do: arities
+
+  defp collect_local_preload_arities({kind, _meta, args}, arities)
+       when kind in @function_definitions and is_list(args) do
+    case args do
+      [head | _body] -> put_preload_arity(arities, head)
+      _args -> arities
+    end
+  end
+
+  defp collect_local_preload_arities(ast, arities) when is_tuple(ast) do
+    ast
+    |> Tuple.to_list()
+    |> collect_local_preload_arities(arities)
+  end
+
+  defp collect_local_preload_arities(_ast, arities), do: arities
+
+  defp put_preload_arity(arities, {:when, _meta, [head | _guards]}),
+    do: put_preload_arity(arities, head)
+
+  defp put_preload_arity(arities, {:preload, _meta, args}) when is_list(args) do
+    MapSet.put(arities, length(args))
+  end
+
+  defp put_preload_arity(arities, _head), do: arities
 
   defp maybe_report_pipe(ast, state) do
     stages = flatten_pipe(ast)
@@ -116,21 +210,32 @@ defmodule Canary.Checks.PreloadThenTake do
   end
 
   defp field_referenced_before_truncation?(stages, preload_index, truncation_index, field) do
-    field_value_stage?(
-      Enum.at(stages, truncation_index - 1),
-      preload_index,
-      truncation_index,
-      field
-    ) or
+    pipeline_field_value_before_truncation?(stages, preload_index, truncation_index, field) or
       field_truncated_in_stage?(Enum.at(stages, truncation_index), field)
   end
 
-  defp field_value_stage?(_stage, preload_index, truncation_index, _field)
-       when truncation_index <= preload_index + 1,
-       do: false
+  defp pipeline_field_value_before_truncation?(stages, preload_index, truncation_index, field) do
+    stages
+    |> Enum.slice(preload_index + 1, truncation_index - preload_index - 1)
+    |> Enum.reduce_while(:source, fn stage, relation ->
+      next_relation = field_value_relation(stage, relation, field)
 
-  defp field_value_stage?(stage, _preload_index, _truncation_index, field) do
-    references_field?(stage, field)
+      if next_relation == :other do
+        {:halt, :other}
+      else
+        {:cont, next_relation}
+      end
+    end)
+    |> Kernel.==(:field)
+  end
+
+  defp field_value_relation(stage, relation, field) do
+    cond do
+      extracts_field_value?(stage, field) -> :field
+      relation == :field -> :field
+      extracts_other_field_value?(stage, field) -> :other
+      true -> relation
+    end
   end
 
   defp field_truncated_in_stage?(stage, field) do
@@ -149,20 +254,31 @@ defmodule Canary.Checks.PreloadThenTake do
     |> Enum.map(fn {field, _bounded?} -> field end)
   end
 
-  defp preload_specs({{:., _, [module_ast, :preload]}, _meta, args}, piped?, _state)
+  defp preload_specs({{:., _, [module_ast, :preload]}, _meta, args}, piped?, state)
        when is_list(args) do
-    with true <- repo_module?(module_ast),
-         {:ok, specs} <- repo_preload_specs_arg(args, piped?) do
-      preload_specs_for_arg(specs)
-    else
-      _ -> []
+    cond do
+      repo_module?(module_ast) ->
+        args
+        |> repo_preload_specs_arg(piped?)
+        |> preload_specs_from_result()
+
+      ecto_query_module?(module_ast, state) ->
+        args
+        |> ecto_preload_specs_arg(piped?, true)
+        |> preload_specs_from_result()
+
+      true ->
+        []
     end
   end
 
   defp preload_specs({:preload, _meta, args}, piped?, state) when is_list(args) do
-    case ecto_preload_specs_arg(args, piped?, state.ecto_query_imported?) do
-      {:ok, specs} -> preload_specs_for_arg(specs)
-      :error -> []
+    if imported_ecto_preload?(args, piped?, state) do
+      args
+      |> ecto_preload_specs_arg(piped?, true)
+      |> preload_specs_from_result()
+    else
+      []
     end
   end
 
@@ -179,18 +295,25 @@ defmodule Canary.Checks.PreloadThenTake do
   defp repo_preload_specs_arg([_source, specs, _opts], false), do: {:ok, specs}
   defp repo_preload_specs_arg(_args, _piped?), do: :error
 
+  defp preload_specs_from_result({:ok, specs}), do: preload_specs_for_arg(specs)
+  defp preload_specs_from_result(:error), do: []
+
+  defp imported_ecto_preload?(args, piped?, state) do
+    state.ecto_query_imported? and
+      not MapSet.member?(state.local_preload_arities, preload_call_arity(args, piped?))
+  end
+
+  defp preload_call_arity(args, true), do: length(args) + 1
+  defp preload_call_arity(args, false), do: length(args)
+
   defp ecto_preload_specs_arg([specs], true, true), do: {:ok, specs}
 
-  defp ecto_preload_specs_arg([binding_ast, specs], _piped?, true) do
-    if ecto_binding_list?(binding_ast),
-      do: {:ok, specs},
-      else: {:ok, specs}
-  end
+  defp ecto_preload_specs_arg([_query_or_binding_ast, specs], _piped?, true), do: {:ok, specs}
 
   defp ecto_preload_specs_arg([_query_ast, binding_ast, specs], _piped?, true) do
     if ecto_binding_list?(binding_ast),
       do: {:ok, specs},
-      else: {:ok, binding_ast}
+      else: :error
   end
 
   defp ecto_preload_specs_arg(_args, _piped?, _ecto_query_imported?), do: :error
@@ -292,6 +415,47 @@ defmodule Canary.Checks.PreloadThenTake do
 
   defp field_access?(_node, _field), do: false
 
+  defp extracts_field_value?(stage, field) do
+    case field_extraction(stage) do
+      {:ok, key} -> field_key?(key, field)
+      :error -> false
+    end
+  end
+
+  defp extracts_other_field_value?(stage, field) do
+    case field_extraction(stage) do
+      {:ok, key} -> not field_key?(key, field)
+      :error -> false
+    end
+  end
+
+  defp field_extraction({{:., _, [module_ast, function]}, _meta, args})
+       when function in [:fetch!, :get] and is_list(args) do
+    if map_module?(module_ast), do: field_extraction_arg(args), else: :error
+  end
+
+  defp field_extraction({:then, _meta, [fun_ast]}), do: then_field_extraction(fun_ast)
+  defp field_extraction(_stage), do: :error
+
+  defp field_extraction_arg([key]), do: field_from_key(key)
+  defp field_extraction_arg([_source, key]), do: field_from_key(key)
+  defp field_extraction_arg(_args), do: :error
+
+  defp field_from_key(key) when is_atom(key) or is_binary(key), do: {:ok, key}
+  defp field_from_key(_key), do: :error
+
+  defp then_field_extraction({:fn, _meta, [{:->, _arrow_meta, [_args, body]}]}) do
+    body_field_extraction(body)
+  end
+
+  defp then_field_extraction({:&, _meta, [body]}), do: body_field_extraction(body)
+  defp then_field_extraction(_fun_ast), do: :error
+
+  defp body_field_extraction({{:., _, [_object_ast, field]}, _meta, []}) when is_atom(field),
+    do: {:ok, field}
+
+  defp body_field_extraction(_body), do: :error
+
   defp field_truncation?({:|>, _meta, [left, right]}, field),
     do: references_field?(left, field) and match?({:ok, _truncation}, truncation_info(right))
 
@@ -377,6 +541,15 @@ defmodule Canary.Checks.PreloadThenTake do
   end
 
   defp unresolved_module_call?(_module_ast, _function, _args), do: true
+
+  defp ecto_query_module?(module_ast, state) do
+    ecto_query_module?(module_ast) or aliased_ecto_query_module?(module_ast, state)
+  end
+
+  defp aliased_ecto_query_module?({:__aliases__, _, parts}, state),
+    do: MapSet.member?(state.ecto_query_aliases, parts)
+
+  defp aliased_ecto_query_module?(_module_ast, _state), do: false
 
   defp ecto_query_module?({:__aliases__, _, [:Ecto, :Query]}), do: true
   defp ecto_query_module?(_module_ast), do: false

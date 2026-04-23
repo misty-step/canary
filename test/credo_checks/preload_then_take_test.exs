@@ -144,6 +144,42 @@ defmodule Canary.Checks.PreloadThenTakeTest do
     |> assert_issue(%{trigger: "signals"})
   end
 
+  test "reports qualified Ecto preload followed by in-memory truncation" do
+    """
+    defmodule Canary.Query.Sample do
+      def detail(repo, id) do
+        Canary.Schemas.Incident
+        |> Ecto.Query.where([i], i.id == ^id)
+        |> Ecto.Query.preload(:signals)
+        |> repo.one()
+        |> Map.update!(:signals, &Stream.take(&1, 25))
+      end
+    end
+    """
+    |> to_source_file("lib/canary/query/sample.ex")
+    |> run_check(PreloadThenTake)
+    |> assert_issue(%{trigger: "signals"})
+  end
+
+  test "reports aliased Ecto preload followed by in-memory truncation" do
+    """
+    defmodule Canary.Query.Sample do
+      alias Ecto.Query, as: EQ
+
+      def detail(repo, id) do
+        Canary.Schemas.Incident
+        |> EQ.where([i], i.id == ^id)
+        |> EQ.preload(:signals)
+        |> repo.one()
+        |> Map.update!(:signals, &Stream.take(&1, 25))
+      end
+    end
+    """
+    |> to_source_file("lib/canary/query/sample.ex")
+    |> run_check(PreloadThenTake)
+    |> assert_issue(%{trigger: "signals"})
+  end
+
   test "reports Repo.preload/3 followed by in-memory truncation" do
     """
     defmodule Canary.Query.Sample do
@@ -202,6 +238,52 @@ defmodule Canary.Checks.PreloadThenTakeTest do
       end
 
       defp preload(incident, _field), do: incident
+    end
+    """
+    |> to_source_file("lib/canary/query/sample.ex")
+    |> run_check(PreloadThenTake)
+    |> refute_issues()
+  end
+
+  test "ignores local helper functions named preload when Ecto.Query is imported" do
+    """
+    defmodule Canary.Query.Sample do
+      import Ecto.Query
+
+      def signals(incident) do
+        incident
+        |> preload(:signals)
+        |> Map.get(:signals)
+        |> Enum.take(25)
+      end
+
+      defp preload(incident, _field), do: incident
+    end
+    """
+    |> to_source_file("lib/canary/query/sample.ex")
+    |> run_check(PreloadThenTake)
+    |> refute_issues()
+  end
+
+  test "does not leak imported Ecto.Query into sibling modules" do
+    """
+    defmodule Canary.Query.WithImport do
+      import Ecto.Query
+
+      def detail(repo) do
+        Canary.Schemas.Incident
+        |> where([i], i.id != nil)
+        |> repo.all()
+      end
+    end
+
+    defmodule Canary.Query.Sample do
+      def signals(incident) do
+        incident
+        |> preload(:signals)
+        |> Map.get(:signals)
+        |> Enum.take(25)
+      end
     end
     """
     |> to_source_file("lib/canary/query/sample.ex")
@@ -273,6 +355,23 @@ defmodule Canary.Checks.PreloadThenTakeTest do
     |> to_source_file("lib/canary/query/sample.ex")
     |> run_check(PreloadThenTake)
     |> refute_issues()
+  end
+
+  test "reports extracted preloaded fields transformed before truncation" do
+    """
+    defmodule Canary.Query.Sample do
+      def signals(incident) do
+        incident
+        |> Canary.Repo.preload(:signals)
+        |> Map.get(:signals)
+        |> Enum.filter(& &1.active)
+        |> Enum.take(25)
+      end
+    end
+    """
+    |> to_source_file("lib/canary/query/sample.ex")
+    |> run_check(PreloadThenTake)
+    |> assert_issue(%{trigger: "signals"})
   end
 
   test "ignores same-stage truncation when it does not operate on the preloaded field" do
