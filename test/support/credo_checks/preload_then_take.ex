@@ -314,6 +314,8 @@ defmodule Canary.Checks.PreloadThenTake do
   defp contains_limit?({:from, _meta, args}) when is_list(args),
     do: Enum.any?(args, &from_limit_arg?/1)
 
+  defp contains_limit?({:^, _meta, [ast]}), do: contains_limit?(ast)
+
   defp contains_limit?({{:., _, [module_ast, :limit]}, _meta, args}) when is_list(args),
     do: ecto_query_module?(module_ast) and length(args) in [1, 2]
 
@@ -330,18 +332,32 @@ defmodule Canary.Checks.PreloadThenTake do
 
   defp from_limit_arg?(_arg), do: false
 
-  defp unresolved_query?({{:., _, [{:__aliases__, _, _module_parts}, _function]}, _meta, args})
-       when is_list(args),
-       do: true
+  defp unresolved_query?({:^, _meta, [ast]}), do: unresolved_query?(ast)
 
-  defp unresolved_query?({:|>, _meta, [_left, _right]}), do: false
-  defp unresolved_query?({:from, _meta, _args}), do: false
+  defp unresolved_query?({:|>, _meta, [left, _right]}), do: unresolved_query?(left)
+
   defp unresolved_query?({{:., _, [_object_ast, _field]}, _meta, []}), do: false
+
+  defp unresolved_query?({{:., _, [module_ast, function]}, _meta, args})
+       when is_list(args),
+       do: unresolved_module_call?(module_ast, function, args)
+
+  defp unresolved_query?({:from, _meta, _args}), do: false
   defp unresolved_query?({:%{}, _meta, _pairs}), do: false
 
   defp unresolved_query?({_name, _meta, args}) when is_list(args), do: true
   defp unresolved_query?({_name, _meta, context}) when is_atom(context), do: true
   defp unresolved_query?(_ast), do: false
+
+  defp unresolved_module_call?(module_ast, :limit, _args) do
+    not ecto_query_module?(module_ast)
+  end
+
+  defp unresolved_module_call?(module_ast, _function, [query_ast | _args]) do
+    if ecto_query_module?(module_ast), do: unresolved_query?(query_ast), else: true
+  end
+
+  defp unresolved_module_call?(_module_ast, _function, _args), do: true
 
   defp ecto_query_module?({:__aliases__, _, [:Ecto, :Query]}), do: true
   defp ecto_query_module?(_module_ast), do: false

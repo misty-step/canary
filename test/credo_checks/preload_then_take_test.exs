@@ -312,6 +312,25 @@ defmodule Canary.Checks.PreloadThenTakeTest do
     |> assert_issue(%{trigger: "signals"})
   end
 
+  test "reports pinned inline preload queries without a SQL limit" do
+    """
+    defmodule Canary.Query.Sample do
+      import Ecto.Query
+
+      def detail(incident) do
+        Canary.Repo.preload(
+          incident,
+          signals: ^from(s in Canary.Schemas.IncidentSignal, order_by: s.id)
+        )
+        |> Map.update!(:signals, &Enum.take(&1, 25))
+      end
+    end
+    """
+    |> to_source_file("lib/canary/query/sample.ex")
+    |> run_check(PreloadThenTake)
+    |> assert_issue(%{trigger: "signals"})
+  end
+
   test "accepts preload queries with a qualified SQL limit" do
     """
     defmodule Canary.Query.Sample do
@@ -342,6 +361,28 @@ defmodule Canary.Checks.PreloadThenTakeTest do
           from(s in Canary.Schemas.IncidentSignal, order_by: s.id, limit: ^limit)
 
         Canary.Repo.preload(incident, signals: signal_query)
+        |> Map.update!(:signals, &Enum.take(&1, limit))
+      end
+    end
+    """
+    |> to_source_file("lib/canary/query/sample.ex")
+    |> run_check(PreloadThenTake)
+    |> refute_issues()
+  end
+
+  test "accepts piped preload query variables as statically unresolved" do
+    """
+    defmodule Canary.Query.Sample do
+      import Ecto.Query
+
+      def detail(incident, limit) do
+        signal_query =
+          from(s in Canary.Schemas.IncidentSignal, order_by: s.id, limit: ^limit)
+
+        Canary.Repo.preload(
+          incident,
+          signals: signal_query |> where([s], s.id > 0)
+        )
         |> Map.update!(:signals, &Enum.take(&1, limit))
       end
     end
