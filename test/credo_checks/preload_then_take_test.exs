@@ -10,10 +10,14 @@ defmodule Canary.Checks.PreloadThenTakeTest do
 
   test "custom check is wired into Credo config" do
     {config, _bindings} = Code.eval_file(Path.expand(".credo.exs"))
-    [default_config] = config.configs
 
-    assert "./test/support/credo_checks/preload_then_take.ex" in default_config.requires
-    assert {Canary.Checks.PreloadThenTake, []} in default_config.checks.enabled
+    assert Enum.any?(config.configs, fn config ->
+             {Canary.Checks.PreloadThenTake, []} in config.checks.enabled
+           end)
+
+    assert Enum.any?(config.configs, fn config ->
+             Enum.any?(config.requires, &String.ends_with?(&1, "preload_then_take.ex"))
+           end)
   end
 
   test "reports preloaded associations truncated in memory in read models" do
@@ -108,6 +112,21 @@ defmodule Canary.Checks.PreloadThenTakeTest do
     defmodule Canary.Query.Sample do
       def detail(incident) do
         Canary.Repo.preload(incident, :signals, force: true)
+        |> Map.update!(:signals, &Enum.take(&1, 25))
+      end
+    end
+    """
+    |> to_source_file("lib/canary/query/sample.ex")
+    |> run_check(PreloadThenTake)
+    |> assert_issue(%{trigger: "signals"})
+  end
+
+  test "reports piped Repo.preload/3 followed by in-memory truncation" do
+    """
+    defmodule Canary.Query.Sample do
+      def detail(incident) do
+        incident
+        |> Canary.Repo.preload(:signals, force: true)
         |> Map.update!(:signals, &Enum.take(&1, 25))
       end
     end
@@ -219,6 +238,21 @@ defmodule Canary.Checks.PreloadThenTakeTest do
     |> refute_issues()
   end
 
+  test "reports same-stage truncation when it operates on the preloaded field" do
+    """
+    defmodule Canary.Query.Sample do
+      def signals(incident) do
+        incident
+        |> Canary.Repo.preload(:signals)
+        |> then(fn incident -> Enum.take(incident.signals, 25) end)
+      end
+    end
+    """
+    |> to_source_file("lib/canary/query/sample.ex")
+    |> run_check(PreloadThenTake)
+    |> assert_issue(%{trigger: "signals"})
+  end
+
   test "accepts preload queries with a SQL limit" do
     """
     defmodule Canary.Query.Sample do
@@ -247,6 +281,27 @@ defmodule Canary.Checks.PreloadThenTakeTest do
         Canary.Repo.preload(
           incident,
           signals: from(s in Canary.Schemas.IncidentSignal, order_by: s.id)
+        )
+        |> Map.update!(:signals, &Enum.take(&1, 25))
+      end
+    end
+    """
+    |> to_source_file("lib/canary/query/sample.ex")
+    |> run_check(PreloadThenTake)
+    |> assert_issue(%{trigger: "signals"})
+  end
+
+  test "reports piped preload queries without a SQL limit" do
+    """
+    defmodule Canary.Query.Sample do
+      import Ecto.Query
+
+      def detail(incident) do
+        Canary.Repo.preload(
+          incident,
+          signals:
+            from(s in Canary.Schemas.IncidentSignal, order_by: s.id)
+            |> where([s], s.id > 0)
         )
         |> Map.update!(:signals, &Enum.take(&1, 25))
       end
@@ -304,6 +359,26 @@ defmodule Canary.Checks.PreloadThenTakeTest do
           incident,
           signals: %{metadata: %{limit: 25}}
         )
+        |> Map.update!(:signals, &Enum.take(&1, 25))
+      end
+    end
+    """
+    |> to_source_file("lib/canary/query/sample.ex")
+    |> run_check(PreloadThenTake)
+    |> assert_issue(%{trigger: "signals"})
+  end
+
+  test "reports from preload clauses followed by in-memory truncation" do
+    """
+    defmodule Canary.Query.Sample do
+      import Ecto.Query
+
+      def detail(repo, id) do
+        from(i in Canary.Schemas.Incident,
+          where: i.id == ^id,
+          preload: [signals: i.signals]
+        )
+        |> repo.one()
         |> Map.update!(:signals, &Enum.take(&1, 25))
       end
     end

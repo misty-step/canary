@@ -122,7 +122,12 @@ defmodule Canary.Checks.PreloadThenTake do
   end
 
   defp field_truncated_in_stage?(stage, field) do
-    map_field_update?(stage, field) and match?({:ok, _truncation}, truncation_info(stage))
+    {_ast, found?} =
+      Macro.prewalk(stage, false, fn node, found? ->
+        {node, found? or field_truncation?(node, field)}
+      end)
+
+    found?
   end
 
   defp unbounded_preload_fields(stage, piped?) do
@@ -146,6 +151,11 @@ defmodule Canary.Checks.PreloadThenTake do
       {:ok, specs} -> preload_specs_for_arg(specs)
       :error -> []
     end
+  end
+
+  defp preload_specs({:from, _meta, args}, _piped?) when is_list(args) do
+    args
+    |> Enum.flat_map(&from_preload_specs/1)
   end
 
   defp preload_specs(_stage, _piped?), do: []
@@ -187,6 +197,18 @@ defmodule Canary.Checks.PreloadThenTake do
   end
 
   defp preload_specs_for_arg(_arg), do: []
+
+  defp from_preload_specs(arg) when is_list(arg) do
+    if Keyword.keyword?(arg) do
+      arg
+      |> Keyword.get(:preload)
+      |> preload_specs_for_arg()
+    else
+      []
+    end
+  end
+
+  defp from_preload_specs(_arg), do: []
 
   defp truncation_info(nil), do: :error
 
@@ -251,12 +273,36 @@ defmodule Canary.Checks.PreloadThenTake do
 
   defp field_access?(_node, _field), do: false
 
-  defp map_field_update?({{:., _, [module_ast, function]}, _meta, args}, field)
-       when function in [:update, :update!] and is_list(args) do
-    map_module?(module_ast) and Enum.any?(args, &field_key?(&1, field))
+  defp field_truncation?({:|>, _meta, [left, right]}, field),
+    do: references_field?(left, field) and match?({:ok, _truncation}, truncation_info(right))
+
+  defp field_truncation?({{:., _, [module_ast, function]}, _meta, args} = node, field)
+       when is_list(args) do
+    direct_truncation_on_field?(module_ast, function, args, field) or
+      map_field_update_truncates?(node, field)
   end
 
-  defp map_field_update?(_stage, _field), do: false
+  defp field_truncation?(_node, _field), do: false
+
+  defp direct_truncation_on_field?(module_ast, function, [first_arg | args], field) do
+    with {:ok, module} <- truncation_module(module_ast),
+         true <- truncation_function?(module, function, length([first_arg | args])) do
+      references_field?(first_arg, field)
+    else
+      _ -> false
+    end
+  end
+
+  defp direct_truncation_on_field?(_module_ast, _function, _args, _field), do: false
+
+  defp map_field_update_truncates?({{:., _, [module_ast, function]}, _meta, args}, field)
+       when function in [:update, :update!] and is_list(args) do
+    map_module?(module_ast) and
+      Enum.any?(args, &field_key?(&1, field)) and
+      match?({:ok, _truncation}, truncation_info(List.last(args)))
+  end
+
+  defp map_field_update_truncates?(_stage, _field), do: false
 
   defp map_module?({:__aliases__, _, [:Map]}), do: true
   defp map_module?(_module_ast), do: false
@@ -288,6 +334,7 @@ defmodule Canary.Checks.PreloadThenTake do
        when is_list(args),
        do: true
 
+  defp unresolved_query?({:|>, _meta, [_left, _right]}), do: false
   defp unresolved_query?({:from, _meta, _args}), do: false
   defp unresolved_query?({{:., _, [_object_ast, _field]}, _meta, []}), do: false
   defp unresolved_query?({:%{}, _meta, _pairs}), do: false
