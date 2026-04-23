@@ -62,6 +62,24 @@ defmodule Canary.Checks.PreloadThenTakeTest do
     |> assert_issue(%{trigger: "signals"})
   end
 
+  test "ignores local helper functions named preload" do
+    """
+    defmodule Canary.Query.Sample do
+      def signals(incident) do
+        incident
+        |> preload(:signals)
+        |> Map.get(:signals)
+        |> Enum.take(25)
+      end
+
+      defp preload(incident, _field), do: incident
+    end
+    """
+    |> to_source_file("lib/canary/query/sample.ex")
+    |> run_check(PreloadThenTake)
+    |> refute_issues()
+  end
+
   test "accepts preload queries with a SQL limit" do
     """
     defmodule Canary.Query.Sample do

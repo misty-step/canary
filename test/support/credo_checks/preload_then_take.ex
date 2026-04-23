@@ -112,10 +112,17 @@ defmodule Canary.Checks.PreloadThenTake do
   end
 
   defp preload_specs({:preload, _meta, args}) when is_list(args) do
-    args |> List.last() |> preload_specs_for_arg()
+    if ecto_preload_macro_args?(args),
+      do: args |> List.last() |> preload_specs_for_arg(),
+      else: []
   end
 
   defp preload_specs(_stage), do: []
+
+  defp ecto_preload_macro_args?([binding_ast, _specs]) when is_list(binding_ast),
+    do: not Keyword.keyword?(binding_ast)
+
+  defp ecto_preload_macro_args?(_args), do: false
 
   defp preload_specs_for_arg(field) when is_atom(field), do: [{field, false}]
 
