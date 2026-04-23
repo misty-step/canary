@@ -44,10 +44,15 @@ defmodule Canary.Checks.PreloadThenTake do
 
   defp initial_state(source_file, params) do
     %{
+      ecto_query_imported?: false,
       issue_meta: IssueMeta.for(source_file, params),
       issues: [],
       reported: MapSet.new()
     }
+  end
+
+  defp walk({:import, _, [{:__aliases__, _, [:Ecto, :Query]} | _args]} = ast, state) do
+    {ast, %{state | ecto_query_imported?: true}}
   end
 
   defp walk({:|>, _, _} = ast, state) do
@@ -67,7 +72,7 @@ defmodule Canary.Checks.PreloadThenTake do
   end
 
   defp maybe_report_truncation(stages, truncation, truncation_index, state) do
-    with {:ok, field} <- preloaded_field_for_truncation(stages, truncation_index),
+    with {:ok, field} <- preloaded_field_for_truncation(stages, truncation_index, state),
          false <- MapSet.member?(state.reported, {field, truncation.line_no}) do
       state
       |> add_issue(issue_for(state.issue_meta, field, truncation, truncation.line_no))
@@ -91,13 +96,13 @@ defmodule Canary.Checks.PreloadThenTake do
     end)
   end
 
-  defp preloaded_field_for_truncation(stages, truncation_index) do
+  defp preloaded_field_for_truncation(stages, truncation_index, state) do
     stages
     |> Enum.take(truncation_index)
     |> Enum.with_index()
     |> Enum.find_value(:error, fn {stage, index} ->
       stage
-      |> unbounded_preload_fields(index > 0)
+      |> unbounded_preload_fields(index > 0, state)
       |> Enum.find_value(fn field ->
         if field_referenced_before_truncation?(stages, index, truncation_index, field) do
           {:ok, field}
@@ -111,14 +116,21 @@ defmodule Canary.Checks.PreloadThenTake do
   end
 
   defp field_referenced_before_truncation?(stages, preload_index, truncation_index, field) do
-    field_referenced_before_stage?(stages, preload_index, truncation_index, field) or
+    field_value_stage?(
+      Enum.at(stages, truncation_index - 1),
+      preload_index,
+      truncation_index,
+      field
+    ) or
       field_truncated_in_stage?(Enum.at(stages, truncation_index), field)
   end
 
-  defp field_referenced_before_stage?(stages, preload_index, stage_index, field) do
-    stages
-    |> Enum.slice(preload_index + 1, stage_index - preload_index - 1)
-    |> Enum.any?(&references_field?(&1, field))
+  defp field_value_stage?(_stage, preload_index, truncation_index, _field)
+       when truncation_index <= preload_index + 1,
+       do: false
+
+  defp field_value_stage?(stage, _preload_index, _truncation_index, field) do
+    references_field?(stage, field)
   end
 
   defp field_truncated_in_stage?(stage, field) do
@@ -130,14 +142,15 @@ defmodule Canary.Checks.PreloadThenTake do
     found?
   end
 
-  defp unbounded_preload_fields(stage, piped?) do
+  defp unbounded_preload_fields(stage, piped?, state) do
     stage
-    |> preload_specs(piped?)
+    |> preload_specs(piped?, state)
     |> Enum.reject(fn {_field, bounded?} -> bounded? end)
     |> Enum.map(fn {field, _bounded?} -> field end)
   end
 
-  defp preload_specs({{:., _, [module_ast, :preload]}, _meta, args}, piped?) when is_list(args) do
+  defp preload_specs({{:., _, [module_ast, :preload]}, _meta, args}, piped?, _state)
+       when is_list(args) do
     with true <- repo_module?(module_ast),
          {:ok, specs} <- repo_preload_specs_arg(args, piped?) do
       preload_specs_for_arg(specs)
@@ -146,19 +159,19 @@ defmodule Canary.Checks.PreloadThenTake do
     end
   end
 
-  defp preload_specs({:preload, _meta, args}, _piped?) when is_list(args) do
-    case ecto_preload_specs_arg(args) do
+  defp preload_specs({:preload, _meta, args}, piped?, state) when is_list(args) do
+    case ecto_preload_specs_arg(args, piped?, state.ecto_query_imported?) do
       {:ok, specs} -> preload_specs_for_arg(specs)
       :error -> []
     end
   end
 
-  defp preload_specs({:from, _meta, args}, _piped?) when is_list(args) do
+  defp preload_specs({:from, _meta, args}, _piped?, _state) when is_list(args) do
     args
     |> Enum.flat_map(&from_preload_specs/1)
   end
 
-  defp preload_specs(_stage, _piped?), do: []
+  defp preload_specs(_stage, _piped?, _state), do: []
 
   defp repo_preload_specs_arg([specs], true), do: {:ok, specs}
   defp repo_preload_specs_arg([specs, _opts], true), do: {:ok, specs}
@@ -166,15 +179,21 @@ defmodule Canary.Checks.PreloadThenTake do
   defp repo_preload_specs_arg([_source, specs, _opts], false), do: {:ok, specs}
   defp repo_preload_specs_arg(_args, _piped?), do: :error
 
-  defp ecto_preload_specs_arg([binding_ast, specs]) do
-    if ecto_binding_list?(binding_ast), do: {:ok, specs}, else: :error
+  defp ecto_preload_specs_arg([specs], true, true), do: {:ok, specs}
+
+  defp ecto_preload_specs_arg([binding_ast, specs], _piped?, true) do
+    if ecto_binding_list?(binding_ast),
+      do: {:ok, specs},
+      else: {:ok, specs}
   end
 
-  defp ecto_preload_specs_arg([_query_ast, binding_ast, specs]) do
-    if ecto_binding_list?(binding_ast), do: {:ok, specs}, else: :error
+  defp ecto_preload_specs_arg([_query_ast, binding_ast, specs], _piped?, true) do
+    if ecto_binding_list?(binding_ast),
+      do: {:ok, specs},
+      else: {:ok, binding_ast}
   end
 
-  defp ecto_preload_specs_arg(_args), do: :error
+  defp ecto_preload_specs_arg(_args, _piped?, _ecto_query_imported?), do: :error
 
   defp ecto_binding_list?(binding_ast) when is_list(binding_ast),
     do: not Keyword.keyword?(binding_ast)

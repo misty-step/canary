@@ -107,6 +107,43 @@ defmodule Canary.Checks.PreloadThenTakeTest do
     |> assert_issue(%{trigger: "signals"})
   end
 
+  test "reports Ecto query preload shorthand followed by in-memory truncation" do
+    """
+    defmodule Canary.Query.Sample do
+      import Ecto.Query
+
+      def detail(repo, id) do
+        Canary.Schemas.Incident
+        |> where([i], i.id == ^id)
+        |> preload(:signals)
+        |> repo.one()
+        |> Map.update!(:signals, &Stream.take(&1, 25))
+      end
+    end
+    """
+    |> to_source_file("lib/canary/query/sample.ex")
+    |> run_check(PreloadThenTake)
+    |> assert_issue(%{trigger: "signals"})
+  end
+
+  test "reports direct Ecto preload shorthand followed by in-memory truncation" do
+    """
+    defmodule Canary.Query.Sample do
+      import Ecto.Query
+
+      def detail(repo, id) do
+        preload(Canary.Schemas.Incident, :signals)
+        |> where([i], i.id == ^id)
+        |> repo.one()
+        |> Map.update!(:signals, &Stream.take(&1, 25))
+      end
+    end
+    """
+    |> to_source_file("lib/canary/query/sample.ex")
+    |> run_check(PreloadThenTake)
+    |> assert_issue(%{trigger: "signals"})
+  end
+
   test "reports Repo.preload/3 followed by in-memory truncation" do
     """
     defmodule Canary.Query.Sample do
@@ -213,6 +250,23 @@ defmodule Canary.Checks.PreloadThenTakeTest do
         |> Map.get(:events)
         |> Enum.take(25)
         |> then(fn events -> %{events: events, signals: incident.signals} end)
+      end
+    end
+    """
+    |> to_source_file("lib/canary/query/sample.ex")
+    |> run_check(PreloadThenTake)
+    |> refute_issues()
+  end
+
+  test "ignores fields referenced before unrelated truncation" do
+    """
+    defmodule Canary.Query.Sample do
+      def events(incident) do
+        incident
+        |> Canary.Repo.preload(:signals)
+        |> then(fn incident -> %{signals: incident.signals, events: incident.events} end)
+        |> Map.get(:events)
+        |> Enum.take(25)
       end
     end
     """
