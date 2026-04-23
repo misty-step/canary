@@ -43,6 +43,22 @@ defmodule Canary.Checks.PreloadThenTakeTest do
     |> assert_issue(%{trigger: "signals"})
   end
 
+  test "reports issues in the root read-model module" do
+    """
+    defmodule Canary.Query do
+      def signals(incident) do
+        incident
+        |> Canary.Repo.preload(:signals)
+        |> Map.get(:signals)
+        |> Enum.take(25)
+      end
+    end
+    """
+    |> to_source_file("lib/canary/query.ex")
+    |> run_check(PreloadThenTake)
+    |> assert_issue(%{trigger: "signals"})
+  end
+
   test "reports Ecto query preload macros followed by in-memory truncation" do
     """
     defmodule Canary.Query.Sample do
@@ -73,6 +89,38 @@ defmodule Canary.Checks.PreloadThenTakeTest do
       end
 
       defp preload(incident, _field), do: incident
+    end
+    """
+    |> to_source_file("lib/canary/query/sample.ex")
+    |> run_check(PreloadThenTake)
+    |> refute_issues()
+  end
+
+  test "ignores non-Repo modules with preload functions" do
+    """
+    defmodule Canary.Query.Sample do
+      def signals(cache, incident) do
+        cache.preload(incident, :signals)
+        |> Map.get(:signals)
+        |> Enum.take(25)
+      end
+    end
+    """
+    |> to_source_file("lib/canary/query/sample.ex")
+    |> run_check(PreloadThenTake)
+    |> refute_issues()
+  end
+
+  test "ignores incidental mentions of the preloaded field" do
+    """
+    defmodule Canary.Query.Sample do
+      def events(incident) do
+        incident
+        |> Canary.Repo.preload(:signals)
+        |> Map.put(:metadata, %{note: "signals"})
+        |> Map.get(:events)
+        |> Enum.take(25)
+      end
     end
     """
     |> to_source_file("lib/canary/query/sample.ex")

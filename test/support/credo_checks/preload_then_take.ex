@@ -185,15 +185,29 @@ defmodule Canary.Checks.PreloadThenTake do
   defp pipeline_arity(_function, arity), do: arity
 
   defp references_field?(ast, field) do
-    field_name = Atom.to_string(field)
-
     {_ast, found?} =
       Macro.prewalk(ast, false, fn node, found? ->
-        {node, found? or node == field or node == field_name}
+        {node, found? or field_access?(node, field)}
       end)
 
     found?
   end
+
+  defp field_access?({{:., _, [module_ast, function]}, _meta, args}, field)
+       when function in [:fetch!, :get, :update, :update!] and is_list(args) do
+    map_module?(module_ast) and
+      Enum.any?(args, &field_key?(&1, field))
+  end
+
+  defp field_access?({{:., _, [_object_ast, accessed_field]}, _meta, []}, field),
+    do: accessed_field == field
+
+  defp field_access?(_node, _field), do: false
+
+  defp map_module?({:__aliases__, _, [:Map]}), do: true
+  defp map_module?(_module_ast), do: false
+
+  defp field_key?(key, field), do: key == field or key == Atom.to_string(field)
 
   defp contains_limit?(ast) when is_list(ast) do
     (Keyword.keyword?(ast) and Keyword.has_key?(ast, :limit)) or
@@ -211,15 +225,13 @@ defmodule Canary.Checks.PreloadThenTake do
   defp contains_limit?(_ast), do: false
 
   defp repo_module?({:__aliases__, _, parts}), do: List.last(parts) == :Repo
-
-  defp repo_module?({name, _, context}) when is_atom(name),
-    do: is_atom(context) or is_nil(context)
-
   defp repo_module?(_module_ast), do: false
 
   defp read_model_path?(filename) when is_binary(filename) do
     String.contains?(filename, "/lib/canary/query/") or
       String.starts_with?(filename, "lib/canary/query/") or
+      String.ends_with?(filename, "/lib/canary/query.ex") or
+      filename == "lib/canary/query.ex" or
       Regex.match?(~r{(^|/)lib/canary/.*/query[^/]*\.ex$}, filename)
   end
 
