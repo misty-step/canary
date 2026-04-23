@@ -8,9 +8,10 @@
         excluded: [~r"/_build/", ~r"/deps/"]
       },
       plugins: [],
-      requires: [],
+      requires: ["./test/support/credo_checks/ecto_pk_via_cast.ex"],
       checks: %{
         enabled: [
+          {Canary.Checks.EctoPKViaCast, []},
           # Disable AliasUsage — inline qualified calls are clearer in controllers
           # where the alias would be used once or twice.
           {Credo.Check.Design.AliasUsage, false},

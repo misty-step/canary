@@ -20,8 +20,11 @@ defmodule Canary.QueryTest do
       status: "active"
     }
 
-    %ErrorGroup{}
-    |> ErrorGroup.changeset(Map.merge(defaults, attrs))
+    merged = Map.merge(defaults, attrs)
+    {group_hash, group_attrs} = Map.pop!(merged, :group_hash)
+
+    %ErrorGroup{group_hash: group_hash}
+    |> ErrorGroup.changeset(group_attrs)
     |> Canary.Repo.insert!()
   end
 

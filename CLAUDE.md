@@ -9,7 +9,7 @@ Self-hosted observability for agent-driven infrastructure. Elixir/Phoenix + SQLi
 
 ## Footguns
 
-- **Ecto primary keys.** Custom string PKs (`ERR-nanoid`) must be set on the struct, not cast: `%Error{id: id} |> changeset(attrs)`. Casting silently drops the `id` field because it's not in the `@required`/`@optional` lists. (6 bugs in initial build.)
+- **Ecto primary keys.** Custom string PKs (`ERR-nanoid`) must be set on the struct, not cast: `%Error{id: id} |> changeset(attrs)`. Casting silently drops the `id` field because it's not in the `@required`/`@optional` lists. Enforced by `Canary.Checks.EctoPKViaCast` in `./bin/validate --fast`. (6 bugs in initial build.)
 - **Oban Lite tables.** Oban's SQLite engine does NOT auto-create its tables. `Oban.Migrations.SQLite` exists but `Ecto.Migrator.run` can't invoke it (different migration behaviour). Fixed: dedicated Ecto migration (`20260314230000_create_oban_jobs.exs`) with `execute` for raw SQL. Do NOT put this in a GenServer or Release module — `Repo.query!` races with pool_size:1 during Ecto migration.
 - **Req + Finch.** Cannot pass both `:finch` and `:connect_options` to `Req.request/1`. The `:finch` option implies connection management — use `:receive_timeout` for timeouts.
 - **ReadRepo is not in `ecto_repos`.** Only `Canary.Repo` runs migrations. Adding `ReadRepo` to `ecto_repos` makes `mix ecto.migrate` look for `priv/read_repo/migrations/` which doesn't exist.
