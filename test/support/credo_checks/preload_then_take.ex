@@ -97,7 +97,7 @@ defmodule Canary.Checks.PreloadThenTake do
     |> Enum.with_index()
     |> Enum.find_value(:error, fn {stage, index} ->
       stage
-      |> unbounded_preload_fields()
+      |> unbounded_preload_fields(index > 0)
       |> Enum.find_value(fn field ->
         if field_referenced_before_truncation?(stages, index, truncation_index, field) do
           {:ok, field}
@@ -111,41 +111,72 @@ defmodule Canary.Checks.PreloadThenTake do
   end
 
   defp field_referenced_before_truncation?(stages, preload_index, truncation_index, field) do
+    field_referenced_before_stage?(stages, preload_index, truncation_index, field) or
+      field_truncated_in_stage?(Enum.at(stages, truncation_index), field)
+  end
+
+  defp field_referenced_before_stage?(stages, preload_index, stage_index, field) do
     stages
-    |> Enum.slice(preload_index + 1, truncation_index - preload_index)
+    |> Enum.slice(preload_index + 1, stage_index - preload_index - 1)
     |> Enum.any?(&references_field?(&1, field))
   end
 
-  defp unbounded_preload_fields(stage) do
+  defp field_truncated_in_stage?(stage, field) do
+    map_field_update?(stage, field) and match?({:ok, _truncation}, truncation_info(stage))
+  end
+
+  defp unbounded_preload_fields(stage, piped?) do
     stage
-    |> preload_specs()
+    |> preload_specs(piped?)
     |> Enum.reject(fn {_field, bounded?} -> bounded? end)
     |> Enum.map(fn {field, _bounded?} -> field end)
   end
 
-  defp preload_specs({{:., _, [module_ast, :preload]}, _meta, args}) when is_list(args) do
-    if repo_module?(module_ast), do: args |> List.last() |> preload_specs_for_arg(), else: []
+  defp preload_specs({{:., _, [module_ast, :preload]}, _meta, args}, piped?) when is_list(args) do
+    with true <- repo_module?(module_ast),
+         {:ok, specs} <- repo_preload_specs_arg(args, piped?) do
+      preload_specs_for_arg(specs)
+    else
+      _ -> []
+    end
   end
 
-  defp preload_specs({:preload, _meta, args}) when is_list(args) do
-    if ecto_preload_macro_args?(args),
-      do: args |> List.last() |> preload_specs_for_arg(),
-      else: []
+  defp preload_specs({:preload, _meta, args}, _piped?) when is_list(args) do
+    case ecto_preload_specs_arg(args) do
+      {:ok, specs} -> preload_specs_for_arg(specs)
+      :error -> []
+    end
   end
 
-  defp preload_specs(_stage), do: []
+  defp preload_specs(_stage, _piped?), do: []
 
-  defp ecto_preload_macro_args?([binding_ast, _specs]) when is_list(binding_ast),
+  defp repo_preload_specs_arg([specs], true), do: {:ok, specs}
+  defp repo_preload_specs_arg([specs, _opts], true), do: {:ok, specs}
+  defp repo_preload_specs_arg([_source, specs], false), do: {:ok, specs}
+  defp repo_preload_specs_arg([_source, specs, _opts], false), do: {:ok, specs}
+  defp repo_preload_specs_arg(_args, _piped?), do: :error
+
+  defp ecto_preload_specs_arg([binding_ast, specs]) do
+    if ecto_binding_list?(binding_ast), do: {:ok, specs}, else: :error
+  end
+
+  defp ecto_preload_specs_arg([_query_ast, binding_ast, specs]) do
+    if ecto_binding_list?(binding_ast), do: {:ok, specs}, else: :error
+  end
+
+  defp ecto_preload_specs_arg(_args), do: :error
+
+  defp ecto_binding_list?(binding_ast) when is_list(binding_ast),
     do: not Keyword.keyword?(binding_ast)
 
-  defp ecto_preload_macro_args?(_args), do: false
+  defp ecto_binding_list?(_binding_ast), do: false
 
   defp preload_specs_for_arg(field) when is_atom(field), do: [{field, false}]
 
   defp preload_specs_for_arg(fields) when is_list(fields) do
     Enum.flat_map(fields, fn
       {field, query_ast} when is_atom(field) ->
-        [{field, contains_limit?(query_ast)}]
+        [{field, bounded_preload_query?(query_ast)}]
 
       field when is_atom(field) ->
         [{field, false}]
@@ -220,13 +251,25 @@ defmodule Canary.Checks.PreloadThenTake do
 
   defp field_access?(_node, _field), do: false
 
+  defp map_field_update?({{:., _, [module_ast, function]}, _meta, args}, field)
+       when function in [:update, :update!] and is_list(args) do
+    map_module?(module_ast) and Enum.any?(args, &field_key?(&1, field))
+  end
+
+  defp map_field_update?(_stage, _field), do: false
+
   defp map_module?({:__aliases__, _, [:Map]}), do: true
   defp map_module?(_module_ast), do: false
 
   defp field_key?(key, field), do: key == field or key == Atom.to_string(field)
 
+  defp bounded_preload_query?(ast), do: contains_limit?(ast) or unresolved_query?(ast)
+
   defp contains_limit?({:from, _meta, args}) when is_list(args),
     do: Enum.any?(args, &from_limit_arg?/1)
+
+  defp contains_limit?({{:., _, [module_ast, :limit]}, _meta, args}) when is_list(args),
+    do: ecto_query_module?(module_ast) and length(args) in [1, 2]
 
   defp contains_limit?({:limit, _meta, args}) when is_list(args),
     do: length(args) in [1, 2]
@@ -241,6 +284,21 @@ defmodule Canary.Checks.PreloadThenTake do
 
   defp from_limit_arg?(_arg), do: false
 
+  defp unresolved_query?({{:., _, [{:__aliases__, _, _module_parts}, _function]}, _meta, args})
+       when is_list(args),
+       do: true
+
+  defp unresolved_query?({:from, _meta, _args}), do: false
+  defp unresolved_query?({{:., _, [_object_ast, _field]}, _meta, []}), do: false
+  defp unresolved_query?({:%{}, _meta, _pairs}), do: false
+
+  defp unresolved_query?({_name, _meta, args}) when is_list(args), do: true
+  defp unresolved_query?({_name, _meta, context}) when is_atom(context), do: true
+  defp unresolved_query?(_ast), do: false
+
+  defp ecto_query_module?({:__aliases__, _, [:Ecto, :Query]}), do: true
+  defp ecto_query_module?(_module_ast), do: false
+
   defp repo_module?({:__aliases__, _, parts}), do: List.last(parts) == :Repo
   defp repo_module?(_module_ast), do: false
 
@@ -248,8 +306,7 @@ defmodule Canary.Checks.PreloadThenTake do
     String.contains?(filename, "/lib/canary/query/") or
       String.starts_with?(filename, "lib/canary/query/") or
       String.ends_with?(filename, "/lib/canary/query.ex") or
-      filename == "lib/canary/query.ex" or
-      Regex.match?(~r{(^|/)lib/canary/.*/query[^/]*\.ex$}, filename)
+      filename == "lib/canary/query.ex"
   end
 
   defp read_model_path?(_filename), do: false
@@ -263,7 +320,7 @@ defmodule Canary.Checks.PreloadThenTake do
         "Bounded-payload antipattern at L#{line_no}: preload on `:#{field_name}` followed by " <>
           "#{truncation.call} loads every row into memory before discarding most. " <>
           "Push the cap into SQL: either `preload: [#{field_name}: ^from(r in Rel, order_by: ..., limit: ^max)]`, " <>
-          "or split into `count_#{field_name}/1` + `fetch_top_#{field_name}/2`. " <>
+          "or split into explicit count and limited-fetch helpers. " <>
           "See `lib/canary/query/incidents.ex:fetch_top_signals/3` for the reference shape.",
       trigger: field_name,
       line_no: line_no
