@@ -7,12 +7,14 @@ description: |
   uptime/health, managing health check targets, configuring webhooks, or asking
   "is production ok?" / "what errors happened?" against Canary. Triggers: canary,
   error query, health check, uptime, monitoring targets, observability API.
+  For editing the Canary repository itself, use /canary-repo instead.
 argument-hint: "[query, e.g. 'errors in volume' or 'health status' or 'add target']"
 ---
 
 # /canary
 
 Query and manage a self-hosted Canary observability instance via its REST API.
+This is an operations/API skill, not the repo engineering skill.
 
 ## Config
 

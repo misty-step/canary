@@ -86,6 +86,7 @@ pick it up.
 | Skill | What it does here |
 |---|---|
 | `/agent-readiness` | Two-audience audit: codebase-for-agents AND Canary's own product-agent-readiness (OpenAPI `info.x-agent-guide`, scoped keys, responder boundary, NL summary on every response). |
+| `/canary-repo` | Repo engineering orientation for Canary's Phoenix/Elixir core, SDKs, Dagger gate, OpenAPI/router parity, state-machine purity, SQLite single-writer, scoped keys, webhooks, and harness topology. Use before editing product code. |
 | `/ci` | Drives `./bin/validate` green. Names the Dagger lanes (`fast`, `check`, `strict`, `advisories`) from `dagger/src/index.ts`; cites the immutable control plane (`.ci/trusted/` + `.ci/candidate/`); self-heals format/lockfiles; escalates only genuine logic failures. |
 | `/code-review` | Parallel reviewer panel using installed roster (`ousterhout`/`carmack`/`grug`/`beck`/`critic`) against canary invariants checklist (pool_size:1, pure StateMachine, RFC 9457, scope pipelines, OpenAPI parity, responder boundary). |
 | `/deliver` | One `backlog.d/NNN-*.md` → merge-ready. Stops at exit + `receipt.json`. Archives via `git mv backlog.d/NNN-*.md backlog.d/_done/`. Does not push/merge/deploy. |
@@ -105,7 +106,7 @@ pick it up.
 
 **Universal skills (verbatim from spellbook):** `/research`, `/model-research`, `/office-hours`, `/ceo-review`, `/reflect`, `/groom`.
 
-**Pre-existing project-local skills (untouched by this tailor pass):** `canary`, `database`, `observability`, `security-scan`, `cli-reference`, `external-integration-patterns`, `github-cli-hygiene`, `git-mastery`, `design`, `design-review`, `high-end-visual-design`, `redesign-existing-projects`.
+**Project-local skills:** `canary`, `canary-repo`, `database`, `observability`, `security-scan`, `cli-reference`, `external-integration-patterns`, `github-cli-hygiene`, `git-mastery`, `design`, `design-review`, `high-end-visual-design`, `redesign-existing-projects`. Use `/canary` for operating a running Canary instance through the API; use `/canary-repo` for modifying this repository.
 
 **Agents (personas for subagent dispatch).** Under `.claude/agents/` and
 `.codex/agents/` (harness-native; no documented shared-agent convention yet).
