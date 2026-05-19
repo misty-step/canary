@@ -1,7 +1,7 @@
 # Credo custom check: `Canary.Checks.PreloadThenTake`
 
 Priority: high
-Status: ready
+Status: done
 Estimate: S
 
 ## Goal
@@ -44,6 +44,11 @@ query" on PR #133.
 - [ ] `./bin/validate --fast` green on the branch that introduces the check
 
 ## Notes
+
+**Shipped.** Landed in `fcd2991` with `Canary.Checks.PreloadThenTake`
+enabled from `.credo.exs`, broad ExUnit coverage under
+`test/credo_checks/preload_then_take_test.exs`, and the CLAUDE.md
+bounded-read-model footgun updated to cite the fast gate enforcement.
 
 **Why now.** PR #133 landed the incident detail endpoint. The initial
 read model used

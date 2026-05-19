@@ -1,7 +1,7 @@
 # Audit test helpers for Ecto PK cast-drop
 
 Priority: low
-Status: ready
+Status: done
 Estimate: S
 
 ## Goal
@@ -17,6 +17,12 @@ Find and fix every test helper that passes a custom string primary key (`ERR-`, 
 - [ ] A one-line comment or a shared helper documents the correct pattern near any remaining `Map.merge(defaults, attrs)` idiom
 
 ## Notes
+
+**Grooming closeout (2026-05-19).** Subsumed by #026, which shipped
+`Canary.Checks.EctoPKViaCast` in `./bin/validate --fast` and fixed the
+known `test/canary/query_test.exs` helper to set `group_hash` on the
+struct before calling the changeset. Keep the historical audit note for
+why the lint rule exists, but do not leave this as a separate ready item.
 
 **Why now.** #022 introduced `test/canary/query/errors_test.exs` with a helper that copied the `%Struct{} |> Struct.changeset(Map.merge(defaults_with_pk, attrs))` pattern from `test/canary/query_test.exs:23-25`. CodeRabbit caught the copy (PR #132, comment id 3120469488) via the coding guideline "Custom string primary keys ... must be set on the struct before passing to changeset." The helper was fixed in-branch for the new file; the pre-existing copy in `test/canary/query_test.exs` stayed as-is because it was out of scope for #022.
 

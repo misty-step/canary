@@ -1,7 +1,7 @@
 # Credo custom check: `Canary.Checks.EctoPKViaCast`
 
 Priority: high
-Status: ready
+Status: done
 Estimate: S
 
 ## Goal
@@ -44,6 +44,12 @@ past `./bin/validate --fast`.
 - [ ] `./bin/validate --fast` green on the branch that introduces the check
 
 ## Notes
+
+**Shipped.** Landed in `07dc24f` with `Canary.Checks.EctoPKViaCast`
+enabled from `.credo.exs`, ExUnit coverage under
+`test/credo_checks/ecto_pk_via_cast_test.exs`, the known
+`test/canary/query_test.exs` helper fixed, and the CLAUDE.md footgun
+updated to cite the fast gate enforcement.
 
 **Why now.** The footgun has been in `CLAUDE.md` since the initial build
 (six bugs in first implementation). It was flagged by CodeRabbit on PR

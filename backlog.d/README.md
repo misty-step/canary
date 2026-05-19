@@ -1,6 +1,6 @@
 # Canary Backlog
 
-`backlog.d/` is the source of truth for active backlog work as of 2026-04-21.
+`backlog.d/` is the source of truth for active backlog work as of 2026-05-19.
 
 ## Priority Order
 
@@ -28,11 +28,12 @@
 | 022 | Contract hygiene + shallow-module collapse | high | done | M |
 | 023 | Incident as atomic agent unit (detail API) | high | done | M |
 | 024 | Signal-agnostic annotations | medium | done | M |
-| 025 | Audit test helpers for Ecto PK cast-drop | low | ready | S |
+| 025 | Audit test helpers for Ecto PK cast-drop | low | done | S |
 | 026 | Credo check: EctoPKViaCast | high | done | S |
-| 027 | Credo check: PreloadThenTake | high | ready | S |
+| 027 | Credo check: PreloadThenTake | high | done | S |
 | 028 | OpenAPI ↔ Ecto type-parity Dagger lane | medium | ready | M |
 | 029 | Code-review pattern catalog + reviewer wiring | medium | ready | S |
+| 030 | Agent contract safety pass | high | ready | M |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
 
@@ -53,6 +54,7 @@
 011 (OpenAPI) — contract for SDK convergence and agent self-discovery
 013 (metrics) — self-observability for dogfooding credibility
 014 (DR) — data durability assurance
+030 (agent contract safety) — depends on 011 + 012; makes scopes, summaries, cold-start guidance, annotation write-back, and webhook delivery replay machine-verifiable
 
 022 (contract hygiene) ──── ships independently; restores summary invariant + supervision-tree collapse
 023 (incident detail API) ──→ Canary-side substrate for bb/011 (and thus 010 ramp pattern)
@@ -63,24 +65,26 @@
 
 **Lane 1 (agent readiness):** 012 (delivery ledger) → bb/011 (triage sprite) → 010 (ramp)
   · **023 (incident detail API) → 024 (signal-agnostic annotations)** land the Canary-side substrate bb/011 consumes
-**Lane 2 (contract + observability):** 011 (OpenAPI) + 013 (metrics) — parallel, no deps
+**Lane 2 (contract + observability):** 011 (OpenAPI) + 013 (metrics) — parallel, no deps · **030 (agent contract safety)** depends on 011 + 012 and tightens the existing contract for autonomous consumers
 **Lane 3 (structural):** 006 (query split) → 005 (connect-a-service) · **022 (contract hygiene + shallow-module collapse)** — ship first of the active set; unblocks nothing but restores the summary invariant and sheds ~300 LOC of drift
 **Lane 4 (hardening):** 008, 014, 016, 017, 018, 019 (independent, small, can ship anytime)
 **Lane 5 (future):** 020 (Adminifi HTTP surface verification)
 
-### Active order (2026-04-23)
+### Active order (2026-05-19)
 
-1. **027** — Credo check: PreloadThenTake (prevent bounded-payload antipattern)
-2. **029** — Code-review pattern catalog + reviewer wiring (ships independently, pure docs)
-3. **028** — OpenAPI ↔ Ecto type-parity Dagger lane (larger scope; ship after 027)
+1. **028** — OpenAPI ↔ Ecto type-parity Dagger lane (highest leverage: the contract is the agent API)
+2. **030** — Agent contract safety pass (scope annotations, summary completeness, cold-start guidance, annotation write-back, delivery-id lookup)
+3. **029** — Code-review pattern catalog + reviewer wiring (ships independently, pure docs)
 
 022 + 023 landed on 2026-04-21. 024 landed on 2026-04-22. 026 landed on
 2026-04-23 — Ramp
 substrate now complete; bb/011 unblocks the north star. 026-029
 captured 2026-04-22 from /reflect prevent-coderabbit-patterns — codify
 CodeRabbit's recurring finds at the highest-leverage target in the
-Continuous Learning hierarchy. 010 stays blocked on bb/011. 020 stays
-blocked on Adminifi URLs.
+Continuous Learning hierarchy. 027 landed in `fcd2991`; 025 was subsumed by
+the #026 lint rule plus the fixed `test/canary/query_test.exs` helper and
+archived during the 2026-05-19 grooming pass. 010 stays blocked on bb/011.
+020 stays blocked on Adminifi URLs.
 
 ## Migration Notes
 
@@ -91,6 +95,11 @@ blocked on Adminifi URLs.
 - 2026-04-02: Added 012–015 from multi-AI architecture audit. Promoted 006, 011 to high.
 - 2026-04-21: Added 022–024 from grooming investigation (three parallel investigators: archaeologist / strategist / scout). Three themes: contract hygiene, incident-as-atomic-agent-unit, signal-agnostic annotations. 022 ready to ship first; 023 + 024 land the Canary-side substrate for the ramp pattern.
 - 2026-04-22: Added 026–029 from `/reflect prevent-coderabbit-patterns` after shipping 022 + 023. Four structural prevention items for the classes of issue CodeRabbit surfaced: two Credo checks (PK-via-cast, preload-then-take), one Dagger lane (OpenAPI ↔ Ecto type parity), and one reviewer-wiring docs pass (canary-patterns.md catalog). Companion cross-repo convention in spellbook `#048` + `#049`.
+- 2026-05-19: Groomed stale active backlog. Archived 025 as subsumed by #026
+  and archived shipped 027. Added 030 from the agent-contract safety theme:
+  per-operation scope metadata, summary completeness discipline, cold-start
+  guidance, annotation write-back conventions, and delivery-id-addressable
+  webhook diagnostics without crossing the responder boundary.
 
 ## Status
 
