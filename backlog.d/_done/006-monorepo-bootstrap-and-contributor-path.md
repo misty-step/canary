@@ -1,7 +1,7 @@
 # Monorepo Bootstrap And Contributor Path
 
 Priority: medium
-Status: ready
+Status: done
 Estimate: M
 
 ## Goal

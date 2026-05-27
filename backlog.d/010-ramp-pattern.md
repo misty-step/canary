@@ -19,11 +19,15 @@ Canary generates monitors per code change, auto-triages alerts, and proposes fix
 - [ ] State on monitor prevents duplicate work
 
 ## Notes
-Blocked on: annotations API (001), timeline enrichment (002), triage sprite in bitterblossom (bb backlog.d/011).
+Blocked on: triage sprite in bitterblossom (`bb/011-canary-triage-sprite.md`).
 Reference: "How we made Ramp Sheets self-maintaining" (Ramp Labs, 2026-03-23).
-Current state: canary-watch synthesizes incidents into GitHub issues.
-Next step: annotations API + timeline enrichment in Canary, then triage sprite in bitterblossom.
-After that: close the loop so the triaging agent also proposes fixes.
+Current state: Canary-side prerequisites for annotations, timeline replay,
+incident detail, and signal-agnostic write-back have landed. `#030` and `#031`
+make the remaining agent contract and replay boundaries machine-verifiable
+before the downstream triage sprite closes the loop.
+Next step: ship the bitterblossom triage sprite, then close the loop so the
+triaging agent can propose fixes while Canary remains the observability
+substrate.
 
 Source: spellbook simplification session 2026-03-25.
 Refined: grooming session 2026-03-30 — decided annotations over triage state machine.
