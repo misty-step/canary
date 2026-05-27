@@ -116,6 +116,12 @@ defmodule CanaryWeb.IncidentControllerTest do
 
       error_group = create_error_group("detail-svc", "DetailError", 4)
 
+      insert_error_for_group(error_group,
+        classification_category: "application",
+        classification_persistence: "persistent",
+        classification_component: "runtime"
+      )
+
       Canary.Repo.insert!(%Canary.Schemas.IncidentSignal{
         incident_id: incident.id,
         signal_type: "error_group",
@@ -157,6 +163,12 @@ defmodule CanaryWeb.IncidentControllerTest do
       assert err["group_hash"] == error_group.group_hash
       assert err["error_class"] == "DetailError"
       assert err["total_count"] == 4
+
+      assert err["classification"] == %{
+               "category" => "application",
+               "persistence" => "persistent",
+               "component" => "runtime"
+             }
 
       # Per-signal annotation_count is 0 when no annotations target the signal's
       # underlying error_group / target / monitor subject (only an incident
@@ -235,6 +247,164 @@ defmodule CanaryWeb.IncidentControllerTest do
         |> get("/api/v1/incidents/INC-anything")
 
       assert json_response(conn, 401)["code"] == "invalid_api_key"
+    end
+
+    test "returns an action brief over existing incident state", %{conn: conn} do
+      incident = create_incident("brief-svc")
+      now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+      active_group = create_error_group("brief-svc", "EmbeddingError", 7)
+      resolved_group = create_error_group("brief-svc", "ConfigError", 4)
+
+      Canary.Repo.insert!(%Canary.Schemas.IncidentSignal{
+        incident_id: incident.id,
+        signal_type: "error_group",
+        signal_ref: active_group.group_hash,
+        attached_at: now
+      })
+
+      Canary.Repo.insert!(%Canary.Schemas.IncidentSignal{
+        incident_id: incident.id,
+        signal_type: "error_group",
+        signal_ref: resolved_group.group_hash,
+        attached_at: now,
+        resolved_at: now
+      })
+
+      create_annotation(:incident, incident.id,
+        action: "fixed",
+        agent: "codex",
+        metadata: %{deployment: "https://example.com/deploy"}
+      )
+
+      conn = get(conn, "/api/v1/incidents/#{incident.id}")
+      body = json_response(conn, 200)["action_brief"]
+
+      assert body["summary"] =~ "brief-svc action brief"
+      assert body["recommendation"]["action"] == "triage"
+      assert body["recommendation"]["reason"] =~ "active signal"
+
+      assert body["signal_counts"] == %{
+               "active" => 1,
+               "resolved" => 1,
+               "total" => 2,
+               "visible" => 2
+             }
+
+      assert body["signals_truncated"] == false
+      assert body["latest_annotation"]["action"] == "fixed"
+      assert body["latest_annotation"]["agent"] == "codex"
+      refute Map.has_key?(body, "active_signals")
+      refute Map.has_key?(body, "resolved_signals")
+      refute Map.has_key?(body, "incident")
+      refute Map.has_key?(body, "action_state")
+      refute Map.has_key?(body, "suggested_annotation_actions")
+    end
+
+    test "recommends watch when all visible active signals already have annotations", %{
+      conn: conn
+    } do
+      incident = create_incident("watch-svc")
+      now = DateTime.utc_now() |> DateTime.to_iso8601()
+      group = create_error_group("watch-svc", "WatchError", 2)
+
+      insert_incident_signal(incident, "error_group", group.group_hash, attached_at: now)
+      create_annotation(:group, group.group_hash, action: "triaged", agent: "bb-sprite")
+
+      conn = get(conn, "/api/v1/incidents/#{incident.id}")
+      body = json_response(conn, 200)["action_brief"]
+
+      assert body["recommendation"]["action"] == "watch"
+      assert body["recommendation"]["reason"] =~ "already have coordination annotations"
+
+      assert body["signal_counts"] == %{
+               "active" => 1,
+               "resolved" => 0,
+               "total" => 1,
+               "visible" => 1
+             }
+    end
+
+    test "recommends recovery verification when no active signals remain", %{conn: conn} do
+      incident = create_incident("resolved-svc")
+      now = DateTime.utc_now() |> DateTime.to_iso8601()
+      group = create_error_group("resolved-svc", "ResolvedError", 2)
+
+      insert_incident_signal(incident, "error_group", group.group_hash,
+        attached_at: now,
+        resolved_at: now
+      )
+
+      conn = get(conn, "/api/v1/incidents/#{incident.id}")
+      body = json_response(conn, 200)["action_brief"]
+
+      assert body["recommendation"]["action"] == "verify-recovery"
+      assert body["recommendation"]["reason"] =~ "No active signals remain"
+
+      assert body["signal_counts"] == %{
+               "active" => 0,
+               "resolved" => 1,
+               "total" => 1,
+               "visible" => 1
+             }
+    end
+
+    test "marks action brief as truncated before recommending action", %{conn: conn} do
+      incident = create_incident("truncated-svc")
+      now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+      for i <- 1..30 do
+        insert_incident_signal(
+          incident,
+          "error_group",
+          "grp-#{String.pad_leading(to_string(i), 3, "0")}",
+          attached_at: now
+        )
+      end
+
+      conn = get(conn, "/api/v1/incidents/#{incident.id}")
+      body = json_response(conn, 200)["action_brief"]
+
+      assert body["signals_truncated"] == true
+      assert body["recommendation"]["action"] == "inspect-truncated-signals"
+      assert body["recommendation"]["reason"] =~ "complete recommendation cannot be derived"
+
+      assert body["signal_counts"] == %{
+               "active" => 25,
+               "resolved" => 0,
+               "total" => 30,
+               "visible" => 25
+             }
+    end
+
+    test "keeps truncated recommendation conservative when visible signals are resolved", %{
+      conn: conn
+    } do
+      incident = create_incident("truncated-resolved-svc")
+      now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+      for i <- 1..30 do
+        insert_incident_signal(
+          incident,
+          "error_group",
+          "grp-resolved-#{String.pad_leading(to_string(i), 3, "0")}",
+          attached_at: now,
+          resolved_at: now
+        )
+      end
+
+      conn = get(conn, "/api/v1/incidents/#{incident.id}")
+      body = json_response(conn, 200)["action_brief"]
+
+      assert body["signals_truncated"] == true
+      assert body["recommendation"]["action"] == "inspect-truncated-signals"
+
+      assert body["signal_counts"] == %{
+               "active" => 0,
+               "resolved" => 25,
+               "total" => 30,
+               "visible" => 25
+             }
     end
 
     test "caps signals at 25 and reports truncation", %{conn: conn} do
@@ -354,5 +524,32 @@ defmodule CanaryWeb.IncidentControllerTest do
       # across all signals.
       assert count <= 10, "expected ≤10 read queries for detail fetch, got #{count}"
     end
+  end
+
+  defp insert_incident_signal(incident, signal_type, signal_ref, attrs) do
+    Canary.Repo.insert!(%Canary.Schemas.IncidentSignal{
+      incident_id: incident.id,
+      signal_type: signal_type,
+      signal_ref: signal_ref,
+      attached_at: Keyword.fetch!(attrs, :attached_at),
+      resolved_at: Keyword.get(attrs, :resolved_at)
+    })
+  end
+
+  defp insert_error_for_group(error_group, attrs) do
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    %Canary.Schemas.Error{id: error_group.last_error_id}
+    |> Canary.Schemas.Error.changeset(%{
+      service: error_group.service,
+      error_class: error_group.error_class,
+      message: "classified detail error",
+      group_hash: error_group.group_hash,
+      created_at: now,
+      classification_category: Keyword.fetch!(attrs, :classification_category),
+      classification_persistence: Keyword.fetch!(attrs, :classification_persistence),
+      classification_component: Keyword.fetch!(attrs, :classification_component)
+    })
+    |> Canary.Repo.insert!()
   end
 end

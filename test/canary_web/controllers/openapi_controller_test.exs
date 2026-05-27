@@ -91,6 +91,67 @@ defmodule CanaryWeb.OpenAPIControllerTest do
              "#/components/responses/ForbiddenProblem"
   end
 
+  test "documents incident action brief as part of the one-call responder payload", %{conn: conn} do
+    body = openapi_body(conn)
+
+    assert get_in(body, [
+             "components",
+             "schemas",
+             "IncidentDetailResponse",
+             "properties",
+             "action_brief",
+             "$ref"
+           ]) == "#/components/schemas/IncidentActionBrief"
+
+    assert get_in(body, [
+             "components",
+             "schemas",
+             "IncidentDetailSignalErrorGroup",
+             "properties",
+             "classification",
+             "$ref"
+           ]) == "#/components/schemas/ErrorGroupClassification"
+
+    assert get_in(body, [
+             "components",
+             "schemas",
+             "IncidentActionRecommendation",
+             "properties",
+             "action",
+             "enum"
+           ]) == ["triage", "watch", "verify-recovery", "inspect-truncated-signals"]
+
+    assert get_in(body, [
+             "components",
+             "schemas",
+             "IncidentActionBrief",
+             "properties",
+             "signal_counts",
+             "properties",
+             "total",
+             "type"
+           ]) == "integer"
+
+    assert get_in(body, [
+             "components",
+             "schemas",
+             "IncidentActionBrief",
+             "properties",
+             "signals_truncated",
+             "type"
+           ]) == "boolean"
+
+    refute Map.has_key?(
+             get_in(body, ["components", "schemas", "IncidentActionBrief", "properties"]),
+             "active_signals"
+           )
+
+    refute Map.has_key?(
+             get_in(body, ["components", "schemas", "IncidentActionBrief", "properties"]),
+             "action_state"
+           )
+  end
+
   defp openapi_body(conn) do
     conn
     |> get("/api/v1/openapi.json")

@@ -164,4 +164,33 @@ defmodule Canary.SummaryTest do
       assert result =~ "2026-03-14T10:00:00Z"
     end
   end
+
+  describe "incident_action_brief/1" do
+    test "summarizes active and resolved signal split with recommendation" do
+      result =
+        Summary.incident_action_brief(%{
+          service: "sploot-web",
+          active_count: 1,
+          resolved_count: 2,
+          recommendation: %{action: "triage"}
+        })
+
+      assert result ==
+               "sploot-web action brief: 1 active signal, 2 resolved signals. Recommended action: triage."
+    end
+
+    test "qualifies counts when the signal window is truncated" do
+      result =
+        Summary.incident_action_brief(%{
+          service: "sploot-web",
+          active_count: 1,
+          resolved_count: 0,
+          signals_truncated: true,
+          recommendation: %{action: "inspect-truncated-signals"}
+        })
+
+      assert result ==
+               "sploot-web action brief: 1 visible active signal, 0 visible resolved signals. Recommended action: inspect-truncated-signals."
+    end
+  end
 end

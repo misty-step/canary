@@ -132,6 +132,22 @@ defmodule Canary.Summary do
     "#{state_label}. #{incident.severity}-severity incident opened at #{incident.opened_at} on service #{incident.service}. #{signal_part}#{annotation_part}"
   end
 
+  @spec incident_action_brief(map()) :: String.t()
+  def incident_action_brief(
+        %{
+          service: service,
+          active_count: active_count,
+          resolved_count: resolved_count,
+          recommendation: %{action: action}
+        } = brief
+      ) do
+    active_label = pluralize(active_count, "active signal", "active signals")
+    resolved_label = pluralize(resolved_count, "resolved signal", "resolved signals")
+    scope = if Map.get(brief, :signals_truncated), do: " visible", else: ""
+
+    "#{service} action brief: #{active_count}#{scope} #{active_label}, #{resolved_count}#{scope} #{resolved_label}. Recommended action: #{action}."
+  end
+
   @spec annotations_page(map()) :: String.t()
   def annotations_page(%{
         subject_type: subject_type,
