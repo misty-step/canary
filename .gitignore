@@ -47,6 +47,9 @@ thinktank.log
 # Dependencies
 /node_modules/
 
+# Rust build output
+/target/
+
 # OS
 .DS_Store
 
