@@ -8,7 +8,12 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
+mod ingest;
 mod schema;
+
+pub use ingest::{
+    ErrorIngest, ErrorIngestCommit, ErrorIngestIds, ErrorIngestPayload, ErrorServiceEvent,
+};
 
 /// Result type returned by the store boundary.
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -55,6 +60,11 @@ impl Store {
         Ok(version)
     }
 
+    /// Commit one validated error ingest transaction.
+    pub fn commit_error_ingest(&mut self, ingest: ErrorIngest) -> Result<ErrorIngestCommit> {
+        ingest::commit(&mut self.connection, ingest)
+    }
+
     fn from_connection(connection: Connection) -> Result<Self> {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -66,8 +76,14 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
+    use std::str::FromStr;
 
+    use canary_core::{
+        ids::{ErrorId, EventId},
+        ingest::classification::{Category, Classification, Component, Persistence},
+    };
     use rusqlite::params;
+    use serde_json::Value;
 
     use super::*;
 
@@ -299,10 +315,194 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn commit_error_ingest_creates_error_group_and_timeline_event() -> Result<()> {
+        let mut store = migrated_store()?;
+        let ingest = error_ingest(
+            "ERR-123456789abc",
+            "EVT-123456789abc",
+            "group-new",
+            "2026-05-28T20:00:00Z",
+        );
+
+        let commit = store.commit_error_ingest(ingest)?;
+
+        assert_eq!(commit.id, "ERR-123456789abc");
+        assert_eq!(commit.group_hash, "group-new");
+        assert!(commit.is_new_class);
+        assert_eq!(
+            commit
+                .service_event
+                .as_ref()
+                .map(|event| event.event.as_str()),
+            Some("error.new_class")
+        );
+
+        assert_eq!(row_count(&store.connection, "errors")?, 1);
+        let group_count = store.connection.query_row(
+            "SELECT total_count FROM error_groups WHERE group_hash = 'group-new'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        assert_eq!(group_count, 1);
+
+        let event_payload = store.connection.query_row(
+            "SELECT event, entity_type, entity_ref, payload
+             FROM service_events
+             WHERE entity_ref = 'group-new'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )?;
+        assert_eq!(event_payload.0, "error.new_class");
+        assert_eq!(event_payload.1, "error_group");
+        assert_eq!(event_payload.2, "group-new");
+
+        let payload_json: Value = serde_json::from_str(&event_payload.3).unwrap_or(Value::Null);
+        assert_eq!(payload_json["event"], "error.new_class");
+        assert_eq!(payload_json["error"]["id"], "ERR-123456789abc");
+        assert_eq!(payload_json["error"]["service"], "cadence");
+        assert_eq!(payload_json["error"]["group_hash"], "group-new");
+
+        Ok(())
+    }
+
+    #[test]
+    fn commit_error_ingest_updates_existing_group_without_new_class_event() -> Result<()> {
+        let mut store = migrated_store()?;
+        store.commit_error_ingest(error_ingest(
+            "ERR-123456789abc",
+            "EVT-123456789abc",
+            "group-dup",
+            "2026-05-28T20:00:00Z",
+        ))?;
+
+        let commit = store.commit_error_ingest(error_ingest(
+            "ERR-abcdefghijkl",
+            "EVT-abcdefghijkl",
+            "group-dup",
+            "2026-05-28T20:05:00Z",
+        ))?;
+
+        assert!(!commit.is_new_class);
+        assert!(commit.service_event.is_none());
+        let group = store.connection.query_row(
+            "SELECT total_count, last_error_id, status
+             FROM error_groups
+             WHERE group_hash = 'group-dup'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        assert_eq!(
+            group,
+            (2, "ERR-abcdefghijkl".to_owned(), "active".to_owned())
+        );
+        assert_eq!(
+            service_event_count(&store.connection, "group-dup", "error.new_class")?,
+            1
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn commit_error_ingest_records_regression_after_twenty_four_hours() -> Result<()> {
+        let mut store = migrated_store()?;
+        store.commit_error_ingest(error_ingest(
+            "ERR-123456789abc",
+            "EVT-123456789abc",
+            "group-regression",
+            "2026-05-27T20:00:00Z",
+        ))?;
+
+        let commit = store.commit_error_ingest(error_ingest(
+            "ERR-abcdefghijkl",
+            "EVT-abcdefghijkl",
+            "group-regression",
+            "2026-05-28T20:00:00Z",
+        ))?;
+
+        assert!(!commit.is_new_class);
+        assert_eq!(
+            commit
+                .service_event
+                .as_ref()
+                .map(|event| event.event.as_str()),
+            Some("error.regression")
+        );
+        assert_eq!(
+            service_event_count(&store.connection, "group-regression", "error.regression")?,
+            1
+        );
+
+        Ok(())
+    }
+
     fn migrated_store() -> Result<Store> {
         let mut store = Store::open_in_memory()?;
         store.migrate()?;
         Ok(store)
+    }
+
+    fn error_ingest(
+        error_id: &str,
+        event_id: &str,
+        group_hash: &str,
+        created_at: &str,
+    ) -> ErrorIngest {
+        ErrorIngest {
+            ids: ErrorIngestIds {
+                error_id: ErrorId::from_str(error_id).unwrap_or_else(|_| ErrorId::generate()),
+                event_id: EventId::from_str(event_id).unwrap_or_else(|_| EventId::generate()),
+            },
+            payload: ErrorIngestPayload {
+                service: "cadence".to_owned(),
+                error_class: "DBConnection.ConnectionError".to_owned(),
+                message: "pool timed out".to_owned(),
+                message_template: "pool timed out".to_owned(),
+                stack_trace: Some("stack line".to_owned()),
+                context_json: Some(r#"{"tenant":"alpha"}"#.to_owned()),
+                severity: "warning".to_owned(),
+                environment: "production".to_owned(),
+                group_hash: group_hash.to_owned(),
+                fingerprint_json: Some(r#"["route","handler"]"#.to_owned()),
+                region: Some("iad".to_owned()),
+                classification: Classification {
+                    category: Category::Infrastructure,
+                    persistence: Persistence::Transient,
+                    component: Component::Database,
+                },
+                created_at: created_at.to_owned(),
+            },
+        }
+    }
+
+    fn row_count(connection: &Connection, table: &str) -> Result<i64> {
+        let count = connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        Ok(count)
+    }
+
+    fn service_event_count(connection: &Connection, group_hash: &str, event: &str) -> Result<i64> {
+        let count = connection.query_row(
+            "SELECT count(*) FROM service_events WHERE entity_ref = ?1 AND event = ?2",
+            params![group_hash, event],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count)
     }
 
     fn table_names(connection: &Connection) -> Result<BTreeSet<String>> {

@@ -120,9 +120,12 @@ the Rust server accepts production traffic:
     migrations ported from the Phoenix Ecto migrations, plus compatibility tests
     for table shape, defaults, indexes, FTS triggers, foreign keys, and
     open-incident uniqueness.
+11. `canary-store::commit_error_ingest` and `canary-ingest`: transactional
+    error persistence plus a deep ingest boundary that owns Phoenix validation
+    order, truncation, grouping, classification, and the single store call.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
-ten existing contracts into Rust types and tests. The server crate is allowed
+eleven existing contracts into Rust types and tests. The server crate is allowed
 to know Axum, routing, and response conversion; it is not allowed to own product
 decisions already expressed by `canary-core` or `canary-http`.
 
@@ -147,10 +150,14 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Port `POST /api/v1/errors` end-to-end: scoped auth, validation, grouping,
-   single-writer transaction, response shape, and contract tests.
-2. Port webhook ledger and delivery after ingest is stable; preserve
+1. Wire `POST /api/v1/errors` through `canary-server`: content-length preflight,
+   scoped auth, JSON decoding, `canary-ingest`, 201 response shape, and RFC 9457
+   validation/413/500 Problem Details.
+2. Add post-commit effect handling for new-class/regression events without
+   making broadcast, incident correlation, or webhook enqueue failures fail the
+   ingest response.
+3. Port webhook ledger and delivery after ingest is stable; preserve
    `X-Delivery-Id`, `X-Signature`, `X-Event`, `X-Webhook-Version`, and
    `X-Sequence`.
-3. Add compatibility checks against a migrated Phoenix fixture database before
+4. Add compatibility checks against a migrated Phoenix fixture database before
    any production traffic moves to the Rust server.

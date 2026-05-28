@@ -150,6 +150,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "canary-ingest"
+version = "0.1.0"
+dependencies = [
+ "canary-core",
+ "canary-store",
+ "serde_json",
+ "thiserror",
+ "time",
+]
+
+[[package]]
 name = "canary-server"
 version = "0.1.0"
 dependencies = [
@@ -165,8 +176,11 @@ dependencies = [
 name = "canary-store"
 version = "0.1.0"
 dependencies = [
+ "canary-core",
  "rusqlite",
+ "serde_json",
  "thiserror",
+ "time",
 ]
 
 [[package]]
