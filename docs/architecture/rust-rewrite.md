@@ -112,9 +112,13 @@ the Rust server accepts production traffic:
 8. `canary-server`: an Axum public-router adapter for `/healthz`, `/readyz`,
    and `/api/v1/openapi.json` that preserves status codes, content type, body
    bytes, and the absence of private routes.
+9. `canary-http::webhooks`: HMAC-SHA256 signing, verification, and outbound
+   webhook header construction for exact body bytes, including Phoenix parity
+   fixtures for `sha256=<hex>`, `x-delivery-id`, `x-event`,
+   `x-webhook-version`, and `x-sequence`.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
-eight existing contracts into Rust types and tests. The server crate is allowed
+nine existing contracts into Rust types and tests. The server crate is allowed
 to know Axum, routing, and response conversion; it is not allowed to own product
 decisions already expressed by `canary-core` or `canary-http`.
 
@@ -139,11 +143,10 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Add webhook signing parity fixtures before worker delivery is ported.
-2. Add `canary-store` with SQL migrations generated from the existing Ecto schema,
+1. Add `canary-store` with SQL migrations generated from the existing Ecto schema,
    plus compatibility tests against a fixture SQLite database.
-3. Port `POST /api/v1/errors` end-to-end: scoped auth, validation, grouping,
+2. Port `POST /api/v1/errors` end-to-end: scoped auth, validation, grouping,
    single-writer transaction, response shape, and contract tests.
-4. Port webhook ledger and delivery after ingest is stable; preserve
+3. Port webhook ledger and delivery after ingest is stable; preserve
    `X-Delivery-Id`, `X-Signature`, `X-Event`, `X-Webhook-Version`, and
    `X-Sequence`.

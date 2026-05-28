@@ -7,3 +7,4 @@
 pub mod auth;
 pub mod problem_details;
 pub mod public;
+pub mod webhooks;
