@@ -10,12 +10,14 @@ use rusqlite::Connection;
 
 mod api_keys;
 mod ingest;
+mod query;
 mod schema;
 
 pub use api_keys::{API_KEY_PREFIX_LEN, ApiKeyInsert, VerifiedApiKey};
 pub use ingest::{
     ErrorIngest, ErrorIngestCommit, ErrorIngestIds, ErrorIngestPayload, ErrorServiceEvent,
 };
+pub use query::{QueryError, QueryResult, ServiceQueryOptions};
 
 /// Result type returned by the store boundary.
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -75,6 +77,35 @@ impl Store {
     /// Verify a raw bearer token against active bcrypt-hashed API-key rows.
     pub fn verify_api_key(&self, raw_key: &str) -> Result<Option<VerifiedApiKey>> {
         api_keys::verify_key(&self.connection, raw_key)
+    }
+
+    /// Query recent error groups for a service.
+    pub fn errors_by_service(
+        &self,
+        service: &str,
+        window: &str,
+        options: ServiceQueryOptions,
+    ) -> QueryResult<canary_core::query::ErrorsByService> {
+        query::errors_by_service(&self.connection, service, window, options)
+    }
+
+    /// Query recent error groups for an error class.
+    pub fn errors_by_error_class(
+        &self,
+        error_class: &str,
+        window: &str,
+        service: Option<&str>,
+        options: ServiceQueryOptions,
+    ) -> QueryResult<canary_core::query::ErrorsByErrorClass> {
+        query::errors_by_error_class(&self.connection, error_class, window, service, options)
+    }
+
+    /// Return one error detail read model.
+    pub fn error_detail(
+        &self,
+        error_id: &str,
+    ) -> QueryResult<Option<canary_core::query::ErrorDetail>> {
+        query::error_detail(&self.connection, error_id)
     }
 
     /// Count persisted errors.
@@ -402,6 +433,134 @@ mod tests {
 
         assert_eq!(store.verify_api_key("sk_live_revoked_secret")?, None);
         assert_eq!(store.verify_api_key("sk_live_missing_secret")?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn errors_by_service_returns_phoenix_group_shape_and_summary()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        store.commit_error_ingest(error_ingest(
+            "ERR-123456789abc",
+            "EVT-123456789abc",
+            "group-query-a",
+            "2026-05-28T20:00:00Z",
+        ))?;
+
+        let result = store.errors_by_service("cadence", "24h", ServiceQueryOptions::default())?;
+
+        assert_eq!(result.service, "cadence");
+        assert_eq!(result.window, "24h");
+        assert_eq!(result.total_errors, 1);
+        assert_eq!(
+            result.summary,
+            "1 errors in cadence in the last 24h. 1 unique classes. Most frequent: DBConnection.ConnectionError (1 occurrences)."
+        );
+        assert_eq!(result.cursor, None);
+        assert_eq!(result.groups.len(), 1);
+        assert_eq!(result.groups[0].group_hash, "group-query-a");
+        assert_eq!(result.groups[0].total_count, 1);
+        assert_eq!(result.groups[0].classification.category, "infrastructure");
+
+        Ok(())
+    }
+
+    #[test]
+    fn errors_by_service_cursor_follows_count_then_hash_order()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let store = migrated_store()?;
+        let now = "2026-05-28T20:00:00Z";
+
+        for rank in 1..=51 {
+            let inverse_hash = format!("{:03}", 52 - rank);
+            let group_hash = format!("group-{inverse_hash}");
+            store.connection.execute(
+                "INSERT INTO error_groups (
+                    group_hash, service, error_class, severity, first_seen_at, last_seen_at,
+                    last_error_id, total_count, status
+                 ) VALUES (?1, 'svc-page', ?2, 'error', ?3, ?3, ?4, ?5, 'active')",
+                params![
+                    group_hash,
+                    format!("RuntimeError{rank}"),
+                    now,
+                    format!("ERR-page-{rank}"),
+                    200 - rank,
+                ],
+            )?;
+        }
+
+        let first_page =
+            store.errors_by_service("svc-page", "24h", ServiceQueryOptions::default())?;
+        assert_eq!(first_page.groups.len(), 50);
+        assert!(first_page.cursor.is_some());
+
+        let second_page = store.errors_by_service(
+            "svc-page",
+            "24h",
+            ServiceQueryOptions {
+                cursor: first_page.cursor,
+                ..ServiceQueryOptions::default()
+            },
+        )?;
+
+        assert_eq!(
+            second_page
+                .groups
+                .iter()
+                .map(|group| group.group_hash.as_str())
+                .collect::<Vec<_>>(),
+            vec!["group-001"]
+        );
+        assert_eq!(second_page.cursor, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn error_detail_returns_group_context_and_incident_ids()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        store.commit_error_ingest(error_ingest(
+            "ERR-123456789abc",
+            "EVT-123456789abc",
+            "group-detail",
+            "2026-05-28T20:00:00Z",
+        ))?;
+        store.connection.execute(
+            "INSERT INTO incidents (id, service, state, severity, opened_at)
+             VALUES ('INC-123456789abc', 'cadence', 'investigating', 'medium', '2026-05-28T20:00:00Z')",
+            [],
+        )?;
+        store.connection.execute(
+            "INSERT INTO incident_signals (incident_id, signal_type, signal_ref, attached_at)
+             VALUES ('INC-123456789abc', 'error_group', 'group-detail', '2026-05-28T20:00:00Z')",
+            [],
+        )?;
+
+        let detail = store
+            .error_detail("ERR-123456789abc")?
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+        assert_eq!(detail.service, "cadence");
+        assert_eq!(detail.group_hash, "group-detail");
+        assert_eq!(detail.incident_ids, vec!["INC-123456789abc"]);
+        assert_eq!(
+            detail.summary,
+            "DBConnection.ConnectionError in cadence. Seen 1 times since 2026-05-28T20:00:00Z. Last occurrence: 2026-05-28T20:00:00Z."
+        );
+        assert_eq!(
+            detail
+                .context
+                .as_ref()
+                .and_then(|value| value.get("tenant"))
+                .and_then(Value::as_str),
+            Some("alpha")
+        );
+        assert_eq!(
+            detail.group.as_ref().map(|group| group.total_count),
+            Some(1)
+        );
+
         Ok(())
     }
 

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use axum::{
     Router,
     body::{Body, Bytes},
-    extract::State,
+    extract::{Path, Query, State},
     http::{
         HeaderMap, HeaderValue, Response, StatusCode,
         header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderName},
@@ -30,7 +30,8 @@ use canary_ingest::{
     IngestConfig, IngestContext, IngestError, ValidationErrors, ingest as ingest_error,
 };
 use canary_store::Store;
-use serde::Serialize;
+use canary_store::{QueryError, ServiceQueryOptions};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
@@ -71,6 +72,8 @@ pub fn public_router(readiness: PublicReadiness) -> Router {
 pub fn ingest_router(state: IngestState) -> Router {
     Router::new()
         .route("/api/v1/errors", post(create_error))
+        .route("/api/v1/query", get(query_errors))
+        .route("/api/v1/errors/{id}", get(show_error))
         .with_state(state)
 }
 
@@ -161,9 +164,118 @@ async fn create_error(
     }
 }
 
+async fn query_errors(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Query(params): Query<QueryParams>,
+) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+        return problem_response(*problem);
+    }
+
+    let query_kind = match (params.error_class.as_deref(), params.service.as_deref()) {
+        (Some(error_class), service) => QueryKind::ErrorClass {
+            error_class: error_class.to_owned(),
+            service: service.map(ToOwned::to_owned),
+        },
+        (None, Some(service)) => QueryKind::Service {
+            service: service.to_owned(),
+        },
+        (None, None) => return problem_response(missing_query_problem()),
+    };
+
+    let default_window = match &query_kind {
+        QueryKind::Service { .. } => "1h",
+        QueryKind::ErrorClass { .. } => "24h",
+    };
+    let window = params.window.as_deref().unwrap_or(default_window);
+    let options = ServiceQueryOptions {
+        cursor: params.cursor,
+        with_annotation: params.with_annotation,
+        without_annotation: params.without_annotation,
+    };
+
+    let store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+
+    match query_kind {
+        QueryKind::Service { service } => {
+            match store.errors_by_service(&service, window, options) {
+                Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
+                Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
+                Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
+            }
+        }
+        QueryKind::ErrorClass {
+            error_class,
+            service,
+        } => match store.errors_by_error_class(&error_class, window, service.as_deref(), options) {
+            Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
+            Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
+            Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
+        },
+    }
+}
+
+enum QueryKind {
+    Service {
+        service: String,
+    },
+    ErrorClass {
+        error_class: String,
+        service: Option<String>,
+    },
+}
+
+fn missing_query_problem() -> ProblemDetails {
+    ProblemDetails::new(
+        422,
+        ProblemCode::ValidationError,
+        "Provide 'service', 'error_class', or 'group_by=error_class' parameter.",
+        None,
+    )
+}
+
+async fn show_error(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+        return problem_response(*problem);
+    }
+
+    let store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+
+    match store.error_detail(&id) {
+        Ok(Some(result)) => json_status_response(StatusCode::OK.as_u16(), result),
+        Ok(None) => problem_response(ProblemDetails::new(
+            404,
+            ProblemCode::NotFound,
+            format!("Error {id} not found."),
+            None,
+        )),
+        Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
+        Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
+    }
+}
+
 fn require_ingest_scope(
     state: &IngestState,
     headers: &HeaderMap,
+) -> Result<(), Box<ProblemDetails>> {
+    require_scope(state, headers, Permission::Ingest)
+}
+
+fn require_scope(
+    state: &IngestState,
+    headers: &HeaderMap,
+    permission: Permission,
 ) -> Result<(), Box<ProblemDetails>> {
     let authorization_headers = headers
         .get_all(AUTHORIZATION)
@@ -173,7 +285,7 @@ fn require_ingest_scope(
 
     authorize_with_lookup(
         &authorization_headers,
-        Permission::Ingest,
+        permission,
         |token| {
             let store = state.store.lock().map_err(|_| ())?;
             store
@@ -256,6 +368,28 @@ fn payload_too_large_problem(detail: impl Into<String>) -> ProblemDetails {
     http_payload_too_large_problem(detail, None)
 }
 
+fn invalid_window_problem() -> ProblemDetails {
+    ProblemDetails::new(
+        422,
+        ProblemCode::ValidationError,
+        canary_core::query::INVALID_WINDOW_DETAIL,
+        None,
+    )
+    .with_extra(
+        "errors",
+        json!({"window": [canary_core::query::INVALID_WINDOW_FIELD_ERROR]}),
+    )
+}
+
+fn internal_problem() -> ProblemDetails {
+    ProblemDetails::new(
+        500,
+        ProblemCode::InternalError,
+        "An unexpected error occurred.",
+        None,
+    )
+}
+
 fn text_response(contract: PublicResponse<&'static str>) -> Response<Body> {
     response(
         contract.status,
@@ -290,6 +424,16 @@ fn status_code(status: u16) -> StatusCode {
 
 /// Headers set by the public adapter.
 pub const PUBLIC_CONTENT_TYPE: HeaderName = CONTENT_TYPE;
+
+#[derive(Debug, Deserialize)]
+struct QueryParams {
+    service: Option<String>,
+    error_class: Option<String>,
+    window: Option<String>,
+    cursor: Option<String>,
+    with_annotation: Option<String>,
+    without_annotation: Option<String>,
+}
 
 #[cfg(test)]
 mod tests {
@@ -421,6 +565,141 @@ mod tests {
             .await?;
 
         assert_eq!(response.status(), StatusCode::CREATED);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn error_query_accepts_read_scope_and_returns_service_groups()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let router = ingest_router(state);
+
+        let response = router
+            .clone()
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let response = router
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/query?service=test-svc&window=24h",
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["service"], "test-svc");
+        assert_eq!(body["window"], "24h");
+        assert_eq!(body["total_errors"], 1);
+        assert_eq!(body["groups"][0]["error_class"], "RuntimeError");
+        assert_eq!(body["groups"][0]["classification"]["category"], "unknown");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn error_query_accepts_error_class_with_optional_service_filter()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let router = ingest_router(state);
+
+        let first = router
+            .clone()
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+        assert_eq!(first.status(), StatusCode::CREATED);
+
+        let response = router
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/query?error_class=RuntimeError&service=test-svc",
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["error_class"], "RuntimeError");
+        assert_eq!(body["window"], "24h");
+        assert_eq!(body["total_errors"], 1);
+        assert_eq!(body["groups"][0]["service"], "test-svc");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn error_query_rejects_ingest_scope_and_invalid_params() -> Result<(), Box<dyn Error>> {
+        let cases = [
+            (
+                read_request(INGEST_KEY, "/api/v1/query?service=test-svc")?,
+                StatusCode::FORBIDDEN,
+                "insufficient_scope",
+            ),
+            (
+                read_request(READ_KEY, "/api/v1/query")?,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_error",
+            ),
+            (
+                read_request(READ_KEY, "/api/v1/query?service=test-svc&window=99h")?,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_error",
+            ),
+        ];
+
+        for (request, expected_status, expected_code) in cases {
+            let response = ingest_router(test_ingest_state()?).oneshot(request).await?;
+            let status = response.status();
+            let body = json_body(response).await?;
+
+            assert_eq!(status, expected_status);
+            assert_eq!(body["code"], expected_code);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn error_detail_accepts_read_scope_and_reports_missing_errors()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let router = ingest_router(state);
+
+        let create_response = router
+            .clone()
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+        let created = json_body(create_response).await?;
+        let error_id = created["id"].as_str().ok_or("missing id")?;
+
+        let response = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                &format!("/api/v1/errors/{error_id}"),
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["id"], error_id);
+        assert_eq!(body["service"], "test-svc");
+        assert_eq!(body["group"]["total_count"], 1);
+        assert!(body["incident_ids"].as_array().is_some());
+
+        let response = router
+            .oneshot(read_request(READ_KEY, "/api/v1/errors/ERR-missing")?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "not_found");
+        assert_eq!(body["detail"], "Error ERR-missing not found.");
 
         Ok(())
     }
@@ -611,6 +890,12 @@ mod tests {
             .header("authorization", format!("Bearer {token}"))
             .header(CONTENT_TYPE, APPLICATION_JSON)
             .body(Body::from(body))?)
+    }
+
+    fn read_request(token: &str, path: &str) -> Result<Request<Body>, Box<dyn Error>> {
+        Ok(Request::get(path)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())?)
     }
 
     fn error_count(state: &IngestState) -> Result<u64, Box<dyn Error>> {

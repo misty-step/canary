@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 axum = "0.8"
 canary-ingest = { path = "../canary-ingest" }
+canary-core = { path = "../canary-core" }
 canary-http = { path = "../canary-http" }
 canary-store = { path = "../canary-store" }
 serde = { version = "1.0", features = ["derive"] }
