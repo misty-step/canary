@@ -6,6 +6,7 @@ members = [
   "crates/canary-ingest",
   "crates/canary-server",
   "crates/canary-store",
+  "crates/canary-workers",
 ]
 
 [workspace.package]

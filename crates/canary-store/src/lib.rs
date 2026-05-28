@@ -12,12 +12,17 @@ mod api_keys;
 mod ingest;
 mod query;
 mod schema;
+mod webhook_deliveries;
 
 pub use api_keys::{API_KEY_PREFIX_LEN, ApiKeyInsert, VerifiedApiKey};
 pub use ingest::{
     ErrorIngest, ErrorIngestCommit, ErrorIngestIds, ErrorIngestPayload, ErrorServiceEvent,
 };
 pub use query::{IncidentListOptions, QueryError, QueryResult, ServiceQueryOptions};
+pub use webhook_deliveries::{
+    WebhookDeliveryInsert, WebhookDeliveryListOptions, WebhookDeliveryRow, WebhookDeliveryStatus,
+    WebhookSubscription,
+};
 
 /// Result type returned by the store boundary.
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -127,6 +132,59 @@ impl Store {
         error_id: &str,
     ) -> QueryResult<Option<canary_core::query::ErrorDetail>> {
         query::error_detail(&self.connection, error_id)
+    }
+
+    /// Insert a pending webhook delivery ledger row.
+    pub fn create_pending_webhook_delivery(
+        &mut self,
+        delivery: WebhookDeliveryInsert,
+    ) -> Result<()> {
+        webhook_deliveries::create_pending(&mut self.connection, delivery)
+    }
+
+    /// Insert or update a suppressed webhook delivery ledger row.
+    pub fn create_suppressed_webhook_delivery(
+        &mut self,
+        delivery: WebhookDeliveryInsert,
+        reason: &str,
+    ) -> Result<()> {
+        webhook_deliveries::create_suppressed(&mut self.connection, delivery, reason)
+    }
+
+    /// Mark one webhook delivery attempt.
+    pub fn mark_webhook_delivery_attempt(&mut self, delivery_id: &str, now: &str) -> Result<()> {
+        webhook_deliveries::mark_attempt(&mut self.connection, delivery_id, now)
+    }
+
+    /// Mark one webhook delivery as delivered if the ledger row exists.
+    pub fn mark_webhook_delivery_delivered(&mut self, delivery_id: &str, now: &str) -> Result<()> {
+        webhook_deliveries::mark_delivered(&mut self.connection, delivery_id, now)
+    }
+
+    /// Mark one webhook delivery as discarded if the ledger row exists.
+    pub fn mark_webhook_delivery_discarded(
+        &mut self,
+        delivery_id: &str,
+        reason: &str,
+        now: &str,
+    ) -> Result<()> {
+        webhook_deliveries::mark_discarded(&mut self.connection, delivery_id, reason, now)
+    }
+
+    /// List webhook delivery ledger rows in Phoenix's deterministic order.
+    pub fn webhook_deliveries(
+        &self,
+        options: WebhookDeliveryListOptions,
+    ) -> Result<Vec<WebhookDeliveryRow>> {
+        webhook_deliveries::list(&self.connection, options)
+    }
+
+    /// Return active webhook subscriptions for one event.
+    pub fn active_webhook_subscriptions_for_event(
+        &self,
+        event: &str,
+    ) -> Result<Vec<WebhookSubscription>> {
+        webhook_deliveries::active_subscriptions_for_event(&self.connection, event)
     }
 
     /// Count persisted errors.
@@ -351,6 +409,140 @@ mod tests {
                 "webhook_deliveries_status_created_at_delivery_id_index",
             ],
         )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_ledger_tracks_attempt_success_and_final_discard() -> Result<()> {
+        let mut store = migrated_store()?;
+
+        store.create_pending_webhook_delivery(WebhookDeliveryInsert {
+            delivery_id: "DLV-123456789abc".to_owned(),
+            webhook_id: "WHK-123456789abc".to_owned(),
+            event: "error.new_class".to_owned(),
+            now: "2026-05-28T20:00:00Z".to_owned(),
+        })?;
+        store.mark_webhook_delivery_attempt("DLV-123456789abc", "2026-05-28T20:00:01Z")?;
+        store.mark_webhook_delivery_attempt("DLV-123456789abc", "2026-05-28T20:00:02Z")?;
+
+        let rows = store.webhook_deliveries(WebhookDeliveryListOptions {
+            delivery_id: Some("DLV-123456789abc".to_owned()),
+            ..WebhookDeliveryListOptions::default()
+        })?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, WebhookDeliveryStatus::Retrying);
+        assert_eq!(rows[0].attempt_count, 2);
+        assert_eq!(
+            rows[0].first_attempt_at.as_deref(),
+            Some("2026-05-28T20:00:01Z")
+        );
+        assert_eq!(
+            rows[0].last_attempt_at.as_deref(),
+            Some("2026-05-28T20:00:02Z")
+        );
+
+        store.mark_webhook_delivery_delivered("DLV-123456789abc", "2026-05-28T20:00:03Z")?;
+        let delivered = store.webhook_deliveries(WebhookDeliveryListOptions {
+            status: Some(WebhookDeliveryStatus::Delivered),
+            ..WebhookDeliveryListOptions::default()
+        })?;
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(
+            delivered[0].delivered_at.as_deref(),
+            Some("2026-05-28T20:00:03Z")
+        );
+
+        store.create_pending_webhook_delivery(WebhookDeliveryInsert {
+            delivery_id: "DLV-abcdefghijkl".to_owned(),
+            webhook_id: "WHK-123456789abc".to_owned(),
+            event: "error.new_class".to_owned(),
+            now: "2026-05-28T20:01:00Z".to_owned(),
+        })?;
+        store.mark_webhook_delivery_attempt("DLV-abcdefghijkl", "2026-05-28T20:01:01Z")?;
+        store.mark_webhook_delivery_discarded(
+            "DLV-abcdefghijkl",
+            "http_500",
+            "2026-05-28T20:01:02Z",
+        )?;
+        let discarded = store.webhook_deliveries(WebhookDeliveryListOptions {
+            status: Some(WebhookDeliveryStatus::Discarded),
+            ..WebhookDeliveryListOptions::default()
+        })?;
+        assert_eq!(discarded.len(), 1);
+        assert_eq!(discarded[0].reason.as_deref(), Some("http_500"));
+        assert_eq!(
+            discarded[0].discarded_at.as_deref(),
+            Some("2026-05-28T20:01:02Z")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_suppression_is_idempotent_and_queryable() -> Result<()> {
+        let mut store = migrated_store()?;
+
+        store.create_pending_webhook_delivery(WebhookDeliveryInsert {
+            delivery_id: "DLV-123456789abc".to_owned(),
+            webhook_id: "WHK-123456789abc".to_owned(),
+            event: "error.new_class".to_owned(),
+            now: "2026-05-28T20:00:00Z".to_owned(),
+        })?;
+        store.create_suppressed_webhook_delivery(
+            WebhookDeliveryInsert {
+                delivery_id: "DLV-123456789abc".to_owned(),
+                webhook_id: "WHK-123456789abc".to_owned(),
+                event: "error.new_class".to_owned(),
+                now: "2026-05-28T20:00:05Z".to_owned(),
+            },
+            "cooldown",
+        )?;
+
+        let rows = store.webhook_deliveries(WebhookDeliveryListOptions {
+            webhook_id: Some("WHK-123456789abc".to_owned()),
+            event: Some("error.new_class".to_owned()),
+            status: Some(WebhookDeliveryStatus::Suppressed),
+            ..WebhookDeliveryListOptions::default()
+        })?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].delivery_id, "DLV-123456789abc");
+        assert_eq!(rows[0].reason.as_deref(), Some("cooldown"));
+        assert_eq!(rows[0].attempt_count, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn active_webhook_subscriptions_filter_by_active_flag_and_event() -> Result<()> {
+        let store = migrated_store()?;
+
+        insert_webhook(
+            &store,
+            "WHK-123456789abc",
+            "[\"error.new_class\",\"health_check.state_change\"]",
+            1,
+            "2026-05-28T20:00:00Z",
+        )?;
+        insert_webhook(
+            &store,
+            "WHK-abcdefghijkl",
+            "[\"annotation.added\"]",
+            1,
+            "2026-05-28T20:01:00Z",
+        )?;
+        insert_webhook(
+            &store,
+            "WHK-inactive000",
+            "[\"error.new_class\"]",
+            0,
+            "2026-05-28T20:02:00Z",
+        )?;
+
+        let subscriptions = store.active_webhook_subscriptions_for_event("error.new_class")?;
+        assert_eq!(subscriptions.len(), 1);
+        assert_eq!(subscriptions[0].id, "WHK-123456789abc");
+        assert!(subscriptions[0].subscribes_to("health_check.state_change"));
 
         Ok(())
     }
@@ -1143,6 +1335,22 @@ mod tests {
         let mut store = Store::open_in_memory()?;
         store.migrate()?;
         Ok(store)
+    }
+
+    fn insert_webhook(
+        store: &Store,
+        id: &str,
+        events: &str,
+        active: i64,
+        created_at: &str,
+    ) -> Result<()> {
+        store.connection.execute(
+            "INSERT INTO webhooks (id, url, events, secret, active, created_at)
+             VALUES (?1, 'https://example.test/hook', ?2, 'secret', ?3, ?4)",
+            params![id, events, active, created_at],
+        )?;
+
+        Ok(())
     }
 
     fn error_ingest(

@@ -1,0 +1,293 @@
+//! Webhook delivery ledger persistence.
+
+use rusqlite::{Connection, params};
+
+use crate::Result;
+
+/// Delivery status values accepted by the Phoenix schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebhookDeliveryStatus {
+    /// Delivery has been enqueued but not attempted.
+    Pending,
+    /// Delivery has failed at least once and can be retried.
+    Retrying,
+    /// Delivery succeeded.
+    Delivered,
+    /// Delivery failed permanently or could not be used.
+    Discarded,
+    /// Delivery was intentionally not sent.
+    Suppressed,
+}
+
+impl WebhookDeliveryStatus {
+    /// Return the persisted status string.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Retrying => "retrying",
+            Self::Delivered => "delivered",
+            Self::Discarded => "discarded",
+            Self::Suppressed => "suppressed",
+        }
+    }
+
+    fn from_str(value: &str) -> Self {
+        match value {
+            "retrying" => Self::Retrying,
+            "delivered" => Self::Delivered,
+            "discarded" => Self::Discarded,
+            "suppressed" => Self::Suppressed,
+            _ => Self::Pending,
+        }
+    }
+}
+
+/// Ledger fields required to create a pending or suppressed delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebhookDeliveryInsert {
+    /// Stable delivery id.
+    pub delivery_id: String,
+    /// Webhook subscription id.
+    pub webhook_id: String,
+    /// Event name.
+    pub event: String,
+    /// RFC3339 timestamp.
+    pub now: String,
+}
+
+/// Delivery ledger row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebhookDeliveryRow {
+    /// Stable delivery id.
+    pub delivery_id: String,
+    /// Webhook subscription id.
+    pub webhook_id: String,
+    /// Event name.
+    pub event: String,
+    /// Current status.
+    pub status: WebhookDeliveryStatus,
+    /// Number of HTTP attempts.
+    pub attempt_count: i64,
+    /// Discard/suppression reason.
+    pub reason: Option<String>,
+    /// First attempt timestamp.
+    pub first_attempt_at: Option<String>,
+    /// Last attempt timestamp.
+    pub last_attempt_at: Option<String>,
+    /// Success timestamp.
+    pub delivered_at: Option<String>,
+    /// Permanent-discard timestamp.
+    pub discarded_at: Option<String>,
+    /// Creation timestamp.
+    pub created_at: String,
+    /// Last update timestamp.
+    pub updated_at: String,
+}
+
+/// Webhook delivery list filters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WebhookDeliveryListOptions {
+    /// Optional delivery id filter.
+    pub delivery_id: Option<String>,
+    /// Optional webhook id filter.
+    pub webhook_id: Option<String>,
+    /// Optional event filter.
+    pub event: Option<String>,
+    /// Optional status filter.
+    pub status: Option<WebhookDeliveryStatus>,
+    /// Maximum rows to return.
+    pub limit: Option<u32>,
+}
+
+/// Active webhook subscription.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebhookSubscription {
+    /// Webhook id.
+    pub id: String,
+    /// Destination URL.
+    pub url: String,
+    /// JSON-encoded subscribed event names.
+    pub events: String,
+    /// Shared secret.
+    pub secret: String,
+}
+
+impl WebhookSubscription {
+    /// Return true when this subscription includes `event`.
+    pub fn subscribes_to(&self, event: &str) -> bool {
+        serde_json::from_str::<Vec<String>>(&self.events)
+            .is_ok_and(|events| events.iter().any(|subscribed| subscribed == event))
+    }
+}
+
+pub(crate) fn create_pending(
+    connection: &mut Connection,
+    delivery: WebhookDeliveryInsert,
+) -> Result<()> {
+    connection.execute(
+        "INSERT OR IGNORE INTO webhook_deliveries (
+            delivery_id, webhook_id, event, status, attempt_count, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, 'pending', 0, ?4, ?4)",
+        params![
+            delivery.delivery_id,
+            delivery.webhook_id,
+            delivery.event,
+            delivery.now,
+        ],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn create_suppressed(
+    connection: &mut Connection,
+    delivery: WebhookDeliveryInsert,
+    reason: &str,
+) -> Result<()> {
+    connection.execute(
+        "INSERT INTO webhook_deliveries (
+            delivery_id, webhook_id, event, status, attempt_count, reason, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, 'suppressed', 0, ?4, ?5, ?5)
+         ON CONFLICT(delivery_id) DO UPDATE SET
+            status = 'suppressed',
+            reason = excluded.reason,
+            updated_at = excluded.updated_at",
+        params![
+            delivery.delivery_id,
+            delivery.webhook_id,
+            delivery.event,
+            reason,
+            delivery.now,
+        ],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn mark_attempt(
+    connection: &mut Connection,
+    delivery_id: &str,
+    now: &str,
+) -> Result<()> {
+    connection.execute(
+        "UPDATE webhook_deliveries
+         SET status = CASE
+                WHEN status IN ('pending', 'retrying') THEN 'retrying'
+                ELSE status
+             END,
+             attempt_count = attempt_count + 1,
+             first_attempt_at = COALESCE(first_attempt_at, ?2),
+             last_attempt_at = ?2,
+             updated_at = ?2
+         WHERE delivery_id = ?1",
+        params![delivery_id, now],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn mark_delivered(
+    connection: &mut Connection,
+    delivery_id: &str,
+    now: &str,
+) -> Result<()> {
+    connection.execute(
+        "UPDATE webhook_deliveries
+         SET status = 'delivered', delivered_at = ?2, updated_at = ?2
+         WHERE delivery_id = ?1",
+        params![delivery_id, now],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn mark_discarded(
+    connection: &mut Connection,
+    delivery_id: &str,
+    reason: &str,
+    now: &str,
+) -> Result<()> {
+    connection.execute(
+        "UPDATE webhook_deliveries
+         SET status = 'discarded', reason = ?2, discarded_at = ?3, updated_at = ?3
+         WHERE delivery_id = ?1",
+        params![delivery_id, reason, now],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn list(
+    connection: &Connection,
+    options: WebhookDeliveryListOptions,
+) -> Result<Vec<WebhookDeliveryRow>> {
+    let mut sql = String::from(
+        "SELECT delivery_id, webhook_id, event, status, attempt_count, reason,
+                first_attempt_at, last_attempt_at, delivered_at, discarded_at,
+                created_at, updated_at
+         FROM webhook_deliveries WHERE 1 = 1",
+    );
+    let mut filters = Vec::new();
+
+    if let Some(delivery_id) = options.delivery_id {
+        sql.push_str(" AND delivery_id = ?");
+        filters.push(delivery_id);
+    }
+    if let Some(webhook_id) = options.webhook_id {
+        sql.push_str(" AND webhook_id = ?");
+        filters.push(webhook_id);
+    }
+    if let Some(event) = options.event {
+        sql.push_str(" AND event = ?");
+        filters.push(event);
+    }
+    if let Some(status) = options.status {
+        sql.push_str(" AND status = ?");
+        filters.push(status.as_str().to_owned());
+    }
+
+    sql.push_str(" ORDER BY created_at DESC, delivery_id DESC LIMIT ?");
+    filters.push(options.limit.unwrap_or(50).to_string());
+
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(rusqlite::params_from_iter(filters), row)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+pub(crate) fn active_subscriptions_for_event(
+    connection: &Connection,
+    event: &str,
+) -> Result<Vec<WebhookSubscription>> {
+    let mut statement = connection.prepare(
+        "SELECT id, url, events, secret FROM webhooks WHERE active = 1 ORDER BY created_at, id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(WebhookSubscription {
+            id: row.get(0)?,
+            url: row.get(1)?,
+            events: row.get(2)?,
+            secret: row.get(3)?,
+        })
+    })?;
+
+    let subscriptions = rows
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|subscription| subscription.subscribes_to(event))
+        .collect();
+    Ok(subscriptions)
+}
+
+fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WebhookDeliveryRow> {
+    let status: String = row.get(3)?;
+    Ok(WebhookDeliveryRow {
+        delivery_id: row.get(0)?,
+        webhook_id: row.get(1)?,
+        event: row.get(2)?,
+        status: WebhookDeliveryStatus::from_str(&status),
+        attempt_count: row.get(4)?,
+        reason: row.get(5)?,
+        first_attempt_at: row.get(6)?,
+        last_attempt_at: row.get(7)?,
+        delivered_at: row.get(8)?,
+        discarded_at: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+    })
+}
