@@ -12,6 +12,18 @@ use crate::problem_details::{ProblemCode, ProblemDetails};
 /// Result type for HTTP boundary authorization checks.
 pub type AuthResult<T> = std::result::Result<T, Box<ProblemDetails>>;
 
+/// Result type for authorization checks whose storage lookup may fail.
+pub type TryAuthResult<T, E> = std::result::Result<T, AuthError<E>>;
+
+/// Authorization failed either at the HTTP contract layer or during lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthError<E> {
+    /// Header parsing, invalid key, or scope failure.
+    Problem(Box<ProblemDetails>),
+    /// Storage or other lookup boundary failure.
+    Lookup(E),
+}
+
 /// Stable API-key scope stored on Canary keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -31,6 +43,16 @@ impl ApiKeyScope {
             Self::Admin => "admin",
             Self::IngestOnly => "ingest-only",
             Self::ReadOnly => "read-only",
+        }
+    }
+
+    /// Parse the existing Phoenix wire value for a scope.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "admin" => Some(Self::Admin),
+            "ingest-only" => Some(Self::IngestOnly),
+            "read-only" => Some(Self::ReadOnly),
+            _ => None,
         }
     }
 
@@ -101,21 +123,47 @@ pub fn authorize(
     lookup_scope: impl FnOnce(&str) -> Option<ApiKeyScope>,
     request_id: Option<String>,
 ) -> AuthResult<()> {
+    authorize_with_lookup(
+        authorization_headers,
+        permission,
+        |token| Ok::<_, std::convert::Infallible>(lookup_scope(token)),
+        request_id,
+    )
+    .map_err(|error| match error {
+        AuthError::Problem(problem) => problem,
+        AuthError::Lookup(never) => match never {},
+    })
+}
+
+/// Authorize a request while preserving storage lookup failures for the caller.
+pub fn authorize_with_lookup<E>(
+    authorization_headers: &[&str],
+    permission: Permission,
+    lookup_scope: impl FnOnce(&str) -> Result<Option<ApiKeyScope>, E>,
+    request_id: Option<String>,
+) -> TryAuthResult<(), E> {
     let token = match extract_bearer(authorization_headers) {
         BearerToken::Present(token) => token,
-        BearerToken::Missing => return Err(Box::new(missing_authorization_problem(request_id))),
+        BearerToken::Missing => {
+            return Err(AuthError::Problem(Box::new(missing_authorization_problem(
+                request_id,
+            ))));
+        }
     };
 
-    let Some(scope) = lookup_scope(token) else {
-        return Err(Box::new(invalid_api_key_problem(request_id)));
+    let scope = lookup_scope(token).map_err(AuthError::Lookup)?;
+    let Some(scope) = scope else {
+        return Err(AuthError::Problem(Box::new(invalid_api_key_problem(
+            request_id,
+        ))));
     };
 
     if scope.allows(permission) {
         Ok(())
     } else {
-        Err(Box::new(insufficient_scope_problem(
+        Err(AuthError::Problem(Box::new(insufficient_scope_problem(
             scope, permission, request_id,
-        )))
+        ))))
     }
 }
 
@@ -199,6 +247,18 @@ mod tests {
         assert!(!ApiKeyScope::ReadOnly.allows(Permission::Admin));
         assert!(!ApiKeyScope::ReadOnly.allows(Permission::Ingest));
         assert!(ApiKeyScope::ReadOnly.allows(Permission::Read));
+    }
+
+    #[test]
+    fn scope_parser_accepts_only_phoenix_wire_values() {
+        assert_eq!(ApiKeyScope::parse("admin"), Some(ApiKeyScope::Admin));
+        assert_eq!(
+            ApiKeyScope::parse("ingest-only"),
+            Some(ApiKeyScope::IngestOnly)
+        );
+        assert_eq!(ApiKeyScope::parse("read-only"), Some(ApiKeyScope::ReadOnly));
+        assert_eq!(ApiKeyScope::parse("ingest_only"), None);
+        assert_eq!(ApiKeyScope::parse(""), None);
     }
 
     #[test]

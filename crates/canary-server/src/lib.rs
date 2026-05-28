@@ -3,10 +3,7 @@
 //! This crate adapts the stable wire contracts from `canary-http` to concrete
 //! HTTP responses. Domain decisions and body shapes stay out of the router.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 use axum::{
     Router,
@@ -22,7 +19,7 @@ use canary_http::public::{
     DependencyStatus, PublicResponse, healthz_response, openapi_response, readyz_response,
 };
 use canary_http::{
-    auth::{ApiKeyScope, Permission, authorize},
+    auth::{ApiKeyScope, AuthError, Permission, authorize_with_lookup},
     problem_details::{ProblemCode, ProblemDetails},
     request::{
         MAX_JSON_BODY_BYTES, decode_json_object,
@@ -81,16 +78,14 @@ pub fn ingest_router(state: IngestState) -> Router {
 #[derive(Clone)]
 pub struct IngestState {
     store: Arc<Mutex<Store>>,
-    api_keys: Arc<HashMap<String, ApiKeyScope>>,
     config: IngestConfig,
 }
 
 impl IngestState {
     /// Build ingest state from an already-open single-writer store.
-    pub fn new(store: Store, api_keys: HashMap<String, ApiKeyScope>, config: IngestConfig) -> Self {
+    pub fn new(store: Store, config: IngestConfig) -> Self {
         Self {
             store: Arc::new(Mutex::new(store)),
-            api_keys: Arc::new(api_keys),
             config,
         }
     }
@@ -176,12 +171,27 @@ fn require_ingest_scope(
         .filter_map(|value| value.to_str().ok())
         .collect::<Vec<_>>();
 
-    authorize(
+    authorize_with_lookup(
         &authorization_headers,
         Permission::Ingest,
-        |token| state.api_keys.get(token).copied(),
+        |token| {
+            let store = state.store.lock().map_err(|_| ())?;
+            store
+                .verify_api_key(token)
+                .map(|verified| verified.and_then(|key| ApiKeyScope::parse(&key.scope)))
+                .map_err(|_| ())
+        },
         None,
     )
+    .map_err(|error| match error {
+        AuthError::Problem(problem) => problem,
+        AuthError::Lookup(()) => Box::new(ProblemDetails::new(
+            500,
+            ProblemCode::InternalError,
+            "An unexpected error occurred.",
+            None,
+        )),
+    })
 }
 
 fn check_content_length(headers: &HeaderMap) -> Result<(), Box<ProblemDetails>> {
@@ -290,10 +300,16 @@ mod tests {
         http::{Request, StatusCode, header::CONTENT_TYPE},
     };
     use canary_http::public::{APPLICATION_JSON, OPENAPI_JSON};
+    use canary_store::{API_KEY_PREFIX_LEN, ApiKeyInsert};
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
     use super::*;
+
+    const ADMIN_KEY: &str = "sk_live_admin_secret";
+    const INGEST_KEY: &str = "sk_live_ingest_secret";
+    const READ_KEY: &str = "sk_live_read_secret";
+    const REVOKED_KEY: &str = "sk_live_revoked_secret";
 
     #[tokio::test]
     async fn healthz_adapts_the_public_contract() -> Result<(), Box<dyn Error>> {
@@ -385,7 +401,7 @@ mod tests {
     #[tokio::test]
     async fn error_ingest_accepts_ingest_scope_and_returns_summary() -> Result<(), Box<dyn Error>> {
         let response = ingest_router(test_ingest_state()?)
-            .oneshot(error_request("sk_ingest", valid_error_body())?)
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
             .await?;
         let status = response.status();
         let body = json_body(response).await?;
@@ -401,7 +417,7 @@ mod tests {
     #[tokio::test]
     async fn error_ingest_accepts_admin_scope() -> Result<(), Box<dyn Error>> {
         let response = ingest_router(test_ingest_state()?)
-            .oneshot(error_request("sk_admin", valid_error_body())?)
+            .oneshot(error_request(ADMIN_KEY, valid_error_body())?)
             .await?;
 
         assert_eq!(response.status(), StatusCode::CREATED);
@@ -419,14 +435,19 @@ mod tests {
                 "invalid_api_key",
             ),
             (
-                error_request("sk_unknown", valid_error_body())?,
+                error_request("sk_live_unknown_secret", valid_error_body())?,
                 StatusCode::UNAUTHORIZED,
                 "invalid_api_key",
             ),
             (
-                error_request("sk_read", valid_error_body())?,
+                error_request(READ_KEY, valid_error_body())?,
                 StatusCode::FORBIDDEN,
                 "insufficient_scope",
+            ),
+            (
+                error_request(REVOKED_KEY, valid_error_body())?,
+                StatusCode::UNAUTHORIZED,
+                "invalid_api_key",
             ),
         ];
 
@@ -451,7 +472,7 @@ mod tests {
 
         let response = router
             .clone()
-            .oneshot(error_request("sk_ingest", "{}")?)
+            .oneshot(error_request(INGEST_KEY, "{}")?)
             .await?;
         let status = response.status();
         let body = json_body(response).await?;
@@ -462,7 +483,7 @@ mod tests {
         assert_eq!(error_count(&state)?, 0);
 
         let response = router
-            .oneshot(error_request("sk_ingest", valid_error_body())?)
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
             .await?;
         let body = json_body(response).await?;
         assert_eq!(body["is_new_class"], true);
@@ -482,7 +503,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::post("/api/v1/errors")
-                    .header("authorization", "Bearer sk_ingest")
+                    .header("authorization", format!("Bearer {INGEST_KEY}"))
                     .header("content-length", "102401")
                     .body(Body::from("{"))?,
             )
@@ -496,7 +517,7 @@ mod tests {
         assert_eq!(error_count(&state)?, 0);
 
         let response = router
-            .oneshot(error_request("sk_ingest", valid_error_body())?)
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
             .await?;
         let body = json_body(response).await?;
         assert_eq!(body["is_new_class"], true);
@@ -513,7 +534,7 @@ mod tests {
 
         let response = router
             .clone()
-            .oneshot(error_request("sk_ingest", "{")?)
+            .oneshot(error_request(INGEST_KEY, "{")?)
             .await?;
         let status = response.status();
         let body = json_body(response).await?;
@@ -523,7 +544,7 @@ mod tests {
         assert_eq!(error_count(&state)?, 0);
 
         let response = router
-            .oneshot(error_request("sk_ingest", valid_error_body())?)
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
             .await?;
         let body = json_body(response).await?;
         assert_eq!(body["is_new_class"], true);
@@ -551,7 +572,7 @@ mod tests {
         assert_eq!(error_count(&state)?, 0);
 
         let response = router
-            .oneshot(error_request("sk_ingest", valid_error_body())?)
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
             .await?;
         let body = json_body(response).await?;
         assert_eq!(body["is_new_class"], true);
@@ -571,15 +592,18 @@ mod tests {
         let mut store = Store::open_in_memory()?;
         store.migrate()?;
 
-        Ok(IngestState::new(
-            store,
-            HashMap::from([
-                ("sk_admin".to_owned(), ApiKeyScope::Admin),
-                ("sk_ingest".to_owned(), ApiKeyScope::IngestOnly),
-                ("sk_read".to_owned(), ApiKeyScope::ReadOnly),
-            ]),
-            IngestConfig::default(),
-        ))
+        seed_api_key(&mut store, "KEY-admin", ADMIN_KEY, "admin", None)?;
+        seed_api_key(&mut store, "KEY-ingest", INGEST_KEY, "ingest-only", None)?;
+        seed_api_key(&mut store, "KEY-read", READ_KEY, "read-only", None)?;
+        seed_api_key(
+            &mut store,
+            "KEY-revoked",
+            REVOKED_KEY,
+            "ingest-only",
+            Some("2026-05-28T20:05:00Z"),
+        )?;
+
+        Ok(IngestState::new(store, IngestConfig::default()))
     }
 
     fn error_request(token: &str, body: &'static str) -> Result<Request<Body>, Box<dyn Error>> {
@@ -592,6 +616,25 @@ mod tests {
     fn error_count(state: &IngestState) -> Result<u64, Box<dyn Error>> {
         let store = state.store.lock().map_err(|_| "store lock poisoned")?;
         Ok(store.error_count()?)
+    }
+
+    fn seed_api_key(
+        store: &mut Store,
+        id: &str,
+        raw_key: &str,
+        scope: &str,
+        revoked_at: Option<&str>,
+    ) -> Result<(), Box<dyn Error>> {
+        store.insert_api_key(ApiKeyInsert {
+            id: id.to_owned(),
+            name: format!("key {id}"),
+            key_prefix: raw_key.chars().take(API_KEY_PREFIX_LEN).collect(),
+            key_hash: bcrypt::hash(raw_key, bcrypt::DEFAULT_COST)?,
+            created_at: "2026-05-28T20:00:00Z".to_owned(),
+            revoked_at: revoked_at.map(str::to_owned),
+            scope: scope.to_owned(),
+        })?;
+        Ok(())
     }
 
     fn valid_error_body() -> &'static str {

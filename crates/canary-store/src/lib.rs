@@ -8,9 +8,11 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
+mod api_keys;
 mod ingest;
 mod schema;
 
+pub use api_keys::{API_KEY_PREFIX_LEN, ApiKeyInsert, VerifiedApiKey};
 pub use ingest::{
     ErrorIngest, ErrorIngestCommit, ErrorIngestIds, ErrorIngestPayload, ErrorServiceEvent,
 };
@@ -63,6 +65,16 @@ impl Store {
     /// Commit one validated error ingest transaction.
     pub fn commit_error_ingest(&mut self, ingest: ErrorIngest) -> Result<ErrorIngestCommit> {
         ingest::commit(&mut self.connection, ingest)
+    }
+
+    /// Insert one API-key row whose raw secret has already been bcrypt-hashed.
+    pub fn insert_api_key(&mut self, key: ApiKeyInsert) -> Result<()> {
+        api_keys::insert(&self.connection, key)
+    }
+
+    /// Verify a raw bearer token against active bcrypt-hashed API-key rows.
+    pub fn verify_api_key(&self, raw_key: &str) -> Result<Option<VerifiedApiKey>> {
+        api_keys::verify_key(&self.connection, raw_key)
     }
 
     /// Count persisted errors.
@@ -291,6 +303,109 @@ mod tests {
     }
 
     #[test]
+    fn api_keys_table_preserves_phoenix_hash_storage_shape() -> Result<()> {
+        let store = migrated_store()?;
+        let columns = columns(&store.connection, "api_keys")?;
+
+        assert_column(
+            &columns,
+            "id",
+            ColumnSpec::new("TEXT").primary_key_position(1),
+        );
+        assert_column(&columns, "name", ColumnSpec::new("TEXT").not_null());
+        assert_column(&columns, "key_prefix", ColumnSpec::new("TEXT").not_null());
+        assert_column(&columns, "key_hash", ColumnSpec::new("TEXT").not_null());
+        assert_column(&columns, "created_at", ColumnSpec::new("TEXT").not_null());
+        assert_column(&columns, "revoked_at", ColumnSpec::new("TEXT"));
+        assert_column(
+            &columns,
+            "scope",
+            ColumnSpec::new("TEXT").not_null().default_value("'admin'"),
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn verify_api_key_matches_active_bcrypt_candidate()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        insert_api_key(
+            &mut store,
+            "KEY-valid",
+            "sk_live_valid_secret",
+            "ingest-only",
+            None,
+        )?;
+
+        let Some(verified) = store.verify_api_key("sk_live_valid_secret")? else {
+            return Err("key should verify".into());
+        };
+
+        assert_eq!(verified.id, "KEY-valid");
+        assert_eq!(verified.name, "key KEY-valid");
+        assert_eq!(verified.scope, "ingest-only");
+        Ok(())
+    }
+
+    #[test]
+    fn verify_api_key_rejects_wrong_raw_key_with_matching_prefix()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        insert_api_key(
+            &mut store,
+            "KEY-prefix",
+            "sk_live_same_secret",
+            "admin",
+            None,
+        )?;
+
+        let verified = store.verify_api_key("sk_live_same_wrong")?;
+
+        assert_eq!(verified, None);
+        Ok(())
+    }
+
+    #[test]
+    fn verify_api_key_checks_all_same_prefix_candidates()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        insert_api_key(&mut store, "KEY-first", "sk_live_same_first", "admin", None)?;
+        insert_api_key(
+            &mut store,
+            "KEY-second",
+            "sk_live_same_second",
+            "read-only",
+            None,
+        )?;
+
+        let Some(verified) = store.verify_api_key("sk_live_same_second")? else {
+            return Err("second same-prefix key should verify".into());
+        };
+
+        assert_eq!(verified.id, "KEY-second");
+        assert_eq!(verified.scope, "read-only");
+        Ok(())
+    }
+
+    #[test]
+    fn verify_api_key_rejects_revoked_and_unknown_prefix_keys()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        insert_api_key(
+            &mut store,
+            "KEY-revoked",
+            "sk_live_revoked_secret",
+            "ingest-only",
+            Some("2026-05-28T20:05:00Z"),
+        )?;
+
+        assert_eq!(store.verify_api_key("sk_live_revoked_secret")?, None);
+        assert_eq!(store.verify_api_key("sk_live_missing_secret")?, None);
+        Ok(())
+    }
+
+    #[test]
     fn monitor_tables_preserve_cascade_and_defaults() -> Result<()> {
         let store = migrated_store()?;
         let monitor_state = columns(&store.connection, "monitor_state")?;
@@ -513,6 +628,25 @@ mod tests {
             |row| row.get::<_, i64>(0),
         )?;
         Ok(count)
+    }
+
+    fn insert_api_key(
+        store: &mut Store,
+        id: &str,
+        raw_key: &str,
+        scope: &str,
+        revoked_at: Option<&str>,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        store.insert_api_key(ApiKeyInsert {
+            id: id.to_owned(),
+            name: format!("key {id}"),
+            key_prefix: api_keys::key_prefix(raw_key),
+            key_hash: bcrypt::hash(raw_key, bcrypt::DEFAULT_COST)?,
+            created_at: "2026-05-28T20:00:00Z".to_owned(),
+            revoked_at: revoked_at.map(str::to_owned),
+            scope: scope.to_owned(),
+        })?;
+        Ok(())
     }
 
     fn table_names(connection: &Connection) -> Result<BTreeSet<String>> {
