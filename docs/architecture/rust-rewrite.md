@@ -106,9 +106,12 @@ the Rust server accepts production traffic:
    implementation.
 6. `canary-http::auth`: bearer-header extraction, scoped API-key authorization
    decisions, and Phoenix-compatible 401/403 Problem Details bodies.
+7. `canary-http::public`: public unauthenticated endpoint contracts for
+   `/healthz`, `/readyz`, and `/api/v1/openapi.json`, including unchanged
+   OpenAPI bytes from `priv/openapi/openapi.json`.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
-six existing contracts into Rust types and tests instead of adding a shallow
+seven existing contracts into Rust types and tests instead of adding a shallow
 HTTP shell.
 
 ## Verification Expectations
@@ -132,8 +135,8 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Expand HTTP parity into `/healthz`, `/readyz`, and `/api/v1/openapi.json`,
-   serving the existing OpenAPI document unchanged and keeping the routes public.
+1. Add a minimal `canary-server` Axum shell that adapts `canary-http::public`
+   without duplicating response logic.
 2. Add webhook signing parity fixtures before worker delivery is ported.
 3. Add `canary-store` with SQL migrations generated from the existing Ecto schema,
    plus compatibility tests against a fixture SQLite database.
