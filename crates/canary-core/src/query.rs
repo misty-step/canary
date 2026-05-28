@@ -224,6 +224,51 @@ pub struct ErrorsByClass {
     pub groups: Vec<ErrorClassAggregate>,
 }
 
+/// Signal item returned by `GET /api/v1/incidents`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ActiveIncidentSignal {
+    /// Signal type, such as `error_group` or `health_transition`.
+    pub signal_type: String,
+    /// Stable signal reference.
+    pub signal_ref: String,
+    /// Signal attachment timestamp.
+    pub attached_at: String,
+    /// Signal resolution timestamp.
+    pub resolved_at: Option<String>,
+}
+
+/// Incident item returned by `GET /api/v1/incidents`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ActiveIncident {
+    /// Incident id.
+    pub id: String,
+    /// Service name.
+    pub service: String,
+    /// Active-list incidents are reported as investigating while any signal is active.
+    pub state: String,
+    /// Derived severity for the currently active signal set.
+    pub severity: String,
+    /// Incident title.
+    pub title: Option<String>,
+    /// Incident open timestamp.
+    pub opened_at: String,
+    /// Incident resolution timestamp.
+    pub resolved_at: Option<String>,
+    /// Count of active signals in this list item.
+    pub signal_count: usize,
+    /// Active signals.
+    pub signals: Vec<ActiveIncidentSignal>,
+}
+
+/// Response for `GET /api/v1/incidents`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ActiveIncidents {
+    /// Deterministic summary.
+    pub summary: String,
+    /// Active incident list.
+    pub incidents: Vec<ActiveIncident>,
+}
+
 /// Error group attached to an error detail response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ErrorDetailGroup {
@@ -354,6 +399,14 @@ pub fn errors_by_class_response(
     }
 }
 
+/// Build a Phoenix-compatible active incidents response.
+pub fn active_incidents_response(incidents: Vec<ActiveIncident>) -> ActiveIncidents {
+    ActiveIncidents {
+        summary: incidents_list_summary(&incidents),
+        incidents,
+    }
+}
+
 /// Build a Phoenix-compatible error detail response.
 pub fn error_detail_response(
     mut detail: ErrorDetail,
@@ -435,6 +488,46 @@ fn error_class_aggregate_summary(
     format!("{base}{top_part}{truncated_part}")
 }
 
+fn incidents_list_summary(incidents: &[ActiveIncident]) -> String {
+    if incidents.is_empty() {
+        return "No active incidents.".to_owned();
+    }
+
+    let count = incidents.len();
+    let mut services = incidents
+        .iter()
+        .map(|incident| incident.service.as_str())
+        .collect::<Vec<_>>();
+    services.sort_unstable();
+    services.dedup();
+    let service_count = services.len();
+    let high = incidents
+        .iter()
+        .filter(|incident| incident.severity == "high")
+        .count();
+
+    let severity_part = if high > 0 {
+        format!(
+            " {high} high-severity {}.",
+            pluralize_usize(high, "incident", "incidents")
+        )
+    } else {
+        String::new()
+    };
+
+    let newest_part = incidents
+        .iter()
+        .max_by_key(|incident| incident.opened_at.as_str())
+        .map(|incident| format!(" Newest: {} at {}.", incident.service, incident.opened_at))
+        .unwrap_or_default();
+
+    format!(
+        "{count} open {} across {service_count} {}.{severity_part}{newest_part}",
+        pluralize_usize(count, "incident", "incidents"),
+        pluralize_usize(service_count, "service", "services")
+    )
+}
+
 fn error_detail_summary(
     error_class: &str,
     service: &str,
@@ -448,6 +541,10 @@ fn error_detail_summary(
 }
 
 fn pluralize<'a>(count: u64, singular: &'a str, plural: &'a str) -> &'a str {
+    if count == 1 { singular } else { plural }
+}
+
+fn pluralize_usize<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
     if count == 1 { singular } else { plural }
 }
 

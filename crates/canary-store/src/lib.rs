@@ -17,7 +17,7 @@ pub use api_keys::{API_KEY_PREFIX_LEN, ApiKeyInsert, VerifiedApiKey};
 pub use ingest::{
     ErrorIngest, ErrorIngestCommit, ErrorIngestIds, ErrorIngestPayload, ErrorServiceEvent,
 };
-pub use query::{QueryError, QueryResult, ServiceQueryOptions};
+pub use query::{IncidentListOptions, QueryError, QueryResult, ServiceQueryOptions};
 
 /// Result type returned by the store boundary.
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -105,6 +105,14 @@ impl Store {
         query::errors_by_class(&self.connection, window)
     }
 
+    /// Query active incidents with currently active signals.
+    pub fn active_incidents(
+        &self,
+        options: IncidentListOptions,
+    ) -> QueryResult<canary_core::query::ActiveIncidents> {
+        query::active_incidents(&self.connection, options)
+    }
+
     /// Return one error detail read model.
     pub fn error_detail(
         &self,
@@ -142,6 +150,7 @@ mod tests {
     };
     use rusqlite::params;
     use serde_json::Value;
+    use time::OffsetDateTime;
 
     use super::*;
 
@@ -561,6 +570,113 @@ mod tests {
     }
 
     #[test]
+    fn active_incidents_filters_inactive_signals_and_annotation_actions()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let store = migrated_store()?;
+        let now =
+            OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?;
+
+        store.connection.execute(
+            "INSERT INTO target_state (target_id, state, consecutive_failures)
+             VALUES ('TGT-api', 'down', 2)",
+            [],
+        )?;
+        store.connection.execute(
+            "INSERT INTO target_state (target_id, state, consecutive_failures)
+             VALUES ('TGT-web', 'up', 0)",
+            [],
+        )?;
+        insert_incident(&store, "INC-api", "api", "2026-05-28T20:00:00Z")?;
+        insert_incident(&store, "INC-web", "web", "2026-05-28T19:00:00Z")?;
+        insert_incident_signal(
+            &store,
+            "INC-api",
+            "health_transition",
+            "TGT-api",
+            &now,
+            None,
+        )?;
+        insert_incident_signal(
+            &store,
+            "INC-web",
+            "health_transition",
+            "TGT-web",
+            &now,
+            None,
+        )?;
+        store.connection.execute(
+            "INSERT INTO annotations (
+                id, incident_id, agent, action, created_at, subject_type, subject_id
+             ) VALUES ('ANN-api', 'INC-api', 'agent', 'acknowledged', ?1, 'incident', 'INC-api')",
+            [now.as_str()],
+        )?;
+
+        let all = store.active_incidents(IncidentListOptions::default())?;
+        assert_eq!(all.incidents.len(), 1);
+        assert_eq!(all.incidents[0].id, "INC-api");
+        assert_eq!(all.incidents[0].state, "investigating");
+        assert_eq!(all.incidents[0].severity, "medium");
+        assert_eq!(all.incidents[0].signal_count, 1);
+        assert_eq!(
+            all.summary,
+            "1 open incident across 1 service. Newest: api at 2026-05-28T20:00:00Z."
+        );
+
+        let with = store.active_incidents(IncidentListOptions {
+            with_annotation: Some("acknowledged".to_owned()),
+            without_annotation: None,
+        })?;
+        assert_eq!(with.incidents.len(), 1);
+
+        let without = store.active_incidents(IncidentListOptions {
+            with_annotation: None,
+            without_annotation: Some("acknowledged".to_owned()),
+        })?;
+        assert_eq!(without.incidents, Vec::new());
+        assert_eq!(without.summary, "No active incidents.");
+
+        Ok(())
+    }
+
+    #[test]
+    fn active_incidents_marks_high_severity_after_three_recent_signals()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let store = migrated_store()?;
+        let now =
+            OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?;
+
+        insert_incident(&store, "INC-high", "api", "2026-05-28T20:00:00Z")?;
+        for index in 1..=3 {
+            let group_hash = format!("group-high-{index}");
+            store.connection.execute(
+                "INSERT INTO error_groups (
+                    group_hash, service, error_class, severity, first_seen_at, last_seen_at,
+                    last_error_id, total_count, status
+                 ) VALUES (?1, 'api', ?2, 'error', ?3, ?3, ?4, 1, 'active')",
+                params![
+                    group_hash,
+                    format!("HighError{index}"),
+                    now,
+                    format!("ERR-high-{index}"),
+                ],
+            )?;
+            insert_incident_signal(&store, "INC-high", "error_group", &group_hash, &now, None)?;
+        }
+
+        let result = store.active_incidents(IncidentListOptions::default())?;
+
+        assert_eq!(result.incidents.len(), 1);
+        assert_eq!(result.incidents[0].severity, "high");
+        assert_eq!(result.incidents[0].signal_count, 3);
+        assert_eq!(
+            result.summary,
+            "1 open incident across 1 service. 1 high-severity incident. Newest: api at 2026-05-28T20:00:00Z."
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn error_detail_returns_group_context_and_incident_ids()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut store = migrated_store()?;
@@ -831,6 +947,38 @@ mod tests {
             |row| row.get::<_, i64>(0),
         )?;
         Ok(count)
+    }
+
+    fn insert_incident(store: &Store, id: &str, service: &str, opened_at: &str) -> Result<()> {
+        store.connection.execute(
+            "INSERT INTO incidents (id, service, state, severity, title, opened_at)
+             VALUES (?1, ?2, 'investigating', 'medium', ?3, ?4)",
+            params![id, service, format!("{service} incident"), opened_at],
+        )?;
+        Ok(())
+    }
+
+    fn insert_incident_signal(
+        store: &Store,
+        incident_id: &str,
+        signal_type: &str,
+        signal_ref: &str,
+        attached_at: &str,
+        resolved_at: Option<&str>,
+    ) -> Result<()> {
+        store.connection.execute(
+            "INSERT INTO incident_signals (
+                incident_id, signal_type, signal_ref, attached_at, resolved_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                incident_id,
+                signal_type,
+                signal_ref,
+                attached_at,
+                resolved_at
+            ],
+        )?;
+        Ok(())
     }
 
     fn insert_api_key(

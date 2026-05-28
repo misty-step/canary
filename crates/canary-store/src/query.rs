@@ -1,12 +1,13 @@
 use canary_core::query::{
-    ErrorClassAggregate, ErrorClassification, ErrorDetail, ErrorDetailGroup, ErrorGroupSummary,
-    ErrorsByClass, ErrorsByErrorClass, ErrorsByService, QueryCursor, QueryWindow, decode_cursor,
-    error_detail_response, errors_by_class_response, errors_by_error_class_response,
+    ActiveIncident, ActiveIncidentSignal, ActiveIncidents, ErrorClassAggregate,
+    ErrorClassification, ErrorDetail, ErrorDetailGroup, ErrorGroupSummary, ErrorsByClass,
+    ErrorsByErrorClass, ErrorsByService, QueryCursor, QueryWindow, active_incidents_response,
+    decode_cursor, error_detail_response, errors_by_class_response, errors_by_error_class_response,
     errors_by_service_response,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
-use time::OffsetDateTime;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 /// Optional filters for service error queries.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -16,6 +17,15 @@ pub struct ServiceQueryOptions {
     /// Optional annotation action that must exist for the group.
     pub with_annotation: Option<String>,
     /// Optional annotation action that must not exist for the group.
+    pub without_annotation: Option<String>,
+}
+
+/// Optional filters for active incident queries.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IncidentListOptions {
+    /// Optional annotation action that must exist for the incident.
+    pub with_annotation: Option<String>,
+    /// Optional annotation action that must not exist for the incident.
     pub without_annotation: Option<String>,
 }
 
@@ -137,6 +147,44 @@ pub(crate) fn error_detail(
     )))
 }
 
+pub(crate) fn active_incidents(
+    connection: &Connection,
+    options: IncidentListOptions,
+) -> QueryResult<ActiveIncidents> {
+    let now = OffsetDateTime::now_utc();
+    let rows = incident_rows(connection)?;
+    let mut incidents = Vec::new();
+
+    for row in rows {
+        if !incident_matches_annotation_filters(connection, &row.id, &options)? {
+            continue;
+        }
+
+        let signals = incident_signals(connection, &row.id)?;
+        let active_signals = active_signals(connection, signals, now)?;
+
+        if active_signals.is_empty() {
+            continue;
+        }
+
+        let severity = incident_severity(&active_signals, now);
+        let signal_count = active_signals.len();
+        incidents.push(ActiveIncident {
+            id: row.id,
+            service: row.service,
+            state: "investigating".to_owned(),
+            severity,
+            title: row.title,
+            opened_at: row.opened_at,
+            resolved_at: row.resolved_at,
+            signal_count,
+            signals: active_signals,
+        });
+    }
+
+    Ok(active_incidents_response(incidents))
+}
+
 fn error_class_aggregates(
     connection: &Connection,
     cutoff: &str,
@@ -169,6 +217,198 @@ fn error_class_totals(connection: &Connection, cutoff: &str) -> QueryResult<(u64
         [cutoff],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?)
+}
+
+#[derive(Debug)]
+struct IncidentRow {
+    id: String,
+    service: String,
+    title: Option<String>,
+    opened_at: String,
+    resolved_at: Option<String>,
+}
+
+#[derive(Debug)]
+struct IncidentSignalRow {
+    signal_type: String,
+    signal_ref: String,
+    attached_at: String,
+    resolved_at: Option<String>,
+}
+
+fn incident_rows(connection: &Connection) -> QueryResult<Vec<IncidentRow>> {
+    let mut statement = connection.prepare(
+        "SELECT id, service, title, opened_at, resolved_at
+         FROM incidents
+         WHERE state != 'resolved'
+         ORDER BY opened_at DESC",
+    )?;
+    Ok(statement
+        .query_map([], |row| {
+            Ok(IncidentRow {
+                id: row.get(0)?,
+                service: row.get(1)?,
+                title: row.get(2)?,
+                opened_at: row.get(3)?,
+                resolved_at: row.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn incident_signals(
+    connection: &Connection,
+    incident_id: &str,
+) -> QueryResult<Vec<IncidentSignalRow>> {
+    let mut statement = connection.prepare(
+        "SELECT signal_type, signal_ref, attached_at, resolved_at
+         FROM incident_signals
+         WHERE incident_id = ?1
+         ORDER BY attached_at ASC, id ASC",
+    )?;
+    Ok(statement
+        .query_map([incident_id], |row| {
+            Ok(IncidentSignalRow {
+                signal_type: row.get(0)?,
+                signal_ref: row.get(1)?,
+                attached_at: row.get(2)?,
+                resolved_at: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn active_signals(
+    connection: &Connection,
+    signals: Vec<IncidentSignalRow>,
+    now: OffsetDateTime,
+) -> QueryResult<Vec<ActiveIncidentSignal>> {
+    let mut active = Vec::new();
+
+    for signal in signals {
+        if signal.resolved_at.is_some() {
+            continue;
+        }
+
+        if signal_active_for_report(connection, &signal, now)? {
+            active.push(ActiveIncidentSignal {
+                signal_type: signal.signal_type,
+                signal_ref: signal.signal_ref,
+                attached_at: signal.attached_at,
+                resolved_at: signal.resolved_at,
+            });
+        }
+    }
+
+    Ok(active)
+}
+
+fn signal_active_for_report(
+    connection: &Connection,
+    signal: &IncidentSignalRow,
+    now: OffsetDateTime,
+) -> QueryResult<bool> {
+    match signal.signal_type.as_str() {
+        "health_transition" => health_signal_active(connection, &signal.signal_ref),
+        "error_group" => error_group_signal_active(connection, &signal.signal_ref, now),
+        _ => Ok(false),
+    }
+}
+
+fn health_signal_active(connection: &Connection, signal_ref: &str) -> QueryResult<bool> {
+    let state = if signal_ref.starts_with("TGT-") {
+        connection
+            .query_row(
+                "SELECT state FROM target_state WHERE target_id = ?1",
+                [signal_ref],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+    } else if signal_ref.starts_with("MON-") {
+        connection
+            .query_row(
+                "SELECT state FROM monitor_state WHERE monitor_id = ?1",
+                [signal_ref],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+    } else {
+        None
+    };
+
+    Ok(state.is_some_and(|state| state != "up"))
+}
+
+fn error_group_signal_active(
+    connection: &Connection,
+    signal_ref: &str,
+    now: OffsetDateTime,
+) -> QueryResult<bool> {
+    let row = connection
+        .query_row(
+            "SELECT status, last_seen_at FROM error_groups WHERE group_hash = ?1",
+            [signal_ref],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+
+    Ok(row.is_some_and(|(status, last_seen_at)| {
+        status == "active" && within_incident_window(&last_seen_at, now)
+    }))
+}
+
+fn incident_matches_annotation_filters(
+    connection: &Connection,
+    incident_id: &str,
+    options: &IncidentListOptions,
+) -> QueryResult<bool> {
+    if let Some(action) = options.with_annotation.as_deref()
+        && !incident_has_annotation(connection, incident_id, action)?
+    {
+        return Ok(false);
+    }
+
+    if let Some(action) = options.without_annotation.as_deref()
+        && incident_has_annotation(connection, incident_id, action)?
+    {
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+fn incident_has_annotation(
+    connection: &Connection,
+    incident_id: &str,
+    action: &str,
+) -> QueryResult<bool> {
+    let count = connection.query_row(
+        "SELECT COUNT(*)
+         FROM annotations
+         WHERE incident_id = ?1 AND action = ?2",
+        params![incident_id, action],
+        |row| row.get::<_, u64>(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn incident_severity(signals: &[ActiveIncidentSignal], now: OffsetDateTime) -> String {
+    let recent_count = signals
+        .iter()
+        .filter(|signal| within_incident_window(&signal.attached_at, now))
+        .count();
+
+    if recent_count >= 3 {
+        "high".to_owned()
+    } else {
+        "medium".to_owned()
+    }
+}
+
+fn within_incident_window(timestamp: &str, now: OffsetDateTime) -> bool {
+    OffsetDateTime::parse(timestamp, &Rfc3339)
+        .map(|timestamp| (now - timestamp).whole_seconds() <= 300)
+        .unwrap_or(false)
 }
 
 fn list_error_groups(

@@ -130,9 +130,13 @@ the Rust server accepts production traffic:
     that preserves content-length preflight, `admin`/`ingest-only` authorization,
     malformed JSON handling, validation/413 Problem Details, and the 201 ingest
     summary without putting domain decisions in the router.
+13. `canary-store::active_incidents` and `GET /api/v1/incidents`: a read-only
+    incident list path that preserves scoped read auth, active-signal filtering,
+    annotation include/exclude filters, severity derivation, and deterministic
+    list summaries.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
-twelve existing contracts into Rust types and tests. The server crate is allowed
+existing contracts into Rust types and tests. The server crate is allowed
 to know Axum, routing, and response conversion; it is not allowed to own product
 decisions already expressed by `canary-core` or `canary-http`.
 
@@ -157,13 +161,14 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Replace the in-memory Rust ingest auth map with SQLite-backed API-key lookup
-   and hash verification while preserving the current `canary-http::auth` scope
-   contract.
+1. Finish incidents read parity by porting `GET /api/v1/incidents/:id` with the
+   bounded detail payload: top 25 signals, top 20 annotations, five recent
+   timeline events, per-signal subject annotation counts, and action-brief
+   recommendations.
 2. Add post-commit effect handling for new-class/regression events without
    making broadcast, incident correlation, or webhook enqueue failures fail the
    ingest response.
-3. Port webhook ledger and delivery after ingest is stable; preserve
+3. Port webhook ledger and delivery after ingest and incident reads are stable; preserve
    `X-Delivery-Id`, `X-Signature`, `X-Event`, `X-Webhook-Version`, and
    `X-Sequence`.
 4. Add compatibility checks against a migrated Phoenix fixture database before

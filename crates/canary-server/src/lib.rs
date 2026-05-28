@@ -29,7 +29,7 @@ use canary_http::{
 use canary_ingest::{
     IngestConfig, IngestContext, IngestError, ValidationErrors, ingest as ingest_error,
 };
-use canary_store::Store;
+use canary_store::{IncidentListOptions, Store};
 use canary_store::{QueryError, ServiceQueryOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -73,6 +73,7 @@ pub fn ingest_router(state: IngestState) -> Router {
     Router::new()
         .route("/api/v1/errors", post(create_error))
         .route("/api/v1/query", get(query_errors))
+        .route("/api/v1/incidents", get(list_incidents))
         .route("/api/v1/errors/{id}", get(show_error))
         .with_state(state)
 }
@@ -238,6 +239,30 @@ enum QueryKind {
         service: Option<String>,
     },
     ErrorClasses,
+}
+
+async fn list_incidents(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Query(params): Query<QueryParams>,
+) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+        return problem_response(*problem);
+    }
+
+    let store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+
+    match store.active_incidents(IncidentListOptions {
+        with_annotation: params.with_annotation,
+        without_annotation: params.without_annotation,
+    }) {
+        Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
+        Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
+        Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
+    }
 }
 
 fn missing_query_problem() -> ProblemDetails {
@@ -717,6 +742,34 @@ mod tests {
             assert_eq!(status, expected_status);
             assert_eq!(body["code"], expected_code);
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn incidents_accept_read_scope_and_return_empty_summary() -> Result<(), Box<dyn Error>> {
+        let response = ingest_router(test_ingest_state()?)
+            .oneshot(read_request(READ_KEY, "/api/v1/incidents")?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["summary"], "No active incidents.");
+        assert_eq!(body["incidents"].as_array().map(Vec::len), Some(0));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn incidents_reject_ingest_scope() -> Result<(), Box<dyn Error>> {
+        let response = ingest_router(test_ingest_state()?)
+            .oneshot(read_request(INGEST_KEY, "/api/v1/incidents")?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "insufficient_scope");
 
         Ok(())
     }
