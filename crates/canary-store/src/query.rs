@@ -1,13 +1,18 @@
 use canary_core::query::{
     ActiveIncident, ActiveIncidentSignal, ActiveIncidents, ErrorClassAggregate,
     ErrorClassification, ErrorDetail, ErrorDetailGroup, ErrorGroupSummary, ErrorsByClass,
-    ErrorsByErrorClass, ErrorsByService, QueryCursor, QueryWindow, active_incidents_response,
-    decode_cursor, error_detail_response, errors_by_class_response, errors_by_error_class_response,
-    errors_by_service_response,
+    ErrorsByErrorClass, ErrorsByService, IncidentAnnotation, IncidentDetail,
+    IncidentDetailIncident, IncidentDetailSignal, IncidentTimelineEvent, QueryCursor, QueryWindow,
+    active_incidents_response, decode_cursor, error_detail_response, errors_by_class_response,
+    errors_by_error_class_response, errors_by_service_response, incident_detail_response,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+
+const MAX_INCIDENT_SIGNALS: usize = 25;
+const MAX_INCIDENT_ANNOTATIONS: usize = 20;
+const MAX_INCIDENT_TIMELINE_EVENTS: usize = 5;
 
 /// Optional filters for service error queries.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -185,6 +190,45 @@ pub(crate) fn active_incidents(
     Ok(active_incidents_response(incidents))
 }
 
+pub(crate) fn incident_detail(
+    connection: &Connection,
+    incident_id: &str,
+) -> QueryResult<Option<IncidentDetail>> {
+    let Some(incident) = incident_detail_incident(connection, incident_id)? else {
+        return Ok(None);
+    };
+
+    let total_signals = count_incident_signals(connection, incident_id)?;
+    let signal_rows = incident_detail_signals(connection, incident_id, MAX_INCIDENT_SIGNALS)?;
+    let signals_truncated = total_signals > signal_rows.len();
+    let signal_context = load_incident_signal_context(connection, &signal_rows)?;
+    let signals = signal_rows
+        .iter()
+        .map(|signal| format_incident_signal(signal, &signal_context))
+        .collect::<Vec<_>>();
+    let (annotations, annotations_truncated) =
+        incident_annotations(connection, incident_id, MAX_INCIDENT_ANNOTATIONS)?;
+    let timeline = incident_timeline_events(connection, incident_id, MAX_INCIDENT_TIMELINE_EVENTS)?;
+
+    Ok(Some(incident_detail_response(
+        IncidentDetailIncident {
+            id: incident.id,
+            service: incident.service,
+            state: incident.state,
+            severity: incident.severity,
+            title: incident.title,
+            opened_at: incident.opened_at,
+            resolved_at: incident.resolved_at,
+            signal_count: total_signals,
+        },
+        signals,
+        signals_truncated,
+        annotations,
+        annotations_truncated,
+        timeline,
+    )))
+}
+
 fn error_class_aggregates(
     connection: &Connection,
     cutoff: &str,
@@ -236,6 +280,55 @@ struct IncidentSignalRow {
     resolved_at: Option<String>,
 }
 
+#[derive(Debug)]
+struct IncidentDetailRow {
+    id: String,
+    service: String,
+    state: String,
+    severity: String,
+    title: Option<String>,
+    opened_at: String,
+    resolved_at: Option<String>,
+}
+
+#[derive(Debug)]
+struct IncidentDetailSignalRow {
+    signal_type: String,
+    signal_ref: String,
+    attached_at: String,
+    resolved_at: Option<String>,
+}
+
+#[derive(Debug)]
+struct ErrorGroupSignalContext {
+    error_class: String,
+    total_count: u64,
+    first_seen_at: String,
+    last_seen_at: String,
+    classification: ErrorClassification,
+}
+
+#[derive(Debug)]
+struct TargetSignalContext {
+    name: String,
+    current_state: String,
+    consecutive_failures: u64,
+}
+
+#[derive(Debug)]
+struct MonitorSignalContext {
+    name: String,
+    current_state: String,
+}
+
+#[derive(Debug, Default)]
+struct IncidentSignalContext {
+    error_groups: std::collections::HashMap<String, ErrorGroupSignalContext>,
+    targets: std::collections::HashMap<String, TargetSignalContext>,
+    monitors: std::collections::HashMap<String, MonitorSignalContext>,
+    annotation_counts: std::collections::HashMap<(String, String), u64>,
+}
+
 fn incident_rows(connection: &Connection) -> QueryResult<Vec<IncidentRow>> {
     let mut statement = connection.prepare(
         "SELECT id, service, title, opened_at, resolved_at
@@ -276,6 +369,526 @@ fn incident_signals(
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn incident_detail_incident(
+    connection: &Connection,
+    incident_id: &str,
+) -> QueryResult<Option<IncidentDetailRow>> {
+    Ok(connection
+        .query_row(
+            "SELECT id, service, state, severity, title, opened_at, resolved_at
+             FROM incidents
+             WHERE id = ?1",
+            [incident_id],
+            |row| {
+                Ok(IncidentDetailRow {
+                    id: row.get(0)?,
+                    service: row.get(1)?,
+                    state: row.get(2)?,
+                    severity: row.get(3)?,
+                    title: row.get(4)?,
+                    opened_at: row.get(5)?,
+                    resolved_at: row.get(6)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+fn count_incident_signals(connection: &Connection, incident_id: &str) -> QueryResult<usize> {
+    let count = connection.query_row(
+        "SELECT COUNT(*) FROM incident_signals WHERE incident_id = ?1",
+        [incident_id],
+        |row| row.get::<_, u64>(0),
+    )?;
+    Ok(count as usize)
+}
+
+fn incident_detail_signals(
+    connection: &Connection,
+    incident_id: &str,
+    limit: usize,
+) -> QueryResult<Vec<IncidentDetailSignalRow>> {
+    let mut statement = connection.prepare(
+        "SELECT signal_type, signal_ref, attached_at, resolved_at
+         FROM incident_signals
+         WHERE incident_id = ?1
+         ORDER BY attached_at DESC, id DESC
+         LIMIT ?2",
+    )?;
+    Ok(statement
+        .query_map(params![incident_id, limit as u64], |row| {
+            Ok(IncidentDetailSignalRow {
+                signal_type: row.get(0)?,
+                signal_ref: row.get(1)?,
+                attached_at: row.get(2)?,
+                resolved_at: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn load_incident_signal_context(
+    connection: &Connection,
+    signals: &[IncidentDetailSignalRow],
+) -> QueryResult<IncidentSignalContext> {
+    let error_refs = signal_refs_for_detail(signals, "error_group");
+    let health_refs = signal_refs_for_detail(signals, "health_transition");
+    let target_refs = health_refs
+        .iter()
+        .filter(|reference| reference.starts_with("TGT-"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let monitor_refs = health_refs
+        .iter()
+        .filter(|reference| reference.starts_with("MON-"))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Ok(IncidentSignalContext {
+        error_groups: load_error_group_signal_context(connection, &error_refs)?,
+        targets: load_target_signal_context(connection, &target_refs)?,
+        monitors: load_monitor_signal_context(connection, &monitor_refs)?,
+        annotation_counts: load_signal_annotation_counts(connection, signals)?,
+    })
+}
+
+fn signal_refs_for_detail(signals: &[IncidentDetailSignalRow], signal_type: &str) -> Vec<String> {
+    let mut refs = signals
+        .iter()
+        .filter(|signal| signal.signal_type == signal_type)
+        .map(|signal| signal.signal_ref.clone())
+        .collect::<Vec<_>>();
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
+fn load_error_group_signal_context(
+    connection: &Connection,
+    refs: &[String],
+) -> QueryResult<std::collections::HashMap<String, ErrorGroupSignalContext>> {
+    if refs.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let mut statement = connection.prepare(&format!(
+        "SELECT
+            g.group_hash,
+            g.error_class,
+            g.total_count,
+            g.first_seen_at,
+            g.last_seen_at,
+            e.classification_category,
+            e.classification_persistence,
+            e.classification_component
+         FROM error_groups g
+         LEFT JOIN errors e ON e.id = g.last_error_id
+         WHERE g.group_hash IN ({})",
+        placeholders(refs.len())
+    ))?;
+    let rows = statement.query_map(rusqlite::params_from_iter(refs.iter()), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            ErrorGroupSignalContext {
+                error_class: row.get(1)?,
+                total_count: row.get(2)?,
+                first_seen_at: row.get(3)?,
+                last_seen_at: row.get(4)?,
+                classification: ErrorClassification::new(row.get(5)?, row.get(6)?, row.get(7)?),
+            },
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+fn load_target_signal_context(
+    connection: &Connection,
+    refs: &[String],
+) -> QueryResult<std::collections::HashMap<String, TargetSignalContext>> {
+    if refs.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let mut statement = connection.prepare(
+        "SELECT
+            r.ref,
+            COALESCE(t.name, r.ref),
+            COALESCE(s.state, 'unknown'),
+            COALESCE(s.consecutive_failures, 0)
+         FROM (SELECT value AS ref FROM json_each(?1)) r
+         LEFT JOIN targets t ON t.id = r.ref
+         LEFT JOIN target_state s ON s.target_id = r.ref",
+    )?;
+    let refs_json = serde_json::to_string(refs).unwrap_or_else(|_| "[]".to_owned());
+    let rows = statement.query_map([refs_json], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            TargetSignalContext {
+                name: row.get(1)?,
+                current_state: row.get(2)?,
+                consecutive_failures: row.get(3)?,
+            },
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+fn load_monitor_signal_context(
+    connection: &Connection,
+    refs: &[String],
+) -> QueryResult<std::collections::HashMap<String, MonitorSignalContext>> {
+    if refs.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let mut statement = connection.prepare(
+        "SELECT
+            r.ref,
+            COALESCE(m.name, r.ref),
+            COALESCE(s.state, 'unknown')
+         FROM (SELECT value AS ref FROM json_each(?1)) r
+         LEFT JOIN monitors m ON m.id = r.ref
+         LEFT JOIN monitor_state s ON s.monitor_id = r.ref",
+    )?;
+    let refs_json = serde_json::to_string(refs).unwrap_or_else(|_| "[]".to_owned());
+    let rows = statement.query_map([refs_json], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            MonitorSignalContext {
+                name: row.get(1)?,
+                current_state: row.get(2)?,
+            },
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+fn load_signal_annotation_counts(
+    connection: &Connection,
+    signals: &[IncidentDetailSignalRow],
+) -> QueryResult<std::collections::HashMap<(String, String), u64>> {
+    let subjects = signal_subjects(signals);
+    if subjects.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let mut statement = connection.prepare(
+        "SELECT subject_type, subject_id, COUNT(*)
+         FROM annotations
+         WHERE subject_type IS NOT NULL
+           AND subject_id IS NOT NULL
+           AND (subject_type || char(31) || subject_id) IN (
+             SELECT value FROM json_each(?1)
+           )
+         GROUP BY subject_type, subject_id",
+    )?;
+    let subject_keys = subjects
+        .iter()
+        .map(|(subject_type, subject_id)| format!("{subject_type}\u{1f}{subject_id}"))
+        .collect::<Vec<_>>();
+    let subject_keys_json = serde_json::to_string(&subject_keys).unwrap_or_else(|_| "[]".into());
+    let rows = statement.query_map([subject_keys_json], |row| {
+        Ok((
+            (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+            row.get::<_, u64>(2)?,
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+fn signal_subjects(signals: &[IncidentDetailSignalRow]) -> Vec<(String, String)> {
+    let mut subjects = signals
+        .iter()
+        .filter_map(|signal| signal_subject(&signal.signal_type, &signal.signal_ref))
+        .collect::<Vec<_>>();
+    subjects.sort();
+    subjects.dedup();
+    subjects
+}
+
+fn signal_subject(signal_type: &str, signal_ref: &str) -> Option<(String, String)> {
+    match signal_type {
+        "error_group" => Some(("error_group".to_owned(), signal_ref.to_owned())),
+        "health_transition" if signal_ref.starts_with("TGT-") => {
+            Some(("target".to_owned(), signal_ref.to_owned()))
+        }
+        "health_transition" if signal_ref.starts_with("MON-") => {
+            Some(("monitor".to_owned(), signal_ref.to_owned()))
+        }
+        _ => None,
+    }
+}
+
+fn format_incident_signal(
+    signal: &IncidentDetailSignalRow,
+    context: &IncidentSignalContext,
+) -> IncidentDetailSignal {
+    match signal.signal_type.as_str() {
+        "error_group" => format_error_group_signal(signal, context),
+        "health_transition" if signal.signal_ref.starts_with("TGT-") => {
+            format_target_signal(signal, context)
+        }
+        "health_transition" if signal.signal_ref.starts_with("MON-") => {
+            format_monitor_signal(signal, context)
+        }
+        "health_transition" => IncidentDetailSignal {
+            signal_type: "health_transition".to_owned(),
+            summary: format!(
+                "Health transition on {} (detail unavailable).",
+                signal.signal_ref
+            ),
+            group_hash: None,
+            error_class: None,
+            total_count: None,
+            first_seen_at: None,
+            last_seen_at: None,
+            classification: None,
+            target_id: None,
+            target_name: None,
+            monitor_id: None,
+            monitor_name: None,
+            current_state: None,
+            consecutive_failures: None,
+            signal_ref: Some(signal.signal_ref.clone()),
+            attached_at: signal.attached_at.clone(),
+            resolved_at: signal.resolved_at.clone(),
+            annotation_count: 0,
+        },
+        _ => IncidentDetailSignal {
+            signal_type: signal.signal_type.clone(),
+            summary: format!(
+                "Signal of type {} on {}.",
+                signal.signal_type, signal.signal_ref
+            ),
+            group_hash: None,
+            error_class: None,
+            total_count: None,
+            first_seen_at: None,
+            last_seen_at: None,
+            classification: None,
+            target_id: None,
+            target_name: None,
+            monitor_id: None,
+            monitor_name: None,
+            current_state: None,
+            consecutive_failures: None,
+            signal_ref: Some(signal.signal_ref.clone()),
+            attached_at: signal.attached_at.clone(),
+            resolved_at: signal.resolved_at.clone(),
+            annotation_count: annotation_count(context, &signal.signal_type, &signal.signal_ref),
+        },
+    }
+}
+
+fn format_error_group_signal(
+    signal: &IncidentDetailSignalRow,
+    context: &IncidentSignalContext,
+) -> IncidentDetailSignal {
+    let group = context.error_groups.get(&signal.signal_ref);
+    IncidentDetailSignal {
+        signal_type: "error_group".to_owned(),
+        summary: group.map_or_else(
+            || {
+                format!(
+                    "Error group {} (detail unavailable).",
+                    truncate_hash(&signal.signal_ref)
+                )
+            },
+            |group| {
+                format!(
+                    "{} {} of {} (last seen {}).",
+                    group.total_count,
+                    pluralize(group.total_count, "occurrence", "occurrences"),
+                    group.error_class,
+                    group.last_seen_at
+                )
+            },
+        ),
+        group_hash: Some(signal.signal_ref.clone()),
+        error_class: group.map(|group| group.error_class.clone()),
+        total_count: group.map(|group| group.total_count),
+        first_seen_at: group.map(|group| group.first_seen_at.clone()),
+        last_seen_at: group.map(|group| group.last_seen_at.clone()),
+        classification: Some(
+            group
+                .map(|group| group.classification.clone())
+                .unwrap_or_else(|| ErrorClassification::new(None, None, None)),
+        ),
+        target_id: None,
+        target_name: None,
+        monitor_id: None,
+        monitor_name: None,
+        current_state: None,
+        consecutive_failures: None,
+        signal_ref: None,
+        attached_at: signal.attached_at.clone(),
+        resolved_at: signal.resolved_at.clone(),
+        annotation_count: annotation_count(context, &signal.signal_type, &signal.signal_ref),
+    }
+}
+
+fn format_target_signal(
+    signal: &IncidentDetailSignalRow,
+    context: &IncidentSignalContext,
+) -> IncidentDetailSignal {
+    let target = context.targets.get(&signal.signal_ref);
+    let name = target
+        .map(|target| target.name.clone())
+        .unwrap_or_else(|| signal.signal_ref.clone());
+    let state = target
+        .map(|target| target.current_state.clone())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let consecutive_failures = target
+        .map(|target| target.consecutive_failures)
+        .unwrap_or(0);
+    let summary = if signal.resolved_at.is_some() {
+        format!("Target {name} recovered to {state}.")
+    } else {
+        format!(
+            "Target {name} is {state} ({consecutive_failures} consecutive {}).",
+            pluralize(consecutive_failures, "failure", "failures")
+        )
+    };
+
+    IncidentDetailSignal {
+        signal_type: "health_transition".to_owned(),
+        summary,
+        group_hash: None,
+        error_class: None,
+        total_count: None,
+        first_seen_at: None,
+        last_seen_at: None,
+        classification: None,
+        target_id: Some(signal.signal_ref.clone()),
+        target_name: Some(name),
+        monitor_id: None,
+        monitor_name: None,
+        current_state: Some(state),
+        consecutive_failures: Some(consecutive_failures),
+        signal_ref: None,
+        attached_at: signal.attached_at.clone(),
+        resolved_at: signal.resolved_at.clone(),
+        annotation_count: annotation_count(context, &signal.signal_type, &signal.signal_ref),
+    }
+}
+
+fn format_monitor_signal(
+    signal: &IncidentDetailSignalRow,
+    context: &IncidentSignalContext,
+) -> IncidentDetailSignal {
+    let monitor = context.monitors.get(&signal.signal_ref);
+    let name = monitor
+        .map(|monitor| monitor.name.clone())
+        .unwrap_or_else(|| signal.signal_ref.clone());
+    let state = monitor
+        .map(|monitor| monitor.current_state.clone())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let summary = if signal.resolved_at.is_some() {
+        format!("Monitor {name} recovered to {state}.")
+    } else {
+        format!("Monitor {name} is {state}.")
+    };
+
+    IncidentDetailSignal {
+        signal_type: "health_transition".to_owned(),
+        summary,
+        group_hash: None,
+        error_class: None,
+        total_count: None,
+        first_seen_at: None,
+        last_seen_at: None,
+        classification: None,
+        target_id: None,
+        target_name: None,
+        monitor_id: Some(signal.signal_ref.clone()),
+        monitor_name: Some(name),
+        current_state: Some(state),
+        consecutive_failures: None,
+        signal_ref: None,
+        attached_at: signal.attached_at.clone(),
+        resolved_at: signal.resolved_at.clone(),
+        annotation_count: annotation_count(context, &signal.signal_type, &signal.signal_ref),
+    }
+}
+
+fn annotation_count(context: &IncidentSignalContext, signal_type: &str, signal_ref: &str) -> u64 {
+    signal_subject(signal_type, signal_ref)
+        .and_then(|subject| context.annotation_counts.get(&subject).copied())
+        .unwrap_or(0)
+}
+
+fn incident_annotations(
+    connection: &Connection,
+    incident_id: &str,
+    limit: usize,
+) -> QueryResult<(Vec<IncidentAnnotation>, bool)> {
+    let mut statement = connection.prepare(
+        "SELECT id, subject_type, subject_id, incident_id, group_hash, agent, action, metadata, created_at
+         FROM annotations
+         WHERE incident_id = ?1
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?2",
+    )?;
+    let rows = statement
+        .query_map(params![incident_id, (limit + 1) as u64], |row| {
+            Ok(IncidentAnnotation {
+                id: row.get(0)?,
+                subject_type: row.get(1)?,
+                subject_id: row.get(2)?,
+                incident_id: row.get(3)?,
+                group_hash: row.get(4)?,
+                agent: row.get(5)?,
+                action: row.get(6)?,
+                metadata: safe_decode_json(row.get(7)?),
+                created_at: row.get(8)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let truncated = rows.len() > limit;
+    Ok((rows.into_iter().take(limit).collect(), truncated))
+}
+
+fn incident_timeline_events(
+    connection: &Connection,
+    incident_id: &str,
+    limit: usize,
+) -> QueryResult<Vec<IncidentTimelineEvent>> {
+    let mut statement = connection.prepare(
+        "SELECT id, event, severity, summary, created_at
+         FROM service_events
+         WHERE entity_type = 'incident' AND entity_ref = ?1
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?2",
+    )?;
+    Ok(statement
+        .query_map(params![incident_id, limit as u64], |row| {
+            Ok(IncidentTimelineEvent {
+                id: row.get(0)?,
+                event: row.get(1)?,
+                severity: row.get(2)?,
+                summary: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn placeholders(len: usize) -> String {
+    std::iter::repeat_n("?", len).collect::<Vec<_>>().join(",")
+}
+
+fn truncate_hash(hash: &str) -> String {
+    if hash.len() > 12 {
+        format!("{}...", &hash[..12])
+    } else {
+        hash.to_owned()
+    }
+}
+
+fn pluralize<'a>(count: u64, singular: &'a str, plural: &'a str) -> &'a str {
+    if count == 1 { singular } else { plural }
 }
 
 fn active_signals(

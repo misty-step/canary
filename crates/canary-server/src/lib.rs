@@ -74,6 +74,7 @@ pub fn ingest_router(state: IngestState) -> Router {
         .route("/api/v1/errors", post(create_error))
         .route("/api/v1/query", get(query_errors))
         .route("/api/v1/incidents", get(list_incidents))
+        .route("/api/v1/incidents/{id}", get(show_incident))
         .route("/api/v1/errors/{id}", get(show_error))
         .with_state(state)
 }
@@ -294,6 +295,33 @@ async fn show_error(
             404,
             ProblemCode::NotFound,
             format!("Error {id} not found."),
+            None,
+        )),
+        Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
+        Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
+    }
+}
+
+async fn show_incident(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+        return problem_response(*problem);
+    }
+
+    let store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+
+    match store.incident_detail(&id) {
+        Ok(Some(result)) => json_status_response(StatusCode::OK.as_u16(), result),
+        Ok(None) => problem_response(ProblemDetails::new(
+            404,
+            ProblemCode::NotFound,
+            format!("Incident {id} not found."),
             None,
         )),
         Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
@@ -768,6 +796,36 @@ mod tests {
             .await?;
         let status = response.status();
         let body = json_body(response).await?;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "insufficient_scope");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn incident_detail_accepts_read_scope_and_reports_missing_incidents()
+    -> Result<(), Box<dyn Error>> {
+        let response = ingest_router(test_ingest_state()?)
+            .oneshot(read_request(READ_KEY, "/api/v1/incidents/INC-missing")?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "not_found");
+        assert_eq!(body["detail"], "Incident INC-missing not found.");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn incident_detail_rejects_ingest_scope() -> Result<(), Box<dyn Error>> {
+        let response = ingest_router(test_ingest_state()?)
+            .oneshot(read_request(INGEST_KEY, "/api/v1/incidents/INC-anything")?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["code"], "insufficient_scope");
 

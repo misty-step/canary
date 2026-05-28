@@ -5,6 +5,7 @@
 
 use base64::{Engine, prelude::BASE64_STANDARD, prelude::BASE64_URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 /// Maximum number of error groups returned by group-list queries.
@@ -269,6 +270,191 @@ pub struct ActiveIncidents {
     pub incidents: Vec<ActiveIncident>,
 }
 
+/// Incident row embedded in `GET /api/v1/incidents/:id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IncidentDetailIncident {
+    /// Incident id.
+    pub id: String,
+    /// Service name.
+    pub service: String,
+    /// Stored incident state.
+    pub state: String,
+    /// Stored incident severity.
+    pub severity: String,
+    /// Incident title.
+    pub title: Option<String>,
+    /// Incident open timestamp.
+    pub opened_at: String,
+    /// Incident resolution timestamp.
+    pub resolved_at: Option<String>,
+    /// Total persisted signal count, including rows not visible in the bounded response.
+    pub signal_count: usize,
+}
+
+/// Signal item embedded in `GET /api/v1/incidents/:id`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct IncidentDetailSignal {
+    /// Signal type.
+    #[serde(rename = "type")]
+    pub signal_type: String,
+    /// Deterministic one-line signal summary.
+    pub summary: String,
+    /// Error group hash for error-group signals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_hash: Option<String>,
+    /// Error class for error-group signals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<String>,
+    /// Total count for error-group signals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_count: Option<u64>,
+    /// First seen timestamp for error-group signals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_seen_at: Option<String>,
+    /// Last seen timestamp for error-group signals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<String>,
+    /// Classification for error-group signals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classification: Option<ErrorClassification>,
+    /// Target id for target health signals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    /// Target name for target health signals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_name: Option<String>,
+    /// Monitor id for monitor health signals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monitor_id: Option<String>,
+    /// Monitor name for monitor health signals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monitor_name: Option<String>,
+    /// Current health state for health signals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_state: Option<String>,
+    /// Consecutive failure count for target health signals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consecutive_failures: Option<u64>,
+    /// Generic signal reference for fallback shapes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal_ref: Option<String>,
+    /// Signal attachment timestamp.
+    pub attached_at: String,
+    /// Signal resolution timestamp.
+    pub resolved_at: Option<String>,
+    /// Number of coordination annotations on the signal's underlying subject.
+    pub annotation_count: u64,
+}
+
+/// Incident annotation view embedded in incident detail.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct IncidentAnnotation {
+    /// Annotation id.
+    pub id: String,
+    /// Canonical subject type.
+    pub subject_type: Option<String>,
+    /// Canonical subject id.
+    pub subject_id: Option<String>,
+    /// Legacy incident id.
+    pub incident_id: Option<String>,
+    /// Legacy error-group hash.
+    pub group_hash: Option<String>,
+    /// Agent that wrote the annotation.
+    pub agent: String,
+    /// Action label.
+    pub action: String,
+    /// Decoded annotation metadata.
+    pub metadata: Option<Value>,
+    /// Creation timestamp.
+    pub created_at: String,
+}
+
+/// Recent incident timeline event embedded in incident detail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IncidentTimelineEvent {
+    /// Event id.
+    pub id: String,
+    /// Event name.
+    pub event: String,
+    /// Event severity.
+    pub severity: Option<String>,
+    /// Event summary.
+    pub summary: String,
+    /// Creation timestamp.
+    pub created_at: String,
+}
+
+/// Recommended next action for an incident detail response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IncidentActionRecommendation {
+    /// Machine-friendly action label.
+    pub action: String,
+    /// Deterministic reason.
+    pub reason: String,
+}
+
+/// Visible and total signal counts for an action brief.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IncidentActionSignalCounts {
+    /// Active visible signals.
+    pub active: usize,
+    /// Resolved visible signals.
+    pub resolved: usize,
+    /// Visible signal count.
+    pub visible: usize,
+    /// Total persisted signal count.
+    pub total: usize,
+}
+
+/// Newest incident annotation summary embedded in the action brief.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LatestIncidentAnnotation {
+    /// Annotation id.
+    pub id: String,
+    /// Agent that wrote the annotation.
+    pub agent: String,
+    /// Action label.
+    pub action: String,
+    /// Creation timestamp.
+    pub created_at: String,
+}
+
+/// Action brief embedded in incident detail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IncidentActionBrief {
+    /// Deterministic summary.
+    pub summary: String,
+    /// Recommended next action.
+    pub recommendation: IncidentActionRecommendation,
+    /// Signal counts.
+    pub signal_counts: IncidentActionSignalCounts,
+    /// Whether the signal list is truncated.
+    pub signals_truncated: bool,
+    /// Newest incident annotation, if one exists.
+    pub latest_annotation: Option<LatestIncidentAnnotation>,
+}
+
+/// Response for `GET /api/v1/incidents/:id`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct IncidentDetail {
+    /// Deterministic summary.
+    pub summary: String,
+    /// Incident row.
+    pub incident: IncidentDetailIncident,
+    /// Bounded signal list.
+    pub signals: Vec<IncidentDetailSignal>,
+    /// Whether more signals exist past the visible list.
+    pub signals_truncated: bool,
+    /// Bounded incident annotation list.
+    pub annotations: Vec<IncidentAnnotation>,
+    /// Whether more annotations exist past the visible list.
+    pub annotations_truncated: bool,
+    /// Recent timeline events for this incident.
+    pub recent_timeline_events: Vec<IncidentTimelineEvent>,
+    /// Deterministic next-action brief.
+    pub action_brief: IncidentActionBrief,
+}
+
 /// Error group attached to an error detail response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ErrorDetailGroup {
@@ -407,6 +593,42 @@ pub fn active_incidents_response(incidents: Vec<ActiveIncident>) -> ActiveIncide
     }
 }
 
+/// Build a Phoenix-compatible incident detail response.
+pub fn incident_detail_response(
+    incident: IncidentDetailIncident,
+    signals: Vec<IncidentDetailSignal>,
+    signals_truncated: bool,
+    annotations: Vec<IncidentAnnotation>,
+    annotations_truncated: bool,
+    recent_timeline_events: Vec<IncidentTimelineEvent>,
+) -> IncidentDetail {
+    let summary = incident_detail_summary(&incident, annotations.len());
+    let action_brief = incident_action_brief(
+        &incident,
+        &signals,
+        signals_truncated,
+        annotations
+            .first()
+            .map(|annotation| LatestIncidentAnnotation {
+                id: annotation.id.clone(),
+                agent: annotation.agent.clone(),
+                action: annotation.action.clone(),
+                created_at: annotation.created_at.clone(),
+            }),
+    );
+
+    IncidentDetail {
+        summary,
+        incident,
+        signals,
+        signals_truncated,
+        annotations,
+        annotations_truncated,
+        recent_timeline_events,
+        action_brief,
+    }
+}
+
 /// Build a Phoenix-compatible error detail response.
 pub fn error_detail_response(
     mut detail: ErrorDetail,
@@ -538,6 +760,116 @@ fn error_detail_summary(
     format!(
         "{error_class} in {service}. Seen {count} times since {first_seen}. Last occurrence: {last_seen}."
     )
+}
+
+fn incident_detail_summary(incident: &IncidentDetailIncident, annotation_count: usize) -> String {
+    let state_label = if incident.state == "resolved" {
+        "Resolved"
+    } else {
+        "Investigating"
+    };
+    let signal_part = match incident.signal_count {
+        0 => "No active signals.".to_owned(),
+        n => format!(
+            "{n} correlated {}.",
+            pluralize_usize(n, "signal", "signals")
+        ),
+    };
+    let annotation_part = match annotation_count {
+        0 => " No prior triage annotations.".to_owned(),
+        n => format!(
+            " {n} prior triage {}.",
+            pluralize_usize(n, "annotation", "annotations")
+        ),
+    };
+
+    format!(
+        "{state_label}. {}-severity incident opened at {} on service {}. {signal_part}{annotation_part}",
+        incident.severity, incident.opened_at, incident.service
+    )
+}
+
+fn incident_action_brief(
+    incident: &IncidentDetailIncident,
+    signals: &[IncidentDetailSignal],
+    signals_truncated: bool,
+    latest_annotation: Option<LatestIncidentAnnotation>,
+) -> IncidentActionBrief {
+    let active = signals
+        .iter()
+        .filter(|signal| signal.resolved_at.is_none())
+        .count();
+    let resolved = signals.len() - active;
+    let recommendation = incident_action_recommendation(signals, signals_truncated);
+    let scope = if signals_truncated { " visible" } else { "" };
+    let summary = format!(
+        "{} action brief: {active}{scope} {}, {resolved}{scope} {}. Recommended action: {}.",
+        incident.service,
+        pluralize_usize(active, "active signal", "active signals"),
+        pluralize_usize(resolved, "resolved signal", "resolved signals"),
+        recommendation.action
+    );
+
+    IncidentActionBrief {
+        summary,
+        recommendation,
+        signal_counts: IncidentActionSignalCounts {
+            active,
+            resolved,
+            visible: signals.len(),
+            total: incident.signal_count,
+        },
+        signals_truncated,
+        latest_annotation,
+    }
+}
+
+fn incident_action_recommendation(
+    signals: &[IncidentDetailSignal],
+    signals_truncated: bool,
+) -> IncidentActionRecommendation {
+    if signals_truncated {
+        return IncidentActionRecommendation {
+            action: "inspect-truncated-signals".to_owned(),
+            reason: "Signal state is truncated; a complete recommendation cannot be derived from the visible signal set.".to_owned(),
+        };
+    }
+
+    let active = signals
+        .iter()
+        .filter(|signal| signal.resolved_at.is_none())
+        .collect::<Vec<_>>();
+
+    if active.is_empty() {
+        let resolved = signals.len();
+        return IncidentActionRecommendation {
+            action: "verify-recovery".to_owned(),
+            reason: format!(
+                "No active signals remain in the visible signal set ({resolved} resolved {}).",
+                pluralize_usize(resolved, "signal", "signals")
+            ),
+        };
+    }
+
+    let unannotated = active
+        .iter()
+        .filter(|signal| signal.annotation_count == 0)
+        .count();
+
+    if unannotated > 0 {
+        IncidentActionRecommendation {
+            action: "triage".to_owned(),
+            reason: format!(
+                "{unannotated} active {} lack coordination annotations.",
+                pluralize_usize(unannotated, "signal", "signals")
+            ),
+        }
+    } else {
+        IncidentActionRecommendation {
+            action: "watch".to_owned(),
+            reason: "Active signals already have coordination annotations.".to_owned(),
+        }
+    }
 }
 
 fn pluralize<'a>(count: u64, singular: &'a str, plural: &'a str) -> &'a str {

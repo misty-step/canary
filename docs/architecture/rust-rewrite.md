@@ -134,6 +134,10 @@ the Rust server accepts production traffic:
     incident list path that preserves scoped read auth, active-signal filtering,
     annotation include/exclude filters, severity derivation, and deterministic
     list summaries.
+14. `canary-store::incident_detail` and `GET /api/v1/incidents/:id`: a bounded
+    incident detail path that preserves stored incident state, total signal
+    counts, newest-first signal and annotation caps, per-signal subject
+    annotation counts, recent timeline events, and deterministic action briefs.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -161,15 +165,11 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Finish incidents read parity by porting `GET /api/v1/incidents/:id` with the
-   bounded detail payload: top 25 signals, top 20 annotations, five recent
-   timeline events, per-signal subject annotation counts, and action-brief
-   recommendations.
-2. Add post-commit effect handling for new-class/regression events without
+1. Add post-commit effect handling for new-class/regression events without
    making broadcast, incident correlation, or webhook enqueue failures fail the
    ingest response.
-3. Port webhook ledger and delivery after ingest and incident reads are stable; preserve
+2. Port webhook ledger and delivery after ingest and incident reads are stable; preserve
    `X-Delivery-Id`, `X-Signature`, `X-Event`, `X-Webhook-Version`, and
    `X-Sequence`.
-4. Add compatibility checks against a migrated Phoenix fixture database before
+3. Add compatibility checks against a migrated Phoenix fixture database before
    any production traffic moves to the Rust server.

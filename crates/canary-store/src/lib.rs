@@ -113,6 +113,14 @@ impl Store {
         query::active_incidents(&self.connection, options)
     }
 
+    /// Return one incident detail read model.
+    pub fn incident_detail(
+        &self,
+        incident_id: &str,
+    ) -> QueryResult<Option<canary_core::query::IncidentDetail>> {
+        query::incident_detail(&self.connection, incident_id)
+    }
+
     /// Return one error detail read model.
     pub fn error_detail(
         &self,
@@ -672,6 +680,242 @@ mod tests {
             result.summary,
             "1 open incident across 1 service. 1 high-severity incident. Newest: api at 2026-05-28T20:00:00Z."
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn incident_detail_returns_bounded_context_and_action_brief()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let store = migrated_store()?;
+        insert_incident(&store, "INC-detail", "api", "2026-05-28T20:00:00Z")?;
+        store.connection.execute(
+            "INSERT INTO targets (id, url, name, created_at, service)
+             VALUES ('TGT-api', 'https://api.example.com', 'API', '2026-05-28T19:00:00Z', 'api')",
+            [],
+        )?;
+        store.connection.execute(
+            "INSERT INTO target_state (target_id, state, consecutive_failures)
+             VALUES ('TGT-api', 'down', 4)",
+            [],
+        )?;
+        store.connection.execute(
+            "INSERT INTO monitors (id, name, service, mode, expected_every_ms, created_at)
+             VALUES ('MON-api-cron', 'API cron', 'api', 'ttl', 60000, '2026-05-28T19:00:00Z')",
+            [],
+        )?;
+        store.connection.execute(
+            "INSERT INTO monitor_state (monitor_id, state)
+             VALUES ('MON-api-cron', 'down')",
+            [],
+        )?;
+        store.connection.execute(
+            "INSERT INTO errors (
+                id, service, error_class, message, group_hash, created_at,
+                classification_category, classification_persistence, classification_component
+             ) VALUES (
+                'ERR-detail', 'api', 'DetailError', 'boom', 'group-detail',
+                '2026-05-28T20:00:00Z', 'application', 'persistent', 'runtime'
+             )",
+            [],
+        )?;
+        store.connection.execute(
+            "INSERT INTO error_groups (
+                group_hash, service, error_class, severity, first_seen_at, last_seen_at,
+                total_count, last_error_id, status
+             ) VALUES (
+                'group-detail', 'api', 'DetailError', 'error',
+                '2026-05-28T19:55:00Z', '2026-05-28T20:00:00Z', 4,
+                'ERR-detail', 'active'
+             )",
+            [],
+        )?;
+        insert_incident_signal(
+            &store,
+            "INC-detail",
+            "health_transition",
+            "TGT-api",
+            "2026-05-28T20:02:00Z",
+            None,
+        )?;
+        insert_incident_signal(
+            &store,
+            "INC-detail",
+            "error_group",
+            "group-detail",
+            "2026-05-28T20:01:00Z",
+            None,
+        )?;
+        insert_incident_signal(
+            &store,
+            "INC-detail",
+            "health_transition",
+            "MON-api-cron",
+            "2026-05-28T20:00:30Z",
+            Some("2026-05-28T20:03:00Z"),
+        )?;
+        store.connection.execute(
+            "INSERT INTO annotations (
+                id, incident_id, group_hash, agent, action, metadata, created_at, subject_type, subject_id
+             ) VALUES (
+                'ANN-incident', 'INC-detail', NULL, 'codex', 'acknowledged',
+                '{\"deployment\":\"https://example.com/deploy\"}', '2026-05-28T20:04:00Z',
+                'incident', 'INC-detail'
+             )",
+            [],
+        )?;
+        for id in ["ANN-g1", "ANN-g2", "ANN-g3"] {
+            store.connection.execute(
+                "INSERT INTO annotations (
+                    id, agent, action, created_at, subject_type, subject_id
+                 ) VALUES (?1, 'agent', 'triaged', '2026-05-28T20:04:00Z', 'error_group', 'group-detail')",
+                [id],
+            )?;
+        }
+        store.connection.execute(
+            "INSERT INTO annotations (
+                id, agent, action, created_at, subject_type, subject_id
+             ) VALUES (
+                'ANN-target', 'agent', 'triaged', '2026-05-28T20:04:00Z', 'target', 'TGT-api'
+             )",
+            [],
+        )?;
+        store.connection.execute(
+            "INSERT INTO service_events (
+                id, service, event, entity_type, entity_ref, severity, summary, payload, created_at
+             ) VALUES (
+                'EVT-incident', 'api', 'incident.opened', 'incident', 'INC-detail',
+                'warning', 'api incident opened', '{}', '2026-05-28T20:00:00Z'
+             )",
+            [],
+        )?;
+
+        let detail = store
+            .incident_detail("INC-detail")?
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+        assert_eq!(detail.incident.id, "INC-detail");
+        assert_eq!(detail.incident.state, "investigating");
+        assert_eq!(detail.incident.signal_count, 3);
+        assert_eq!(detail.signals.len(), 3);
+        assert!(!detail.signals_truncated);
+        assert_eq!(detail.annotations.len(), 1);
+        assert!(!detail.annotations_truncated);
+        assert_eq!(detail.annotations[0].action, "acknowledged");
+        assert_eq!(
+            detail.annotations[0]
+                .metadata
+                .as_ref()
+                .and_then(|value| value.get("deployment"))
+                .and_then(Value::as_str),
+            Some("https://example.com/deploy")
+        );
+        assert_eq!(detail.recent_timeline_events[0].event, "incident.opened");
+
+        let target = detail
+            .signals
+            .iter()
+            .find(|signal| signal.target_id.as_deref() == Some("TGT-api"))
+            .ok_or("missing target signal")?;
+        assert_eq!(target.target_name.as_deref(), Some("API"));
+        assert_eq!(target.current_state.as_deref(), Some("down"));
+        assert_eq!(target.consecutive_failures, Some(4));
+        assert_eq!(target.annotation_count, 1);
+
+        let group = detail
+            .signals
+            .iter()
+            .find(|signal| signal.group_hash.as_deref() == Some("group-detail"))
+            .ok_or("missing error group signal")?;
+        assert_eq!(group.error_class.as_deref(), Some("DetailError"));
+        assert_eq!(group.total_count, Some(4));
+        assert_eq!(
+            group
+                .classification
+                .as_ref()
+                .map(|classification| classification.category.as_str()),
+            Some("application")
+        );
+        assert_eq!(group.annotation_count, 3);
+
+        let monitor = detail
+            .signals
+            .iter()
+            .find(|signal| signal.monitor_id.as_deref() == Some("MON-api-cron"))
+            .ok_or("missing monitor signal")?;
+        assert_eq!(monitor.monitor_name.as_deref(), Some("API cron"));
+        assert_eq!(monitor.annotation_count, 0);
+
+        assert_eq!(detail.action_brief.recommendation.action, "watch");
+        assert_eq!(detail.action_brief.signal_counts.active, 2);
+        assert_eq!(detail.action_brief.signal_counts.resolved, 1);
+        assert_eq!(
+            detail
+                .action_brief
+                .latest_annotation
+                .as_ref()
+                .map(|annotation| annotation.action.as_str()),
+            Some("acknowledged")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn incident_detail_caps_signals_and_annotations_with_conservative_brief()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let store = migrated_store()?;
+        insert_incident(&store, "INC-cap", "api", "2026-05-28T20:00:00Z")?;
+        for index in 1..=30 {
+            insert_incident_signal(
+                &store,
+                "INC-cap",
+                "error_group",
+                &format!("group-{index:03}"),
+                "2026-05-28T20:00:00Z",
+                Some("2026-05-28T20:05:00Z"),
+            )?;
+        }
+        for index in 1..=25 {
+            store.connection.execute(
+                "INSERT INTO annotations (
+                    id, incident_id, agent, action, created_at, subject_type, subject_id
+                 ) VALUES (?1, 'INC-cap', 'agent', ?2, ?3, 'incident', 'INC-cap')",
+                params![
+                    format!("ANN-cap-{index:03}"),
+                    format!("note-{index}"),
+                    format!("2026-05-28T20:{index:02}:00Z"),
+                ],
+            )?;
+        }
+
+        let detail = store
+            .incident_detail("INC-cap")?
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+        assert_eq!(detail.incident.signal_count, 30);
+        assert_eq!(detail.signals.len(), 25);
+        assert!(detail.signals_truncated);
+        assert_eq!(detail.annotations.len(), 20);
+        assert!(detail.annotations_truncated);
+        assert_eq!(detail.annotations[0].action, "note-25");
+        assert!(!detail.annotations.iter().any(|ann| ann.action == "note-1"));
+        assert_eq!(
+            detail.action_brief.recommendation.action,
+            "inspect-truncated-signals"
+        );
+        assert_eq!(detail.action_brief.signal_counts.visible, 25);
+        assert_eq!(detail.action_brief.signal_counts.total, 30);
+
+        Ok(())
+    }
+
+    #[test]
+    fn incident_detail_returns_none_for_unknown_incident()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let store = migrated_store()?;
+
+        assert!(store.incident_detail("INC-missing")?.is_none());
 
         Ok(())
     }
