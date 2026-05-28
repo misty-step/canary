@@ -104,9 +104,11 @@ the Rust server accepts production traffic:
    for category, persistence, and component.
 5. `canary-http::problem_details`: RFC 9457 body compatible with the Phoenix
    implementation.
+6. `canary-http::auth`: bearer-header extraction, scoped API-key authorization
+   decisions, and Phoenix-compatible 401/403 Problem Details bodies.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
-five existing contracts into Rust types and tests instead of adding a shallow
+six existing contracts into Rust types and tests instead of adding a shallow
 HTTP shell.
 
 ## Verification Expectations
@@ -130,12 +132,11 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Expand Phoenix parity fixtures beyond grouping/classification into HTTP
-   errors, auth, OpenAPI, and webhook signing.
-2. Add `canary-store` with SQL migrations generated from the existing Ecto schema,
+1. Expand HTTP parity into `/healthz`, `/readyz`, and `/api/v1/openapi.json`,
+   serving the existing OpenAPI document unchanged and keeping the routes public.
+2. Add webhook signing parity fixtures before worker delivery is ported.
+3. Add `canary-store` with SQL migrations generated from the existing Ecto schema,
    plus compatibility tests against a fixture SQLite database.
-3. Add read-only Axum endpoints for `/healthz`, `/readyz`, and
-   `/api/v1/openapi.json`; serve the existing OpenAPI document unchanged.
 4. Port `POST /api/v1/errors` end-to-end: scoped auth, validation, grouping,
    single-writer transaction, response shape, and contract tests.
 5. Port webhook ledger and delivery after ingest is stable; preserve

@@ -84,7 +84,6 @@ pub struct ProblemDetails {
     /// Stable machine-readable Canary code.
     pub code: String,
     /// Request ID when available.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
     /// Extra structured fields merged into the JSON body.
     #[serde(flatten)]
@@ -162,6 +161,70 @@ mod tests {
 
         let encoded = serde_json::to_value(problem).unwrap_or(Value::Null);
         assert_eq!(encoded["scope"], "ingest-only");
-        assert!(encoded.get("request_id").is_none());
+        assert!(encoded.get("request_id").is_some());
+        assert!(encoded["request_id"].is_null());
+    }
+
+    #[test]
+    fn known_problem_codes_match_phoenix_titles_and_type_slugs() {
+        let cases = [
+            (
+                ProblemCode::InvalidRequest,
+                "invalid_request",
+                "Invalid Request",
+            ),
+            (
+                ProblemCode::InvalidApiKey,
+                "invalid_api_key",
+                "Invalid API Key",
+            ),
+            (
+                ProblemCode::InsufficientScope,
+                "insufficient_scope",
+                "Insufficient Scope",
+            ),
+            (ProblemCode::NotFound, "not_found", "Not Found"),
+            (
+                ProblemCode::PayloadTooLarge,
+                "payload_too_large",
+                "Payload Too Large",
+            ),
+            (
+                ProblemCode::ValidationError,
+                "validation_error",
+                "Validation Error",
+            ),
+            (
+                ProblemCode::RateLimited,
+                "rate_limited",
+                "Rate Limit Exceeded",
+            ),
+            (
+                ProblemCode::InternalError,
+                "internal_error",
+                "Internal Server Error",
+            ),
+            (
+                ProblemCode::Unavailable,
+                "unavailable",
+                "Service Unavailable",
+            ),
+        ];
+
+        for (code, expected_code, expected_title) in cases {
+            let encoded = serde_json::to_value(ProblemDetails::new(400, code, "detail", None))
+                .unwrap_or(Value::Null);
+
+            assert_eq!(encoded["code"], expected_code);
+            assert_eq!(encoded["title"], expected_title);
+            assert_eq!(
+                encoded["type"],
+                format!(
+                    "https://canary.dev/problems/{}",
+                    expected_code.replace('_', "-")
+                )
+            );
+            assert!(encoded["request_id"].is_null());
+        }
     }
 }
