@@ -116,9 +116,13 @@ the Rust server accepts production traffic:
    webhook header construction for exact body bytes, including Phoenix parity
    fixtures for `sha256=<hex>`, `x-delivery-id`, `x-event`,
    `x-webhook-version`, and `x-sequence`.
+10. `canary-store`: a single-writer SQLite boundary with ordered schema
+    migrations ported from the Phoenix Ecto migrations, plus compatibility tests
+    for table shape, defaults, indexes, FTS triggers, foreign keys, and
+    open-incident uniqueness.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
-nine existing contracts into Rust types and tests. The server crate is allowed
+ten existing contracts into Rust types and tests. The server crate is allowed
 to know Axum, routing, and response conversion; it is not allowed to own product
 decisions already expressed by `canary-core` or `canary-http`.
 
@@ -143,10 +147,10 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Add `canary-store` with SQL migrations generated from the existing Ecto schema,
-   plus compatibility tests against a fixture SQLite database.
-2. Port `POST /api/v1/errors` end-to-end: scoped auth, validation, grouping,
+1. Port `POST /api/v1/errors` end-to-end: scoped auth, validation, grouping,
    single-writer transaction, response shape, and contract tests.
-3. Port webhook ledger and delivery after ingest is stable; preserve
+2. Port webhook ledger and delivery after ingest is stable; preserve
    `X-Delivery-Id`, `X-Signature`, `X-Event`, `X-Webhook-Version`, and
    `X-Sequence`.
+3. Add compatibility checks against a migrated Phoenix fixture database before
+   any production traffic moves to the Rust server.

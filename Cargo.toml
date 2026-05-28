@@ -4,6 +4,7 @@ members = [
   "crates/canary-core",
   "crates/canary-http",
   "crates/canary-server",
+  "crates/canary-store",
 ]
 
 [workspace.package]
