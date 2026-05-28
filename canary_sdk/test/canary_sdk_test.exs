@@ -10,11 +10,32 @@ defmodule CanarySdkTest do
   end
 
   defp expect_payload(bypass, test_pid) do
-    Bypass.expect_once(bypass, "POST", "/api/v1/errors", fn conn ->
+    Bypass.stub(bypass, "POST", "/api/v1/errors", fn conn ->
       {:ok, body, conn} = Plug.Conn.read_body(conn)
       send(test_pid, {:captured, Jason.decode!(body)})
       Plug.Conn.resp(conn, 201, ~s({}))
     end)
+  end
+
+  defp assert_captured_payload(matches?, timeout \\ 1_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_assert_captured_payload(matches?, deadline)
+  end
+
+  defp do_assert_captured_payload(matches?, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:captured, payload} ->
+        if matches?.(payload) do
+          payload
+        else
+          do_assert_captured_payload(matches?, deadline)
+        end
+    after
+      remaining ->
+        flunk("expected matching Canary SDK payload")
+    end
   end
 
   defp handler_config(port, overrides \\ %{}) do
@@ -72,18 +93,22 @@ defmodule CanarySdkTest do
 
       Logger.error("something broke")
 
-      assert_receive {:captured, payload}, 1_000
+      payload =
+        assert_captured_payload(fn payload ->
+          String.contains?(payload["message"], "something broke")
+        end)
+
       assert payload["service"] == "my-app"
       assert is_binary(payload["error_class"])
-      assert payload["message"] =~ "something broke"
       assert payload["severity"] == "error"
+      CanarySdk.detach()
     end
 
     test "sends authorization header" do
       bypass = Bypass.open()
       test_pid = self()
 
-      Bypass.expect_once(bypass, "POST", "/api/v1/errors", fn conn ->
+      Bypass.stub(bypass, "POST", "/api/v1/errors", fn conn ->
         auth = Plug.Conn.get_req_header(conn, "authorization")
         send(test_pid, {:auth, auth})
         Plug.Conn.resp(conn, 201, ~s({}))
@@ -96,7 +121,9 @@ defmodule CanarySdkTest do
       )
 
       Logger.error("boom")
+
       assert_receive {:auth, ["Bearer secret-key"]}, 1_000
+      CanarySdk.detach()
     end
 
     test "ignores non-error log levels" do
@@ -201,9 +228,13 @@ defmodule CanarySdkTest do
 
       Logger.error("something", exception: exception, stacktrace: [])
 
-      assert_receive {:captured, payload}, 1_000
+      payload =
+        assert_captured_payload(fn payload ->
+          payload["message"] == "structured boom"
+        end)
+
       assert payload["error_class"] == "RuntimeError"
-      assert payload["message"] == "structured boom"
+      CanarySdk.detach()
     end
 
     test "formats exception stacktraces and respects custom environments" do
@@ -224,10 +255,15 @@ defmodule CanarySdkTest do
 
       Logger.error("ignored", exception: exception, stacktrace: stacktrace)
 
-      assert_receive {:captured, payload}, 1_000
+      payload =
+        assert_captured_payload(fn payload ->
+          payload["message"] == "invalid payload"
+        end)
+
       assert payload["environment"] == "staging"
       assert payload["error_class"] == "ArgumentError"
       assert payload["stack_trace"] =~ "test/canary_sdk_test.exs:222"
+      CanarySdk.detach()
     end
   end
 
@@ -251,7 +287,11 @@ defmodule CanarySdkTest do
 
       CanarySdk.Handler.log(event, %{config: handler_config(bypass.port)})
 
-      assert_receive {:captured, payload}, 1_000
+      payload =
+        assert_captured_payload(fn payload ->
+          payload["error_class"] == "ArgumentError"
+        end)
+
       assert payload["error_class"] == "ArgumentError"
       assert payload["stack_trace"] =~ "lib/canary_sdk.ex:12"
       assert payload["context"]["module"] == "CanarySdk"
@@ -271,9 +311,12 @@ defmodule CanarySdkTest do
 
       CanarySdk.Handler.log(event, %{config: handler_config(bypass.port)})
 
-      assert_receive {:captured, payload}, 1_000
+      payload =
+        assert_captured_payload(fn payload ->
+          String.contains?(payload["message"], "kind: :unexpected")
+        end)
+
       assert payload["error_class"] == "OTPError"
-      assert payload["message"] =~ "kind: :unexpected"
       assert payload["context"]["module"] == "CanarySdkTest"
     end
 
@@ -293,7 +336,11 @@ defmodule CanarySdkTest do
 
       CanarySdk.Handler.log(event, %{config: handler_config(bypass.port)})
 
-      assert_receive {:captured, payload}, 1_000
+      payload =
+        assert_captured_payload(fn payload ->
+          payload["message"] == String.slice(long_message, 0, 4_096)
+        end)
+
       assert String.length(payload["message"]) == 4_096
       assert payload["context"]["source"] == "canary_sdk"
       assert payload["context"]["pid"] == inspect(self())
