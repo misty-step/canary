@@ -9,6 +9,9 @@ use serde_json::json;
 
 use crate::problem_details::{ProblemCode, ProblemDetails};
 
+/// Result type for HTTP boundary authorization checks.
+pub type AuthResult<T> = std::result::Result<T, Box<ProblemDetails>>;
+
 /// Stable API-key scope stored on Canary keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -88,6 +91,31 @@ pub fn extract_bearer<'a>(authorization_headers: &'a [&'a str]) -> BearerToken<'
             .map(str::trim)
             .map_or(BearerToken::Missing, BearerToken::Present),
         _ => BearerToken::Missing,
+    }
+}
+
+/// Authorize an already-collected Authorization header set for a route.
+pub fn authorize(
+    authorization_headers: &[&str],
+    permission: Permission,
+    lookup_scope: impl FnOnce(&str) -> Option<ApiKeyScope>,
+    request_id: Option<String>,
+) -> AuthResult<()> {
+    let token = match extract_bearer(authorization_headers) {
+        BearerToken::Present(token) => token,
+        BearerToken::Missing => return Err(Box::new(missing_authorization_problem(request_id))),
+    };
+
+    let Some(scope) = lookup_scope(token) else {
+        return Err(Box::new(invalid_api_key_problem(request_id)));
+    };
+
+    if scope.allows(permission) {
+        Ok(())
+    } else {
+        Err(Box::new(insufficient_scope_problem(
+            scope, permission, request_id,
+        )))
     }
 }
 
@@ -229,5 +257,42 @@ mod tests {
             encoded["detail"],
             "API key scope `read-only` cannot access this ingest endpoint. Use an `admin` or `ingest-only` key."
         );
+    }
+
+    #[test]
+    fn authorize_hides_bearer_and_scope_decisions_from_routers() {
+        assert!(
+            authorize(
+                &["Bearer sk_admin"],
+                Permission::Ingest,
+                |_| Some(ApiKeyScope::Admin),
+                None
+            )
+            .is_ok()
+        );
+        assert!(
+            authorize(
+                &["Bearer sk_ingest"],
+                Permission::Ingest,
+                |_| Some(ApiKeyScope::IngestOnly),
+                None
+            )
+            .is_ok()
+        );
+
+        let missing = authorize(&[], Permission::Ingest, |_| None, None)
+            .err()
+            .map(|problem| problem.code);
+        assert_eq!(missing.as_deref(), Some("invalid_api_key"));
+
+        let denied = authorize(
+            &["Bearer sk_read"],
+            Permission::Ingest,
+            |_| Some(ApiKeyScope::ReadOnly),
+            None,
+        )
+        .err()
+        .map(|problem| problem.code);
+        assert_eq!(denied.as_deref(), Some("insufficient_scope"));
     }
 }

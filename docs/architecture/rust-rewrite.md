@@ -34,9 +34,12 @@ crates/
 ```
 
 The first server crate now exists, but it is intentionally an adapter, not a
-new product layer. `canary-server` mounts only the public unauthenticated routes
-whose bodies are built by `canary-http::public`; it does not duplicate response
-logic or introduce database, auth, or responder behavior.
+new product layer. `canary-server` mounts public unauthenticated routes whose
+bodies are built by `canary-http::public`, plus the authenticated
+`POST /api/v1/errors` adapter that performs only HTTP-boundary work:
+content-length preflight, bearer/scope checks, JSON decoding, response status
+selection, and RFC 9457 translation. Validation, grouping, classification, and
+the database commit stay in `canary-ingest` and `canary-store`.
 
 The crate boundaries should stay deep:
 
@@ -123,9 +126,13 @@ the Rust server accepts production traffic:
 11. `canary-store::commit_error_ingest` and `canary-ingest`: transactional
     error persistence plus a deep ingest boundary that owns Phoenix validation
     order, truncation, grouping, classification, and the single store call.
+12. `canary-server::ingest_router`: an Axum adapter for `POST /api/v1/errors`
+    that preserves content-length preflight, `admin`/`ingest-only` authorization,
+    malformed JSON handling, validation/413 Problem Details, and the 201 ingest
+    summary without putting domain decisions in the router.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
-eleven existing contracts into Rust types and tests. The server crate is allowed
+twelve existing contracts into Rust types and tests. The server crate is allowed
 to know Axum, routing, and response conversion; it is not allowed to own product
 decisions already expressed by `canary-core` or `canary-http`.
 
@@ -150,9 +157,9 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Wire `POST /api/v1/errors` through `canary-server`: content-length preflight,
-   scoped auth, JSON decoding, `canary-ingest`, 201 response shape, and RFC 9457
-   validation/413/500 Problem Details.
+1. Replace the in-memory Rust ingest auth map with SQLite-backed API-key lookup
+   and hash verification while preserving the current `canary-http::auth` scope
+   contract.
 2. Add post-commit effect handling for new-class/regression events without
    making broadcast, incident correlation, or webhook enqueue failures fail the
    ingest response.

@@ -166,6 +166,8 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "canary-http",
+ "canary-ingest",
+ "canary-store",
  "serde",
  "serde_json",
  "tokio",

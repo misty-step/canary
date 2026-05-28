@@ -65,6 +65,16 @@ impl Store {
         ingest::commit(&mut self.connection, ingest)
     }
 
+    /// Count persisted errors.
+    pub fn error_count(&self) -> Result<u64> {
+        let count = self
+            .connection
+            .query_row("SELECT count(*) FROM errors", [], |row| {
+                row.get::<_, u64>(0)
+            })?;
+        Ok(count)
+    }
+
     fn from_connection(connection: Connection) -> Result<Self> {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
