@@ -20,6 +20,8 @@ const NODE_IMAGE =
   "node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94"
 const PYTHON_IMAGE =
   "python:3.13-slim-bookworm@sha256:f13a6b7565175da40695e8109f64cbc4d2e65f4c9ef2e3b321c3a44fa3c06fe7"
+const RUST_IMAGE =
+  "rust:1.94.0-bookworm@sha256:365468470075493dc4583f47387001854321c5a8583ea9604b297e67f01c5a4f"
 const GITLEAKS_IMAGE =
   "zricethezav/gitleaks:latest@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f"
 const DIGEST_PREFIX = "sha256:"
@@ -166,6 +168,31 @@ async function nodeContainer(
     .withExec(["npm", "ci", "--ignore-scripts"])
 }
 
+async function rustContainer(source: Directory): Promise<Container> {
+  const digest = await lockfileDigest(source, "Cargo.lock")
+  const platformKey = await cachePlatformKey()
+  const imageKey = imageIdentity(RUST_IMAGE)
+  const registryCache = dag.cacheVolume(
+    cacheVolumeName("canary-rust-registry", platformKey, imageKey, digest),
+  )
+  const gitCache = dag.cacheVolume(
+    cacheVolumeName("canary-rust-git", platformKey, imageKey, digest),
+  )
+  const targetCache = dag.cacheVolume(
+    cacheVolumeName("canary-rust-target", platformKey, imageKey, digest),
+  )
+
+  return dag
+    .container()
+    .from(RUST_IMAGE)
+    .withExec(["rustup", "component", "add", "rustfmt", "clippy"])
+    .withMountedDirectory("/work", source)
+    .withMountedCache("/usr/local/cargo/registry", registryCache)
+    .withMountedCache("/usr/local/cargo/git", gitCache)
+    .withMountedCache("/work/target", targetCache)
+    .withWorkdir("/work")
+}
+
 function codexAgentRolesContainer(source: Directory): Container {
   return dag
     .container()
@@ -281,6 +308,33 @@ export class Ci {
     ).withExec(["npm", "run", "typecheck"])
   }
 
+  private async rustFastContainer(source: Directory): Promise<Container> {
+    return (await rustContainer(source))
+      .withExec(["cargo", "fmt", "--all", "--check"])
+      .withExec(["cargo", "check", "--workspace", "--all-targets", "--locked"])
+  }
+
+  private async rustQualityContainer(source: Directory): Promise<Container> {
+    return (await this.rustFastContainer(source))
+      .withExec([
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings",
+      ])
+      .withExec(["cargo", "test", "--workspace", "--locked"])
+  }
+
+  private async rustAdvisoryContainer(source: Directory): Promise<Container> {
+    return (await rustContainer(source))
+      .withExec(["cargo", "install", "cargo-audit", "--version", "0.22.1", "--locked"])
+      .withExec(["cargo", "audit"])
+  }
+
   private async rootAdvisoryContainer(source: Directory): Promise<Container> {
     return (await elixirContainer(source, ".", "test", "canary-root-test", "mix.lock")).withExec(
       ["mix", "deps.audit", "--ignore-file", ".mix_audit.ignore"],
@@ -342,6 +396,7 @@ export class Ci {
         "clients/typescript/dist",
         "clients/typescript/coverage",
         "dagger/node_modules",
+        "target",
       ],
     })
     source?: Directory,
@@ -352,6 +407,7 @@ export class Ci {
     await (await this.rootFastContainer(repo)).sync()
     await (await this.sdkFastContainer(repo)).sync()
     await (await this.typescriptFastContainer(repo)).sync()
+    await (await this.rustFastContainer(repo)).sync()
   }
 
   @func()
@@ -370,6 +426,7 @@ export class Ci {
         "clients/typescript/dist",
         "clients/typescript/coverage",
         "dagger/node_modules",
+        "target",
       ],
     })
     source?: Directory,
@@ -379,6 +436,7 @@ export class Ci {
     await (await this.rootAdvisoryContainer(repo)).sync()
     await (await this.sdkAdvisoryContainer(repo)).sync()
     await (await this.typescriptAdvisoryContainer(repo)).sync()
+    await (await this.rustAdvisoryContainer(repo)).sync()
   }
 
   @func()
@@ -396,6 +454,7 @@ export class Ci {
         "clients/typescript/dist",
         "clients/typescript/coverage",
         "dagger/node_modules",
+        "target",
       ],
     })
     source?: Directory,
@@ -424,6 +483,7 @@ export class Ci {
         "clients/typescript/dist",
         "clients/typescript/coverage",
         "dagger/node_modules",
+        "target",
       ],
     })
     source?: Directory,
@@ -450,6 +510,7 @@ export class Ci {
         "clients/typescript/dist",
         "clients/typescript/coverage",
         "dagger/node_modules",
+        "target",
       ],
     })
     source?: Directory,
@@ -463,6 +524,7 @@ export class Ci {
     await this.rootDialyzer(repo)
     await this.sdkQuality(repo)
     await this.typescriptQuality(repo)
+    await this.rustQuality(repo)
     await this.secrets(repo)
   }
 
@@ -482,6 +544,7 @@ export class Ci {
         "clients/typescript/dist",
         "clients/typescript/coverage",
         "dagger/node_modules",
+        "target",
       ],
     })
     source?: Directory,
@@ -505,6 +568,7 @@ export class Ci {
         "clients/typescript/dist",
         "clients/typescript/coverage",
         "dagger/node_modules",
+        "target",
       ],
     })
     source?: Directory,
@@ -528,6 +592,7 @@ export class Ci {
         "clients/typescript/dist",
         "clients/typescript/coverage",
         "dagger/node_modules",
+        "target",
       ],
     })
     source?: Directory,
@@ -551,6 +616,7 @@ export class Ci {
         "clients/typescript/dist",
         "clients/typescript/coverage",
         "dagger/node_modules",
+        "target",
       ],
     })
     source?: Directory,
@@ -574,6 +640,7 @@ export class Ci {
         "clients/typescript/dist",
         "clients/typescript/coverage",
         "dagger/node_modules",
+        "target",
       ],
     })
     source?: Directory,
@@ -597,6 +664,7 @@ export class Ci {
         "clients/typescript/dist",
         "clients/typescript/coverage",
         "dagger/node_modules",
+        "target",
       ],
     })
     source?: Directory,
@@ -620,11 +688,60 @@ export class Ci {
         "clients/typescript/dist",
         "clients/typescript/coverage",
         "dagger/node_modules",
+        "target",
       ],
     })
     source?: Directory,
   ): Promise<void> {
     await (await this.typescriptQualityContainer(source!)).sync()
+  }
+
+  @func()
+  async rustQuality(
+    @argument({
+      defaultPath: "/",
+      ignore: [
+        ".git",
+        "_build",
+        "deps",
+        "cover",
+        "canary_sdk/_build",
+        "canary_sdk/deps",
+        "canary_sdk/cover",
+        "clients/typescript/node_modules",
+        "clients/typescript/dist",
+        "clients/typescript/coverage",
+        "dagger/node_modules",
+        "target",
+      ],
+    })
+    source?: Directory,
+  ): Promise<void> {
+    await (await this.rustQualityContainer(source!)).sync()
+  }
+
+  @func()
+  async rustAdvisories(
+    @argument({
+      defaultPath: "/",
+      ignore: [
+        ".git",
+        "_build",
+        "deps",
+        "cover",
+        "canary_sdk/_build",
+        "canary_sdk/deps",
+        "canary_sdk/cover",
+        "clients/typescript/node_modules",
+        "clients/typescript/dist",
+        "clients/typescript/coverage",
+        "dagger/node_modules",
+        "target",
+      ],
+    })
+    source?: Directory,
+  ): Promise<void> {
+    await (await this.rustAdvisoryContainer(source!)).sync()
   }
 
   @func()
@@ -642,6 +759,7 @@ export class Ci {
         "clients/typescript/dist",
         "clients/typescript/coverage",
         "dagger/node_modules",
+        "target",
       ],
     })
     source?: Directory,
@@ -665,6 +783,7 @@ export class Ci {
         "clients/typescript/dist",
         "clients/typescript/coverage",
         "dagger/node_modules",
+        "target",
       ],
     })
     source?: Directory,

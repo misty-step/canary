@@ -722,12 +722,26 @@ require(
     "dagger/src/index.ts must scope cache volumes by dag.defaultPlatform()",
 )
 require(
-    dagger_source.count("const platformKey = await cachePlatformKey()") == 2,
+    dagger_source.count("const platformKey = await cachePlatformKey()") == 3,
     "Each Dagger dependency container must compute a platform cache key once",
 )
 require(
-    dagger_source.count("platformKey, imageKey, digest") == 5,
+    dagger_source.count("platformKey, imageKey, digest") == 8,
     "Every Dagger cache volume must scope its key by platform, image, and lockfile digest",
+)
+require(
+    "async function rustContainer(source: Directory)" in dagger_source
+    and ".withExec([\"cargo\", \"fmt\", \"--all\", \"--check\"])" in dagger_source
+    and ".withExec([\"cargo\", \"check\", \"--workspace\", \"--all-targets\", \"--locked\"])" in dagger_source
+    and "\"clippy\"" in dagger_source
+    and ".withExec([\"cargo\", \"test\", \"--workspace\", \"--locked\"])" in dagger_source,
+    "Dagger must run Rust format, check, clippy, and tests from a Rust container",
+)
+require(
+    "await (await this.rustFastContainer(repo)).sync()" in dagger_source
+    and "await this.rustQuality(repo)" in dagger_source
+    and "await (await this.rustAdvisoryContainer(repo)).sync()" in dagger_source,
+    "Dagger fast, deterministic, and advisory gates must include Rust validation",
 )
 
 sync_result = subprocess.run(

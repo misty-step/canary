@@ -81,7 +81,7 @@ pub enum GroupingStrategy {
 pub fn compute(input: GroupingInput<'_>) -> Grouping {
     let message_template = strip_template(input.message);
 
-    if let Some(fingerprint) = input.fingerprint.filter(|items| !items.is_empty()) {
+    if let Some(fingerprint) = input.fingerprint {
         return Grouping {
             group_hash: fingerprint_hash(input.service, fingerprint),
             message_template,

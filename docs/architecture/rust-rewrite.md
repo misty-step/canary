@@ -123,21 +123,21 @@ Phoenix behavior until the replacement is complete:
   schema shape and repository behavior.
 - HTTP tests exercise the same endpoint, auth, and error cases in the OpenAPI
   contract.
-- The repo gate must eventually call the Rust gate from `./bin/validate`, so the
-  rewrite cannot drift outside Canary's single source of truth.
+- The repo gate calls Rust from `./bin/validate`: fast validation runs
+  `cargo fmt --all --check` and `cargo check --workspace --all-targets --locked`;
+  deterministic validation runs clippy and tests; advisory validation runs
+  `cargo audit`.
 
 ## Next Slices
 
-1. Add Phoenix parity fixtures for grouping and classification so the current
-   Rust port is proven byte-for-byte where the old behavior is observable.
+1. Expand Phoenix parity fixtures beyond grouping/classification into HTTP
+   errors, auth, OpenAPI, and webhook signing.
 2. Add `canary-store` with SQL migrations generated from the existing Ecto schema,
    plus compatibility tests against a fixture SQLite database.
-3. Wire `cargo test`, `cargo clippy`, and formatting into `./bin/validate`
-   without weakening the existing Dagger gate.
-4. Add read-only Axum endpoints for `/healthz`, `/readyz`, and
+3. Add read-only Axum endpoints for `/healthz`, `/readyz`, and
    `/api/v1/openapi.json`; serve the existing OpenAPI document unchanged.
-5. Port `POST /api/v1/errors` end-to-end: scoped auth, validation, grouping,
+4. Port `POST /api/v1/errors` end-to-end: scoped auth, validation, grouping,
    single-writer transaction, response shape, and contract tests.
-6. Port webhook ledger and delivery after ingest is stable; preserve
+5. Port webhook ledger and delivery after ingest is stable; preserve
    `X-Delivery-Id`, `X-Signature`, `X-Event`, `X-Webhook-Version`, and
    `X-Sequence`.
