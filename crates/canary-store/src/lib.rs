@@ -1016,6 +1016,7 @@ mod tests {
         let commit = store.commit_error_ingest(ingest)?;
 
         assert_eq!(commit.id, "ERR-123456789abc");
+        assert_eq!(commit.service, "cadence");
         assert_eq!(commit.group_hash, "group-new");
         assert!(commit.is_new_class);
         assert_eq!(

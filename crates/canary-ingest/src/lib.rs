@@ -89,6 +89,36 @@ pub struct IngestAccepted {
     pub group_hash: String,
     /// Whether this was a newly-created error class.
     pub is_new_class: bool,
+    /// Best-effort effects to run after the ingest transaction commits.
+    pub post_commit_effects: Vec<IngestEffect>,
+}
+
+/// Post-commit effect emitted by a successful ingest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IngestEffect {
+    /// Notify in-process subscribers that a new error row exists.
+    BroadcastNewError {
+        /// Error row id.
+        error_id: String,
+        /// Service name.
+        service: String,
+    },
+    /// Attach the error group to the service incident graph.
+    CorrelateIncident {
+        /// Signal type to correlate.
+        signal_type: String,
+        /// Stable signal reference.
+        signal_ref: String,
+        /// Service name.
+        service: String,
+    },
+    /// Enqueue responder webhooks for an already-recorded service event.
+    EnqueueWebhook {
+        /// Event name.
+        event: String,
+        /// JSON payload to deliver.
+        payload_json: String,
+    },
 }
 
 /// Ingest one decoded JSON object.
@@ -152,10 +182,30 @@ fn prepare(
 }
 
 fn accepted(commit: ErrorIngestCommit) -> IngestAccepted {
+    let mut post_commit_effects = vec![
+        IngestEffect::BroadcastNewError {
+            error_id: commit.id.clone(),
+            service: commit.service.clone(),
+        },
+        IngestEffect::CorrelateIncident {
+            signal_type: "error_group".to_owned(),
+            signal_ref: commit.group_hash.clone(),
+            service: commit.service.clone(),
+        },
+    ];
+
+    if let Some(event) = &commit.service_event {
+        post_commit_effects.push(IngestEffect::EnqueueWebhook {
+            event: event.event.clone(),
+            payload_json: event.payload_json.clone(),
+        });
+    }
+
     IngestAccepted {
         id: commit.id,
         group_hash: commit.group_hash,
         is_new_class: commit.is_new_class,
+        post_commit_effects,
     }
 }
 
@@ -283,6 +333,27 @@ mod tests {
         assert_eq!(accepted.id, "ERR-123456789abc");
         assert!(accepted.is_new_class);
         assert_eq!(accepted.group_hash.len(), 64);
+        assert_eq!(accepted.post_commit_effects.len(), 3);
+        assert_eq!(
+            accepted.post_commit_effects[0],
+            IngestEffect::BroadcastNewError {
+                error_id: "ERR-123456789abc".to_owned(),
+                service: "cadence".to_owned(),
+            }
+        );
+        assert_eq!(
+            accepted.post_commit_effects[1],
+            IngestEffect::CorrelateIncident {
+                signal_type: "error_group".to_owned(),
+                signal_ref: accepted.group_hash.clone(),
+                service: "cadence".to_owned(),
+            }
+        );
+        assert!(matches!(
+            &accepted.post_commit_effects[2],
+            IngestEffect::EnqueueWebhook { event, payload_json }
+                if event == "error.new_class" && payload_json.contains("error.new_class")
+        ));
 
         Ok(())
     }
@@ -315,6 +386,50 @@ mod tests {
 
         assert_eq!(first.group_hash, second.group_hash);
         assert!(!second.is_new_class);
+        assert_eq!(second.post_commit_effects.len(), 2);
+        assert!(matches!(
+            second.post_commit_effects.as_slice(),
+            [
+                IngestEffect::BroadcastNewError { .. },
+                IngestEffect::CorrelateIncident { .. }
+            ]
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn regression_ingest_emits_webhook_effect_after_commit() -> Result<()> {
+        let mut store = migrated_store()?;
+        let attrs = valid_attrs();
+        let attrs = object(&attrs)?;
+        let first = ingest(
+            &mut store,
+            attrs,
+            &IngestConfig::default(),
+            context(
+                "ERR-123456789abc",
+                "EVT-123456789abc",
+                "2026-05-27T20:00:00Z",
+            ),
+        )?;
+        let second = ingest(
+            &mut store,
+            attrs,
+            &IngestConfig::default(),
+            context(
+                "ERR-abcdefghijkl",
+                "EVT-abcdefghijkl",
+                "2026-05-28T20:00:00Z",
+            ),
+        )?;
+
+        assert_eq!(first.group_hash, second.group_hash);
+        assert!(matches!(
+            second.post_commit_effects.last(),
+            Some(IngestEffect::EnqueueWebhook { event, payload_json })
+                if event == "error.regression" && payload_json.contains("error.regression")
+        ));
 
         Ok(())
     }

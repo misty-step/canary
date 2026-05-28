@@ -79,6 +79,8 @@ pub struct ErrorServiceEvent {
 pub struct ErrorIngestCommit {
     /// Error row id.
     pub id: String,
+    /// Service name.
+    pub service: String,
     /// Stable group hash.
     pub group_hash: String,
     /// Whether this was a newly-created error class.
@@ -118,6 +120,7 @@ pub(crate) fn commit(
 
     Ok(ErrorIngestCommit {
         id: ingest.ids.error_id.into_string(),
+        service: ingest.payload.service,
         group_hash: ingest.payload.group_hash,
         is_new_class,
         service_event,

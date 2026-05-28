@@ -138,6 +138,11 @@ the Rust server accepts production traffic:
     incident detail path that preserves stored incident state, total signal
     counts, newest-first signal and annotation caps, per-signal subject
     annotation counts, recent timeline events, and deterministic action briefs.
+15. `canary-ingest::IngestEffect` and `canary-server::IngestEffectSink`: a
+    typed post-commit effect boundary for broadcasts, incident correlation, and
+    webhook enqueue triggers. The SQLite commit remains the only ingest-critical
+    operation; effect sink failures are best-effort and do not change the 201
+    ingest summary.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -165,11 +170,10 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Add post-commit effect handling for new-class/regression events without
-   making broadcast, incident correlation, or webhook enqueue failures fail the
-   ingest response.
-2. Port webhook ledger and delivery after ingest and incident reads are stable; preserve
+1. Port webhook ledger and delivery after ingest and incident reads are stable; preserve
    `X-Delivery-Id`, `X-Signature`, `X-Event`, `X-Webhook-Version`, and
    `X-Sequence`.
+2. Add a concrete incident-correlation effect sink once the Rust incident write
+   path exists, keeping correlation failures isolated from ingest success.
 3. Add compatibility checks against a migrated Phoenix fixture database before
    any production traffic moves to the Rust server.

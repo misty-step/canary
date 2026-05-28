@@ -27,7 +27,8 @@ use canary_http::{
     },
 };
 use canary_ingest::{
-    IngestConfig, IngestContext, IngestError, ValidationErrors, ingest as ingest_error,
+    IngestConfig, IngestContext, IngestEffect, IngestError, ValidationErrors,
+    ingest as ingest_error,
 };
 use canary_store::{IncidentListOptions, Store};
 use canary_store::{QueryError, ServiceQueryOptions};
@@ -84,15 +85,41 @@ pub fn ingest_router(state: IngestState) -> Router {
 pub struct IngestState {
     store: Arc<Mutex<Store>>,
     config: IngestConfig,
+    effect_sink: Arc<dyn IngestEffectSink>,
 }
 
 impl IngestState {
     /// Build ingest state from an already-open single-writer store.
     pub fn new(store: Store, config: IngestConfig) -> Self {
+        Self::new_with_effect_sink(store, config, Arc::new(NoopIngestEffectSink))
+    }
+
+    /// Build ingest state with an explicit post-commit effect sink.
+    pub fn new_with_effect_sink(
+        store: Store,
+        config: IngestConfig,
+        effect_sink: Arc<dyn IngestEffectSink>,
+    ) -> Self {
         Self {
             store: Arc::new(Mutex::new(store)),
             config,
+            effect_sink,
         }
+    }
+}
+
+/// Best-effort sink for ingest effects emitted after the store transaction commits.
+pub trait IngestEffectSink: Send + Sync + 'static {
+    /// Handle effects. Errors are advisory and must not change the HTTP response.
+    fn handle(&self, effects: &[IngestEffect]) -> Result<(), String>;
+}
+
+#[derive(Debug, Default)]
+struct NoopIngestEffectSink;
+
+impl IngestEffectSink for NoopIngestEffectSink {
+    fn handle(&self, _effects: &[IngestEffect]) -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -144,15 +171,21 @@ async fn create_error(
         }
     };
 
-    match ingest_error(&mut store, &attrs, &state.config, IngestContext::now()) {
-        Ok(accepted) => json_status_response(
-            StatusCode::CREATED.as_u16(),
-            json!({
-                "id": accepted.id,
-                "group_hash": accepted.group_hash,
-                "is_new_class": accepted.is_new_class
-            }),
-        ),
+    let result = ingest_error(&mut store, &attrs, &state.config, IngestContext::now());
+    drop(store);
+
+    match result {
+        Ok(accepted) => {
+            let _ = state.effect_sink.handle(&accepted.post_commit_effects);
+            json_status_response(
+                StatusCode::CREATED.as_u16(),
+                json!({
+                    "id": accepted.id,
+                    "group_hash": accepted.group_hash,
+                    "is_new_class": accepted.is_new_class
+                }),
+            )
+        }
         Err(IngestError::Validation(errors)) => problem_response(validation_problem(errors)),
         Err(IngestError::PayloadTooLarge(detail)) => {
             problem_response(payload_too_large_problem(detail))
@@ -503,6 +536,7 @@ struct QueryParams {
 #[cfg(test)]
 mod tests {
     use std::error::Error;
+    use std::sync::{Arc, Mutex as StdMutex};
 
     use axum::{
         body::{Body, to_bytes},
@@ -619,6 +653,34 @@ mod tests {
         assert!(body["id"].as_str().is_some_and(|id| id.starts_with("ERR-")));
         assert_eq!(body["group_hash"].as_str().map(str::len), Some(64));
         assert_eq!(body["is_new_class"], true);
+        assert!(body.get("post_commit_effects").is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn error_ingest_runs_post_commit_effects_best_effort() -> Result<(), Box<dyn Error>> {
+        let sink = Arc::new(RecordingFailingSink::default());
+        let state = test_ingest_state_with_sink(sink.clone())?;
+        let response = ingest_router(state)
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(body["id"].as_str().is_some_and(|id| id.starts_with("ERR-")));
+
+        let effects = sink.effects.lock().map_err(|_| "effect lock poisoned")?;
+        assert_eq!(effects.len(), 3);
+        assert!(matches!(
+            effects.as_slice(),
+            [
+                IngestEffect::BroadcastNewError { .. },
+                IngestEffect::CorrelateIncident { .. },
+                IngestEffect::EnqueueWebhook { event, .. }
+            ] if event == "error.new_class"
+        ));
 
         Ok(())
     }
@@ -1038,6 +1100,12 @@ mod tests {
     }
 
     fn test_ingest_state() -> Result<IngestState, Box<dyn Error>> {
+        test_ingest_state_with_sink(Arc::new(NoopIngestEffectSink))
+    }
+
+    fn test_ingest_state_with_sink(
+        effect_sink: Arc<dyn IngestEffectSink>,
+    ) -> Result<IngestState, Box<dyn Error>> {
         let mut store = Store::open_in_memory()?;
         store.migrate()?;
 
@@ -1052,7 +1120,11 @@ mod tests {
             Some("2026-05-28T20:05:00Z"),
         )?;
 
-        Ok(IngestState::new(store, IngestConfig::default()))
+        Ok(IngestState::new_with_effect_sink(
+            store,
+            IngestConfig::default(),
+            effect_sink,
+        ))
     }
 
     fn error_request(token: &str, body: &'static str) -> Result<Request<Body>, Box<dyn Error>> {
@@ -1094,5 +1166,21 @@ mod tests {
 
     fn valid_error_body() -> &'static str {
         r#"{"service":"test-svc","error_class":"RuntimeError","message":"something went wrong"}"#
+    }
+
+    #[derive(Default)]
+    struct RecordingFailingSink {
+        effects: StdMutex<Vec<IngestEffect>>,
+    }
+
+    impl IngestEffectSink for RecordingFailingSink {
+        fn handle(&self, effects: &[IngestEffect]) -> Result<(), String> {
+            let mut recorded = self
+                .effects
+                .lock()
+                .map_err(|_| "effect lock poisoned".to_owned())?;
+            recorded.extend_from_slice(effects);
+            Err("simulated effect sink failure".to_owned())
+        }
     }
 }
