@@ -1,7 +1,8 @@
 use canary_core::query::{
-    ErrorClassification, ErrorDetail, ErrorDetailGroup, ErrorGroupSummary, ErrorsByErrorClass,
-    ErrorsByService, QueryCursor, QueryWindow, decode_cursor, error_detail_response,
-    errors_by_error_class_response, errors_by_service_response,
+    ErrorClassAggregate, ErrorClassification, ErrorDetail, ErrorDetailGroup, ErrorGroupSummary,
+    ErrorsByClass, ErrorsByErrorClass, ErrorsByService, QueryCursor, QueryWindow, decode_cursor,
+    error_detail_response, errors_by_class_response, errors_by_error_class_response,
+    errors_by_service_response,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
@@ -80,6 +81,20 @@ pub(crate) fn errors_by_error_class(
     ))
 }
 
+pub(crate) fn errors_by_class(connection: &Connection, window: &str) -> QueryResult<ErrorsByClass> {
+    let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
+    let cutoff = window.cutoff_at(OffsetDateTime::now_utc());
+    let groups = error_class_aggregates(connection, &cutoff)?;
+    let (total_errors, total_error_classes) = error_class_totals(connection, &cutoff)?;
+
+    Ok(errors_by_class_response(
+        window,
+        groups,
+        total_errors,
+        total_error_classes,
+    ))
+}
+
 pub(crate) fn error_detail(
     connection: &Connection,
     error_id: &str,
@@ -120,6 +135,40 @@ pub(crate) fn error_detail(
     Ok(Some(error_detail_response(
         detail, count, first_seen, last_seen,
     )))
+}
+
+fn error_class_aggregates(
+    connection: &Connection,
+    cutoff: &str,
+) -> QueryResult<Vec<ErrorClassAggregate>> {
+    let mut statement = connection.prepare(
+        "SELECT error_class, COALESCE(SUM(total_count), 0), COUNT(DISTINCT service)
+         FROM error_groups
+         WHERE last_seen_at >= ?1
+         GROUP BY error_class
+         ORDER BY SUM(total_count) DESC, error_class ASC
+         LIMIT 50",
+    )?;
+    let groups = statement
+        .query_map([cutoff], |row| {
+            Ok(ErrorClassAggregate {
+                error_class: row.get(0)?,
+                total_count: row.get(1)?,
+                service_count: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(groups)
+}
+
+fn error_class_totals(connection: &Connection, cutoff: &str) -> QueryResult<(u64, u64)> {
+    Ok(connection.query_row(
+        "SELECT COALESCE(SUM(total_count), 0), COUNT(DISTINCT error_class)
+         FROM error_groups
+         WHERE last_seen_at >= ?1",
+        [cutoff],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?)
 }
 
 fn list_error_groups(

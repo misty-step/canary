@@ -196,6 +196,34 @@ pub struct ErrorsByErrorClass {
     pub cursor: Option<String>,
 }
 
+/// Aggregate item returned by `GET /api/v1/query?group_by=error_class`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ErrorClassAggregate {
+    /// Error class.
+    pub error_class: String,
+    /// Sum of grouped error counts for the class.
+    pub total_count: u64,
+    /// Number of services represented by the class.
+    pub service_count: u64,
+}
+
+/// Response for `GET /api/v1/query?group_by=error_class`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ErrorsByClass {
+    /// Deterministic summary.
+    pub summary: String,
+    /// Query window wire value.
+    pub window: String,
+    /// Sum of all matching group counts, including rows past the visible limit.
+    pub total_errors: u64,
+    /// Count of all matching error classes, including rows past the visible limit.
+    pub total_error_classes: u64,
+    /// True when more than 50 classes matched the query.
+    pub truncated: bool,
+    /// Top classes by total count.
+    pub groups: Vec<ErrorClassAggregate>,
+}
+
 /// Error group attached to an error detail response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ErrorDetailGroup {
@@ -300,6 +328,32 @@ pub fn errors_by_error_class_response(
     }
 }
 
+/// Build a Phoenix-compatible error-class aggregate response.
+pub fn errors_by_class_response(
+    window: QueryWindow,
+    groups: Vec<ErrorClassAggregate>,
+    total_errors: u64,
+    total_error_classes: u64,
+) -> ErrorsByClass {
+    let truncated = total_error_classes as usize > groups.len();
+    let summary = error_class_aggregate_summary(
+        total_errors,
+        total_error_classes,
+        window.as_str(),
+        &groups,
+        truncated,
+    );
+
+    ErrorsByClass {
+        summary,
+        window: window.as_str().to_owned(),
+        total_errors,
+        total_error_classes,
+        truncated,
+        groups,
+    }
+}
+
 /// Build a Phoenix-compatible error detail response.
 pub fn error_detail_response(
     mut detail: ErrorDetail,
@@ -327,7 +381,7 @@ fn error_query_summary(
         "{total} errors in {service} in the last {window}. {} unique classes.",
         groups.len()
     );
-    match groups.iter().max_by_key(|group| group.total_count) {
+    match groups.first() {
         Some(top) => format!(
             "{base} Most frequent: {} ({} occurrences).",
             top.error_class, top.total_count
@@ -356,6 +410,31 @@ fn error_class_query_summary(
     )
 }
 
+fn error_class_aggregate_summary(
+    total: u64,
+    class_count: u64,
+    window: &str,
+    groups: &[ErrorClassAggregate],
+    truncated: bool,
+) -> String {
+    let class_label = pluralize(class_count, "error class", "error classes");
+    let base = format!("{total} errors across {class_count} {class_label} in the last {window}.");
+    let top_part = match groups.first() {
+        Some(top) => format!(
+            " Most frequent: {} ({} occurrences).",
+            top.error_class, top.total_count
+        ),
+        None => String::new(),
+    };
+    let truncated_part = if truncated {
+        format!(" Response truncated to top {} classes.", groups.len())
+    } else {
+        String::new()
+    };
+
+    format!("{base}{top_part}{truncated_part}")
+}
+
 fn error_detail_summary(
     error_class: &str,
     service: &str,
@@ -366,6 +445,10 @@ fn error_detail_summary(
     format!(
         "{error_class} in {service}. Seen {count} times since {first_seen}. Last occurrence: {last_seen}."
     )
+}
+
+fn pluralize<'a>(count: u64, singular: &'a str, plural: &'a str) -> &'a str {
+    if count == 1 { singular } else { plural }
 }
 
 fn classification_value(value: Option<String>) -> String {

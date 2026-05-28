@@ -100,6 +100,11 @@ impl Store {
         query::errors_by_error_class(&self.connection, error_class, window, service, options)
     }
 
+    /// Query recent error counts grouped by error class.
+    pub fn errors_by_class(&self, window: &str) -> QueryResult<canary_core::query::ErrorsByClass> {
+        query::errors_by_class(&self.connection, window)
+    }
+
     /// Return one error detail read model.
     pub fn error_detail(
         &self,
@@ -512,6 +517,45 @@ mod tests {
             vec!["group-001"]
         );
         assert_eq!(second_page.cursor, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn errors_by_class_counts_all_classes_beyond_visible_limit()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let store = migrated_store()?;
+        let now = "2026-05-28T20:00:00Z";
+
+        for class_number in 1..=52 {
+            store.connection.execute(
+                "INSERT INTO error_groups (
+                    group_hash, service, error_class, severity, first_seen_at, last_seen_at,
+                    last_error_id, total_count, status
+                 ) VALUES (?1, ?2, ?3, 'error', ?4, ?4, ?5, 3, 'active')",
+                params![
+                    format!("group-class-{class_number:03}"),
+                    format!("svc-{}", class_number % 3),
+                    format!("Err{class_number:03}"),
+                    now,
+                    format!("ERR-class-{class_number}"),
+                ],
+            )?;
+        }
+
+        let result = store.errors_by_class("24h")?;
+
+        assert_eq!(result.window, "24h");
+        assert_eq!(result.groups.len(), 50);
+        assert_eq!(result.total_errors, 156);
+        assert_eq!(result.total_error_classes, 52);
+        assert!(result.truncated);
+        assert_eq!(result.groups[0].total_count, 3);
+        assert_eq!(result.groups[0].service_count, 1);
+        assert_eq!(
+            result.summary,
+            "156 errors across 52 error classes in the last 24h. Most frequent: Err001 (3 occurrences). Response truncated to top 50 classes."
+        );
 
         Ok(())
     }

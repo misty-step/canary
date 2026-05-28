@@ -173,20 +173,25 @@ async fn query_errors(
         return problem_response(*problem);
     }
 
-    let query_kind = match (params.error_class.as_deref(), params.service.as_deref()) {
-        (Some(error_class), service) => QueryKind::ErrorClass {
+    let query_kind = match (
+        params.error_class.as_deref(),
+        params.service.as_deref(),
+        params.group_by.as_deref(),
+    ) {
+        (Some(error_class), service, _) => QueryKind::ErrorClass {
             error_class: error_class.to_owned(),
             service: service.map(ToOwned::to_owned),
         },
-        (None, Some(service)) => QueryKind::Service {
+        (None, Some(service), _) => QueryKind::Service {
             service: service.to_owned(),
         },
-        (None, None) => return problem_response(missing_query_problem()),
+        (None, None, Some("error_class")) => QueryKind::ErrorClasses,
+        (None, None, _) => return problem_response(missing_query_problem()),
     };
 
     let default_window = match &query_kind {
         QueryKind::Service { .. } => "1h",
-        QueryKind::ErrorClass { .. } => "24h",
+        QueryKind::ErrorClass { .. } | QueryKind::ErrorClasses => "24h",
     };
     let window = params.window.as_deref().unwrap_or(default_window);
     let options = ServiceQueryOptions {
@@ -216,6 +221,11 @@ async fn query_errors(
             Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
             Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
         },
+        QueryKind::ErrorClasses => match store.errors_by_class(window) {
+            Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
+            Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
+            Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
+        },
     }
 }
 
@@ -227,6 +237,7 @@ enum QueryKind {
         error_class: String,
         service: Option<String>,
     },
+    ErrorClasses,
 }
 
 fn missing_query_problem() -> ProblemDetails {
@@ -429,6 +440,7 @@ pub const PUBLIC_CONTENT_TYPE: HeaderName = CONTENT_TYPE;
 struct QueryParams {
     service: Option<String>,
     error_class: Option<String>,
+    group_by: Option<String>,
     window: Option<String>,
     cursor: Option<String>,
     with_annotation: Option<String>,
@@ -626,6 +638,53 @@ mod tests {
         assert_eq!(body["window"], "24h");
         assert_eq!(body["total_errors"], 1);
         assert_eq!(body["groups"][0]["service"], "test-svc");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn error_query_accepts_group_by_error_class() -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let router = ingest_router(state);
+
+        for (service, error_class) in [("svc-a", "FooError"), ("svc-b", "BarError")] {
+            let body = format!(
+                r#"{{"service":"{service}","error_class":"{error_class}","message":"boom"}}"#
+            );
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post("/api/v1/errors")
+                        .header("authorization", format!("Bearer {INGEST_KEY}"))
+                        .header(CONTENT_TYPE, APPLICATION_JSON)
+                        .body(Body::from(body))?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::CREATED);
+        }
+
+        let response = router
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/query?group_by=error_class",
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["window"], "24h");
+        assert_eq!(body["total_errors"], 2);
+        assert_eq!(body["total_error_classes"], 2);
+        assert_eq!(body["truncated"], false);
+        let classes = body["groups"]
+            .as_array()
+            .ok_or("groups should be an array")?
+            .iter()
+            .filter_map(|group| group["error_class"].as_str())
+            .collect::<Vec<_>>();
+        assert!(classes.contains(&"FooError"));
+        assert!(classes.contains(&"BarError"));
 
         Ok(())
     }
