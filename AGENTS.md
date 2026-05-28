@@ -50,7 +50,7 @@ Prefer these over re-deriving from the code base.
 |---|---|---|
 | `./bin/validate` | → `./bin/dagger check` (deterministic lanes + secrets scan) | manual run |
 | `./bin/validate --fast` | → `dagger call fast` (lint + core tests) | `.githooks/pre-commit` |
-| `./bin/validate --strict` | → `dagger call strict` (full gate + advisories + `.codex/agents/*.toml` validation) | `.githooks/pre-push` |
+| `./bin/validate --strict` | → `dagger call strict` (full gate + advisories + optional `.codex/agents/*.toml` validation when present) | `.githooks/pre-push` |
 | `./bin/validate --advisories` | live advisory scan only | manual run |
 | `dagger call strict --source=../candidate` | Hosted CI in `pull_request_target` immutable control plane (trusted base checkout at `.ci/trusted/`, candidate at `.ci/candidate/`) | `.github/workflows/ci.yml` |
 | `flyctl deploy --app canary-obs --remote-only` | Auto on green master | `.github/workflows/deploy.yml` |

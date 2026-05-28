@@ -2911,7 +2911,8 @@
           "last_seen_at",
           "attached_at",
           "resolved_at",
-          "annotation_count"
+          "annotation_count",
+          "classification"
         ],
         "properties": {
           "type": {
@@ -3167,7 +3168,8 @@
           "signals_truncated",
           "annotations",
           "annotations_truncated",
-          "recent_timeline_events"
+          "recent_timeline_events",
+          "action_brief"
         ],
         "properties": {
           "summary": {

@@ -98,10 +98,33 @@ defmodule CanaryWeb.OpenAPIControllerTest do
              "components",
              "schemas",
              "IncidentDetailResponse",
+             "required"
+           ]) == [
+             "summary",
+             "incident",
+             "signals",
+             "signals_truncated",
+             "annotations",
+             "annotations_truncated",
+             "recent_timeline_events",
+             "action_brief"
+           ]
+
+    assert get_in(body, [
+             "components",
+             "schemas",
+             "IncidentDetailResponse",
              "properties",
              "action_brief",
              "$ref"
            ]) == "#/components/schemas/IncidentActionBrief"
+
+    assert "classification" in get_in(body, [
+             "components",
+             "schemas",
+             "IncidentDetailSignalErrorGroup",
+             "required"
+           ])
 
     assert get_in(body, [
              "components",

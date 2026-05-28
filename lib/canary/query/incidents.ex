@@ -251,7 +251,13 @@ defmodule Canary.Query.Incidents do
           })
 
         action_brief =
-          build_action_brief(incident_view, formatted_signals, annotations, signals_truncated)
+          build_action_brief(
+            incident_view,
+            signals,
+            annotation_counts,
+            annotations,
+            signals_truncated
+          )
 
         {:ok,
          %{
@@ -554,11 +560,16 @@ defmodule Canary.Query.Incidents do
     }
   end
 
-  defp build_action_brief(incident, signals, annotations, signals_truncated) do
+  defp build_action_brief(incident, signals, annotation_counts, annotations, signals_truncated) do
     {active_signals, resolved_signals} = Enum.split_with(signals, &is_nil(&1.resolved_at))
 
     recommendation =
-      action_brief_recommendation(active_signals, resolved_signals, signals_truncated)
+      action_brief_recommendation(
+        active_signals,
+        resolved_signals,
+        annotation_counts,
+        signals_truncated
+      )
 
     %{
       summary:
@@ -581,7 +592,7 @@ defmodule Canary.Query.Incidents do
     }
   end
 
-  defp action_brief_recommendation(_active_signals, _resolved_signals, true) do
+  defp action_brief_recommendation(_active_signals, _resolved_signals, _annotation_counts, true) do
     %{
       action: "inspect-truncated-signals",
       reason:
@@ -589,7 +600,7 @@ defmodule Canary.Query.Incidents do
     }
   end
 
-  defp action_brief_recommendation([], resolved_signals, false) do
+  defp action_brief_recommendation([], resolved_signals, _annotation_counts, false) do
     %{
       action: "verify-recovery",
       reason:
@@ -597,9 +608,9 @@ defmodule Canary.Query.Incidents do
     }
   end
 
-  defp action_brief_recommendation(active_signals, _resolved_signals, false) do
+  defp action_brief_recommendation(active_signals, _resolved_signals, annotation_counts, false) do
     unannotated_count =
-      Enum.count(active_signals, &(Map.get(&1, :annotation_count, 0) == 0))
+      Enum.count(active_signals, &(signal_annotation_count(&1, annotation_counts) == 0))
 
     if unannotated_count > 0 do
       %{
@@ -619,6 +630,13 @@ defmodule Canary.Query.Incidents do
 
   defp latest_annotation_summary(annotation) do
     Map.take(annotation, [:id, :agent, :action, :created_at])
+  end
+
+  defp signal_annotation_count(signal, annotation_counts) do
+    case signal_subject_key(signal) do
+      nil -> 0
+      key -> Map.get(annotation_counts, key, 0)
+    end
   end
 
   defp format_classification(classification) do
