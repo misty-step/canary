@@ -9,12 +9,13 @@ defmodule CanarySdkTest do
     end)
   end
 
-  defp expect_payload(bypass, test_pid) do
-    Bypass.stub(bypass, "POST", "/api/v1/errors", fn conn ->
-      {:ok, body, conn} = Plug.Conn.read_body(conn)
-      send(test_pid, {:captured, Jason.decode!(body)})
-      Plug.Conn.resp(conn, 201, ~s({}))
-    end)
+  defp capture_request_fun(test_pid) do
+    fn url, opts ->
+      payload = opts |> Keyword.fetch!(:json) |> Jason.encode!() |> Jason.decode!()
+      send(test_pid, {:request, url, opts})
+      send(test_pid, {:captured, payload})
+      {:ok, %{status: 201}}
+    end
   end
 
   defp assert_captured_payload(matches?, timeout \\ 1_000) do
@@ -38,13 +39,14 @@ defmodule CanarySdkTest do
     end
   end
 
-  defp handler_config(port, overrides \\ %{}) do
+  defp handler_config(overrides \\ %{}) do
     Map.merge(
       %{
-        endpoint: "http://localhost:#{port}",
+        endpoint: "http://canary.test",
         api_key: "test-key",
         service: "sdk-service",
-        environment: "test"
+        environment: "test",
+        request_fun: capture_request_fun(self())
       },
       overrides
     )
@@ -80,15 +82,13 @@ defmodule CanarySdkTest do
 
   describe "error capture" do
     test "Logger.error sends POST with service, error_class, message, stack_trace" do
-      bypass = Bypass.open()
       test_pid = self()
 
-      expect_payload(bypass, test_pid)
-
       CanarySdk.attach(
-        endpoint: "http://localhost:#{bypass.port}",
+        endpoint: "http://canary.test",
         api_key: "test-key",
-        service: "my-app"
+        service: "my-app",
+        request_fun: capture_request_fun(test_pid)
       )
 
       Logger.error("something broke")
@@ -105,40 +105,33 @@ defmodule CanarySdkTest do
     end
 
     test "sends authorization header" do
-      bypass = Bypass.open()
       test_pid = self()
 
-      Bypass.stub(bypass, "POST", "/api/v1/errors", fn conn ->
-        auth = Plug.Conn.get_req_header(conn, "authorization")
-        send(test_pid, {:auth, auth})
-        Plug.Conn.resp(conn, 201, ~s({}))
-      end)
-
       CanarySdk.attach(
-        endpoint: "http://localhost:#{bypass.port}",
+        endpoint: "http://canary.test",
         api_key: "secret-key",
-        service: "s"
+        service: "s",
+        request_fun: capture_request_fun(test_pid)
       )
 
       Logger.error("boom")
 
-      assert_receive {:auth, ["Bearer secret-key"]}, 1_000
+      assert_receive {:request, "http://canary.test/api/v1/errors", opts}, 1_000
+      assert Keyword.fetch!(opts, :headers) == [{"authorization", "Bearer secret-key"}]
       CanarySdk.detach()
     end
 
     test "ignores non-error log levels" do
-      bypass = Bypass.open()
       test_pid = self()
 
-      Bypass.stub(bypass, "POST", "/api/v1/errors", fn conn ->
-        send(test_pid, :unexpected_post)
-        Plug.Conn.resp(conn, 201, ~s({}))
-      end)
-
       CanarySdk.attach(
-        endpoint: "http://localhost:#{bypass.port}",
+        endpoint: "http://canary.test",
         api_key: "k",
-        service: "s"
+        service: "s",
+        request_fun: fn _url, _opts ->
+          send(test_pid, :unexpected_post)
+          {:ok, %{status: 201}}
+        end
       )
 
       Logger.info("just info")
@@ -163,20 +156,16 @@ defmodule CanarySdkTest do
 
   describe "self-referential loop prevention" do
     test "drops errors originating from CanarySdk modules (class-name check)" do
-      bypass = Bypass.open()
       test_pid = self()
 
-      Bypass.stub(bypass, "POST", "/api/v1/errors", fn conn ->
-        {:ok, body, conn} = Plug.Conn.read_body(conn)
-        payload = Jason.decode!(body)
-        send(test_pid, {:unexpected_post, payload})
-        Plug.Conn.resp(conn, 201, ~s({}))
-      end)
-
       CanarySdk.attach(
-        endpoint: "http://localhost:#{bypass.port}",
+        endpoint: "http://canary.test",
         api_key: "k",
-        service: "s"
+        service: "s",
+        request_fun: fn _url, opts ->
+          send(test_pid, {:unexpected_post, Keyword.fetch!(opts, :json)})
+          {:ok, %{status: 201}}
+        end
       )
 
       Logger.error("** (CanarySdk.Client) connection refused")
@@ -185,20 +174,16 @@ defmodule CanarySdkTest do
     end
 
     test "drops errors from sending process via process metadata flag" do
-      bypass = Bypass.open()
       test_pid = self()
 
-      Bypass.stub(bypass, "POST", "/api/v1/errors", fn conn ->
-        {:ok, body, conn} = Plug.Conn.read_body(conn)
-        payload = Jason.decode!(body)
-        send(test_pid, {:unexpected_post, payload})
-        Plug.Conn.resp(conn, 201, ~s({}))
-      end)
-
       CanarySdk.attach(
-        endpoint: "http://localhost:#{bypass.port}",
+        endpoint: "http://canary.test",
         api_key: "k",
-        service: "s"
+        service: "s",
+        request_fun: fn _url, opts ->
+          send(test_pid, {:unexpected_post, Keyword.fetch!(opts, :json)})
+          {:ok, %{status: 201}}
+        end
       )
 
       # Simulate error from a process that has the sending flag set
@@ -213,15 +198,13 @@ defmodule CanarySdkTest do
 
   describe "structured exception extraction" do
     test "extracts error class and message from meta[:exception]" do
-      bypass = Bypass.open()
       test_pid = self()
 
-      expect_payload(bypass, test_pid)
-
       CanarySdk.attach(
-        endpoint: "http://localhost:#{bypass.port}",
+        endpoint: "http://canary.test",
         api_key: "k",
-        service: "s"
+        service: "s",
+        request_fun: capture_request_fun(test_pid)
       )
 
       exception = %RuntimeError{message: "structured boom"}
@@ -238,16 +221,14 @@ defmodule CanarySdkTest do
     end
 
     test "formats exception stacktraces and respects custom environments" do
-      bypass = Bypass.open()
       test_pid = self()
 
-      expect_payload(bypass, test_pid)
-
       CanarySdk.attach(
-        endpoint: "http://localhost:#{bypass.port}",
+        endpoint: "http://canary.test",
         api_key: "k",
         service: "s",
-        environment: "staging"
+        environment: "staging",
+        request_fun: capture_request_fun(test_pid)
       )
 
       stacktrace = [{CanarySdkTest, :sample, 0, [file: ~c"test/canary_sdk_test.exs", line: 222]}]
@@ -269,11 +250,6 @@ defmodule CanarySdkTest do
 
   describe "handler payload shaping" do
     test "extracts report messages and stacktraces" do
-      bypass = Bypass.open()
-      test_pid = self()
-
-      expect_payload(bypass, test_pid)
-
       event = %{
         level: :error,
         msg:
@@ -285,7 +261,7 @@ defmodule CanarySdkTest do
         meta: %{pid: self(), mfa: {CanarySdk, :attach, 1}}
       }
 
-      CanarySdk.Handler.log(event, %{config: handler_config(bypass.port)})
+      CanarySdk.Handler.log(event, %{config: handler_config()})
 
       payload =
         assert_captured_payload(fn payload ->
@@ -298,18 +274,13 @@ defmodule CanarySdkTest do
     end
 
     test "falls back to OTPError for generic terms" do
-      bypass = Bypass.open()
-      test_pid = self()
-
-      expect_payload(bypass, test_pid)
-
       event = %{
         level: :error,
         msg: %{kind: :unexpected},
         meta: %{pid: self(), mfa: {CanarySdkTest, :sample, 0}}
       }
 
-      CanarySdk.Handler.log(event, %{config: handler_config(bypass.port)})
+      CanarySdk.Handler.log(event, %{config: handler_config()})
 
       payload =
         assert_captured_payload(fn payload ->
@@ -321,11 +292,6 @@ defmodule CanarySdkTest do
     end
 
     test "truncates long messages and preserves context metadata" do
-      bypass = Bypass.open()
-      test_pid = self()
-
-      expect_payload(bypass, test_pid)
-
       long_message = String.duplicate("a", 5_000)
 
       event = %{
@@ -334,7 +300,7 @@ defmodule CanarySdkTest do
         meta: %{pid: self(), mfa: {CanarySdkTest, :sample, 0}}
       }
 
-      CanarySdk.Handler.log(event, %{config: handler_config(bypass.port)})
+      CanarySdk.Handler.log(event, %{config: handler_config()})
 
       payload =
         assert_captured_payload(fn payload ->

@@ -31,7 +31,7 @@ defmodule CanarySdk.Handler do
           Task.start(fn ->
             Logger.metadata(canary_sdk_sending: true)
 
-            Req.post("#{config.endpoint}/api/v1/errors",
+            config.request_fun.("#{config.endpoint}/api/v1/errors",
               json: body,
               headers: [{"authorization", "Bearer #{config.api_key}"}],
               receive_timeout: 5_000,

@@ -22,7 +22,8 @@ defmodule CanarySdk do
       endpoint: Keyword.fetch!(opts, :endpoint),
       api_key: Keyword.fetch!(opts, :api_key),
       service: Keyword.fetch!(opts, :service),
-      environment: Keyword.get(opts, :environment, "production")
+      environment: Keyword.get(opts, :environment, "production"),
+      request_fun: Keyword.get(opts, :request_fun, &Req.post/2)
     }
 
     case :logger.add_handler(@handler_id, CanarySdk.Handler, %{config: config}) do
