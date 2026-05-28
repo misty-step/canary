@@ -30,10 +30,14 @@ use canary_ingest::{
     IngestConfig, IngestContext, IngestEffect, IngestError, ValidationErrors,
     ingest as ingest_error,
 };
-use canary_store::{IncidentListOptions, Store};
+use canary_store::{IncidentListOptions, Store, WebhookDeliveryInsert, WebhookSubscription};
 use canary_store::{QueryError, ServiceQueryOptions};
+use canary_workers::webhooks::{
+    WebhookEndpoint, WebhookEnqueueDecision, WebhookJob, plan_enqueue_for_event,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 const PROBLEM_CONTENT_TYPE: &str = "application/problem+json; charset=utf-8";
@@ -94,6 +98,29 @@ impl IngestState {
         Self::new_with_effect_sink(store, config, Arc::new(NoopIngestEffectSink))
     }
 
+    /// Build ingest state with Rust webhook enqueue wired to a scheduler.
+    ///
+    /// This constructor persists webhook ledger rows and calls the supplied
+    /// scheduler for `EnqueueWebhook` effects. It does not implement delivery
+    /// transport or retry runtime; those remain behind the scheduler boundary.
+    pub fn new_with_webhook_scheduler(
+        store: Store,
+        config: IngestConfig,
+        scheduler: Arc<dyn WebhookScheduler>,
+    ) -> Self {
+        let store = Arc::new(Mutex::new(store));
+        let effect_sink = Arc::new(WebhookEnqueueEffectSink::new(
+            store.clone(),
+            scheduler,
+            Arc::new(NoopWebhookCooldown),
+        ));
+        Self {
+            store,
+            config,
+            effect_sink,
+        }
+    }
+
     /// Build ingest state with an explicit post-commit effect sink.
     pub fn new_with_effect_sink(
         store: Store,
@@ -114,6 +141,21 @@ pub trait IngestEffectSink: Send + Sync + 'static {
     fn handle(&self, effects: &[IngestEffect]) -> Result<(), String>;
 }
 
+/// Runtime boundary for scheduling webhook delivery jobs.
+pub trait WebhookScheduler: Send + Sync + 'static {
+    /// Schedule one webhook job after its pending ledger row has been created.
+    fn schedule(&self, job: &WebhookJob) -> Result<(), String>;
+}
+
+/// Runtime boundary for webhook cooldown state.
+pub trait WebhookCooldown: Send + Sync + 'static {
+    /// Return true when the event should be suppressed.
+    fn in_cooldown(&self, key: &str) -> bool;
+
+    /// Mark a key after the scheduler accepts a job.
+    fn mark(&self, key: &str);
+}
+
 #[derive(Debug, Default)]
 struct NoopIngestEffectSink;
 
@@ -121,6 +163,180 @@ impl IngestEffectSink for NoopIngestEffectSink {
     fn handle(&self, _effects: &[IngestEffect]) -> Result<(), String> {
         Ok(())
     }
+}
+
+#[derive(Debug, Default)]
+struct NoopWebhookCooldown;
+
+impl WebhookCooldown for NoopWebhookCooldown {
+    fn in_cooldown(&self, _key: &str) -> bool {
+        false
+    }
+
+    fn mark(&self, _key: &str) {}
+}
+
+/// Effect sink that turns ingest webhook effects into ledger rows and jobs.
+pub struct WebhookEnqueueEffectSink {
+    store: Arc<Mutex<Store>>,
+    scheduler: Arc<dyn WebhookScheduler>,
+    cooldown: Arc<dyn WebhookCooldown>,
+}
+
+impl WebhookEnqueueEffectSink {
+    /// Build a webhook enqueue sink from explicit runtime boundaries.
+    pub fn new(
+        store: Arc<Mutex<Store>>,
+        scheduler: Arc<dyn WebhookScheduler>,
+        cooldown: Arc<dyn WebhookCooldown>,
+    ) -> Self {
+        Self {
+            store,
+            scheduler,
+            cooldown,
+        }
+    }
+}
+
+impl IngestEffectSink for WebhookEnqueueEffectSink {
+    fn handle(&self, effects: &[IngestEffect]) -> Result<(), String> {
+        let mut errors = Vec::new();
+        for effect in effects {
+            if let IngestEffect::EnqueueWebhook {
+                event,
+                payload_json,
+            } = effect
+                && let Err(error) = self.enqueue_event(event, payload_json)
+            {
+                errors.push(error);
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+}
+
+impl WebhookEnqueueEffectSink {
+    fn enqueue_event(&self, event: &str, payload_json: &str) -> Result<(), String> {
+        let payload = serde_json::from_str(payload_json)
+            .map_err(|error| format!("invalid webhook payload: {error}"))?;
+        let now = current_rfc3339();
+        let subscriptions = {
+            let store = self
+                .store
+                .lock()
+                .map_err(|_| "store lock poisoned".to_owned())?;
+            store
+                .active_webhook_subscriptions_for_event(event)
+                .map_err(|error| error.to_string())?
+        };
+        let endpoints = subscriptions.into_iter().map(endpoint_from_subscription);
+        let decisions = plan_enqueue_for_event(
+            event,
+            &payload,
+            endpoints,
+            || canary_core::ids::DeliveryId::generate().into_string(),
+            |key| self.cooldown.in_cooldown(key),
+        );
+
+        for decision in decisions {
+            match decision {
+                WebhookEnqueueDecision::Schedule {
+                    delivery,
+                    job,
+                    cooldown_key,
+                } => {
+                    self.create_pending(delivery, &now)?;
+                    match self.scheduler.schedule(&job) {
+                        Ok(()) => self.cooldown.mark(&cooldown_key),
+                        Err(error) => {
+                            self.discard(&job, "enqueue_failed", &now)?;
+                            return Err(format!("failed to schedule webhook: {error}"));
+                        }
+                    }
+                }
+                WebhookEnqueueDecision::Suppress { delivery, reason } => {
+                    self.create_suppressed(delivery, &reason, &now)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn create_pending(
+        &self,
+        delivery: canary_workers::webhooks::PlannedWebhookDelivery,
+        now: &str,
+    ) -> Result<(), String> {
+        let mut store = self
+            .store
+            .lock()
+            .map_err(|_| "store lock poisoned".to_owned())?;
+        store
+            .create_pending_webhook_delivery(WebhookDeliveryInsert {
+                delivery_id: delivery.delivery_id,
+                webhook_id: delivery.webhook_id,
+                event: delivery.event,
+                now: now.to_owned(),
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    fn create_suppressed(
+        &self,
+        delivery: canary_workers::webhooks::PlannedWebhookDelivery,
+        reason: &str,
+        now: &str,
+    ) -> Result<(), String> {
+        let mut store = self
+            .store
+            .lock()
+            .map_err(|_| "store lock poisoned".to_owned())?;
+        store
+            .create_suppressed_webhook_delivery(
+                WebhookDeliveryInsert {
+                    delivery_id: delivery.delivery_id,
+                    webhook_id: delivery.webhook_id,
+                    event: delivery.event,
+                    now: now.to_owned(),
+                },
+                reason,
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn discard(&self, job: &WebhookJob, reason: &str, now: &str) -> Result<(), String> {
+        let Some(delivery_id) = job.delivery_id.as_deref() else {
+            return Ok(());
+        };
+        let mut store = self
+            .store
+            .lock()
+            .map_err(|_| "store lock poisoned".to_owned())?;
+        store
+            .mark_webhook_delivery_discarded(delivery_id, reason, now)
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn endpoint_from_subscription(subscription: WebhookSubscription) -> WebhookEndpoint {
+    WebhookEndpoint {
+        id: subscription.id,
+        url: subscription.url,
+        secret: subscription.secret,
+        active: true,
+    }
+}
+
+fn current_rfc3339() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
 }
 
 async fn healthz() -> Response<Body> {
@@ -543,7 +759,9 @@ mod tests {
         http::{Request, StatusCode, header::CONTENT_TYPE},
     };
     use canary_http::public::{APPLICATION_JSON, OPENAPI_JSON};
-    use canary_store::{API_KEY_PREFIX_LEN, ApiKeyInsert};
+    use canary_store::{
+        API_KEY_PREFIX_LEN, ApiKeyInsert, WebhookDeliveryStatus, WebhookSubscriptionInsert,
+    };
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
@@ -681,6 +899,108 @@ mod tests {
                 IngestEffect::EnqueueWebhook { event, .. }
             ] if event == "error.new_class"
         ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn error_ingest_enqueues_webhooks_into_ledger_and_scheduler() -> Result<(), Box<dyn Error>>
+    {
+        let scheduler = Arc::new(RecordingScheduler::default());
+        let state = test_ingest_state_with_webhook_scheduler(scheduler.clone(), true)?;
+        let response = ingest_router(state.clone())
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = json_body(response).await?;
+        assert_eq!(body["is_new_class"], true);
+
+        let jobs = scheduler
+            .jobs
+            .lock()
+            .map_err(|_| "scheduler lock poisoned")?;
+        assert_eq!(jobs.len(), 1);
+        let job = jobs.first().ok_or("missing scheduled webhook job")?;
+        assert_eq!(job.webhook_id, "WHK-test");
+        assert_eq!(job.event, "error.new_class");
+        let delivery_id = job
+            .delivery_id
+            .as_deref()
+            .ok_or("missing delivery id")?
+            .to_owned();
+        assert!(delivery_id.starts_with("DLV-"));
+        drop(jobs);
+
+        let store = state.store.lock().map_err(|_| "store lock poisoned")?;
+        let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
+            delivery_id: Some(delivery_id),
+            ..Default::default()
+        })?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, WebhookDeliveryStatus::Pending);
+        assert_eq!(rows[0].webhook_id, "WHK-test");
+        assert_eq!(rows[0].event, "error.new_class");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn webhook_scheduler_failure_discards_delivery_without_failing_ingest()
+    -> Result<(), Box<dyn Error>> {
+        let scheduler = Arc::new(FailingScheduler);
+        let state = test_ingest_state_with_webhook_scheduler(scheduler, true)?;
+        let response = ingest_router(state.clone())
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let store = state.store.lock().map_err(|_| "store lock poisoned")?;
+        let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
+            webhook_id: Some("WHK-test".to_owned()),
+            ..Default::default()
+        })?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, WebhookDeliveryStatus::Discarded);
+        assert_eq!(rows[0].reason.as_deref(), Some("enqueue_failed"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn webhook_cooldown_suppresses_delivery_without_scheduler_job()
+    -> Result<(), Box<dyn Error>> {
+        let scheduler = Arc::new(RecordingScheduler::default());
+        let mut state = test_ingest_state_with_webhook_scheduler(scheduler.clone(), true)?;
+        let cooldown = Arc::new(AlwaysCooldown);
+        state.effect_sink = Arc::new(WebhookEnqueueEffectSink::new(
+            state.store.clone(),
+            scheduler.clone(),
+            cooldown,
+        ));
+        let response = ingest_router(state.clone())
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            scheduler
+                .jobs
+                .lock()
+                .map_err(|_| "scheduler lock poisoned")?
+                .len(),
+            0
+        );
+
+        let store = state.store.lock().map_err(|_| "store lock poisoned")?;
+        let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
+            webhook_id: Some("WHK-test".to_owned()),
+            ..Default::default()
+        })?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, WebhookDeliveryStatus::Suppressed);
+        assert_eq!(rows[0].reason.as_deref(), Some("cooldown"));
 
         Ok(())
     }
@@ -1127,6 +1447,32 @@ mod tests {
         ))
     }
 
+    fn test_ingest_state_with_webhook_scheduler(
+        scheduler: Arc<dyn WebhookScheduler>,
+        active_webhook: bool,
+    ) -> Result<IngestState, Box<dyn Error>> {
+        let mut store = Store::open_in_memory()?;
+        store.migrate()?;
+
+        seed_api_key(&mut store, "KEY-admin", ADMIN_KEY, "admin", None)?;
+        seed_api_key(&mut store, "KEY-ingest", INGEST_KEY, "ingest-only", None)?;
+        seed_api_key(&mut store, "KEY-read", READ_KEY, "read-only", None)?;
+        store.insert_webhook_subscription(WebhookSubscriptionInsert {
+            id: "WHK-test".to_owned(),
+            url: "https://example.test/hook".to_owned(),
+            events: vec!["error.new_class".to_owned()],
+            secret: "test-webhook-secret".to_owned(),
+            active: active_webhook,
+            created_at: "2026-05-28T20:00:00Z".to_owned(),
+        })?;
+
+        Ok(IngestState::new_with_webhook_scheduler(
+            store,
+            IngestConfig::default(),
+            scheduler,
+        ))
+    }
+
     fn error_request(token: &str, body: &'static str) -> Result<Request<Body>, Box<dyn Error>> {
         Ok(Request::post("/api/v1/errors")
             .header("authorization", format!("Bearer {token}"))
@@ -1182,5 +1528,38 @@ mod tests {
             recorded.extend_from_slice(effects);
             Err("simulated effect sink failure".to_owned())
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingScheduler {
+        jobs: StdMutex<Vec<WebhookJob>>,
+    }
+
+    impl WebhookScheduler for RecordingScheduler {
+        fn schedule(&self, job: &WebhookJob) -> Result<(), String> {
+            self.jobs
+                .lock()
+                .map_err(|_| "scheduler lock poisoned".to_owned())?
+                .push(job.clone());
+            Ok(())
+        }
+    }
+
+    struct FailingScheduler;
+
+    impl WebhookScheduler for FailingScheduler {
+        fn schedule(&self, _job: &WebhookJob) -> Result<(), String> {
+            Err("scheduler unavailable".to_owned())
+        }
+    }
+
+    struct AlwaysCooldown;
+
+    impl WebhookCooldown for AlwaysCooldown {
+        fn in_cooldown(&self, _key: &str) -> bool {
+            true
+        }
+
+        fn mark(&self, _key: &str) {}
     }
 }

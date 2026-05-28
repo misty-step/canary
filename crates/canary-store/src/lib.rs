@@ -21,7 +21,7 @@ pub use ingest::{
 pub use query::{IncidentListOptions, QueryError, QueryResult, ServiceQueryOptions};
 pub use webhook_deliveries::{
     WebhookDeliveryInsert, WebhookDeliveryListOptions, WebhookDeliveryRow, WebhookDeliveryStatus,
-    WebhookSubscription,
+    WebhookSubscription, WebhookSubscriptionInsert,
 };
 
 /// Result type returned by the store boundary.
@@ -185,6 +185,14 @@ impl Store {
         event: &str,
     ) -> Result<Vec<WebhookSubscription>> {
         webhook_deliveries::active_subscriptions_for_event(&self.connection, event)
+    }
+
+    /// Insert one webhook subscription row.
+    pub fn insert_webhook_subscription(
+        &mut self,
+        subscription: WebhookSubscriptionInsert,
+    ) -> Result<()> {
+        webhook_deliveries::insert_subscription(&mut self.connection, subscription)
     }
 
     /// Count persisted errors.

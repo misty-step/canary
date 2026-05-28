@@ -149,6 +149,14 @@ the Rust server accepts production traffic:
     and active subscription filtering. Workers own Phoenix-compatible delivery
     IDs, retry classification, backoff, header request construction, and
     cooldown identity without importing an Oban-equivalent runtime.
+17. `canary-workers::webhooks::plan_enqueue_for_event` and
+    `canary-server::WebhookEnqueueEffectSink`: the Rust ingest
+    `EnqueueWebhook` effect now reaches the delivery boundary. Workers produce
+    explicit schedule-or-suppress decisions, Store persists pending,
+    suppressed, and enqueue-failed ledger outcomes, and Server wires those
+    decisions through injected scheduler and cooldown traits after the ingest
+    commit. Scheduler failures remain best-effort and do not change the 201
+    ingest response.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -176,10 +184,10 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Wire the Rust ingest `EnqueueWebhook` effect into the webhook delivery
-   boundary with an explicit scheduler decision. Preserve the Phoenix guarantee
-   that enqueue failures do not fail ingest, and keep stable `X-Delivery-Id`
-   across retries.
+1. Add the concrete webhook delivery executor behind the scheduler trait:
+   retrieve scheduled jobs, build signed HTTP requests, mark attempts,
+   delivered, retrying, discarded, and circuit outcomes, and keep the current
+   stable `X-Delivery-Id` across retries.
 2. Add a concrete incident-correlation effect sink once the Rust incident write
    path exists, keeping correlation failures isolated from ingest success.
 3. Add compatibility checks against a migrated Phoenix fixture database before

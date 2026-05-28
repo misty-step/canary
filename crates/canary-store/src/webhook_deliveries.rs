@@ -112,12 +112,49 @@ pub struct WebhookSubscription {
     pub secret: String,
 }
 
+/// Webhook subscription row to persist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebhookSubscriptionInsert {
+    /// Webhook id.
+    pub id: String,
+    /// Destination URL.
+    pub url: String,
+    /// Subscribed events.
+    pub events: Vec<String>,
+    /// Shared secret.
+    pub secret: String,
+    /// Whether the subscription is active.
+    pub active: bool,
+    /// RFC3339 creation timestamp.
+    pub created_at: String,
+}
+
 impl WebhookSubscription {
     /// Return true when this subscription includes `event`.
     pub fn subscribes_to(&self, event: &str) -> bool {
         serde_json::from_str::<Vec<String>>(&self.events)
             .is_ok_and(|events| events.iter().any(|subscribed| subscribed == event))
     }
+}
+
+pub(crate) fn insert_subscription(
+    connection: &mut Connection,
+    subscription: WebhookSubscriptionInsert,
+) -> Result<()> {
+    connection.execute(
+        "INSERT INTO webhooks (id, url, events, secret, active, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            subscription.id,
+            subscription.url,
+            serde_json::to_string(&subscription.events)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?,
+            subscription.secret,
+            if subscription.active { 1 } else { 0 },
+            subscription.created_at,
+        ],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn create_pending(

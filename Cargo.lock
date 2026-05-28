@@ -199,8 +199,10 @@ dependencies = [
  "canary-http",
  "canary-ingest",
  "canary-store",
+ "canary-workers",
  "serde",
  "serde_json",
+ "time",
  "tokio",
  "tower",
 ]

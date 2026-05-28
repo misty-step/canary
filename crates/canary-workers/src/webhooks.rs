@@ -70,6 +70,38 @@ pub struct WebhookRequest {
     pub headers: WebhookHeaders,
 }
 
+/// One scheduler enqueue decision for a subscription.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebhookEnqueueDecision {
+    /// Create a pending ledger row and schedule this delivery job.
+    Schedule {
+        /// Ledger row to create before scheduling.
+        delivery: PlannedWebhookDelivery,
+        /// Job arguments for the scheduler/runtime.
+        job: WebhookJob,
+        /// Cooldown key to mark after the scheduler accepts the job.
+        cooldown_key: String,
+    },
+    /// Create a suppressed ledger row and do not schedule a job.
+    Suppress {
+        /// Ledger row to create as suppressed.
+        delivery: PlannedWebhookDelivery,
+        /// Suppression reason.
+        reason: String,
+    },
+}
+
+/// Minimal delivery ledger data produced by webhook enqueue planning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedWebhookDelivery {
+    /// Stable delivery id.
+    pub delivery_id: String,
+    /// Webhook subscription id.
+    pub webhook_id: String,
+    /// Event name.
+    pub event: String,
+}
+
 /// Transport-level response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportResult {
@@ -122,6 +154,58 @@ pub fn build_request(endpoint: &WebhookEndpoint, job: &WebhookJob) -> Option<Web
         body,
         headers,
     })
+}
+
+/// Plan enqueue work for one event across active subscriptions.
+///
+/// This function deliberately does not mutate cooldown state or schedule work.
+/// The runtime must first persist the returned ledger decision, then schedule
+/// the returned job, then mark cooldown only after scheduling succeeds.
+pub fn plan_enqueue_for_event<I, F>(
+    event: &str,
+    payload: &Value,
+    endpoints: I,
+    mut next_delivery_id: F,
+    mut in_cooldown: impl FnMut(&str) -> bool,
+) -> Vec<WebhookEnqueueDecision>
+where
+    I: IntoIterator<Item = WebhookEndpoint>,
+    F: FnMut() -> String,
+{
+    endpoints
+        .into_iter()
+        .filter(|endpoint| endpoint.active)
+        .map(|endpoint| {
+            let delivery_id = next_delivery_id();
+            let cooldown_key = cooldown_key(&endpoint.id, event, payload);
+            let delivery = PlannedWebhookDelivery {
+                delivery_id: delivery_id.clone(),
+                webhook_id: endpoint.id.clone(),
+                event: event.to_owned(),
+            };
+
+            if in_cooldown(&cooldown_key) {
+                WebhookEnqueueDecision::Suppress {
+                    delivery,
+                    reason: "cooldown".to_owned(),
+                }
+            } else {
+                WebhookEnqueueDecision::Schedule {
+                    delivery,
+                    job: WebhookJob {
+                        webhook_id: endpoint.id,
+                        payload: payload.clone(),
+                        event: event.to_owned(),
+                        delivery_id: Some(delivery_id),
+                        legacy_job_id: None,
+                        attempt: 1,
+                        max_attempts: MAX_ATTEMPTS,
+                    },
+                    cooldown_key,
+                }
+            }
+        })
+        .collect()
 }
 
 /// Classify the transport result for ledger updates and retry handling.
@@ -311,6 +395,52 @@ mod tests {
     #[test]
     fn inactive_webhook_does_not_build_request() {
         assert!(build_request(&endpoint(false), &job(None, 1, 4)).is_none());
+    }
+
+    #[test]
+    fn enqueue_plan_creates_pending_jobs_and_cooldown_suppressions() {
+        let payload = json!({
+            "event": "error.new_class",
+            "error": {"group_hash": "grp-stable"},
+            "sequence": 7
+        });
+        let decisions = plan_enqueue_for_event(
+            "error.new_class",
+            &payload,
+            [
+                endpoint(true),
+                WebhookEndpoint {
+                    id: "WHK-cooldown".to_owned(),
+                    url: "https://example.test/quiet".to_owned(),
+                    secret: "secret".to_owned(),
+                    active: true,
+                },
+            ],
+            {
+                let mut ids = ["DLV-first", "DLV-second"].into_iter();
+                move || ids.next().unwrap_or("DLV-extra").to_owned()
+            },
+            |key| key.starts_with("WHK-cooldown:"),
+        );
+
+        assert_eq!(decisions.len(), 2);
+        assert!(matches!(
+            &decisions[0],
+            WebhookEnqueueDecision::Schedule { delivery, job, cooldown_key }
+                if delivery.delivery_id == "DLV-first"
+                    && delivery.webhook_id == "WHK-123456789abc"
+                    && job.delivery_id.as_deref() == Some("DLV-first")
+                    && job.attempt == 1
+                    && job.max_attempts == MAX_ATTEMPTS
+                    && cooldown_key.ends_with("error_group:grp-stable")
+        ));
+        assert!(matches!(
+            &decisions[1],
+            WebhookEnqueueDecision::Suppress { delivery, reason }
+                if delivery.delivery_id == "DLV-second"
+                    && delivery.webhook_id == "WHK-cooldown"
+                    && reason == "cooldown"
+        ));
     }
 
     #[test]

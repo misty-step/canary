@@ -12,8 +12,10 @@ canary-ingest = { path = "../canary-ingest" }
 canary-core = { path = "../canary-core" }
 canary-http = { path = "../canary-http" }
 canary-store = { path = "../canary-store" }
+canary-workers = { path = "../canary-workers" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+time = { version = "0.3", features = ["formatting"] }
 
 [dev-dependencies]
 bcrypt = "0.17.1"
