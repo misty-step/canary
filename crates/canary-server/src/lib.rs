@@ -329,7 +329,7 @@ fn endpoint_from_subscription(subscription: WebhookSubscription) -> WebhookEndpo
         id: subscription.id,
         url: subscription.url,
         secret: subscription.secret,
-        active: true,
+        active: subscription.active,
     }
 }
 

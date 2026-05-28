@@ -102,6 +102,17 @@ pub struct PlannedWebhookDelivery {
     pub event: String,
 }
 
+/// Subscription lookup result for a scheduled delivery job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebhookLookup {
+    /// No webhook row exists for the job's subscription id.
+    Missing,
+    /// A webhook row exists but is inactive.
+    Inactive(WebhookEndpoint),
+    /// A webhook row exists and is active.
+    Active(WebhookEndpoint),
+}
+
 /// Transport-level response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportResult {
@@ -133,6 +144,80 @@ pub enum DeliveryOutcome {
     },
 }
 
+/// Per-subscription circuit-breaker decision supplied by the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircuitDecision {
+    /// The circuit is closed and delivery may proceed normally.
+    Closed,
+    /// The circuit is open and this attempt should be suppressed.
+    Open,
+    /// The circuit is open but this attempt is the scheduled probe.
+    Probe,
+}
+
+/// Circuit state update requested after one delivery attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CircuitEffect {
+    /// No circuit state update is needed.
+    None,
+    /// Record a successful delivery for this webhook.
+    RecordSuccess {
+        /// Webhook id.
+        webhook_id: String,
+    },
+    /// Record a failed delivery for this webhook.
+    RecordFailure {
+        /// Webhook id.
+        webhook_id: String,
+    },
+}
+
+/// Ledger update requested by delivery execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeliveryLedgerAction {
+    /// Ensure the delivery exists as pending.
+    CreatePending(PlannedWebhookDelivery),
+    /// Mark a delivery as attempted.
+    MarkAttempt {
+        /// Stable delivery id.
+        delivery_id: String,
+    },
+    /// Mark a delivery as delivered.
+    MarkDelivered {
+        /// Stable delivery id.
+        delivery_id: String,
+    },
+    /// Mark a delivery as discarded.
+    MarkDiscarded {
+        /// Stable delivery id.
+        delivery_id: String,
+        /// Discard reason.
+        reason: String,
+    },
+    /// Mark a delivery as suppressed.
+    CreateSuppressed {
+        /// Ledger row to upsert.
+        delivery: PlannedWebhookDelivery,
+        /// Suppression reason.
+        reason: String,
+    },
+}
+
+/// Result of executing one scheduled webhook job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryExecution {
+    /// Stable delivery id used on the wire and in the ledger.
+    pub delivery_id: String,
+    /// Product outcome for the scheduler.
+    pub outcome: DeliveryOutcome,
+    /// Ordered ledger updates for the runtime to persist.
+    pub ledger_actions: Vec<DeliveryLedgerAction>,
+    /// Circuit-breaker update requested by the attempt.
+    pub circuit_effect: CircuitEffect,
+    /// Backoff in seconds for retryable failures.
+    pub retry_after_seconds: Option<u64>,
+}
+
 /// Build the request body and headers for a webhook delivery attempt.
 pub fn build_request(endpoint: &WebhookEndpoint, job: &WebhookJob) -> Option<WebhookRequest> {
     if !endpoint.active {
@@ -154,6 +239,130 @@ pub fn build_request(endpoint: &WebhookEndpoint, job: &WebhookJob) -> Option<Web
         body,
         headers,
     })
+}
+
+/// Execute one scheduled delivery job through injected lookup, circuit, and transport.
+///
+/// Runtime code owns endpoint lookup, circuit state, HTTP transport, persistence,
+/// and job rescheduling. This function owns the Phoenix product contract:
+/// stable delivery ids, pending rows before decisions, attempt marking before
+/// transport, final discard reasons, and circuit suppression.
+pub fn execute_delivery(
+    job: &WebhookJob,
+    lookup: WebhookLookup,
+    circuit: CircuitDecision,
+    mut record_ledger: impl FnMut(DeliveryLedgerAction),
+    transport: impl FnMut(WebhookRequest) -> TransportResult,
+) -> DeliveryExecution {
+    let delivery_id = delivery_id_from_job(job);
+    let delivery = PlannedWebhookDelivery {
+        delivery_id: delivery_id.clone(),
+        webhook_id: job.webhook_id.clone(),
+        event: job.event.clone(),
+    };
+    let mut ledger_actions = Vec::new();
+    let mut push_ledger = |action: DeliveryLedgerAction| {
+        record_ledger(action.clone());
+        ledger_actions.push(action);
+    };
+    push_ledger(DeliveryLedgerAction::CreatePending(delivery.clone()));
+
+    match lookup {
+        WebhookLookup::Missing => {
+            push_ledger(DeliveryLedgerAction::MarkDiscarded {
+                delivery_id: delivery_id.clone(),
+                reason: "webhook_not_found".to_owned(),
+            });
+            DeliveryExecution {
+                delivery_id,
+                outcome: DeliveryOutcome::Discarded {
+                    reason: "webhook_not_found".to_owned(),
+                },
+                ledger_actions,
+                circuit_effect: CircuitEffect::None,
+                retry_after_seconds: None,
+            }
+        }
+        WebhookLookup::Inactive(_) => {
+            push_ledger(DeliveryLedgerAction::MarkDiscarded {
+                delivery_id: delivery_id.clone(),
+                reason: "webhook_inactive".to_owned(),
+            });
+            DeliveryExecution {
+                delivery_id,
+                outcome: DeliveryOutcome::Discarded {
+                    reason: "webhook_inactive".to_owned(),
+                },
+                ledger_actions,
+                circuit_effect: CircuitEffect::None,
+                retry_after_seconds: None,
+            }
+        }
+        WebhookLookup::Active(endpoint) => {
+            if circuit == CircuitDecision::Open {
+                push_ledger(DeliveryLedgerAction::CreateSuppressed {
+                    delivery,
+                    reason: "circuit_open".to_owned(),
+                });
+                return DeliveryExecution {
+                    delivery_id,
+                    outcome: DeliveryOutcome::Suppressed {
+                        reason: "circuit_open".to_owned(),
+                    },
+                    ledger_actions,
+                    circuit_effect: CircuitEffect::None,
+                    retry_after_seconds: None,
+                };
+            }
+
+            push_ledger(DeliveryLedgerAction::MarkAttempt {
+                delivery_id: delivery_id.clone(),
+            });
+
+            let outcome = build_request(&endpoint, job).map(transport).map_or_else(
+                || DeliveryOutcome::Discarded {
+                    reason: "webhook_inactive".to_owned(),
+                },
+                |result| classify_result(job, result),
+            );
+
+            let circuit_effect = match outcome {
+                DeliveryOutcome::Delivered => {
+                    push_ledger(DeliveryLedgerAction::MarkDelivered {
+                        delivery_id: delivery_id.clone(),
+                    });
+                    CircuitEffect::RecordSuccess {
+                        webhook_id: endpoint.id,
+                    }
+                }
+                DeliveryOutcome::Retry { .. } => CircuitEffect::RecordFailure {
+                    webhook_id: endpoint.id,
+                },
+                DeliveryOutcome::Discarded { ref reason } => {
+                    push_ledger(DeliveryLedgerAction::MarkDiscarded {
+                        delivery_id: delivery_id.clone(),
+                        reason: reason.clone(),
+                    });
+                    CircuitEffect::RecordFailure {
+                        webhook_id: endpoint.id,
+                    }
+                }
+                DeliveryOutcome::Suppressed { .. } => CircuitEffect::None,
+            };
+            let retry_after_seconds = match outcome {
+                DeliveryOutcome::Retry { .. } => Some(backoff_seconds(job.effective_attempt())),
+                _ => None,
+            };
+
+            DeliveryExecution {
+                delivery_id,
+                outcome,
+                ledger_actions,
+                circuit_effect,
+                retry_after_seconds,
+            }
+        }
+    }
 }
 
 /// Plan enqueue work for one event across active subscriptions.
@@ -441,6 +650,213 @@ mod tests {
                     && delivery.webhook_id == "WHK-cooldown"
                     && reason == "cooldown"
         ));
+    }
+
+    #[test]
+    fn executor_delivers_and_requests_success_ledger_and_circuit_updates() {
+        let job = job(Some("DLV-stable".to_owned()), 1, 4);
+        let mut recorded_actions = Vec::new();
+        let execution = execute_delivery(
+            &job,
+            WebhookLookup::Active(endpoint(true)),
+            CircuitDecision::Closed,
+            |action| recorded_actions.push(action),
+            |request| {
+                assert_eq!(request.headers.delivery_id, "DLV-stable");
+                TransportResult::HttpStatus(204)
+            },
+        );
+
+        assert_eq!(execution.delivery_id, "DLV-stable");
+        assert_eq!(execution.outcome, DeliveryOutcome::Delivered);
+        assert_eq!(
+            execution.ledger_actions,
+            vec![
+                DeliveryLedgerAction::CreatePending(PlannedWebhookDelivery {
+                    delivery_id: "DLV-stable".to_owned(),
+                    webhook_id: "WHK-123456789abc".to_owned(),
+                    event: "error.new_class".to_owned(),
+                }),
+                DeliveryLedgerAction::MarkAttempt {
+                    delivery_id: "DLV-stable".to_owned(),
+                },
+                DeliveryLedgerAction::MarkDelivered {
+                    delivery_id: "DLV-stable".to_owned(),
+                },
+            ]
+        );
+        assert_eq!(recorded_actions, execution.ledger_actions);
+        assert_eq!(
+            execution.circuit_effect,
+            CircuitEffect::RecordSuccess {
+                webhook_id: "WHK-123456789abc".to_owned()
+            }
+        );
+        assert_eq!(execution.retry_after_seconds, None);
+    }
+
+    #[test]
+    fn executor_retries_non_final_failures_with_backoff() {
+        let mut recorded_actions = Vec::new();
+        let execution = execute_delivery(
+            &job(Some("DLV-retry".to_owned()), 2, 4),
+            WebhookLookup::Active(endpoint(true)),
+            CircuitDecision::Closed,
+            |action| recorded_actions.push(action),
+            |_| TransportResult::HttpStatus(500),
+        );
+
+        assert_eq!(
+            execution.outcome,
+            DeliveryOutcome::Retry {
+                reason: "HTTP 500".to_owned()
+            }
+        );
+        assert_eq!(
+            execution.ledger_actions,
+            vec![
+                DeliveryLedgerAction::CreatePending(PlannedWebhookDelivery {
+                    delivery_id: "DLV-retry".to_owned(),
+                    webhook_id: "WHK-123456789abc".to_owned(),
+                    event: "error.new_class".to_owned(),
+                }),
+                DeliveryLedgerAction::MarkAttempt {
+                    delivery_id: "DLV-retry".to_owned(),
+                },
+            ]
+        );
+        assert_eq!(recorded_actions, execution.ledger_actions);
+        assert_eq!(
+            execution.circuit_effect,
+            CircuitEffect::RecordFailure {
+                webhook_id: "WHK-123456789abc".to_owned()
+            }
+        );
+        assert_eq!(execution.retry_after_seconds, Some(5));
+    }
+
+    #[test]
+    fn executor_discards_final_http_and_request_failures() {
+        let mut http_actions = Vec::new();
+        let http = execute_delivery(
+            &job(Some("DLV-http".to_owned()), 4, 4),
+            WebhookLookup::Active(endpoint(true)),
+            CircuitDecision::Closed,
+            |action| http_actions.push(action),
+            |_| TransportResult::HttpStatus(500),
+        );
+        assert_eq!(
+            http.outcome,
+            DeliveryOutcome::Discarded {
+                reason: "http_500".to_owned()
+            }
+        );
+        assert!(http.ledger_actions.iter().any(|action| matches!(
+            action,
+            DeliveryLedgerAction::MarkDiscarded { delivery_id, reason }
+                if delivery_id == "DLV-http" && reason == "http_500"
+        )));
+        assert_eq!(http_actions, http.ledger_actions);
+
+        let mut request_actions = Vec::new();
+        let request = execute_delivery(
+            &job(Some("DLV-request".to_owned()), 4, 4),
+            WebhookLookup::Active(endpoint(true)),
+            CircuitDecision::Probe,
+            |action| request_actions.push(action),
+            |_| TransportResult::RequestError("connection refused".to_owned()),
+        );
+        assert_eq!(
+            request.outcome,
+            DeliveryOutcome::Discarded {
+                reason: "request_error".to_owned()
+            }
+        );
+        assert!(request.ledger_actions.iter().any(|action| matches!(
+            action,
+            DeliveryLedgerAction::MarkDiscarded { delivery_id, reason }
+                if delivery_id == "DLV-request" && reason == "request_error"
+        )));
+        assert_eq!(request_actions, request.ledger_actions);
+    }
+
+    #[test]
+    fn executor_suppresses_open_circuit_without_transport_or_attempt() {
+        let mut called = false;
+        let mut recorded_actions = Vec::new();
+        let execution = execute_delivery(
+            &job(Some("DLV-open".to_owned()), 1, 4),
+            WebhookLookup::Active(endpoint(true)),
+            CircuitDecision::Open,
+            |action| recorded_actions.push(action),
+            |_| {
+                called = true;
+                TransportResult::HttpStatus(204)
+            },
+        );
+
+        assert!(!called);
+        assert_eq!(
+            execution.outcome,
+            DeliveryOutcome::Suppressed {
+                reason: "circuit_open".to_owned()
+            }
+        );
+        assert_eq!(
+            execution.ledger_actions,
+            vec![
+                DeliveryLedgerAction::CreatePending(PlannedWebhookDelivery {
+                    delivery_id: "DLV-open".to_owned(),
+                    webhook_id: "WHK-123456789abc".to_owned(),
+                    event: "error.new_class".to_owned(),
+                }),
+                DeliveryLedgerAction::CreateSuppressed {
+                    delivery: PlannedWebhookDelivery {
+                        delivery_id: "DLV-open".to_owned(),
+                        webhook_id: "WHK-123456789abc".to_owned(),
+                        event: "error.new_class".to_owned(),
+                    },
+                    reason: "circuit_open".to_owned(),
+                },
+            ]
+        );
+        assert_eq!(recorded_actions, execution.ledger_actions);
+        assert_eq!(execution.circuit_effect, CircuitEffect::None);
+    }
+
+    #[test]
+    fn executor_discards_missing_or_inactive_webhooks_without_transport() {
+        let mut missing_actions = Vec::new();
+        let missing = execute_delivery(
+            &job(Some("DLV-missing".to_owned()), 1, 4),
+            WebhookLookup::Missing,
+            CircuitDecision::Closed,
+            |action| missing_actions.push(action),
+            |_| TransportResult::HttpStatus(204),
+        );
+        assert_eq!(
+            missing.outcome,
+            DeliveryOutcome::Discarded {
+                reason: "webhook_not_found".to_owned()
+            }
+        );
+        assert_eq!(missing_actions, missing.ledger_actions);
+
+        let mut inactive_actions = Vec::new();
+        let inactive = execute_delivery(
+            &job(Some("DLV-inactive".to_owned()), 1, 4),
+            WebhookLookup::Inactive(endpoint(false)),
+            CircuitDecision::Closed,
+            |action| inactive_actions.push(action),
+            |_| TransportResult::HttpStatus(204),
+        );
+        assert_eq!(
+            inactive.outcome,
+            DeliveryOutcome::Discarded {
+                reason: "webhook_inactive".to_owned()
+            }
+        );
+        assert_eq!(inactive_actions, inactive.ledger_actions);
     }
 
     #[test]

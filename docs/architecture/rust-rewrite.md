@@ -157,6 +157,16 @@ the Rust server accepts production traffic:
     decisions through injected scheduler and cooldown traits after the ingest
     commit. Scheduler failures remain best-effort and do not change the 201
     ingest response.
+18. `canary-workers::webhooks::execute_delivery` and
+    `canary-store::webhook_subscription`: the scheduled delivery contract now
+    has a Rust executor that resolves a stable delivery id, emits ordered ledger
+    actions, builds the signed HTTP request through injected transport,
+    classifies delivered/retry/discard outcomes, returns retry backoff, and
+    requests circuit success/failure effects. Store can look up a subscription
+    by id including inactive rows, so the executor can distinguish missing,
+    inactive, open-circuit, retryable, and final-discard cases. This is still a
+    pure/injected execution boundary, not a background job loop or real HTTP
+    client.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -184,10 +194,10 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Add the concrete webhook delivery executor behind the scheduler trait:
-   retrieve scheduled jobs, build signed HTTP requests, mark attempts,
-   delivered, retrying, discarded, and circuit outcomes, and keep the current
-   stable `X-Delivery-Id` across retries.
+1. Add the concrete webhook delivery runtime adapter behind the scheduler trait:
+   retrieve scheduled jobs, apply `DeliveryLedgerAction` values to Store,
+   invoke the real HTTP transport, persist circuit outcomes, and keep retry
+   scheduling outside the pure worker contract.
 2. Add a concrete incident-correlation effect sink once the Rust incident write
    path exists, keeping correlation failures isolated from ingest success.
 3. Add compatibility checks against a migrated Phoenix fixture database before

@@ -187,6 +187,11 @@ impl Store {
         webhook_deliveries::active_subscriptions_for_event(&self.connection, event)
     }
 
+    /// Return one webhook subscription by id, including inactive rows.
+    pub fn webhook_subscription(&self, webhook_id: &str) -> Result<Option<WebhookSubscription>> {
+        webhook_deliveries::subscription_by_id(&self.connection, webhook_id)
+    }
+
     /// Insert one webhook subscription row.
     pub fn insert_webhook_subscription(
         &mut self,
@@ -550,7 +555,31 @@ mod tests {
         let subscriptions = store.active_webhook_subscriptions_for_event("error.new_class")?;
         assert_eq!(subscriptions.len(), 1);
         assert_eq!(subscriptions[0].id, "WHK-123456789abc");
+        assert!(subscriptions[0].active);
         assert!(subscriptions[0].subscribes_to("health_check.state_change"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_subscription_lookup_returns_inactive_rows_for_executor() -> Result<()> {
+        let store = migrated_store()?;
+        insert_webhook(
+            &store,
+            "WHK-inactive000",
+            "[\"error.new_class\"]",
+            0,
+            "2026-05-28T20:02:00Z",
+        )?;
+
+        let subscription = store
+            .webhook_subscription("WHK-inactive000")?
+            .ok_or_else(|| StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+        assert_eq!(subscription.id, "WHK-inactive000");
+        assert!(!subscription.active);
+        assert!(subscription.subscribes_to("error.new_class"));
+        assert!(store.webhook_subscription("WHK-missing")?.is_none());
 
         Ok(())
     }

@@ -110,6 +110,8 @@ pub struct WebhookSubscription {
     pub events: String,
     /// Shared secret.
     pub secret: String,
+    /// Whether the subscription is active.
+    pub active: bool,
 }
 
 /// Webhook subscription row to persist.
@@ -292,7 +294,7 @@ pub(crate) fn active_subscriptions_for_event(
     event: &str,
 ) -> Result<Vec<WebhookSubscription>> {
     let mut statement = connection.prepare(
-        "SELECT id, url, events, secret FROM webhooks WHERE active = 1 ORDER BY created_at, id",
+        "SELECT id, url, events, secret, active FROM webhooks WHERE active = 1 ORDER BY created_at, id",
     )?;
     let rows = statement.query_map([], |row| {
         Ok(WebhookSubscription {
@@ -300,6 +302,7 @@ pub(crate) fn active_subscriptions_for_event(
             url: row.get(1)?,
             events: row.get(2)?,
             secret: row.get(3)?,
+            active: row.get::<_, i64>(4)? == 1,
         })
     })?;
 
@@ -309,6 +312,29 @@ pub(crate) fn active_subscriptions_for_event(
         .filter(|subscription| subscription.subscribes_to(event))
         .collect();
     Ok(subscriptions)
+}
+
+pub(crate) fn subscription_by_id(
+    connection: &Connection,
+    webhook_id: &str,
+) -> Result<Option<WebhookSubscription>> {
+    let mut statement =
+        connection.prepare("SELECT id, url, events, secret, active FROM webhooks WHERE id = ?1")?;
+    let result = statement.query_row([webhook_id], |row| {
+        Ok(WebhookSubscription {
+            id: row.get(0)?,
+            url: row.get(1)?,
+            events: row.get(2)?,
+            secret: row.get(3)?,
+            active: row.get::<_, i64>(4)? == 1,
+        })
+    });
+
+    match result {
+        Ok(subscription) => Ok(Some(subscription)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WebhookDeliveryRow> {
