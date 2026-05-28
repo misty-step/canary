@@ -3,6 +3,7 @@ defmodule Canary.Query.Incidents do
 
   alias Canary.Schemas.{
     Annotation,
+    Error,
     ErrorGroup,
     Incident,
     IncidentSignal,
@@ -249,6 +250,15 @@ defmodule Canary.Query.Incidents do
             annotation_count: length(annotations)
           })
 
+        action_brief =
+          build_action_brief(
+            incident_view,
+            signals,
+            annotation_counts,
+            annotations,
+            signals_truncated
+          )
+
         {:ok,
          %{
            summary: summary,
@@ -257,7 +267,8 @@ defmodule Canary.Query.Incidents do
            signals_truncated: signals_truncated,
            annotations: annotations,
            annotations_truncated: annotations_truncated,
-           recent_timeline_events: recent_timeline_events
+           recent_timeline_events: recent_timeline_events,
+           action_brief: action_brief
          }}
     end
   end
@@ -318,7 +329,13 @@ defmodule Canary.Query.Incidents do
   defp signal_subject_key(_), do: nil
 
   defp load_signal_context(_repo, []),
-    do: %{error_groups: %{}, target_states: %{}, targets: %{}, monitor_states: %{}, monitors: %{}}
+    do: %{
+      error_group_context: %{},
+      target_states: %{},
+      targets: %{},
+      monitor_states: %{},
+      monitors: %{}
+    }
 
   defp load_signal_context(repo, signals) do
     error_refs = refs_by_type(signals, "error_group")
@@ -326,12 +343,34 @@ defmodule Canary.Query.Incidents do
     {target_refs, monitor_refs} = Enum.split_with(health_refs, &String.starts_with?(&1, "TGT-"))
 
     %{
-      error_groups: lookup_by(repo, ErrorGroup, :group_hash, error_refs),
+      error_group_context: load_error_group_context(repo, error_refs),
       target_states: lookup_by(repo, TargetState, :target_id, target_refs),
       targets: lookup_by(repo, Target, :id, target_refs),
       monitor_states: lookup_by(repo, MonitorState, :monitor_id, monitor_refs),
       monitors: lookup_by(repo, Monitor, :id, monitor_refs)
     }
+  end
+
+  defp load_error_group_context(_repo, []), do: %{}
+
+  defp load_error_group_context(repo, refs) do
+    rows =
+      from(g in ErrorGroup,
+        where: g.group_hash in ^refs,
+        left_join: e in Error,
+        on: e.id == g.last_error_id,
+        select: %{
+          group: g,
+          category: e.classification_category,
+          persistence: e.classification_persistence,
+          component: e.classification_component
+        }
+      )
+      |> repo.all()
+
+    Map.new(rows, fn row ->
+      {row.group.group_hash, %{group: row.group, classification: format_classification(row)}}
+    end)
   end
 
   defp refs_by_type(signals, type) do
@@ -351,9 +390,9 @@ defmodule Canary.Query.Incidents do
 
   defp format_signal(
          %IncidentSignal{signal_type: "error_group"} = signal,
-         %{error_groups: groups} = context
+         %{error_group_context: groups} = context
        ) do
-    group = Map.get(groups, signal.signal_ref)
+    group_context = Map.get(groups, signal.signal_ref)
 
     base = %{
       type: "error_group",
@@ -363,14 +402,15 @@ defmodule Canary.Query.Incidents do
       annotation_count: annotation_count(signal, context)
     }
 
-    case group do
-      %ErrorGroup{} = g ->
+    case group_context do
+      %{group: %ErrorGroup{} = g, classification: classification} ->
         Map.merge(base, %{
           summary: error_group_signal_summary(g, signal),
           error_class: g.error_class,
           total_count: g.total_count,
           first_seen_at: g.first_seen_at,
-          last_seen_at: g.last_seen_at
+          last_seen_at: g.last_seen_at,
+          classification: classification
         })
 
       _ ->
@@ -379,7 +419,8 @@ defmodule Canary.Query.Incidents do
           error_class: nil,
           total_count: nil,
           first_seen_at: nil,
-          last_seen_at: nil
+          last_seen_at: nil,
+          classification: unknown_classification()
         })
     end
   end
@@ -517,6 +558,104 @@ defmodule Canary.Query.Incidents do
       summary: event.summary,
       created_at: event.created_at
     }
+  end
+
+  defp build_action_brief(incident, signals, annotation_counts, annotations, signals_truncated) do
+    {active_signals, resolved_signals} = Enum.split_with(signals, &is_nil(&1.resolved_at))
+
+    recommendation =
+      action_brief_recommendation(
+        active_signals,
+        resolved_signals,
+        annotation_counts,
+        signals_truncated
+      )
+
+    %{
+      summary:
+        Canary.Summary.incident_action_brief(%{
+          service: incident.service,
+          active_count: length(active_signals),
+          resolved_count: length(resolved_signals),
+          recommendation: recommendation,
+          signals_truncated: signals_truncated
+        }),
+      recommendation: recommendation,
+      signal_counts: %{
+        active: length(active_signals),
+        resolved: length(resolved_signals),
+        visible: length(signals),
+        total: incident.signal_count
+      },
+      signals_truncated: signals_truncated,
+      latest_annotation: latest_annotation_summary(List.first(annotations))
+    }
+  end
+
+  defp action_brief_recommendation(_active_signals, _resolved_signals, _annotation_counts, true) do
+    %{
+      action: "inspect-truncated-signals",
+      reason:
+        "Signal state is truncated; a complete recommendation cannot be derived from the visible signal set."
+    }
+  end
+
+  defp action_brief_recommendation([], resolved_signals, _annotation_counts, false) do
+    %{
+      action: "verify-recovery",
+      reason:
+        "No active signals remain in the visible signal set (#{length(resolved_signals)} resolved #{pluralize(length(resolved_signals), "signal", "signals")})."
+    }
+  end
+
+  defp action_brief_recommendation(active_signals, _resolved_signals, annotation_counts, false) do
+    unannotated_count =
+      Enum.count(active_signals, &(signal_annotation_count(&1, annotation_counts) == 0))
+
+    if unannotated_count > 0 do
+      %{
+        action: "triage",
+        reason:
+          "#{unannotated_count} active #{pluralize(unannotated_count, "signal", "signals")} lack coordination annotations."
+      }
+    else
+      %{
+        action: "watch",
+        reason: "Active signals already have coordination annotations."
+      }
+    end
+  end
+
+  defp latest_annotation_summary(nil), do: nil
+
+  defp latest_annotation_summary(annotation) do
+    Map.take(annotation, [:id, :agent, :action, :created_at])
+  end
+
+  defp signal_annotation_count(signal, annotation_counts) do
+    case signal_subject_key(signal) do
+      nil -> 0
+      key -> Map.get(annotation_counts, key, 0)
+    end
+  end
+
+  defp format_classification(classification) do
+    %{
+      category: classification_value(classification, :category),
+      persistence: classification_value(classification, :persistence),
+      component: classification_value(classification, :component)
+    }
+  end
+
+  defp classification_value(classification, key) do
+    case Map.get(classification, key) do
+      value when value in [nil, ""] -> "unknown"
+      value -> value
+    end
+  end
+
+  defp unknown_classification do
+    %{category: "unknown", persistence: "unknown", component: "unknown"}
   end
 
   defp truncate_hash(hash) when is_binary(hash) and byte_size(hash) > 12 do

@@ -133,11 +133,12 @@ Or run both in sequence:
 ./bin/validate --strict
 ```
 
-`--strict` also includes the local `.codex/agents/*.toml` role validation
-before the deterministic and advisory phases.
+`--strict` also validates local `.codex/agents/*.toml` role metadata when
+present before the deterministic and advisory phases. Canary normally relies
+on the globally configured Spellbook harness, so an absent repo-local role
+directory is valid.
 
-Repo-local metadata validation for `.codex/agents/*.toml` is part of the local
-hook surfaces and can also be invoked directly:
+Repo-local metadata validation can also be invoked directly:
 
 ```bash
 ./bin/dagger call codex-agent-roles

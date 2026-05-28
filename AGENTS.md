@@ -12,7 +12,6 @@ Self-hosted observability substrate for AI agents (not humans). Phoenix/Elixir +
 | CI module | Single source of truth for the gate (Dagger TS) | `dagger/` |
 | Bin scripts | Operator API — validate, dagger, bootstrap, DR | `bin/` |
 | Backlog | File-driven work with `_done/` archive + priority map | `backlog.d/` |
-| Harness | Shared skill root + bridges; Claude Code + Codex | `.agents/skills/` (canonical), `.claude/skills/` + `.codex/skills/` (symlink bridges), `.claude/agents/` + `.codex/agents/` (harness-native) |
 
 External responders (e.g. bitterblossom) consume Canary's signed webhooks and query back. They live **outside this repo**.
 
@@ -51,7 +50,7 @@ Prefer these over re-deriving from the code base.
 |---|---|---|
 | `./bin/validate` | → `./bin/dagger check` (deterministic lanes + secrets scan) | manual run |
 | `./bin/validate --fast` | → `dagger call fast` (lint + core tests) | `.githooks/pre-commit` |
-| `./bin/validate --strict` | → `dagger call strict` (full gate + advisories + `.codex/agents/*.toml` validation) | `.githooks/pre-push` |
+| `./bin/validate --strict` | → `dagger call strict` (full gate + advisories + optional `.codex/agents/*.toml` validation when present) | `.githooks/pre-push` |
 | `./bin/validate --advisories` | live advisory scan only | manual run |
 | `dagger call strict --source=../candidate` | Hosted CI in `pull_request_target` immutable control plane (trusted base checkout at `.ci/trusted/`, candidate at `.ci/candidate/`) | `.github/workflows/ci.yml` |
 | `flyctl deploy --app canary-obs --remote-only` | Auto on green master | `.github/workflows/deploy.yml` |
@@ -72,55 +71,6 @@ Prefer these over re-deriving from the code base.
 | Recurring footgun surface | `CLAUDE.md` footgun list + `lib/canary/schemas/*`, `lib/canary/health/manager.ex`, `config/runtime.exs`, `priv/repo/migrations/20260314230000_*` | See `CLAUDE.md` — load-bearing. Every remediation here must cite the footgun list and extend it when new failure modes appear. |
 
 All other tracked items are shipped and archived under `backlog.d/_done/`. Priority map + Lanes 1–5 in `backlog.d/README.md`.
-
-## Harness index
-
-**Skill layout.** Canonical copies live at `.agents/skills/<name>/` with a
-`.spellbook` marker (`installed-by: tailor`). Per-harness skill directories
-(`.claude/skills/<name>`, `.codex/skills/<name>`) are **relative symlinks**
-back to that shared root. Edit the `.agents/skills/` copy; both harnesses
-pick it up.
-
-**Workflow skills (rewritten for canary).** All under `.agents/skills/<name>/`.
-
-| Skill | What it does here |
-|---|---|
-| `/agent-readiness` | Two-audience audit: codebase-for-agents AND Canary's own product-agent-readiness (OpenAPI `info.x-agent-guide`, scoped keys, responder boundary, NL summary on every response). |
-| `/canary-repo` | Repo engineering orientation for Canary's Phoenix/Elixir core, SDKs, Dagger gate, OpenAPI/router parity, state-machine purity, SQLite single-writer, scoped keys, webhooks, and harness topology. Use before editing product code. |
-| `/ci` | Drives `./bin/validate` green. Names the Dagger lanes (`fast`, `check`, `strict`, `advisories`) from `dagger/src/index.ts`; cites the immutable control plane (`.ci/trusted/` + `.ci/candidate/`); self-heals format/lockfiles; escalates only genuine logic failures. |
-| `/code-review` | Parallel reviewer panel using installed roster (`ousterhout`/`carmack`/`grug`/`beck`/`critic`) against canary invariants checklist (pool_size:1, pure StateMachine, RFC 9457, scope pipelines, OpenAPI parity, responder boundary). |
-| `/deliver` | One `backlog.d/NNN-*.md` → merge-ready. Stops at exit + `receipt.json`. Archives via `git mv backlog.d/NNN-*.md backlog.d/_done/`. Does not push/merge/deploy. |
-| `/demo` | Two modes: (1) API/agent scripted `curl` walkthrough against `canary-obs.fly.dev` showing `summary` fields + `info.x-agent-guide` replayability; (2) SDK/integration via `canary_sdk/` + `clients/typescript/`. Redacts Bearer tokens; `$CANARY_INGEST_KEY` scope only. |
-| `/deploy` | Fly target `canary-obs` region `iad`, `flyctl deploy --remote-only`. Receipt on `/healthz` + `/readyz`. Describes but does not automate the human-gated nuclear-reset in `docs/backup-restore-dr.md`. |
-| `/deps` | Four surfaces: core Hex, `canary_sdk/` Hex, TS SDK npm, Dagger CLI pin (`dagger.json`) + `.tool-versions`. Uses `./bin/validate --advisories` and `--strict`. |
-| `/diagnose` | Four-phase protocol rooted in canary footgun list — Ecto custom PK cast-drop, Oban migration, Req/Finch `:connect_options` conflict, ReadRepo/`ecto_repos`, `runtime.exs` `port:`, Health.Manager rescue, SQLite WAL + `rm -f`, circuit-breaker ETS reset. |
-| `/flywheel` | Outer-loop composer. Selects from `backlog.d/` lanes → `/deliver` → `/settle` → auto-deploy → `/monitor` → `/reflect`. Halts on blocker chain (`#010`, `#020`). |
-| `/harness` | CLAUDE.md is **append/merge only** (footguns are load-bearing). Cross-harness parity: `.claude/` + `.codex/`. Edits go upstream in spellbook, re-tailor to propagate. Audits skills for gate/invariant citation drift. |
-| `/implement` | TDD on narrow tests: `mix test test/canary/<area>/<area>_test.exs --trace --max-failures 3`. Custom PKs on struct not cast. RFC 9457, deterministic summaries, single-writer. Stops at green. |
-| `/monitor` | **Harness-side** post-deploy signal watch — not `Canary.Monitors` (product concept). Polls `/healthz`, `/readyz`, `flyctl status`, Canary's own `/api/v1/query?service=canary`, health targets, circuit-breaker state. Grace window default 5m. |
-| `/qa` | API-first (curl against `canary-obs.fly.dev` or local `mix phx.server`). Endpoint matrix with `$CANARY_*_KEY` scope enforcement. `bin/dogfood-audit --strict` for owned services. Dashboard is secondary. |
-| `/refactor` | Branch mode: simplify the diff against `origin/master`. Master mode: whole-repo hunt. Cites PR #125 query split as exemplar. Branch commits use `refactor(<scope>):`; squash-merge collapses them into one master commit. |
-| `/settle` | Lands a PR via `gh pr merge --squash` with PR title/body → single master commit. No `--merge`, no `--rebase`. Runs `./bin/validate --strict` once on branch head before merging; no per-commit gate needed. |
-| `/shape` | Produces `backlog.d/NNN-<slug>.md` context packets. Lanes 1–5. `#NNN` dependency IDs. Enforces responder boundary + OpenAPI-router-scope-pipeline contract in acceptance criteria. |
-| `/yeet` | Worktree → semantically-split conventional commits → `git push`. Classifies paths (signal/debris/drift/evidence/secret-risk). Refuses on `gentle-working-tundra/` / `polished-marching-river/` / `sunlit-moving-walnut/` leakage, `*.db*`, `erl_crash.dump`, Fly/Tigris tokens, Dagger pin drift, OpenAPI↔router desync. Hooks run: `./bin/validate --fast` (commit), `--strict` (push). Branch commits stay clean for PR review; master keeps one squash commit per PR via `/settle`. Distinct from `/settle` (branch landing). |
-
-**Universal skills (verbatim from spellbook):** `/research`, `/model-research`, `/office-hours`, `/ceo-review`, `/reflect`, `/groom`.
-
-**Project-local skills:** `canary`, `canary-repo`, `database`, `observability`, `security-scan`, `cli-reference`, `external-integration-patterns`, `github-cli-hygiene`, `git-mastery`, `design`, `design-review`, `high-end-visual-design`, `redesign-existing-projects`. Use `/canary` for operating a running Canary instance through the API; use `/canary-repo` for modifying this repository.
-
-**Agents (personas for subagent dispatch).** Under `.claude/agents/` and
-`.codex/agents/` (harness-native; no documented shared-agent convention yet).
-
-| Agent | Role |
-|---|---|
-| `planner` | Decompose work into buildable specs; write context packets. |
-| `builder` | TDD implementation from a context packet. |
-| `critic` | Skeptical evaluation against grading criteria. |
-| `ousterhout` | Deep modules + information hiding. Use on `lib/canary/query/*`, `lib/canary/health/*`. |
-| `carmack` | Direct implementation + shippability. Use on hot paths: `ingest.ex`, `webhook_delivery.ex`, alerter. |
-| `grug` | Complexity demon hunter. Flags shallow wrappers, pass-throughs, speculative abstractions. |
-| `beck` | TDD + simple design. Pure-function tests (StateMachine), table-driven patterns. |
-| `aesthetician`, `api-design-specialist`, `data-integrity-guardian`, `design-systems-architect`, `error-handling-specialist`, `fowler`, `infrastructure-guardian`, `observability-advocate`, `security-sentinel`, `test-strategy-architect` | Pre-existing specialists. Use `api-design-specialist` when touching `priv/openapi/*` or `lib/canary_web/router.ex`; `data-integrity-guardian` on schema migrations; `security-sentinel` on scope-pipeline changes; `observability-advocate` on self-monitoring and alerter work. |
 
 ## Outer loop
 

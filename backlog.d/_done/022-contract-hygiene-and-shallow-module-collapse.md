@@ -1,7 +1,7 @@
 # Contract hygiene and shallow-module collapse
 
 Priority: high
-Status: ready
+Status: done
 Estimate: M
 
 ## Goal

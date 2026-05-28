@@ -6,10 +6,10 @@ Estimate: S
 
 ## Goal
 
-Stand up a living catalog of canary-specific code-review patterns at
-`.agents/skills/code-review/references/canary-patterns.md` populated
-from the last ~10 CodeRabbit/Gemini finds, wire `/code-review` to
-consult it on every PR, and fold the three structural antipatterns
+Stand up a living catalog of canary-specific code-review patterns in
+`docs/code-review/canary-patterns.md` populated from the last ~10
+CodeRabbit/Gemini finds, wire the global `/code-review` workflow to
+consult the repo-local catalog on every PR, and fold the three structural antipatterns
 flagged by `/reflect prevent-coderabbit-patterns` into the CLAUDE.md
 footgun list with one-line fixes. The catalog closes the gap for
 semantic issues (missing nouns in summary templates, bounded-count vs
@@ -24,11 +24,12 @@ Credo check is the wrong tool.
 - Import every historical CodeRabbit finding. Seed with the recurring
   patterns; grow on each cycle via `/reflect cycle`.
 - Add a new reviewer agent or model. The existing critic panel inside
-  `/code-review` already runs — this ticket only gives it a checklist.
+  `/code-review` already runs from the global Spellbook harness — this ticket
+  only gives it a repo-local checklist.
 
 ## Oracle
 
-- [ ] `.agents/skills/code-review/references/canary-patterns.md` exists
+- [ ] `docs/code-review/canary-patterns.md` exists
       with entries for at least: (a) summary-template invariants —
       "every bounded count has a noun," "pluralize never called with
       identical args," "totals in summaries derive from un-capped
@@ -40,10 +41,9 @@ Credo check is the wrong tool.
 - [ ] Each entry has a title, one-sentence rule, a violating example
       pulled from real prior code, the fix, and a back-reference to
       the PR comment or CLAUDE.md section that first flagged it
-- [ ] `.agents/skills/code-review/SKILL.md` is updated to require the
-      reviewer subagent to load `canary-patterns.md` into its context
-      before running a review, and to check each diff against the
-      catalog
+- [ ] The global `/code-review` workflow or Canary repo instructions require
+      reviewer lanes to load `docs/code-review/canary-patterns.md` before
+      running a review, and to check each diff against the catalog
 - [ ] `CLAUDE.md` footgun list gains three new entries:
       (i) preload-then-take on bounded read models,
       (ii) `:ets.foldl` + `:ets.delete` races (prefer
@@ -121,11 +121,11 @@ PR comments and memory notes.
 
 **Reviewer wiring.**
 
-In `.agents/skills/code-review/SKILL.md`, add a `Context loading`
-section early in the workflow: the skill and all critic subagents
-load `references/canary-patterns.md` before reviewing. For each
-catalog entry, the reviewer checks whether the diff touches the
-pattern's domain; if yes, emit a pass/fail note citing the entry ID.
+Add a `Context loading` rule to the global `/code-review` workflow or Canary
+repo instructions: the skill and all critic subagents load
+`docs/code-review/canary-patterns.md` before reviewing. For each catalog entry,
+the reviewer checks whether the diff touches the pattern's domain; if yes, emit
+a pass/fail note citing the entry ID.
 
 Spellbook's `/code-review` skill will get a generalized "maintain a
 local `review-patterns.md`" convention in `#048`; this ticket is the
@@ -134,14 +134,14 @@ canary instance.
 **Execution sketch (one PR, three commits).**
 
 *Commit 1 — `docs(code-review): seed canary-patterns.md with P-01…P-09`.*
-New file at `.agents/skills/code-review/references/canary-patterns.md`.
+New file at `docs/code-review/canary-patterns.md`.
 Each entry hand-authored from the real PR comments; no lorem-ipsum.
 
-*Commit 2 — `refactor(code-review): wire reviewer subagent to the catalog`.*
-Edit `.agents/skills/code-review/SKILL.md`: add a `Context loading`
-step; update the critic-dispatch prompt template to include
-"Load references/canary-patterns.md before reviewing; cite entry IDs
-on each finding."
+*Commit 2 — `docs(code-review): wire reviewer lanes to the catalog`.*
+Edit the global `/code-review` workflow or Canary repo instructions: add a
+`Context loading` step; update the critic-dispatch prompt template to include
+"Load docs/code-review/canary-patterns.md before reviewing; cite entry IDs on
+each finding."
 
 *Commit 3 — `docs(ops): add three structural footguns to CLAUDE.md`.*
 Preload-then-take, `:ets.foldl` + `:ets.delete`, OpenAPI-PK-integer.

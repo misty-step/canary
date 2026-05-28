@@ -1,0 +1,35 @@
+{
+  "branch": "feat/incident-action-brief",
+  "base": "origin/master",
+  "verdict": "ship",
+  "reviewers": [
+    "critic",
+    "ousterhout",
+    "grug",
+    "beck",
+    "carmack",
+    "codex",
+    "claude",
+    "pi",
+    "agy",
+    "cursor-agent",
+    "grok-build",
+    "opencode",
+    "thinktank-partial"
+  ],
+  "scores": {
+    "correctness": 9,
+    "depth": 8,
+    "simplicity": 8,
+    "craft": 8
+  },
+  "sha": "81f188c2cc54633f99417cc63c712bd2f02ab6b9",
+  "date": "2026-05-27T20:54:22Z",
+  "notes": [
+    "Accepted review findings for classifier precedence, truncated signal recommendations, payload duplication, action_state drift, and missing branch coverage.",
+    "Refactor keeps action_brief compact: summary, recommendation, signal_counts, signals_truncated, latest_annotation.",
+    "Post-refactor internal agents reported no blocking findings and no blocking test gaps.",
+    "Thinktank review was partial/degraded; completed artifacts reviewed stale harness concerns not present in current worktree.",
+    "./bin/validate --fast could not run because installed Dagger CLI v0.20.8 does not match repo-required v0.20.5."
+  ]
+}

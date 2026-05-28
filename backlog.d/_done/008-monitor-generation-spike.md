@@ -1,7 +1,7 @@
 # Monitor Generation Spike
 
 Priority: low
-Status: blocked
+Status: done
 Estimate: XL
 
 ## Goal

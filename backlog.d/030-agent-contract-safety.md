@@ -42,10 +42,11 @@ replay webhook delivery context without out-of-band human interpretation.
 - [ ] `info.x-agent-guide` includes a `cold_start` path for agents with no
       saved cursor: start at `/api/v1/report`, follow truncation/cursor hints,
       then switch to timeline replay for durable state.
-- [ ] The annotation write-back convention is documented without prescribing
-      downstream behavior: stable `action` values for `triaged`,
-      `fix-proposed`, `fix-verified`, and `noise-dismissed`, plus expected
-      opaque `metadata` keys for consumers that choose to use them.
+- [ ] The annotation write-back convention is documented and typed without
+      prescribing downstream behavior: OpenAPI exposes stable `action` values
+      for `triaged`, `fix-proposed`, `fix-verified`, and `noise-dismissed`,
+      plus expected opaque `metadata` keys for consumers that choose to use
+      them.
 - [ ] `mix test test/canary_web/controllers/openapi_controller_test.exs --trace --max-failures 3`
       covers scope annotations, summary completeness, and the new delivery-id
       lookup contract.

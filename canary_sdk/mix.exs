@@ -25,7 +25,6 @@ defmodule CanarySdk.MixProject do
   defp deps do
     [
       {:req, "~> 0.5"},
-      {:bypass, "~> 2.1", only: :test},
       {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]

@@ -1,7 +1,7 @@
 # Signal-agnostic annotations — the missing Ramp primitive
 
 Priority: medium
-Status: blocked
+Status: done
 Estimate: M
 
 ## Goal

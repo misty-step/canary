@@ -283,7 +283,7 @@ export class Ci {
 
   private async rootAdvisoryContainer(source: Directory): Promise<Container> {
     return (await elixirContainer(source, ".", "test", "canary-root-test", "mix.lock")).withExec(
-      ["mix", "deps.audit"],
+      ["mix", "deps.audit", "--ignore-file", ".mix_audit.ignore"],
     )
   }
 
@@ -296,7 +296,7 @@ export class Ci {
         "canary-sdk-test",
         "canary_sdk/mix.lock",
       )
-    ).withExec(["mix", "deps.audit"])
+    ).withExec(["mix", "deps.audit", "--ignore-file", ".mix_audit.ignore"])
   }
 
   private async typescriptAdvisoryContainer(source: Directory): Promise<Container> {

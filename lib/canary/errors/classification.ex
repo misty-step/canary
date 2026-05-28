@@ -38,11 +38,46 @@ defmodule Canary.Errors.Classification do
       }
     },
     %{
+      message:
+        ~r/(CRON_SECRET not configured|unauthorized|forbidden|invalid[_ -]?api[_ -]?key|missing .*secret|token expired)/i,
+      classification: %{
+        category: :application,
+        persistence: :persistent,
+        component: :runtime
+      }
+    },
+    %{
+      error_class: ~r/(^|\.)EmbeddingError$/,
+      message: ~r/(timed out|timeout|deadline exceeded)/i,
+      classification: %{
+        category: :infrastructure,
+        persistence: :transient,
+        component: :network
+      }
+    },
+    %{
+      error_class: ~r/(^|\.)(Mint|Req)\.TransportError$/,
+      classification: %{
+        category: :infrastructure,
+        persistence: :transient,
+        component: :network
+      }
+    },
+    %{
       error_class: ~r/(^|\.)FunctionClauseError$/,
       classification: %{
         category: :application,
         persistence: :persistent,
         component: :runtime
+      }
+    },
+    %{
+      message:
+        ~r/(timed out|timeout|deadline exceeded|connection reset|connection refused|ECONNRESET|ECONNREFUSED|fetch failed|nxdomain|socket closed)/i,
+      classification: %{
+        category: :infrastructure,
+        persistence: :transient,
+        component: :network
       }
     }
   ]

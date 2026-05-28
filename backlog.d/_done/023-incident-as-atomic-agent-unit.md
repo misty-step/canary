@@ -1,7 +1,7 @@
 # Incident as the atomic agent unit — detail endpoint + cross-references
 
 Priority: high
-Status: ready
+Status: done
 Estimate: M
 
 ## Goal

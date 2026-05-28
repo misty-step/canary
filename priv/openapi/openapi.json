@@ -16,7 +16,7 @@
       "webhook_contract": "Deduplicate deliveries by x-delivery-id. Webhooks are non-authoritative wake-up hints; the timeline is the durable event log and must be replayed for correctness.",
       "crash_recovery": "After a crash or restart, resume from the last persisted cursor, replay missed timeline events, and continue polling until the API returns no further cursor.",
       "cursor_precedence": "When both `after` and `cursor` are provided on timeline-style pagination endpoints, Canary resolves `after` first and ignores `cursor` for that request.",
-      "incident_entrypoint": "On an `incident.opened` webhook, call `GET /api/v1/incidents/{id}` once — the response carries summary, the full incident metadata, up to 25 correlated signals with per-type context, up to 20 newest annotations, and up to 5 most recent timeline events. Only fall through to /query, /timeline, or /errors/{id} when `signals_truncated` or `annotations_truncated` is true, or the agent needs raw stack traces."
+      "incident_entrypoint": "On an `incident.opened` webhook, call `GET /api/v1/incidents/{id}` once — the response carries summary, the full incident metadata, a deterministic action brief, up to 25 correlated signals with per-type context, up to 20 newest annotations, and up to 5 most recent timeline events. Only fall through to /query, /timeline, or /errors/{id} when `signals_truncated` or `annotations_truncated` is true, or the agent needs raw stack traces."
     }
   },
   "servers": [
@@ -759,7 +759,7 @@
           "Incidents"
         ],
         "summary": "Get incident detail with bounded signals, annotations, and timeline",
-        "description": "One-call payload for responder agents: deterministic summary, incident metadata, up to 25 correlated signals, up to 20 newest annotations, and up to 5 most recent timeline events. Truncation is signalled by `signals_truncated` and `annotations_truncated`.",
+        "description": "One-call payload for responder agents: deterministic summary, incident metadata, a read-only action brief derived from existing state, up to 25 correlated signals, up to 20 newest annotations, and up to 5 most recent timeline events. Truncation is signalled by `signals_truncated` and `annotations_truncated`.",
         "parameters": [
           {
             "name": "id",
@@ -2911,7 +2911,8 @@
           "last_seen_at",
           "attached_at",
           "resolved_at",
-          "annotation_count"
+          "annotation_count",
+          "classification"
         ],
         "properties": {
           "type": {
@@ -2962,6 +2963,9 @@
           "annotation_count": {
             "type": "integer",
             "description": "Count of annotations on this signal's underlying error_group subject. Responders use this to skip re-investigation when prior coordination signal already exists."
+          },
+          "classification": {
+            "$ref": "#/components/schemas/ErrorGroupClassification"
           }
         }
       },
@@ -3050,6 +3054,110 @@
           }
         }
       },
+      "IncidentActionRecommendation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "reason"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "triage",
+              "watch",
+              "verify-recovery",
+              "inspect-truncated-signals"
+            ],
+            "description": "Deterministic recommendation derived from current incident state. It is guidance for responder agents, not an authoritative workflow state."
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "IncidentActionBrief": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "summary",
+          "recommendation",
+          "signal_counts",
+          "signals_truncated",
+          "latest_annotation"
+        ],
+        "properties": {
+          "summary": {
+            "type": "string"
+          },
+          "recommendation": {
+            "$ref": "#/components/schemas/IncidentActionRecommendation"
+          },
+          "signal_counts": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "active",
+              "resolved",
+              "visible",
+              "total"
+            ],
+            "properties": {
+              "active": {
+                "type": "integer"
+              },
+              "resolved": {
+                "type": "integer"
+              },
+              "visible": {
+                "type": "integer"
+              },
+              "total": {
+                "type": "integer"
+              }
+            }
+          },
+          "signals_truncated": {
+            "type": "boolean",
+            "description": "True when signal_counts.active/resolved are based on the visible signal window rather than the full incident signal set."
+          },
+          "latest_annotation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IncidentActionBriefLatestAnnotation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "IncidentActionBriefLatestAnnotation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "agent",
+          "action",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          }
+        }
+      },
       "IncidentDetailResponse": {
         "type": "object",
         "additionalProperties": false,
@@ -3060,7 +3168,8 @@
           "signals_truncated",
           "annotations",
           "annotations_truncated",
-          "recent_timeline_events"
+          "recent_timeline_events",
+          "action_brief"
         ],
         "properties": {
           "summary": {
@@ -3092,6 +3201,9 @@
             "items": {
               "$ref": "#/components/schemas/IncidentDetailTimelineEvent"
             }
+          },
+          "action_brief": {
+            "$ref": "#/components/schemas/IncidentActionBrief"
           }
         }
       },

@@ -1,6 +1,6 @@
 # Canary Backlog
 
-`backlog.d/` is the source of truth for active backlog work as of 2026-05-19.
+`backlog.d/` is the source of truth for active backlog work as of 2026-05-24.
 
 ## Priority Order
 
@@ -31,9 +31,10 @@
 | 025 | Audit test helpers for Ecto PK cast-drop | low | done | S |
 | 026 | Credo check: EctoPKViaCast | high | done | S |
 | 027 | Credo check: PreloadThenTake | high | done | S |
-| 028 | OpenAPI ↔ Ecto type-parity Dagger lane | medium | ready | M |
-| 029 | Code-review pattern catalog + reviewer wiring | medium | ready | S |
 | 030 | Agent contract safety pass | high | ready | M |
+| 028 | OpenAPI ↔ Ecto type-parity Dagger lane | medium | ready | M |
+| 031 | Agent replay determinism hardening | high | ready | M |
+| 029 | Code-review pattern catalog + reviewer wiring | medium | ready | S |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
 
@@ -55,6 +56,7 @@
 013 (metrics) — self-observability for dogfooding credibility
 014 (DR) — data durability assurance
 030 (agent contract safety) — depends on 011 + 012; makes scopes, summaries, cold-start guidance, annotation write-back, and webhook delivery replay machine-verifiable
+031 (agent replay determinism) — pairs with 030; malformed cursors, unsafe target cadence, invalid persisted probe methods, and unverifiable boot state fail explicitly before agents trust replay state
 
 022 (contract hygiene) ──── ships independently; restores summary invariant + supervision-tree collapse
 023 (incident detail API) ──→ Canary-side substrate for bb/011 (and thus 010 ramp pattern)
@@ -65,16 +67,17 @@
 
 **Lane 1 (agent readiness):** 012 (delivery ledger) → bb/011 (triage sprite) → 010 (ramp)
   · **023 (incident detail API) → 024 (signal-agnostic annotations)** land the Canary-side substrate bb/011 consumes
-**Lane 2 (contract + observability):** 011 (OpenAPI) + 013 (metrics) — parallel, no deps · **030 (agent contract safety)** depends on 011 + 012 and tightens the existing contract for autonomous consumers
+**Lane 2 (contract + observability):** 011 (OpenAPI) + 013 (metrics) — parallel, no deps · **030 (agent contract safety)** depends on 011 + 012 and tightens the existing contract for autonomous consumers · **031 (agent replay determinism)** hardens malformed replay/query/health inputs so agents fail on explicit contract errors
 **Lane 3 (structural):** 006 (query split) → 005 (connect-a-service) · **022 (contract hygiene + shallow-module collapse)** — ship first of the active set; unblocks nothing but restores the summary invariant and sheds ~300 LOC of drift
 **Lane 4 (hardening):** 008, 014, 016, 017, 018, 019 (independent, small, can ship anytime)
 **Lane 5 (future):** 020 (Adminifi HTTP surface verification)
 
-### Active order (2026-05-19)
+### Active order (2026-05-24)
 
-1. **028** — OpenAPI ↔ Ecto type-parity Dagger lane (highest leverage: the contract is the agent API)
-2. **030** — Agent contract safety pass (scope annotations, summary completeness, cold-start guidance, annotation write-back, delivery-id lookup)
-3. **029** — Code-review pattern catalog + reviewer wiring (ships independently, pure docs)
+1. **030** — Agent contract safety pass (scope annotations, summary completeness, cold-start guidance, annotation write-back, delivery-id lookup)
+2. **028** — OpenAPI ↔ Ecto type-parity Dagger lane (narrow contract correctness gate; supports 030 but can ship independently)
+3. **031** — Agent replay determinism hardening (malformed cursor, unsafe target cadence, invalid probe method, unverifiable boot state)
+4. **029** — Code-review pattern catalog + reviewer wiring (ships independently, pure docs)
 
 022 + 023 landed on 2026-04-21. 024 landed on 2026-04-22. 026 landed on
 2026-04-23 — Ramp
@@ -100,6 +103,11 @@ archived during the 2026-05-19 grooming pass. 010 stays blocked on bb/011.
   per-operation scope metadata, summary completeness discipline, cold-start
   guidance, annotation write-back conventions, and delivery-id-addressable
   webhook diagnostics without crossing the responder boundary.
+- 2026-05-24: Groomed toward usefulness/elegance: promoted #030 ahead of the
+  narrower parity lane, added #031 for deterministic replay/health/readiness
+  boundary failures, and clarified that #010 is now blocked on the downstream
+  bitterblossom triage sprite rather than Canary-side annotation/timeline
+  substrate.
 
 ## Status
 
