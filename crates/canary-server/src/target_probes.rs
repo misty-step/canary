@@ -13,6 +13,7 @@ use std::{
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, Sender},
     },
     thread::{self, JoinHandle},
     time::{Duration as StdDuration, Instant},
@@ -203,6 +204,13 @@ impl TargetProbeRuntime {
         }
         Ok(run.outcome)
     }
+
+    /// Forget in-memory transition history for a target removed from active probing.
+    pub fn forget_transition_history(&self, target_id: &str) {
+        if let Ok(mut history) = self.transition_history.lock() {
+            history.remove(target_id);
+        }
+    }
 }
 
 /// Configuration for the target probe lifecycle worker.
@@ -235,11 +243,46 @@ pub struct TargetProbeLifecycleReport {
     pub failed: usize,
 }
 
+/// Runtime control message for active target probe scheduling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetProbeLifecycleCommand {
+    /// Add or refresh an active target in the runtime schedule.
+    Track {
+        /// Target id.
+        target_id: String,
+        /// Probe interval in milliseconds.
+        interval_ms: i64,
+    },
+    /// Remove a target from the runtime schedule and forget its transition history.
+    Untrack {
+        /// Target id.
+        target_id: String,
+    },
+    /// Pause runtime probing for a target while preserving its schedule.
+    Pause {
+        /// Target id.
+        target_id: String,
+    },
+    /// Resume runtime probing for a target promptly.
+    Resume {
+        /// Target id.
+        target_id: String,
+    },
+    /// Update an active target's runtime interval.
+    Reconfigure {
+        /// Target id.
+        target_id: String,
+        /// New probe interval in milliseconds.
+        interval_ms: i64,
+    },
+}
+
 /// Bounded lifecycle adapter for active HTTP target probes.
 pub struct TargetProbeLifecycle {
     store: Arc<Mutex<Store>>,
     runtime: TargetProbeRuntime,
     schedules: BTreeMap<String, ScheduledTarget>,
+    commands: Option<Receiver<TargetProbeLifecycleCommand>>,
 }
 
 impl TargetProbeLifecycle {
@@ -249,6 +292,7 @@ impl TargetProbeLifecycle {
             store,
             runtime,
             schedules: BTreeMap::new(),
+            commands: None,
         }
     }
 
@@ -256,11 +300,12 @@ impl TargetProbeLifecycle {
     pub fn run_due(&mut self, now_millis: i64) -> Result<TargetProbeLifecycleReport, String> {
         let active = self.load_active_schedules()?;
         self.reconcile(active, now_millis);
+        self.drain_control_commands(now_millis);
 
         let due_targets = self
             .schedules
             .iter()
-            .filter(|(_, schedule)| schedule.next_due_millis <= now_millis)
+            .filter(|(_, schedule)| !schedule.paused && schedule.next_due_millis <= now_millis)
             .map(|(target_id, _)| target_id.clone())
             .collect::<Vec<_>>();
 
@@ -277,7 +322,9 @@ impl TargetProbeLifecycle {
                 Err(_) => report.failed += 1,
             }
 
-            if let Some(schedule) = self.schedules.get_mut(&target_id) {
+            if let Some(schedule) = self.schedules.get_mut(&target_id)
+                && !schedule.paused
+            {
                 schedule.next_due_millis =
                     next_due_millis(&target_id, schedule.interval_ms, now_millis);
             }
@@ -300,34 +347,97 @@ impl TargetProbeLifecycle {
         let mut next = BTreeMap::new();
         for target in active {
             let interval_ms = target.interval_ms.max(1_000);
-            let next_due_millis = self
-                .schedules
-                .remove(&target.target_id)
-                .filter(|existing| existing.interval_ms == interval_ms)
-                .map(|existing| existing.next_due_millis)
+            let existing = self.schedules.remove(&target.target_id);
+            let paused = existing.as_ref().is_some_and(|schedule| schedule.paused);
+            let next_due_millis = existing
+                .filter(|schedule| schedule.interval_ms == interval_ms)
+                .map(|schedule| schedule.next_due_millis)
                 .unwrap_or(now_millis);
             next.insert(
                 target.target_id,
                 ScheduledTarget {
                     interval_ms,
                     next_due_millis,
+                    paused,
                 },
             );
         }
         self.schedules = next;
+    }
+
+    fn set_command_receiver(&mut self, commands: Receiver<TargetProbeLifecycleCommand>) {
+        self.commands = Some(commands);
+    }
+
+    fn drain_control_commands(&mut self, now_millis: i64) {
+        let Some(commands) = self.commands.take() else {
+            return;
+        };
+        while let Ok(command) = commands.try_recv() {
+            self.apply_control_command(command, now_millis);
+        }
+        self.commands = Some(commands);
+    }
+
+    fn apply_control_command(&mut self, command: TargetProbeLifecycleCommand, now_millis: i64) {
+        match command {
+            TargetProbeLifecycleCommand::Track {
+                target_id,
+                interval_ms,
+            } => {
+                let interval_ms = interval_ms.max(1_000);
+                self.schedules.insert(
+                    target_id,
+                    ScheduledTarget {
+                        interval_ms,
+                        next_due_millis: now_millis,
+                        paused: false,
+                    },
+                );
+            }
+            TargetProbeLifecycleCommand::Untrack { target_id } => {
+                self.schedules.remove(&target_id);
+                self.runtime.forget_transition_history(&target_id);
+            }
+            TargetProbeLifecycleCommand::Pause { target_id } => {
+                if let Some(schedule) = self.schedules.get_mut(&target_id) {
+                    schedule.paused = true;
+                }
+                self.runtime.forget_transition_history(&target_id);
+            }
+            TargetProbeLifecycleCommand::Resume { target_id } => {
+                if let Some(schedule) = self.schedules.get_mut(&target_id) {
+                    schedule.paused = false;
+                    schedule.next_due_millis = schedule.next_due_millis.min(now_millis);
+                }
+            }
+            TargetProbeLifecycleCommand::Reconfigure {
+                target_id,
+                interval_ms,
+            } => {
+                let interval_ms = interval_ms.max(1_000);
+                if let Some(schedule) = self.schedules.get_mut(&target_id) {
+                    schedule.interval_ms = interval_ms;
+                    schedule.next_due_millis = schedule
+                        .next_due_millis
+                        .min(now_millis.saturating_add(interval_ms));
+                }
+            }
+        }
     }
 }
 
 /// Dedicated OS-thread runner for target probe lifecycle passes.
 pub struct TargetProbeLifecycleWorker {
     control: Arc<LifecycleControl>,
+    command_sender: Sender<TargetProbeLifecycleCommand>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl TargetProbeLifecycleWorker {
     /// Spawn one named background thread that probes due active targets sequentially.
     pub fn spawn(
-        lifecycle: TargetProbeLifecycle,
+        mut lifecycle: TargetProbeLifecycle,
         config: TargetProbeLifecycleConfig,
     ) -> Result<Self, String> {
         if config.tick_interval.is_zero() {
@@ -337,6 +447,8 @@ impl TargetProbeLifecycleWorker {
         }
 
         let control = Arc::new(LifecycleControl::default());
+        let (command_sender, command_receiver) = mpsc::channel();
+        lifecycle.set_command_receiver(command_receiver);
         let thread_control = control.clone();
         let handle = thread::Builder::new()
             .name("canary-target-probes".to_owned())
@@ -345,8 +457,18 @@ impl TargetProbeLifecycleWorker {
 
         Ok(Self {
             control,
+            command_sender,
             handle: Some(handle),
         })
+    }
+
+    /// Send one target-scoped lifecycle control command to the worker.
+    pub fn control_target(&self, command: TargetProbeLifecycleCommand) -> Result<(), String> {
+        self.command_sender
+            .send(command)
+            .map_err(|_| "target probe lifecycle worker is stopped".to_owned())?;
+        self.control.condvar.notify_all();
+        Ok(())
     }
 
     /// Pause future lifecycle passes without stopping the worker.
@@ -474,6 +596,7 @@ fn run_target_probe_once_with_history(
 struct ScheduledTarget {
     interval_ms: i64,
     next_due_millis: i64,
+    paused: bool,
 }
 
 #[derive(Default)]
@@ -1200,6 +1323,34 @@ mod tests {
         }
     }
 
+    struct DeactivatingTransport {
+        store: Arc<Mutex<Store>>,
+        calls: AtomicUsize,
+    }
+
+    impl DeactivatingTransport {
+        fn new(store: Arc<Mutex<Store>>) -> Self {
+            Self {
+                store,
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl ProbeTransport for DeactivatingTransport {
+        fn probe(&self, _request: ProbeRequest) -> Result<ProbeHttpResponse, ProbeTransportError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut store = self
+                .store
+                .lock()
+                .map_err(|_| ProbeTransportError::Connection("store lock poisoned".to_owned()))?;
+            store
+                .update_target_active("TGT-api", false)
+                .map_err(|error| ProbeTransportError::Connection(error.to_string()))?;
+            Ok(response(200, "ok"))
+        }
+    }
+
     #[derive(Default)]
     struct RecordingSink {
         events: StdMutex<Vec<String>>,
@@ -1613,6 +1764,110 @@ mod tests {
         assert_eq!(first.probed, 1);
         assert_eq!(second.due, 0);
         assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_target_pause_resume_commands_control_due_selection() -> Result<(), Box<dyn Error>>
+    {
+        let store = seeded_store("http://127.0.0.1/health", "unknown")?;
+        let transport = Arc::new(QueueTransport::new(vec![
+            response(200, "ok"),
+            response(200, "ok"),
+        ]));
+        let sink = Arc::new(RecordingSink::default());
+        let runtime = TargetProbeRuntime::new(
+            store.clone(),
+            sink,
+            transport.clone(),
+            TargetProbeOptions {
+                allow_private_targets: true,
+                region: None,
+            },
+        );
+        let mut lifecycle = TargetProbeLifecycle::new(store, runtime);
+
+        assert_eq!(lifecycle.run_due(1_000)?.probed, 1);
+        lifecycle.apply_control_command(
+            TargetProbeLifecycleCommand::Pause {
+                target_id: "TGT-api".to_owned(),
+            },
+            2_000,
+        );
+        let paused = lifecycle.run_due(1_000_000)?;
+
+        lifecycle.apply_control_command(
+            TargetProbeLifecycleCommand::Resume {
+                target_id: "TGT-api".to_owned(),
+            },
+            1_000_000,
+        );
+        let resumed = lifecycle.run_due(1_000_000)?;
+
+        assert_eq!(paused.due, 0);
+        assert_eq!(resumed.probed, 1);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_reconfigure_command_pulls_next_due_forward() -> Result<(), Box<dyn Error>> {
+        let store = seeded_store("http://127.0.0.1/health", "unknown")?;
+        let transport = Arc::new(StaticTransport::ok(200, "ok"));
+        let sink = Arc::new(RecordingSink::default());
+        let runtime = TargetProbeRuntime::new(
+            store.clone(),
+            sink,
+            transport,
+            TargetProbeOptions {
+                allow_private_targets: true,
+                region: None,
+            },
+        );
+        let mut lifecycle = TargetProbeLifecycle::new(store, runtime);
+
+        lifecycle.run_due(1_000)?;
+        lifecycle.apply_control_command(
+            TargetProbeLifecycleCommand::Reconfigure {
+                target_id: "TGT-api".to_owned(),
+                interval_ms: 1_000,
+            },
+            2_000,
+        );
+
+        let schedule = lifecycle
+            .schedules
+            .get("TGT-api")
+            .ok_or("missing target schedule")?;
+        assert_eq!(schedule.interval_ms, 1_000);
+        assert_eq!(schedule.next_due_millis, 3_000);
+        Ok(())
+    }
+
+    #[test]
+    fn in_flight_deactivation_skips_commit_after_transport_returns() -> Result<(), Box<dyn Error>> {
+        let store = seeded_store("http://127.0.0.1/health", "unknown")?;
+        let transport = DeactivatingTransport::new(store.clone());
+        let sink = RecordingSink::default();
+
+        let error = match run_target_probe_once(
+            &store,
+            &sink,
+            &transport,
+            "TGT-api",
+            TargetProbeOptions {
+                allow_private_targets: true,
+                region: None,
+            },
+        ) {
+            Ok(outcome) => {
+                return Err(format!("expected target to be skipped, got {outcome:?}").into());
+            }
+            Err(error) => error,
+        };
+
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(error, TargetProbeRuntimeError::TargetNotFound));
         Ok(())
     }
 

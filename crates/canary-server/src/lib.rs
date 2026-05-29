@@ -59,9 +59,9 @@ pub use monitor_overdue::{
 };
 pub use target_probes::{
     ProbeHttpResponse, ProbeRequest, ProbeTransport, ProbeTransportError, ReqwestProbeTransport,
-    TargetProbeLifecycle, TargetProbeLifecycleConfig, TargetProbeLifecycleReport,
-    TargetProbeLifecycleWorker, TargetProbeOptions, TargetProbeOutcome, TargetProbeRuntime,
-    TargetProbeRuntimeError, run_target_probe_once,
+    TargetProbeLifecycle, TargetProbeLifecycleCommand, TargetProbeLifecycleConfig,
+    TargetProbeLifecycleReport, TargetProbeLifecycleWorker, TargetProbeOptions, TargetProbeOutcome,
+    TargetProbeRuntime, TargetProbeRuntimeError, run_target_probe_once,
 };
 use webhooks::NoopWebhookCooldown;
 pub use webhooks::{

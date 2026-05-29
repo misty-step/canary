@@ -110,6 +110,11 @@ impl Store {
         health::insert_target(&self.connection, target)
     }
 
+    /// Update one target's active flag.
+    pub fn update_target_active(&mut self, target_id: &str, active: bool) -> Result<bool> {
+        health::update_target_active(&self.connection, target_id, active)
+    }
+
     /// Return one active target configuration and state snapshot by id.
     ///
     /// If the target exists but has no state row yet, this method creates the

@@ -369,6 +369,21 @@ the Rust server accepts production traffic:
     governed by the HTTP observation. `TargetProbeOutcome` now carries the
     persisted `tls_expires_at` value so focused runtime tests can prove the
     metadata reached the health observation boundary.
+36. `canary-server::TargetProbeLifecycleCommand`: active target probe hot-update
+    semantics now have a typed runtime boundary instead of relying on incidental
+    next-tick reloads. The lifecycle drains exhaustive target-scoped commands
+    before due selection: `Track`, `Untrack`, `Pause`, `Resume`, and
+    `Reconfigure`. Runtime pause preserves the schedule but excludes the target
+    from due selection, resume pulls the next due time forward to the current
+    pass, reconfigure can shorten an interval without pushing an already-due
+    probe away, and untrack/pause forget in-memory flap history so stale
+    transition windows do not leak across operator control actions. Store also
+    exposes the narrow `update_target_active` command needed by future admin
+    routes and tests now prove that a target deactivated after the HTTP socket
+    opens but before commit is skipped rather than writing a stale observation.
+    This keeps hot-update behavior in the target lifecycle module; it does not
+    introduce per-target worker threads, cancellation tokens, SQLite update
+    hooks, or a generic scheduler.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -397,8 +412,9 @@ Phoenix behavior until the replacement is complete:
 ## Next Slices
 
 1. Harden the target probe runtime edge cases that were deliberately left out of
-   the lifecycle slice: enqueue-failure telemetry and explicit hot-update
-   semantics for target deactivate/pause/update while a probe is in flight.
+   the lifecycle slice: enqueue-failure telemetry for health-transition webhook
+   fanout and Rust admin route wiring that forwards target create/delete/pause/
+   resume/update commits into `TargetProbeLifecycleCommand`.
 2. Broaden monitor overdue parity fixtures around malformed persisted rows,
    TTL-vs-expected escalation, webhook enqueue failure receipts, and transaction
    rollback evidence for transition/correlation failures.

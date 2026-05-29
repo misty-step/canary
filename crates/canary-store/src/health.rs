@@ -565,6 +565,18 @@ pub(crate) fn insert_target(connection: &rusqlite::Connection, target: TargetIns
     Ok(())
 }
 
+pub(crate) fn update_target_active(
+    connection: &rusqlite::Connection,
+    target_id: &str,
+    active: bool,
+) -> Result<bool> {
+    let changed = connection.execute(
+        "UPDATE targets SET active = ?2 WHERE id = ?1",
+        rusqlite::params![target_id, if active { 1 } else { 0 }],
+    )?;
+    Ok(changed > 0)
+}
+
 pub(crate) fn target_probe_snapshot_by_id(
     connection: &mut rusqlite::Connection,
     target_id: &str,
