@@ -54,6 +54,22 @@ pub(crate) fn errors_by_service(
     window: &str,
     options: ServiceQueryOptions,
 ) -> QueryResult<ErrorsByService> {
+    errors_by_service_at(
+        connection,
+        service,
+        window,
+        options,
+        OffsetDateTime::now_utc(),
+    )
+}
+
+pub(crate) fn errors_by_service_at(
+    connection: &Connection,
+    service: &str,
+    window: &str,
+    options: ServiceQueryOptions,
+    now: OffsetDateTime,
+) -> QueryResult<ErrorsByService> {
     let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
     let groups = list_error_groups(
         connection,
@@ -62,6 +78,7 @@ pub(crate) fn errors_by_service(
         },
         window,
         options,
+        now,
     )?;
 
     Ok(errors_by_service_response(
@@ -78,6 +95,24 @@ pub(crate) fn errors_by_error_class(
     service: Option<&str>,
     options: ServiceQueryOptions,
 ) -> QueryResult<ErrorsByErrorClass> {
+    errors_by_error_class_at(
+        connection,
+        error_class,
+        window,
+        service,
+        options,
+        OffsetDateTime::now_utc(),
+    )
+}
+
+pub(crate) fn errors_by_error_class_at(
+    connection: &Connection,
+    error_class: &str,
+    window: &str,
+    service: Option<&str>,
+    options: ServiceQueryOptions,
+    now: OffsetDateTime,
+) -> QueryResult<ErrorsByErrorClass> {
     let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
     let groups = list_error_groups(
         connection,
@@ -87,6 +122,7 @@ pub(crate) fn errors_by_error_class(
         },
         window,
         options,
+        now,
     )?;
 
     Ok(errors_by_error_class_response(
@@ -97,8 +133,16 @@ pub(crate) fn errors_by_error_class(
 }
 
 pub(crate) fn errors_by_class(connection: &Connection, window: &str) -> QueryResult<ErrorsByClass> {
+    errors_by_class_at(connection, window, OffsetDateTime::now_utc())
+}
+
+pub(crate) fn errors_by_class_at(
+    connection: &Connection,
+    window: &str,
+    now: OffsetDateTime,
+) -> QueryResult<ErrorsByClass> {
     let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
-    let cutoff = window.cutoff_at(OffsetDateTime::now_utc());
+    let cutoff = window.cutoff_at(now);
     let groups = error_class_aggregates(connection, &cutoff)?;
     let (total_errors, total_error_classes) = error_class_totals(connection, &cutoff)?;
 
@@ -156,7 +200,14 @@ pub(crate) fn active_incidents(
     connection: &Connection,
     options: IncidentListOptions,
 ) -> QueryResult<ActiveIncidents> {
-    let now = OffsetDateTime::now_utc();
+    active_incidents_at(connection, options, OffsetDateTime::now_utc())
+}
+
+pub(crate) fn active_incidents_at(
+    connection: &Connection,
+    options: IncidentListOptions,
+    now: OffsetDateTime,
+) -> QueryResult<ActiveIncidents> {
     let rows = incident_rows(connection)?;
     let mut incidents = Vec::new();
 
@@ -1029,8 +1080,9 @@ fn list_error_groups(
     filter: ErrorGroupFilter,
     window: QueryWindow,
     options: ServiceQueryOptions,
+    now: OffsetDateTime,
 ) -> QueryResult<Vec<ErrorGroupSummary>> {
-    let cutoff = window.cutoff_at(OffsetDateTime::now_utc());
+    let cutoff = window.cutoff_at(now);
     let cursor = options.cursor.as_deref().and_then(decode_cursor);
     paged_error_groups(
         connection,

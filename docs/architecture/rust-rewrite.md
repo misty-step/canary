@@ -440,6 +440,17 @@ the Rust server accepts production traffic:
     counts. This is intentionally not a claim about now-relative windows or
     list pagination; those need deterministic-clock coverage instead of static
     future timestamps.
+42. `canary-store` now exposes deterministic `*_at` query entry points for the
+    now-relative read models while leaving the production methods as thin
+    `now_utc()` adapters. `errors_by_service_at`, `errors_by_error_class_at`,
+    `errors_by_class_at`, and `active_incidents_at` thread a caller-supplied
+    `OffsetDateTime` into the same cutoff and 300-second incident activity
+    logic used by the default methods. The populated Phoenix fixture now proves
+    Rust can evaluate service, error-class, aggregate-class, and active-incident
+    read models against Phoenix-created rows at a fixed clock, including the
+    empty-after-window summary. This is a store-level test seam only: no HTTP
+    `at` parameter, no process-wide clock service, and no change to
+    clock-independent detail read models.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -468,8 +479,8 @@ Phoenix behavior until the replacement is complete:
 ## Next Slices
 
 1. Broaden Phoenix read-model parity with deterministic-clock coverage for
-   now-relative queries such as `errors_by_*`, active incidents, health status,
-   and paginated list ordering.
+   paginated list ordering, exact 300-second incident boundary behavior, and
+   health status/read-model lists.
 2. Continue the remaining Rust HTTP/admin/API surface from the live OpenAPI and
    Phoenix router contracts, keeping each slice behind a typed store or worker
    boundary rather than a generic CRUD layer.

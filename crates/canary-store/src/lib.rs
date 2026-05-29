@@ -210,6 +210,17 @@ impl Store {
         query::errors_by_service(&self.connection, service, window, options)
     }
 
+    /// Query recent error groups for a service at a deterministic evaluation time.
+    pub fn errors_by_service_at(
+        &self,
+        service: &str,
+        window: &str,
+        options: ServiceQueryOptions,
+        now: time::OffsetDateTime,
+    ) -> QueryResult<canary_core::query::ErrorsByService> {
+        query::errors_by_service_at(&self.connection, service, window, options, now)
+    }
+
     /// Query recent error groups for an error class.
     pub fn errors_by_error_class(
         &self,
@@ -221,9 +232,37 @@ impl Store {
         query::errors_by_error_class(&self.connection, error_class, window, service, options)
     }
 
+    /// Query recent error groups for an error class at a deterministic evaluation time.
+    pub fn errors_by_error_class_at(
+        &self,
+        error_class: &str,
+        window: &str,
+        service: Option<&str>,
+        options: ServiceQueryOptions,
+        now: time::OffsetDateTime,
+    ) -> QueryResult<canary_core::query::ErrorsByErrorClass> {
+        query::errors_by_error_class_at(
+            &self.connection,
+            error_class,
+            window,
+            service,
+            options,
+            now,
+        )
+    }
+
     /// Query recent error counts grouped by error class.
     pub fn errors_by_class(&self, window: &str) -> QueryResult<canary_core::query::ErrorsByClass> {
         query::errors_by_class(&self.connection, window)
+    }
+
+    /// Query recent error counts grouped by error class at a deterministic evaluation time.
+    pub fn errors_by_class_at(
+        &self,
+        window: &str,
+        now: time::OffsetDateTime,
+    ) -> QueryResult<canary_core::query::ErrorsByClass> {
+        query::errors_by_class_at(&self.connection, window, now)
     }
 
     /// Query active incidents with currently active signals.
@@ -232,6 +271,15 @@ impl Store {
         options: IncidentListOptions,
     ) -> QueryResult<canary_core::query::ActiveIncidents> {
         query::active_incidents(&self.connection, options)
+    }
+
+    /// Query active incidents with currently active signals at a deterministic evaluation time.
+    pub fn active_incidents_at(
+        &self,
+        options: IncidentListOptions,
+        now: time::OffsetDateTime,
+    ) -> QueryResult<canary_core::query::ActiveIncidents> {
+        query::active_incidents_at(&self.connection, options, now)
     }
 
     /// Return one incident detail read model.

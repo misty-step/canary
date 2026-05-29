@@ -14,10 +14,12 @@ use canary_core::{
     ingest::classification::{Category, Classification, Component, Persistence},
 };
 use canary_store::{
-    ErrorIngest, ErrorIngestIds, ErrorIngestPayload, IncidentCorrelation, Store,
-    WebhookDeliveryInsert, WebhookDeliveryListOptions, WebhookDeliveryStatus,
+    ErrorIngest, ErrorIngestIds, ErrorIngestPayload, IncidentCorrelation, IncidentListOptions,
+    ServiceQueryOptions, Store, WebhookDeliveryInsert, WebhookDeliveryListOptions,
+    WebhookDeliveryStatus,
 };
 use rusqlite::{Connection, OpenFlags, params};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const PHOENIX_FIXTURE: &str = "tests/fixtures/phoenix_schema.db";
 const POPULATED_PHOENIX_FIXTURE: &str = "tests/fixtures/phoenix_read_models.db";
@@ -359,6 +361,85 @@ fn rust_query_read_models_read_populated_phoenix_rows() -> Result<(), Box<dyn Er
         .ok_or("missing error-group signal")?;
     assert_eq!(group.error_class.as_deref(), Some("RuntimeError"));
     assert_eq!(group.annotation_count, 1);
+
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn rust_now_relative_queries_read_populated_phoenix_rows_at_fixed_time()
+-> Result<(), Box<dyn Error>> {
+    let (dir, path) = copy_populated_fixture("read-models-at")?;
+    let store = Store::open(&path)?;
+    let as_of = OffsetDateTime::parse("2026-05-28T20:02:00Z", &Rfc3339)?;
+
+    let service =
+        store.errors_by_service_at("ramp-api", "24h", ServiceQueryOptions::default(), as_of)?;
+    assert_eq!(service.total_errors, 3);
+    assert_eq!(service.groups.len(), 1);
+    assert_eq!(service.groups[0].group_hash, "grp-readmodel-runtime");
+    assert_eq!(service.groups[0].classification.persistence, "persistent");
+    assert_eq!(
+        service.summary,
+        "3 errors in ramp-api in the last 24h. 1 unique classes. Most frequent: RuntimeError (3 occurrences)."
+    );
+
+    let class = store.errors_by_error_class_at(
+        "RuntimeError",
+        "24h",
+        Some("ramp-api"),
+        ServiceQueryOptions::default(),
+        as_of,
+    )?;
+    assert_eq!(class.total_errors, 3);
+    assert_eq!(class.groups[0].service, "ramp-api");
+
+    let classes = store.errors_by_class_at("24h", as_of)?;
+    assert_eq!(classes.total_errors, 3);
+    assert_eq!(classes.total_error_classes, 1);
+    assert_eq!(classes.groups[0].error_class, "RuntimeError");
+
+    let after_window = OffsetDateTime::parse("2026-05-30T20:02:00Z", &Rfc3339)?;
+    let expired = store.errors_by_service_at(
+        "ramp-api",
+        "24h",
+        ServiceQueryOptions::default(),
+        after_window,
+    )?;
+    assert_eq!(expired.total_errors, 0);
+    assert_eq!(expired.groups, Vec::new());
+    assert_eq!(
+        expired.summary,
+        "0 errors in ramp-api in the last 24h. 0 unique classes."
+    );
+
+    let incidents = store.active_incidents_at(IncidentListOptions::default(), as_of)?;
+    assert_eq!(incidents.incidents.len(), 1);
+    assert_eq!(incidents.incidents[0].id, "INC-readmodel0001");
+    assert_eq!(incidents.incidents[0].severity, "high");
+    assert_eq!(incidents.incidents[0].signal_count, 3);
+    assert_eq!(
+        incidents.summary,
+        "1 open incident across 1 service. 1 high-severity incident. Newest: ramp-api at 2026-05-28T19:59:00Z."
+    );
+
+    let with_ack = store.active_incidents_at(
+        IncidentListOptions {
+            with_annotation: Some("acknowledged".to_owned()),
+            without_annotation: None,
+        },
+        as_of,
+    )?;
+    assert_eq!(with_ack.incidents.len(), 1);
+
+    let without_ack = store.active_incidents_at(
+        IncidentListOptions {
+            with_annotation: None,
+            without_annotation: Some("acknowledged".to_owned()),
+        },
+        as_of,
+    )?;
+    assert_eq!(without_ack.incidents, Vec::new());
 
     fs::remove_dir_all(dir)?;
     Ok(())
