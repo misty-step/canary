@@ -175,6 +175,12 @@ the Rust server accepts production traffic:
     values to Store in order, invokes an injected transport, and records circuit
     effects. This proves the delivery side-effect boundary without introducing
     a generic job framework, polling loop, retry table, or concrete HTTP client.
+20. `canary-server::webhooks`: webhook enqueue and one-job delivery runtime
+    wiring now lives in a focused private server module with root re-exports for
+    the public traits and adapters. This keeps the crate API stable while moving
+    webhook-specific Store mapping, runtime boundaries, and timestamp helpers
+    out of the Axum router surface. The split is intentionally one module, not a
+    lifecycle taxonomy or a new crate.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -202,14 +208,12 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Split the growing `canary-server` webhook wiring into a focused module before
-   adding more runtime behavior; keep the public API unchanged.
-2. Add the concrete scheduled-job drain and retry adapter behind the scheduler
+1. Add the concrete scheduled-job drain and retry adapter behind the scheduler
    trait: retrieve due jobs, invoke `WebhookDeliveryRuntime`, persist retry
    scheduling with the same delivery id, and keep concurrency limits explicit.
-3. Add a concrete HTTP transport implementation for webhook delivery, with
+2. Add a concrete HTTP transport implementation for webhook delivery, with
    transport-level retry disabled so scheduler retry remains authoritative.
-4. Add a concrete incident-correlation effect sink once the Rust incident write
+3. Add a concrete incident-correlation effect sink once the Rust incident write
    path exists, keeping correlation failures isolated from ingest success.
-5. Add compatibility checks against a migrated Phoenix fixture database before
+4. Add compatibility checks against a migrated Phoenix fixture database before
    any production traffic moves to the Rust server.
