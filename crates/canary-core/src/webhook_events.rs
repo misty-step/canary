@@ -14,6 +14,11 @@ const BUSINESS_EVENTS: [&str; 10] = [
 ];
 const DIAGNOSTIC_EVENTS: [&str; 1] = ["canary.ping"];
 
+/// Return Canary's business event names.
+pub fn business() -> &'static [&'static str] {
+    &BUSINESS_EVENTS
+}
+
 /// Return true when an event name is accepted by the webhook subscription API.
 pub fn valid(event: &str) -> bool {
     BUSINESS_EVENTS.contains(&event) || DIAGNOSTIC_EVENTS.contains(&event)

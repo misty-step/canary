@@ -557,6 +557,19 @@ the Rust server accepts production traffic:
     payload used by `/api/v1/status`. Missing targets intentionally return
     `200` with an empty `checks` array because the Phoenix query reads check
     history directly and does not perform a target existence lookup.
+53. Rust now implements the Phoenix timeline replay surface:
+    `GET /api/v1/timeline`. The core crate owns the wire DTOs, deterministic
+    summary templates, business-event filter set, and Phoenix-compatible
+    base64url cursor shape. The store owns the bounded keyset query over
+    `service_events`: window cutoff, optional service filter, optional
+    comma-separated business event filter, `after`/`cursor` anchor, newest
+    first order by `(created_at, id)`, and `limit + 1` pagination capped at
+    200. The server owns only read-scope auth, the `24h` default, `after`
+    precedence over `cursor`, and RFC 9457 projection for invalid window,
+    limit, cursor, and event type inputs. Diagnostic events such as
+    `canary.ping` remain valid webhook subscription events but are rejected by
+    timeline filtering because Phoenix exposes only business-event replay
+    filters there.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed

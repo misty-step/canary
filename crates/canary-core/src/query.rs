@@ -11,6 +11,12 @@ use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 /// Maximum number of error groups returned by group-list queries.
 pub const MAX_ERROR_GROUPS: usize = 50;
 
+/// Default number of timeline events returned by Phoenix.
+pub const DEFAULT_TIMELINE_LIMIT: usize = 50;
+
+/// Maximum number of timeline events accepted by Phoenix.
+pub const MAX_TIMELINE_LIMIT: usize = 200;
+
 /// User-facing validation detail for invalid query windows.
 pub const INVALID_WINDOW_DETAIL: &str = "Invalid window. Allowed: 1h, 6h, 24h, 7d, 30d";
 
@@ -97,6 +103,15 @@ pub struct GroupCursor {
     pub group_hash: String,
 }
 
+/// Structured cursor used by Phoenix for timeline pagination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineCursor {
+    /// Last row timestamp from the previous page.
+    pub created_at: String,
+    /// Last row id from the previous page.
+    pub id: String,
+}
+
 /// Decode current structured cursors and legacy base64 group-hash cursors.
 pub fn decode_cursor(cursor: &str) -> Option<QueryCursor> {
     if let Ok(json) = BASE64_URL_SAFE_NO_PAD.decode(cursor)
@@ -114,6 +129,25 @@ pub fn decode_cursor(cursor: &str) -> Option<QueryCursor> {
 
 /// Encode a current structured cursor.
 pub fn encode_cursor(cursor: &GroupCursor) -> Option<String> {
+    let json = serde_json::to_vec(cursor).ok()?;
+    Some(BASE64_URL_SAFE_NO_PAD.encode(json))
+}
+
+/// Decode a Phoenix timeline cursor.
+pub fn decode_timeline_cursor(cursor: &str) -> Option<TimelineCursor> {
+    let decoded = BASE64_URL_SAFE_NO_PAD.decode(cursor).ok()?;
+    let cursor = serde_json::from_slice::<TimelineCursor>(&decoded).ok()?;
+    if cursor.created_at.is_empty()
+        || cursor.id.is_empty()
+        || OffsetDateTime::parse(&cursor.created_at, &Rfc3339).is_err()
+    {
+        return None;
+    }
+    Some(cursor)
+}
+
+/// Encode a Phoenix timeline cursor.
+pub fn encode_timeline_cursor(cursor: &TimelineCursor) -> Option<String> {
     let json = serde_json::to_vec(cursor).ok()?;
     Some(BASE64_URL_SAFE_NO_PAD.encode(json))
 }
@@ -508,6 +542,46 @@ pub struct ErrorDetail {
     pub incident_ids: Vec<String>,
 }
 
+/// Event item returned by `GET /api/v1/timeline`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TimelineEvent {
+    /// Event row id.
+    pub id: String,
+    /// Service name.
+    pub service: String,
+    /// Business event name.
+    pub event: String,
+    /// Subject type.
+    pub entity_type: String,
+    /// Subject id, when present.
+    pub entity_ref: Option<String>,
+    /// Event severity, when present.
+    pub severity: Option<String>,
+    /// Deterministic event summary.
+    pub summary: String,
+    /// Decoded JSON payload.
+    pub payload: Value,
+    /// Creation timestamp.
+    pub created_at: String,
+}
+
+/// Response for `GET /api/v1/timeline`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TimelineResponse {
+    /// Deterministic summary.
+    pub summary: String,
+    /// Count of returned events.
+    pub returned_count: usize,
+    /// Query window.
+    pub window: String,
+    /// Optional service filter.
+    pub service: Option<String>,
+    /// Event page.
+    pub events: Vec<TimelineEvent>,
+    /// Next-page cursor.
+    pub cursor: Option<String>,
+}
+
 /// Build a Phoenix-compatible service query response.
 pub fn errors_by_service_response(
     service: String,
@@ -651,6 +725,36 @@ pub fn error_detail_response(
         &last_seen,
     );
     detail
+}
+
+/// Build a Phoenix-compatible timeline response.
+pub fn timeline_response(
+    events: Vec<TimelineEvent>,
+    service: Option<String>,
+    window: QueryWindow,
+    cursor: Option<String>,
+) -> TimelineResponse {
+    let summary = match service.as_deref() {
+        Some(service) => format!(
+            "Returned {} timeline events for {service} in the last {}.",
+            events.len(),
+            window.as_str()
+        ),
+        None => format!(
+            "Returned {} timeline events in the last {}.",
+            events.len(),
+            window.as_str()
+        ),
+    };
+
+    TimelineResponse {
+        summary,
+        returned_count: events.len(),
+        window: window.as_str().to_owned(),
+        service,
+        events,
+        cursor,
+    }
 }
 
 fn error_query_summary(
@@ -937,6 +1041,53 @@ mod tests {
         assert_eq!(
             decode_cursor(&encoded),
             Some(QueryCursor::LegacyGroupHash("group-legacy".to_owned()))
+        );
+    }
+
+    #[test]
+    fn timeline_cursor_round_trip_matches_phoenix_shape() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let cursor = TimelineCursor {
+            created_at: "2026-05-28T20:59:50Z".to_owned(),
+            id: "EVT-b".to_owned(),
+        };
+        let Some(encoded) = encode_timeline_cursor(&cursor) else {
+            return Err("timeline cursor should encode".into());
+        };
+
+        assert_eq!(decode_timeline_cursor(&encoded), Some(cursor));
+        assert_eq!(decode_timeline_cursor("bogus"), None);
+
+        let malformed = BASE64_URL_SAFE_NO_PAD.encode(r#"{"created_at":1,"id":2}"#);
+        assert_eq!(decode_timeline_cursor(&malformed), None);
+        Ok(())
+    }
+
+    #[test]
+    fn timeline_response_summary_matches_phoenix_templates() {
+        assert_eq!(
+            timeline_response(vec![], None, QueryWindow::TwentyFourHours, None).summary,
+            "Returned 0 timeline events in the last 24h."
+        );
+        assert_eq!(
+            timeline_response(
+                vec![TimelineEvent {
+                    id: "EVT-a".to_owned(),
+                    service: "alpha".to_owned(),
+                    event: "error.new_class".to_owned(),
+                    entity_type: "error_group".to_owned(),
+                    entity_ref: Some("group-a".to_owned()),
+                    severity: Some("error".to_owned()),
+                    summary: "summary".to_owned(),
+                    payload: serde_json::json!({"event": "error.new_class"}),
+                    created_at: "2026-05-28T20:59:50Z".to_owned(),
+                }],
+                Some("alpha".to_owned()),
+                QueryWindow::OneHour,
+                None
+            )
+            .summary,
+            "Returned 1 timeline events for alpha in the last 1h."
         );
     }
 }

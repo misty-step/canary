@@ -37,6 +37,7 @@ pub use oban_jobs::{
 };
 pub use query::{
     ErrorSummaryItem, IncidentListOptions, QueryError, QueryResult, ServiceQueryOptions,
+    TimelineQueryError, TimelineQueryOptions, TimelineQueryResult,
 };
 pub use webhook_deliveries::{
     WebhookDeliveryInsert, WebhookDeliveryListOptions, WebhookDeliveryRow, WebhookDeliveryStatus,
@@ -326,6 +327,15 @@ impl Store {
     /// Query active error counts grouped by service for combined status.
     pub fn error_summary(&self, window: &str) -> QueryResult<Vec<ErrorSummaryItem>> {
         query::error_summary(&self.connection, window)
+    }
+
+    /// Query the durable service-event timeline.
+    pub fn timeline(
+        &self,
+        window: &str,
+        options: TimelineQueryOptions,
+    ) -> TimelineQueryResult<canary_core::query::TimelineResponse> {
+        query::timeline(&self.connection, window, options)
     }
 
     /// Query recent error counts grouped by error class at a deterministic evaluation time.
@@ -1784,6 +1794,131 @@ mod tests {
         assert_eq!(summary[1].service, "worker");
         assert_eq!(summary[1].total_count, 11);
         assert_eq!(summary[1].unique_classes, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn timeline_filters_paginates_and_rejects_invalid_inputs()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let store = migrated_store()?;
+        for (id, service, event, created_at) in [
+            ("EVT-a", "alpha", "incident.opened", "2026-05-28T20:59:50Z"),
+            ("EVT-b", "alpha", "error.new_class", "2026-05-28T20:59:50Z"),
+            ("EVT-c", "beta", "error.new_class", "2026-05-28T20:59:40Z"),
+            (
+                "EVT-old",
+                "alpha",
+                "error.new_class",
+                "2026-05-27T19:00:00Z",
+            ),
+        ] {
+            store.connection.execute(
+                "INSERT INTO service_events (
+                    id, service, event, entity_type, entity_ref, severity, summary, payload, created_at
+                 ) VALUES (?1, ?2, ?3, 'error_group', 'group-a', 'error', 'summary', ?4, ?5)",
+                params![id, service, event, json!({"event": event}).to_string(), created_at],
+            )?;
+        }
+        let now = OffsetDateTime::parse("2026-05-28T21:00:00Z", &Rfc3339)?;
+
+        let first = query::timeline_at(
+            &store.connection,
+            "24h",
+            TimelineQueryOptions {
+                service: Some("alpha".to_owned()),
+                limit: Some("1".to_owned()),
+                cursor: None,
+                event_type: None,
+            },
+            now,
+        )?;
+
+        assert_eq!(first.returned_count, 1);
+        assert_eq!(first.service.as_deref(), Some("alpha"));
+        assert_eq!(first.events[0].id, "EVT-b");
+        assert_eq!(first.events[0].payload["event"], "error.new_class");
+        assert!(first.cursor.is_some());
+
+        let second = query::timeline_at(
+            &store.connection,
+            "24h",
+            TimelineQueryOptions {
+                service: Some("alpha".to_owned()),
+                limit: Some("1".to_owned()),
+                cursor: first.cursor,
+                event_type: None,
+            },
+            now,
+        )?;
+
+        assert_eq!(second.events[0].id, "EVT-a");
+        assert!(second.cursor.is_none());
+
+        let event_filtered = query::timeline_at(
+            &store.connection,
+            "24h",
+            TimelineQueryOptions {
+                service: None,
+                limit: None,
+                cursor: None,
+                event_type: Some("incident.opened, error.new_class".to_owned()),
+            },
+            now,
+        )?;
+        assert_eq!(event_filtered.returned_count, 3);
+        assert!(
+            !event_filtered
+                .events
+                .iter()
+                .any(|event| event.id == "EVT-old")
+        );
+
+        assert!(matches!(
+            query::timeline_at(
+                &store.connection,
+                "99h",
+                TimelineQueryOptions::default(),
+                now
+            ),
+            Err(TimelineQueryError::InvalidWindow)
+        ));
+        assert!(matches!(
+            query::timeline_at(
+                &store.connection,
+                "24h",
+                TimelineQueryOptions {
+                    limit: Some("201".to_owned()),
+                    ..TimelineQueryOptions::default()
+                },
+                now
+            ),
+            Err(TimelineQueryError::InvalidLimit)
+        ));
+        assert!(matches!(
+            query::timeline_at(
+                &store.connection,
+                "24h",
+                TimelineQueryOptions {
+                    cursor: Some("bogus".to_owned()),
+                    ..TimelineQueryOptions::default()
+                },
+                now
+            ),
+            Err(TimelineQueryError::InvalidCursor)
+        ));
+        assert!(matches!(
+            query::timeline_at(
+                &store.connection,
+                "24h",
+                TimelineQueryOptions {
+                    event_type: Some("canary.ping".to_owned()),
+                    ..TimelineQueryOptions::default()
+                },
+                now
+            ),
+            Err(TimelineQueryError::InvalidEventType(invalid)) if invalid == vec!["canary.ping"]
+        ));
 
         Ok(())
     }

@@ -45,7 +45,7 @@ use canary_store::{
     TargetCheckRead, TargetConflict, TargetInsert, TargetRecord, WebhookSubscription,
     WebhookSubscriptionInsert,
 };
-use canary_store::{QueryError, ServiceQueryOptions};
+use canary_store::{QueryError, ServiceQueryOptions, TimelineQueryError, TimelineQueryOptions};
 use canary_workers::health::{
     HealthPlanError, MonitorCheckInInput, MonitorCheckInStatus, MonitorMode, MonitorSnapshot,
     ObservationContext, plan_monitor_check_in,
@@ -481,6 +481,7 @@ pub fn ingest_router(state: IngestState) -> Router {
         .route("/api/v1/errors", post(create_error))
         .route("/api/v1/check-ins", post(create_check_in))
         .route("/api/v1/query", get(query_errors))
+        .route("/api/v1/timeline", get(timeline))
         .route("/api/v1/status", get(status))
         .route("/api/v1/health-status", get(health_status))
         .route("/api/v1/targets/{id}/checks", get(target_checks))
@@ -1499,6 +1500,40 @@ async fn query_errors(
     }
 }
 
+async fn timeline(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Query(params): Query<TimelineParams>,
+) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+        return problem_response(*problem);
+    }
+
+    let window = params.window.as_deref().unwrap_or("24h");
+    let cursor = params.after.or(params.cursor);
+    let options = TimelineQueryOptions {
+        service: params.service,
+        limit: params.limit,
+        cursor,
+        event_type: params.event_type,
+    };
+    let store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+
+    match store.timeline(window, options) {
+        Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
+        Err(TimelineQueryError::InvalidWindow) => problem_response(invalid_window_problem()),
+        Err(TimelineQueryError::InvalidLimit) => problem_response(invalid_limit_problem()),
+        Err(TimelineQueryError::InvalidCursor) => problem_response(invalid_cursor_problem()),
+        Err(TimelineQueryError::InvalidEventType(invalid)) => {
+            problem_response(invalid_event_type_problem(&invalid))
+        }
+        Err(TimelineQueryError::Sqlite(_)) => problem_response(internal_problem()),
+    }
+}
+
 async fn health_status(State(state): State<IngestState>, headers: HeaderMap) -> Response<Body> {
     if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
         return problem_response(*problem);
@@ -1613,6 +1648,16 @@ enum QueryKind {
 #[derive(Deserialize)]
 struct StatusParams {
     window: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TimelineParams {
+    service: Option<String>,
+    window: Option<String>,
+    limit: Option<String>,
+    cursor: Option<String>,
+    after: Option<String>,
+    event_type: Option<String>,
 }
 
 struct ParsedCheckIn {
@@ -3038,6 +3083,43 @@ fn invalid_window_problem() -> ProblemDetails {
     .with_extra(
         "errors",
         json!({"window": [canary_core::query::INVALID_WINDOW_FIELD_ERROR]}),
+    )
+}
+
+fn invalid_limit_problem() -> ProblemDetails {
+    ProblemDetails::new(
+        422,
+        ProblemCode::ValidationError,
+        "Invalid limit. Expected a positive integer up to 200.",
+        None,
+    )
+    .with_extra(
+        "errors",
+        json!({"limit": ["must be a positive integer no greater than 200"]}),
+    )
+}
+
+fn invalid_cursor_problem() -> ProblemDetails {
+    ProblemDetails::new(422, ProblemCode::ValidationError, "Invalid cursor.", None).with_extra(
+        "errors",
+        json!({"cursor": ["must be a valid pagination cursor"]}),
+    )
+}
+
+fn invalid_event_type_problem(invalid: &[String]) -> ProblemDetails {
+    let allowed = canary_core::webhook_events::business().join(", ");
+    ProblemDetails::new(
+        422,
+        ProblemCode::ValidationError,
+        format!(
+            "Invalid event_type: {}. Allowed: {allowed}",
+            invalid.join(", ")
+        ),
+        None,
+    )
+    .with_extra(
+        "errors",
+        json!({"event_type": [format!("must be one or more of: {allowed}")]}),
     )
 }
 
@@ -5498,6 +5580,150 @@ mod tests {
             assert_eq!(status, expected_status);
             assert_eq!(body["code"], expected_code);
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn timeline_accepts_read_scope_filters_and_paginates() -> Result<(), Box<dyn Error>> {
+        let router = ingest_router(test_ingest_state()?);
+        for body in [
+            r#"{"service":"alpha","error_class":"RuntimeError","message":"first"}"#,
+            r#"{"service":"alpha","error_class":"ArgumentError","message":"second"}"#,
+            r#"{"service":"beta","error_class":"RuntimeError","message":"third"}"#,
+        ] {
+            let response = router
+                .clone()
+                .oneshot(json_request("POST", "/api/v1/errors", INGEST_KEY, body)?)
+                .await?;
+            assert_eq!(response.status(), StatusCode::CREATED);
+        }
+
+        let unfiltered = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/timeline?event_type=error.new_class",
+            )?)
+            .await?;
+        let unfiltered_status = unfiltered.status();
+        let unfiltered_body = json_body(unfiltered).await?;
+
+        assert_eq!(unfiltered_status, StatusCode::OK);
+        assert_eq!(unfiltered_body["service"], Value::Null);
+        assert_eq!(
+            unfiltered_body["summary"],
+            "Returned 3 timeline events in the last 24h."
+        );
+
+        let first = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/timeline?service=alpha&event_type=error.new_class&limit=1",
+            )?)
+            .await?;
+        let first_status = first.status();
+        let first_body = json_body(first).await?;
+
+        assert_eq!(first_status, StatusCode::OK);
+        assert_eq!(first_body["service"], "alpha");
+        assert_eq!(first_body["window"], "24h");
+        assert_eq!(first_body["returned_count"], 1);
+        assert_eq!(first_body["events"][0]["service"], "alpha");
+        assert_eq!(first_body["events"][0]["event"], "error.new_class");
+        assert_eq!(
+            first_body["events"][0]["payload"]["event"],
+            "error.new_class"
+        );
+        assert!(first_body["cursor"].as_str().is_some());
+
+        let cursor = first_body["cursor"].as_str().ok_or("missing cursor")?;
+        let second = router
+            .oneshot(read_request(
+                READ_KEY,
+                &format!(
+                    "/api/v1/timeline?service=alpha&event_type=error.new_class&limit=1&after={cursor}&cursor=bogus"
+                ),
+            )?)
+            .await?;
+        let second_status = second.status();
+        let second_body = json_body(second).await?;
+
+        assert_eq!(second_status, StatusCode::OK);
+        assert_eq!(second_body["returned_count"], 1);
+        assert_eq!(second_body["events"][0]["service"], "alpha");
+        assert_eq!(second_body["cursor"], Value::Null);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn timeline_rejects_invalid_params_and_wrong_scope() -> Result<(), Box<dyn Error>> {
+        let cases = [
+            (
+                read_request(INGEST_KEY, "/api/v1/timeline")?,
+                StatusCode::FORBIDDEN,
+                "insufficient_scope",
+                "detail",
+                "API key scope `ingest-only` cannot access this read endpoint. Use an `admin` or `read-only` key.",
+            ),
+            (
+                read_request(READ_KEY, "/api/v1/timeline?window=99h")?,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_error",
+                "window",
+                canary_core::query::INVALID_WINDOW_FIELD_ERROR,
+            ),
+            (
+                read_request(READ_KEY, "/api/v1/timeline?limit=201")?,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_error",
+                "limit",
+                "must be a positive integer no greater than 200",
+            ),
+            (
+                read_request(READ_KEY, "/api/v1/timeline?cursor=bogus")?,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_error",
+                "cursor",
+                "must be a valid pagination cursor",
+            ),
+            (
+                read_request(READ_KEY, "/api/v1/timeline?event_type=canary.ping")?,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_error",
+                "event_type",
+                "must be one or more of:",
+            ),
+        ];
+
+        for (request, expected_status, expected_code, field, expected_fragment) in cases {
+            let response = ingest_router(test_ingest_state()?).oneshot(request).await?;
+            let status = response.status();
+            let body = json_body(response).await?;
+
+            assert_eq!(status, expected_status);
+            assert_eq!(body["code"], expected_code);
+            if field == "detail" {
+                assert_eq!(body["detail"], expected_fragment);
+            } else {
+                assert!(
+                    body["errors"][field][0]
+                        .as_str()
+                        .is_some_and(|error| error.contains(expected_fragment))
+                );
+            }
+        }
+
+        let unauthorized = ingest_router(test_ingest_state()?)
+            .oneshot(Request::get("/api/v1/timeline").body(Body::empty())?)
+            .await?;
+        let unauthorized_status = unauthorized.status();
+        let unauthorized_body = json_body(unauthorized).await?;
+
+        assert_eq!(unauthorized_status, StatusCode::UNAUTHORIZED);
+        assert_eq!(unauthorized_body["code"], "invalid_api_key");
 
         Ok(())
     }

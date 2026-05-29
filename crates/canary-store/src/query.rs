@@ -5,12 +5,14 @@ use canary_core::{
         ErrorClassification, ErrorDetail, ErrorDetailGroup, ErrorGroupSummary, ErrorsByClass,
         ErrorsByErrorClass, ErrorsByService, IncidentAnnotation, IncidentDetail,
         IncidentDetailIncident, IncidentDetailSignal, IncidentTimelineEvent, QueryCursor,
-        QueryWindow, active_incidents_response, decode_cursor, error_detail_response,
+        QueryWindow, TimelineCursor, TimelineEvent, TimelineResponse, active_incidents_response,
+        decode_cursor, decode_timeline_cursor, encode_timeline_cursor, error_detail_response,
         errors_by_class_response, errors_by_error_class_response, errors_by_service_response,
-        incident_detail_response,
+        incident_detail_response, timeline_response,
     },
+    webhook_events,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde_json::Value;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -62,6 +64,42 @@ pub enum QueryError {
 
 /// Result type returned by query read models.
 pub type QueryResult<T> = std::result::Result<T, QueryError>;
+
+/// Timeline read-model failure.
+#[derive(Debug, thiserror::Error)]
+pub enum TimelineQueryError {
+    /// Query window is outside Canary's closed set.
+    #[error("invalid query window")]
+    InvalidWindow,
+    /// Requested limit is outside Phoenix's accepted range.
+    #[error("invalid timeline limit")]
+    InvalidLimit,
+    /// Cursor is not a valid Phoenix timeline cursor.
+    #[error("invalid timeline cursor")]
+    InvalidCursor,
+    /// Event type filter includes one or more non-business events.
+    #[error("invalid timeline event types: {0:?}")]
+    InvalidEventType(Vec<String>),
+    /// SQLite rejected a read query.
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+}
+
+/// Result type returned by timeline read models.
+pub type TimelineQueryResult<T> = std::result::Result<T, TimelineQueryError>;
+
+/// Optional filters for timeline queries.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TimelineQueryOptions {
+    /// Optional service filter. Empty strings are treated as absent.
+    pub service: Option<String>,
+    /// Optional limit. Defaults to Phoenix's 50-row page size.
+    pub limit: Option<String>,
+    /// Optional cursor. Empty strings are treated as absent.
+    pub cursor: Option<String>,
+    /// Optional comma-separated business event filters.
+    pub event_type: Option<String>,
+}
 
 pub(crate) fn errors_by_service(
     connection: &Connection,
@@ -199,6 +237,90 @@ pub(crate) fn error_summary_at(
     })?;
     let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+pub(crate) fn timeline(
+    connection: &Connection,
+    window: &str,
+    options: TimelineQueryOptions,
+) -> TimelineQueryResult<TimelineResponse> {
+    timeline_at(connection, window, options, OffsetDateTime::now_utc())
+}
+
+pub(crate) fn timeline_at(
+    connection: &Connection,
+    window: &str,
+    options: TimelineQueryOptions,
+    now: OffsetDateTime,
+) -> TimelineQueryResult<TimelineResponse> {
+    let window = QueryWindow::parse(window).ok_or(TimelineQueryError::InvalidWindow)?;
+    let cutoff = window.cutoff_at(now);
+    let limit = parse_timeline_limit(options.limit.as_deref())?;
+    let cursor = parse_timeline_cursor(options.cursor.as_deref())?;
+    let event_types = parse_timeline_event_types(options.event_type.as_deref())?;
+    let service = options.service.filter(|service| !service.is_empty());
+
+    let mut sql = String::from(
+        "SELECT id, service, event, entity_type, entity_ref, severity, summary, payload, created_at
+         FROM service_events
+         WHERE created_at >= ?",
+    );
+    let mut filters = vec![cutoff];
+
+    if let Some(service) = service.as_deref() {
+        sql.push_str(" AND service = ?");
+        filters.push(service.to_owned());
+    }
+    if let Some(event_types) = event_types.as_ref()
+        && !event_types.is_empty()
+    {
+        let placeholders = std::iter::repeat_n("?", event_types.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql.push_str(" AND event IN (");
+        sql.push_str(&placeholders);
+        sql.push(')');
+        filters.extend(event_types.iter().cloned());
+    }
+    if let Some(cursor) = cursor.as_ref() {
+        sql.push_str(" AND (created_at < ? OR (created_at = ? AND id < ?))");
+        filters.push(cursor.created_at.clone());
+        filters.push(cursor.created_at.clone());
+        filters.push(cursor.id.clone());
+    }
+
+    sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ?");
+    filters.push((limit + 1).to_string());
+
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(filters), |row| {
+        let payload_json: String = row.get(7)?;
+        Ok(TimelineEvent {
+            id: row.get(0)?,
+            service: row.get(1)?,
+            event: row.get(2)?,
+            entity_type: row.get(3)?,
+            entity_ref: row.get(4)?,
+            severity: row.get(5)?,
+            summary: row.get(6)?,
+            payload: safe_decode_json(Some(payload_json)).unwrap_or(Value::Null),
+            created_at: row.get(8)?,
+        })
+    })?;
+    let mut rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let cursor = if rows.len() > limit {
+        rows.truncate(limit);
+        rows.last().and_then(|event| {
+            encode_timeline_cursor(&TimelineCursor {
+                created_at: event.created_at.clone(),
+                id: event.id.clone(),
+            })
+        })
+    } else {
+        None
+    };
+
+    Ok(timeline_response(rows, service, window, cursor))
 }
 
 pub(crate) fn error_detail(
@@ -1295,6 +1417,53 @@ fn group_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ErrorGroupSummary
         status: row.get(8)?,
         classification: ErrorClassification::new(row.get(9)?, row.get(10)?, row.get(11)?),
     })
+}
+
+fn parse_timeline_limit(limit: Option<&str>) -> TimelineQueryResult<usize> {
+    match limit {
+        None | Some("") => Ok(canary_core::query::DEFAULT_TIMELINE_LIMIT),
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(value) if (1..=canary_core::query::MAX_TIMELINE_LIMIT).contains(&value) => Ok(value),
+            _ => Err(TimelineQueryError::InvalidLimit),
+        },
+    }
+}
+
+fn parse_timeline_cursor(cursor: Option<&str>) -> TimelineQueryResult<Option<TimelineCursor>> {
+    match cursor {
+        None | Some("") => Ok(None),
+        Some(cursor) => decode_timeline_cursor(cursor)
+            .map(Some)
+            .ok_or(TimelineQueryError::InvalidCursor),
+    }
+}
+
+fn parse_timeline_event_types(
+    event_type: Option<&str>,
+) -> TimelineQueryResult<Option<Vec<String>>> {
+    let Some(event_type) = event_type else {
+        return Ok(None);
+    };
+    if event_type.is_empty() {
+        return Ok(None);
+    }
+
+    let types = event_type
+        .split(',')
+        .map(str::trim)
+        .filter(|event| !event.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let invalid = types
+        .iter()
+        .filter(|event| !webhook_events::business().contains(&event.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if invalid.is_empty() {
+        Ok(Some(types))
+    } else {
+        Err(TimelineQueryError::InvalidEventType(invalid))
+    }
 }
 
 struct ErrorRow {
