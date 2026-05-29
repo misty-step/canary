@@ -4,6 +4,8 @@
 //! the delivery ledger in one module. The Rust rewrite keeps the product
 //! decisions here and lets the runtime provide persistence and transport.
 
+use std::convert::Infallible;
+
 use canary_http::webhooks::{WebhookHeaders, headers_for_body};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -254,6 +256,32 @@ pub fn execute_delivery(
     mut record_ledger: impl FnMut(DeliveryLedgerAction),
     transport: impl FnMut(WebhookRequest) -> TransportResult,
 ) -> DeliveryExecution {
+    match try_execute_delivery(
+        job,
+        lookup,
+        circuit,
+        |action| {
+            record_ledger(action);
+            Ok::<(), Infallible>(())
+        },
+        transport,
+    ) {
+        Ok(execution) => execution,
+        Err(error) => match error {},
+    }
+}
+
+/// Execute one scheduled delivery job with fallible ledger persistence.
+///
+/// Runtimes should use this variant so a failed pending or attempt ledger write
+/// stops execution before an outbound request can be sent.
+pub fn try_execute_delivery<E>(
+    job: &WebhookJob,
+    lookup: WebhookLookup,
+    circuit: CircuitDecision,
+    mut record_ledger: impl FnMut(DeliveryLedgerAction) -> Result<(), E>,
+    transport: impl FnMut(WebhookRequest) -> TransportResult,
+) -> Result<DeliveryExecution, E> {
     let delivery_id = delivery_id_from_job(job);
     let delivery = PlannedWebhookDelivery {
         delivery_id: delivery_id.clone(),
@@ -262,17 +290,18 @@ pub fn execute_delivery(
     };
     let mut ledger_actions = Vec::new();
     let mut push_ledger = |action: DeliveryLedgerAction| {
-        record_ledger(action.clone());
+        record_ledger(action.clone())?;
         ledger_actions.push(action);
+        Ok(())
     };
-    push_ledger(DeliveryLedgerAction::CreatePending(delivery.clone()));
+    push_ledger(DeliveryLedgerAction::CreatePending(delivery.clone()))?;
 
-    match lookup {
+    Ok(match lookup {
         WebhookLookup::Missing => {
             push_ledger(DeliveryLedgerAction::MarkDiscarded {
                 delivery_id: delivery_id.clone(),
                 reason: "webhook_not_found".to_owned(),
-            });
+            })?;
             DeliveryExecution {
                 delivery_id,
                 outcome: DeliveryOutcome::Discarded {
@@ -287,7 +316,7 @@ pub fn execute_delivery(
             push_ledger(DeliveryLedgerAction::MarkDiscarded {
                 delivery_id: delivery_id.clone(),
                 reason: "webhook_inactive".to_owned(),
-            });
+            })?;
             DeliveryExecution {
                 delivery_id,
                 outcome: DeliveryOutcome::Discarded {
@@ -303,8 +332,8 @@ pub fn execute_delivery(
                 push_ledger(DeliveryLedgerAction::CreateSuppressed {
                     delivery,
                     reason: "circuit_open".to_owned(),
-                });
-                return DeliveryExecution {
+                })?;
+                return Ok(DeliveryExecution {
                     delivery_id,
                     outcome: DeliveryOutcome::Suppressed {
                         reason: "circuit_open".to_owned(),
@@ -312,12 +341,12 @@ pub fn execute_delivery(
                     ledger_actions,
                     circuit_effect: CircuitEffect::None,
                     retry_after_seconds: None,
-                };
+                });
             }
 
             push_ledger(DeliveryLedgerAction::MarkAttempt {
                 delivery_id: delivery_id.clone(),
-            });
+            })?;
 
             let outcome = build_request(&endpoint, job).map(transport).map_or_else(
                 || DeliveryOutcome::Discarded {
@@ -330,7 +359,7 @@ pub fn execute_delivery(
                 DeliveryOutcome::Delivered => {
                     push_ledger(DeliveryLedgerAction::MarkDelivered {
                         delivery_id: delivery_id.clone(),
-                    });
+                    })?;
                     CircuitEffect::RecordSuccess {
                         webhook_id: endpoint.id,
                     }
@@ -342,7 +371,7 @@ pub fn execute_delivery(
                     push_ledger(DeliveryLedgerAction::MarkDiscarded {
                         delivery_id: delivery_id.clone(),
                         reason: reason.clone(),
-                    });
+                    })?;
                     CircuitEffect::RecordFailure {
                         webhook_id: endpoint.id,
                     }
@@ -362,7 +391,7 @@ pub fn execute_delivery(
                 retry_after_seconds,
             }
         }
-    }
+    })
 }
 
 /// Plan enqueue work for one event across active subscriptions.

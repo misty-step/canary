@@ -167,6 +167,14 @@ the Rust server accepts production traffic:
     inactive, open-circuit, retryable, and final-discard cases. This is still a
     pure/injected execution boundary, not a background job loop or real HTTP
     client.
+19. `canary-workers::webhooks::try_execute_delivery` and
+    `canary-server::WebhookDeliveryRuntime`: the executor now has a fallible
+    ledger-recorder variant so a failed pending or attempt write stops before
+    transport. Server owns the one-job runtime adapter that looks up
+    subscriptions, asks the circuit boundary, applies `DeliveryLedgerAction`
+    values to Store in order, invokes an injected transport, and records circuit
+    effects. This proves the delivery side-effect boundary without introducing
+    a generic job framework, polling loop, retry table, or concrete HTTP client.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -194,11 +202,14 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Add the concrete webhook delivery runtime adapter behind the scheduler trait:
-   retrieve scheduled jobs, apply `DeliveryLedgerAction` values to Store,
-   invoke the real HTTP transport, persist circuit outcomes, and keep retry
-   scheduling outside the pure worker contract.
-2. Add a concrete incident-correlation effect sink once the Rust incident write
+1. Split the growing `canary-server` webhook wiring into a focused module before
+   adding more runtime behavior; keep the public API unchanged.
+2. Add the concrete scheduled-job drain and retry adapter behind the scheduler
+   trait: retrieve due jobs, invoke `WebhookDeliveryRuntime`, persist retry
+   scheduling with the same delivery id, and keep concurrency limits explicit.
+3. Add a concrete HTTP transport implementation for webhook delivery, with
+   transport-level retry disabled so scheduler retry remains authoritative.
+4. Add a concrete incident-correlation effect sink once the Rust incident write
    path exists, keeping correlation failures isolated from ingest success.
-3. Add compatibility checks against a migrated Phoenix fixture database before
+5. Add compatibility checks against a migrated Phoenix fixture database before
    any production traffic moves to the Rust server.

@@ -33,7 +33,9 @@ use canary_ingest::{
 use canary_store::{IncidentListOptions, Store, WebhookDeliveryInsert, WebhookSubscription};
 use canary_store::{QueryError, ServiceQueryOptions};
 use canary_workers::webhooks::{
-    WebhookEndpoint, WebhookEnqueueDecision, WebhookJob, plan_enqueue_for_event,
+    CircuitDecision, CircuitEffect, DeliveryExecution, DeliveryLedgerAction, TransportResult,
+    WebhookEndpoint, WebhookEnqueueDecision, WebhookJob, WebhookLookup, WebhookRequest,
+    plan_enqueue_for_event, try_execute_delivery,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -156,6 +158,24 @@ pub trait WebhookCooldown: Send + Sync + 'static {
     fn mark(&self, key: &str);
 }
 
+/// Runtime boundary for outbound webhook transport.
+pub trait WebhookTransport: Send + Sync + 'static {
+    /// Send one signed webhook request.
+    fn send(&self, request: &WebhookRequest) -> TransportResult;
+}
+
+/// Runtime boundary for webhook circuit state.
+pub trait WebhookCircuit: Send + Sync + 'static {
+    /// Return the circuit decision before one delivery attempt.
+    fn decision(&self, webhook_id: &str) -> CircuitDecision;
+
+    /// Record a successful delivery.
+    fn record_success(&self, webhook_id: &str);
+
+    /// Record a failed delivery.
+    fn record_failure(&self, webhook_id: &str);
+}
+
 #[derive(Debug, Default)]
 struct NoopIngestEffectSink;
 
@@ -174,6 +194,122 @@ impl WebhookCooldown for NoopWebhookCooldown {
     }
 
     fn mark(&self, _key: &str) {}
+}
+
+#[derive(Debug, Default)]
+struct NoopWebhookCircuit;
+
+impl WebhookCircuit for NoopWebhookCircuit {
+    fn decision(&self, _webhook_id: &str) -> CircuitDecision {
+        CircuitDecision::Closed
+    }
+
+    fn record_success(&self, _webhook_id: &str) {}
+
+    fn record_failure(&self, _webhook_id: &str) {}
+}
+
+/// Runtime adapter for executing one scheduled webhook delivery job.
+pub struct WebhookDeliveryRuntime {
+    store: Arc<Mutex<Store>>,
+    transport: Arc<dyn WebhookTransport>,
+    circuit: Arc<dyn WebhookCircuit>,
+}
+
+impl WebhookDeliveryRuntime {
+    /// Build a delivery runtime from explicit side-effect boundaries.
+    pub fn new(
+        store: Arc<Mutex<Store>>,
+        transport: Arc<dyn WebhookTransport>,
+        circuit: Arc<dyn WebhookCircuit>,
+    ) -> Self {
+        Self {
+            store,
+            transport,
+            circuit,
+        }
+    }
+
+    /// Build a delivery runtime with a closed no-op circuit.
+    pub fn new_without_circuit(
+        store: Arc<Mutex<Store>>,
+        transport: Arc<dyn WebhookTransport>,
+    ) -> Self {
+        Self::new(store, transport, Arc::new(NoopWebhookCircuit))
+    }
+
+    /// Execute one scheduled job and persist the ordered ledger actions.
+    pub fn deliver(&self, job: &WebhookJob) -> Result<DeliveryExecution, String> {
+        let lookup = self.lookup_webhook(job)?;
+        let circuit = match &lookup {
+            WebhookLookup::Active(endpoint) => self.circuit.decision(&endpoint.id),
+            WebhookLookup::Missing | WebhookLookup::Inactive(_) => CircuitDecision::Closed,
+        };
+
+        let execution = try_execute_delivery(
+            job,
+            lookup,
+            circuit,
+            |action| self.apply_ledger_action(action),
+            |request| self.transport.send(&request),
+        )?;
+        self.apply_circuit_effect(&execution.circuit_effect);
+
+        Ok(execution)
+    }
+
+    fn lookup_webhook(&self, job: &WebhookJob) -> Result<WebhookLookup, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| "store lock poisoned".to_owned())?;
+        let subscription = store
+            .webhook_subscription(&job.webhook_id)
+            .map_err(|error| error.to_string())?;
+
+        Ok(match subscription.map(endpoint_from_subscription) {
+            None => WebhookLookup::Missing,
+            Some(endpoint) if endpoint.active => WebhookLookup::Active(endpoint),
+            Some(endpoint) => WebhookLookup::Inactive(endpoint),
+        })
+    }
+
+    fn apply_ledger_action(&self, action: DeliveryLedgerAction) -> Result<(), String> {
+        let now = current_rfc3339();
+        let mut store = self
+            .store
+            .lock()
+            .map_err(|_| "store lock poisoned".to_owned())?;
+
+        match action {
+            DeliveryLedgerAction::CreatePending(delivery) => store
+                .create_pending_webhook_delivery(delivery_insert(delivery, &now))
+                .map_err(|error| error.to_string()),
+            DeliveryLedgerAction::MarkAttempt { delivery_id } => store
+                .mark_webhook_delivery_attempt(&delivery_id, &now)
+                .map_err(|error| error.to_string()),
+            DeliveryLedgerAction::MarkDelivered { delivery_id } => store
+                .mark_webhook_delivery_delivered(&delivery_id, &now)
+                .map_err(|error| error.to_string()),
+            DeliveryLedgerAction::MarkDiscarded {
+                delivery_id,
+                reason,
+            } => store
+                .mark_webhook_delivery_discarded(&delivery_id, &reason, &now)
+                .map_err(|error| error.to_string()),
+            DeliveryLedgerAction::CreateSuppressed { delivery, reason } => store
+                .create_suppressed_webhook_delivery(delivery_insert(delivery, &now), &reason)
+                .map_err(|error| error.to_string()),
+        }
+    }
+
+    fn apply_circuit_effect(&self, effect: &CircuitEffect) {
+        match effect {
+            CircuitEffect::None => {}
+            CircuitEffect::RecordSuccess { webhook_id } => self.circuit.record_success(webhook_id),
+            CircuitEffect::RecordFailure { webhook_id } => self.circuit.record_failure(webhook_id),
+        }
+    }
 }
 
 /// Effect sink that turns ingest webhook effects into ledger rows and jobs.
@@ -330,6 +466,18 @@ fn endpoint_from_subscription(subscription: WebhookSubscription) -> WebhookEndpo
         url: subscription.url,
         secret: subscription.secret,
         active: subscription.active,
+    }
+}
+
+fn delivery_insert(
+    delivery: canary_workers::webhooks::PlannedWebhookDelivery,
+    now: &str,
+) -> WebhookDeliveryInsert {
+    WebhookDeliveryInsert {
+        delivery_id: delivery.delivery_id,
+        webhook_id: delivery.webhook_id,
+        event: delivery.event,
+        now: now.to_owned(),
     }
 }
 
@@ -1005,6 +1153,156 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn webhook_delivery_runtime_delivers_and_records_success() -> Result<(), Box<dyn Error>> {
+        let store = runtime_store(true)?;
+        let transport = Arc::new(RecordingTransport::status(204));
+        let circuit = Arc::new(RecordingCircuit::closed());
+        let runtime =
+            WebhookDeliveryRuntime::new(store.clone(), transport.clone(), circuit.clone());
+        let execution = runtime.deliver(&webhook_job("DLV-runtime-ok", 1, 4))?;
+
+        assert_eq!(
+            execution.outcome,
+            canary_workers::webhooks::DeliveryOutcome::Delivered
+        );
+        let requests = transport
+            .requests
+            .lock()
+            .map_err(|_| "transport lock poisoned")?;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].headers.delivery_id, "DLV-runtime-ok");
+        drop(requests);
+
+        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
+            delivery_id: Some("DLV-runtime-ok".to_owned()),
+            ..Default::default()
+        })?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, WebhookDeliveryStatus::Delivered);
+        assert_eq!(rows[0].attempt_count, 1);
+        assert!(rows[0].delivered_at.is_some());
+        assert_eq!(
+            circuit
+                .successes
+                .lock()
+                .map_err(|_| "circuit lock poisoned")?
+                .as_slice(),
+            ["WHK-test"]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_runtime_retries_failed_attempt_without_final_discard()
+    -> Result<(), Box<dyn Error>> {
+        let store = runtime_store(true)?;
+        let transport = Arc::new(RecordingTransport::status(500));
+        let circuit = Arc::new(RecordingCircuit::closed());
+        let runtime = WebhookDeliveryRuntime::new(store.clone(), transport, circuit.clone());
+        let execution = runtime.deliver(&webhook_job("DLV-runtime-retry", 2, 4))?;
+
+        assert_eq!(execution.retry_after_seconds, Some(5));
+        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
+            delivery_id: Some("DLV-runtime-retry".to_owned()),
+            ..Default::default()
+        })?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, WebhookDeliveryStatus::Retrying);
+        assert_eq!(rows[0].attempt_count, 1);
+        assert_eq!(rows[0].discarded_at, None);
+        assert_eq!(
+            circuit
+                .failures
+                .lock()
+                .map_err(|_| "circuit lock poisoned")?
+                .as_slice(),
+            ["WHK-test"]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_runtime_suppresses_open_circuit_without_transport()
+    -> Result<(), Box<dyn Error>> {
+        let store = runtime_store(true)?;
+        let transport = Arc::new(RecordingTransport::status(204));
+        let circuit = Arc::new(RecordingCircuit::open());
+        let runtime = WebhookDeliveryRuntime::new(store.clone(), transport.clone(), circuit);
+        let execution = runtime.deliver(&webhook_job("DLV-runtime-open", 1, 4))?;
+
+        assert_eq!(
+            execution.outcome,
+            canary_workers::webhooks::DeliveryOutcome::Suppressed {
+                reason: "circuit_open".to_owned()
+            }
+        );
+        assert_eq!(
+            transport
+                .requests
+                .lock()
+                .map_err(|_| "transport lock poisoned")?
+                .len(),
+            0
+        );
+
+        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
+            delivery_id: Some("DLV-runtime-open".to_owned()),
+            ..Default::default()
+        })?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, WebhookDeliveryStatus::Suppressed);
+        assert_eq!(rows[0].reason.as_deref(), Some("circuit_open"));
+        assert_eq!(rows[0].attempt_count, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_runtime_discards_missing_and_inactive_without_transport()
+    -> Result<(), Box<dyn Error>> {
+        let store = runtime_store(false)?;
+        let transport = Arc::new(RecordingTransport::status(204));
+        let runtime = WebhookDeliveryRuntime::new_without_circuit(store.clone(), transport.clone());
+
+        runtime.deliver(&webhook_job("DLV-runtime-inactive", 1, 4))?;
+        runtime.deliver(&WebhookJob {
+            webhook_id: "WHK-missing".to_owned(),
+            delivery_id: Some("DLV-runtime-missing".to_owned()),
+            ..webhook_job("DLV-unused", 1, 4)
+        })?;
+
+        assert_eq!(
+            transport
+                .requests
+                .lock()
+                .map_err(|_| "transport lock poisoned")?
+                .len(),
+            0
+        );
+        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let inactive = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
+            delivery_id: Some("DLV-runtime-inactive".to_owned()),
+            ..Default::default()
+        })?;
+        assert_eq!(inactive[0].status, WebhookDeliveryStatus::Discarded);
+        assert_eq!(inactive[0].reason.as_deref(), Some("webhook_inactive"));
+
+        let missing = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
+            delivery_id: Some("DLV-runtime-missing".to_owned()),
+            ..Default::default()
+        })?;
+        assert_eq!(missing[0].status, WebhookDeliveryStatus::Discarded);
+        assert_eq!(missing[0].reason.as_deref(), Some("webhook_not_found"));
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn error_ingest_accepts_admin_scope() -> Result<(), Box<dyn Error>> {
         let response = ingest_router(test_ingest_state()?)
@@ -1512,6 +1810,101 @@ mod tests {
 
     fn valid_error_body() -> &'static str {
         r#"{"service":"test-svc","error_class":"RuntimeError","message":"something went wrong"}"#
+    }
+
+    fn runtime_store(active_webhook: bool) -> Result<Arc<Mutex<Store>>, Box<dyn Error>> {
+        let mut store = Store::open_in_memory()?;
+        store.migrate()?;
+        store.insert_webhook_subscription(WebhookSubscriptionInsert {
+            id: "WHK-test".to_owned(),
+            url: "https://example.test/hook".to_owned(),
+            events: vec!["error.new_class".to_owned()],
+            secret: "test-webhook-secret".to_owned(),
+            active: active_webhook,
+            created_at: "2026-05-28T20:00:00Z".to_owned(),
+        })?;
+
+        Ok(Arc::new(Mutex::new(store)))
+    }
+
+    fn webhook_job(delivery_id: &str, attempt: u32, max_attempts: u32) -> WebhookJob {
+        WebhookJob {
+            webhook_id: "WHK-test".to_owned(),
+            payload: json!({
+                "error": {"group_hash": "group-runtime"},
+                "sequence": 7
+            }),
+            event: "error.new_class".to_owned(),
+            delivery_id: Some(delivery_id.to_owned()),
+            legacy_job_id: None,
+            attempt,
+            max_attempts,
+        }
+    }
+
+    struct RecordingTransport {
+        response: TransportResult,
+        requests: StdMutex<Vec<WebhookRequest>>,
+    }
+
+    impl RecordingTransport {
+        fn status(status: u16) -> Self {
+            Self {
+                response: TransportResult::HttpStatus(status),
+                requests: StdMutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl WebhookTransport for RecordingTransport {
+        fn send(&self, request: &WebhookRequest) -> TransportResult {
+            if let Ok(mut requests) = self.requests.lock() {
+                requests.push(request.clone());
+            }
+            self.response.clone()
+        }
+    }
+
+    struct RecordingCircuit {
+        decision: CircuitDecision,
+        successes: StdMutex<Vec<String>>,
+        failures: StdMutex<Vec<String>>,
+    }
+
+    impl RecordingCircuit {
+        fn closed() -> Self {
+            Self {
+                decision: CircuitDecision::Closed,
+                successes: StdMutex::new(Vec::new()),
+                failures: StdMutex::new(Vec::new()),
+            }
+        }
+
+        fn open() -> Self {
+            Self {
+                decision: CircuitDecision::Open,
+                successes: StdMutex::new(Vec::new()),
+                failures: StdMutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl WebhookCircuit for RecordingCircuit {
+        fn decision(&self, _webhook_id: &str) -> CircuitDecision {
+            self.decision
+        }
+
+        fn record_success(&self, webhook_id: &str) {
+            if let Ok(mut successes) = self.successes.lock() {
+                successes.push(webhook_id.to_owned());
+            }
+        }
+
+        fn record_failure(&self, webhook_id: &str) {
+            if let Ok(mut failures) = self.failures.lock() {
+                failures.push(webhook_id.to_owned());
+            }
+        }
     }
 
     #[derive(Default)]
