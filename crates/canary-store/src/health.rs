@@ -60,6 +60,53 @@ pub struct MonitorOverdueCommitResult {
     pub sequence: i64,
 }
 
+/// Persisted target TLS data eligible for a daily expiry scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsExpiryScanCandidate {
+    /// Target row id.
+    pub target_id: String,
+    /// Target display name.
+    pub name: String,
+    /// Service name resolved with Phoenix's target service fallback.
+    pub service: String,
+    /// Target URL.
+    pub url: String,
+    /// Latest persisted TLS certificate expiration timestamp.
+    pub tls_expires_at: String,
+}
+
+/// One TLS-expiring service event to persist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsExpiryEventInsert {
+    /// Service-event row id.
+    pub event_id: EventId,
+    /// Target row id.
+    pub target_id: String,
+    /// Target display name.
+    pub name: String,
+    /// Service name resolved with Phoenix's target service fallback.
+    pub service: String,
+    /// Target URL.
+    pub url: String,
+    /// Persisted TLS certificate expiration timestamp.
+    pub tls_expires_at: String,
+    /// Whole days until certificate expiry.
+    pub days_until_expiry: i64,
+    /// Service event timestamp.
+    pub now: String,
+}
+
+/// Persisted TLS-expiring event returned for post-commit fanout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsExpiryEventCommit {
+    /// Health TLS warning event name.
+    pub event: String,
+    /// Service-event row id.
+    pub id: String,
+    /// Health event payload JSON.
+    pub payload_json: String,
+}
+
 /// Monitor row to insert.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MonitorInsert {
@@ -671,6 +718,78 @@ pub(crate) fn commit_monitor_overdue(
     Ok(MonitorOverdueCommitResult {
         transition,
         sequence,
+    })
+}
+
+pub(crate) fn tls_expiry_scan_candidates(
+    connection: &rusqlite::Connection,
+) -> Result<Vec<TlsExpiryScanCandidate>> {
+    let mut statement = connection.prepare(
+        "SELECT target_id, name, service, url, tls_expires_at
+         FROM (
+            SELECT
+                t.id AS target_id,
+                t.name AS name,
+                COALESCE(NULLIF(t.service, ''), t.name) AS service,
+                t.url AS url,
+                (
+                    SELECT c.tls_expires_at
+                    FROM target_checks c
+                    WHERE c.target_id = t.id
+                      AND c.tls_expires_at IS NOT NULL
+                    ORDER BY c.checked_at DESC
+                    LIMIT 1
+                ) AS tls_expires_at
+            FROM targets t
+            WHERE COALESCE(t.active, 1) = 1
+              AND lower(t.url) LIKE 'https://%'
+         )
+         WHERE tls_expires_at IS NOT NULL
+         ORDER BY target_id",
+    )?;
+    let candidates = statement
+        .query_map([], |row| {
+            Ok(TlsExpiryScanCandidate {
+                target_id: row.get(0)?,
+                name: row.get(1)?,
+                service: row.get(2)?,
+                url: row.get(3)?,
+                tls_expires_at: row.get(4)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(candidates)
+}
+
+pub(crate) fn record_tls_expiring_event(
+    connection: &mut rusqlite::Connection,
+    event: TlsExpiryEventInsert,
+) -> Result<TlsExpiryEventCommit> {
+    let transaction = connection.transaction()?;
+    let payload_json = tls_expiring_payload(&event).to_string();
+    let summary = format!(
+        "{}: TLS expires in {} day(s)",
+        event.service, event.days_until_expiry
+    );
+    insert_service_event(
+        &transaction,
+        ServiceEventInsert {
+            event_id: &event.event_id,
+            service: &event.service,
+            event: "health_check.tls_expiring",
+            entity_type: "target",
+            entity_ref: &event.target_id,
+            state: "degraded",
+            summary: &summary,
+            payload_json: &payload_json,
+            now: &event.now,
+        },
+    )?;
+    transaction.commit()?;
+    Ok(TlsExpiryEventCommit {
+        event: "health_check.tls_expiring".to_owned(),
+        id: event.event_id.as_str().to_owned(),
+        payload_json,
     })
 }
 
@@ -1694,6 +1813,20 @@ fn monitor_payload(transition: &MonitorTransitionRecord<'_>) -> serde_json::Valu
         "deadline_at": transition.deadline_at,
         "sequence": transition.sequence,
         "timestamp": transition.now,
+    })
+}
+
+fn tls_expiring_payload(event: &TlsExpiryEventInsert) -> serde_json::Value {
+    json!({
+        "event": "health_check.tls_expiring",
+        "target": {
+            "name": event.name,
+            "service": event.service,
+            "url": event.url,
+        },
+        "tls_expires_at": event.tls_expires_at,
+        "days_until_expiry": event.days_until_expiry,
+        "timestamp": event.now,
     })
 }
 

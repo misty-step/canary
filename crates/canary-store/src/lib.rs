@@ -33,7 +33,7 @@ pub use health::{
     MonitorOverdueCommit, MonitorOverdueCommitResult, MonitorRecord, MonitorTransitionEvent,
     TargetCheckObservation, TargetCheckRead, TargetConflict, TargetInsert, TargetIntervalUpdate,
     TargetProbeCommit, TargetProbeCommitResult, TargetProbeSnapshot, TargetRecord,
-    TargetTransitionEvent,
+    TargetTransitionEvent, TlsExpiryEventCommit, TlsExpiryEventInsert, TlsExpiryScanCandidate,
 };
 pub use incidents::{IncidentCorrelation, IncidentCorrelationEvent};
 pub use ingest::{
@@ -260,6 +260,19 @@ impl Store {
     /// Return monitor state rows that have deadlines eligible for overdue evaluation.
     pub fn monitor_overdue_candidates(&self) -> Result<Vec<MonitorOverdueCandidate>> {
         health::monitor_overdue_candidates(&self.connection)
+    }
+
+    /// Return active HTTPS targets with their latest persisted TLS expiry.
+    pub fn tls_expiry_scan_candidates(&self) -> Result<Vec<TlsExpiryScanCandidate>> {
+        health::tls_expiry_scan_candidates(&self.connection)
+    }
+
+    /// Persist one TLS-expiring service event for post-commit webhook fanout.
+    pub fn record_tls_expiring_event(
+        &mut self,
+        event: TlsExpiryEventInsert,
+    ) -> Result<TlsExpiryEventCommit> {
+        health::record_tls_expiring_event(&mut self.connection, event)
     }
 
     /// Insert one API-key row whose raw secret has already been bcrypt-hashed.
@@ -3989,6 +4002,95 @@ mod tests {
         assert_eq!(
             candidates[0].deadline_at.as_deref(),
             Some("2026-05-28T20:00:05Z")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tls_expiry_scan_candidates_return_active_https_latest_non_null_expiry() -> Result<()> {
+        let store = migrated_store()?;
+        for (id, url, active) in [
+            ("TGT-active", "HTTPS://api.example.test/health", 1),
+            ("TGT-http", "http://api.example.test/health", 1),
+            ("TGT-inactive", "https://inactive.example.test/health", 0),
+        ] {
+            store.connection.execute(
+                "INSERT INTO targets (
+                    id, url, name, service, method, headers, interval_ms, timeout_ms,
+                    expected_status, body_contains, degraded_after, down_after, up_after,
+                    active, created_at
+                 ) VALUES (
+                    ?1, ?2, ?1, '', 'GET', NULL, 60000, 10000, '200', NULL,
+                    1, 3, 1, ?3, '2026-05-28T20:00:00Z'
+                 )",
+                params![id, url, active],
+            )?;
+        }
+        store.connection.execute(
+            "INSERT INTO target_checks (target_id, checked_at, result, tls_expires_at)
+             VALUES
+                ('TGT-active', '2026-05-28T20:00:00Z', 'success', '2026-06-01T00:00:00Z'),
+                ('TGT-active', '2026-05-29T20:00:00Z', 'success', NULL),
+                ('TGT-active', '2026-05-30T20:00:00Z', 'success', '2026-06-05T00:00:00Z'),
+                ('TGT-http', '2026-05-30T20:00:00Z', 'success', '2026-06-05T00:00:00Z'),
+                ('TGT-inactive', '2026-05-30T20:00:00Z', 'success', '2026-06-05T00:00:00Z')",
+            [],
+        )?;
+
+        let candidates = store.tls_expiry_scan_candidates()?;
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].target_id, "TGT-active");
+        assert_eq!(candidates[0].service, "TGT-active");
+        assert_eq!(candidates[0].tls_expires_at, "2026-06-05T00:00:00Z");
+        Ok(())
+    }
+
+    #[test]
+    fn record_tls_expiring_event_inserts_warning_timeline_payload()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+
+        let commit = store.record_tls_expiring_event(TlsExpiryEventInsert {
+            event_id: EventId::generate(),
+            target_id: "TGT-api".to_owned(),
+            name: "api-web".to_owned(),
+            service: "api".to_owned(),
+            url: "https://api.example.test/healthz".to_owned(),
+            tls_expires_at: "2026-06-05T00:00:00Z".to_owned(),
+            days_until_expiry: 7,
+            now: "2026-05-29T00:00:00Z".to_owned(),
+        })?;
+
+        assert_eq!(commit.event, "health_check.tls_expiring");
+        let payload: Value = serde_json::from_str(&commit.payload_json)?;
+        assert_eq!(payload["target"]["service"], "api");
+        assert_eq!(payload["tls_expires_at"], "2026-06-05T00:00:00Z");
+        assert_eq!(payload["days_until_expiry"], 7);
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT service, event, entity_type, entity_ref, severity, summary
+                 FROM service_events WHERE id = ?1",
+                [commit.id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )?,
+            (
+                "api".to_owned(),
+                "health_check.tls_expiring".to_owned(),
+                "target".to_owned(),
+                Some("TGT-api".to_owned()),
+                Some("warning".to_owned()),
+                "api: TLS expires in 7 day(s)".to_owned()
+            )
         );
         Ok(())
     }

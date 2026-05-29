@@ -667,6 +667,19 @@ the Rust server accepts production traffic:
     during checks so high-cardinality invalid-key traffic does not retain
     stale identities indefinitely. This is a narrow accounting boundary, not a
     generic request-identity framework.
+62. Rust now implements the Phoenix TLS-expiry scan as a persisted-data worker,
+    not a network probe. Target probing remains the only path that opens HTTP
+    or TLS sockets and persists `target_checks.tls_expires_at`; the new
+    `canary-workers::tls_scan` planner reads only that timestamp and emits a
+    warning for active HTTPS targets whose latest non-null TLS expiry is inside
+    the `[0, 14)` day window. `canary-store` owns the active HTTPS/latest-check
+    query and records the `health_check.tls_expiring` service event with
+    warning severity and Phoenix-compatible payload fields. `canary-server`
+    owns the named lifecycle thread, configurable daily cadence, and
+    best-effort post-commit webhook enqueue. Expired certificates, including
+    partial-day expired timestamps that integer whole-day math could otherwise
+    round to zero, do not emit expiring warnings; this is a deliberate
+    correctness guard before cutover.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -697,5 +710,6 @@ Phoenix behavior until the replacement is complete:
 1. Add a Phoenix-observed compatibility note for the intentional severity
    divergence above before cutover: this is a Rust correctness improvement over
    the current Phoenix read model, not a silent wire-shape change.
-2. Continue remaining Phoenix background behavior, especially TLS-expiry scans,
-   behind typed store or worker boundaries.
+2. Continue remaining Phoenix background behavior behind typed store or worker
+   boundaries, keeping each runtime adapter bespoke rather than introducing a
+   generic scheduler.

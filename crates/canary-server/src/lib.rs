@@ -71,6 +71,7 @@ mod monitor_overdue;
 mod rate_limit;
 mod retention_prune;
 mod target_probes;
+mod tls_scan;
 mod webhooks;
 
 pub use health_fanout::{
@@ -93,6 +94,10 @@ pub use target_probes::{
     TargetProbeLifecycleController, TargetProbeLifecycleReport, TargetProbeLifecycleWorker,
     TargetProbeOptions, TargetProbeOutcome, TargetProbeRuntime, TargetProbeRuntimeError,
     run_target_probe_once, validate_target_configuration,
+};
+pub use tls_scan::{
+    TlsExpiryScanLifecycle, TlsExpiryScanLifecycleConfig, TlsExpiryScanLifecycleReport,
+    TlsExpiryScanLifecycleWorker, TlsExpiryScanRuntimeError, run_tls_expiry_scan_once,
 };
 use webhooks::NoopWebhookCooldown;
 pub use webhooks::{
@@ -126,6 +131,7 @@ const DEFAULT_WEBHOOK_DRAIN_MAX_JOBS: u32 = 25;
 const DEFAULT_TARGET_PROBE_INTERVAL: StdDuration = StdDuration::from_secs(1);
 const DEFAULT_MONITOR_OVERDUE_INTERVAL: StdDuration = StdDuration::from_secs(1);
 const DEFAULT_RETENTION_PRUNE_INTERVAL: StdDuration = StdDuration::from_secs(24 * 60 * 60);
+const DEFAULT_TLS_EXPIRY_SCAN_INTERVAL: StdDuration = StdDuration::from_secs(24 * 60 * 60);
 
 /// Runtime configuration for the top-level Canary server process.
 #[derive(Debug, Clone)]
@@ -146,6 +152,8 @@ pub struct ServerConfig {
     pub monitor_overdue_interval: StdDuration,
     /// Minimum interval between retention prune passes.
     pub retention_prune_interval: StdDuration,
+    /// Minimum interval between persisted TLS-expiry scan passes.
+    pub tls_expiry_scan_interval: StdDuration,
     /// Retention policy used by the maintenance prune worker.
     pub retention_policy: RetentionPolicy,
     /// Client identity source for silent invalid-key accounting.
@@ -164,6 +172,7 @@ impl ServerConfig {
             target_probe_options: TargetProbeOptions::default(),
             monitor_overdue_interval: DEFAULT_MONITOR_OVERDUE_INTERVAL,
             retention_prune_interval: DEFAULT_RETENTION_PRUNE_INTERVAL,
+            tls_expiry_scan_interval: DEFAULT_TLS_EXPIRY_SCAN_INTERVAL,
             retention_policy: RetentionPolicy::default(),
             auth_fail_identity: AuthFailIdentityConfig::default(),
         }
@@ -177,6 +186,7 @@ pub struct CanaryServer {
     target_probe_worker: TargetProbeLifecycleWorker,
     monitor_overdue_worker: MonitorOverdueLifecycleWorker,
     retention_prune_worker: RetentionPruneLifecycleWorker,
+    tls_expiry_scan_worker: TlsExpiryScanLifecycleWorker,
     enqueue_failure_sink: Arc<EnqueueFailureRecorder>,
 }
 
@@ -201,6 +211,11 @@ impl CanaryServer {
         if config.retention_prune_interval.is_zero() {
             return Err(ServerBootError::InvalidConfig(
                 "retention prune interval must be greater than zero".to_owned(),
+            ));
+        }
+        if config.tls_expiry_scan_interval.is_zero() {
+            return Err(ServerBootError::InvalidConfig(
+                "tls expiry scan interval must be greater than zero".to_owned(),
             ));
         }
 
@@ -266,6 +281,13 @@ impl CanaryServer {
             },
         )
         .map_err(ServerBootError::RetentionPruneWorker)?;
+        let tls_expiry_scan_worker = TlsExpiryScanLifecycleWorker::spawn(
+            TlsExpiryScanLifecycle::new(ingest_state.store.clone(), webhook_sink),
+            TlsExpiryScanLifecycleConfig {
+                tick_interval: config.tls_expiry_scan_interval,
+            },
+        )
+        .map_err(ServerBootError::TlsExpiryScanWorker)?;
         let ingest_state = ingest_state
             .with_target_control(Arc::new(target_probe_worker.controller()))
             .with_auth_fail_identity(config.auth_fail_identity)
@@ -278,6 +300,7 @@ impl CanaryServer {
             target_probe_worker,
             monitor_overdue_worker,
             retention_prune_worker,
+            tls_expiry_scan_worker,
             enqueue_failure_sink,
         })
     }
@@ -295,6 +318,11 @@ impl CanaryServer {
     /// Return retention-prune lifecycle failures observed by this process.
     pub fn retention_prune_failure_count(&self) -> u64 {
         self.retention_prune_worker.failure_count()
+    }
+
+    /// Return TLS-expiry scan lifecycle failures observed by this process.
+    pub fn tls_expiry_scan_failure_count(&self) -> u64 {
+        self.tls_expiry_scan_worker.failure_count()
     }
 
     /// Serve the composed router until `shutdown` resolves, then stop the worker.
@@ -317,6 +345,9 @@ impl CanaryServer {
         self.retention_prune_worker
             .join()
             .map_err(ServerRunError::RetentionPruneWorker)?;
+        self.tls_expiry_scan_worker
+            .join()
+            .map_err(ServerRunError::TlsExpiryScanWorker)?;
         self.webhook_worker
             .join()
             .map_err(ServerRunError::WebhookWorker)
@@ -340,6 +371,8 @@ pub enum ServerBootError {
     MonitorOverdueWorker(String),
     /// Retention prune lifecycle worker failed to start.
     RetentionPruneWorker(String),
+    /// TLS-expiry scan lifecycle worker failed to start.
+    TlsExpiryScanWorker(String),
 }
 
 impl fmt::Display for ServerBootError {
@@ -352,6 +385,7 @@ impl fmt::Display for ServerBootError {
             Self::TargetProbeWorker(error) => formatter.write_str(error),
             Self::MonitorOverdueWorker(error) => formatter.write_str(error),
             Self::RetentionPruneWorker(error) => formatter.write_str(error),
+            Self::TlsExpiryScanWorker(error) => formatter.write_str(error),
         }
     }
 }
@@ -371,6 +405,8 @@ pub enum ServerRunError {
     MonitorOverdueWorker(String),
     /// The retention prune worker did not shut down cleanly.
     RetentionPruneWorker(String),
+    /// The TLS-expiry scan worker did not shut down cleanly.
+    TlsExpiryScanWorker(String),
 }
 
 impl fmt::Display for ServerRunError {
@@ -381,6 +417,7 @@ impl fmt::Display for ServerRunError {
             Self::TargetProbeWorker(error) => formatter.write_str(error),
             Self::MonitorOverdueWorker(error) => formatter.write_str(error),
             Self::RetentionPruneWorker(error) => formatter.write_str(error),
+            Self::TlsExpiryScanWorker(error) => formatter.write_str(error),
         }
     }
 }
@@ -4592,6 +4629,26 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "retention prune interval must be greater than zero"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn canary_server_boot_rejects_zero_tls_expiry_scan_interval() -> Result<(), Box<dyn Error>> {
+        let path = temp_db_path("tls-expiry-zero");
+        let config = ServerConfig {
+            tls_expiry_scan_interval: StdDuration::ZERO,
+            ..ServerConfig::new(path)
+        };
+
+        let error = match CanaryServer::boot(config) {
+            Ok(_) => return Err("zero interval should be rejected".into()),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "tls expiry scan interval must be greater than zero"
         );
 
         Ok(())

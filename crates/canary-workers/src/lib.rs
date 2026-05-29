@@ -6,4 +6,5 @@
 
 pub mod health;
 pub mod retention;
+pub mod tls_scan;
 pub mod webhooks;
