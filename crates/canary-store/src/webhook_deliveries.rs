@@ -112,6 +112,8 @@ pub struct WebhookSubscription {
     pub secret: String,
     /// Whether the subscription is active.
     pub active: bool,
+    /// RFC3339 creation timestamp.
+    pub created_at: String,
 }
 
 /// Webhook subscription row to persist.
@@ -157,6 +159,22 @@ pub(crate) fn insert_subscription(
         ],
     )?;
     Ok(())
+}
+
+pub(crate) fn list_subscriptions(connection: &Connection) -> Result<Vec<WebhookSubscription>> {
+    let mut statement = connection.prepare(
+        "SELECT id, url, events, secret, active, created_at
+         FROM webhooks
+         ORDER BY created_at, id",
+    )?;
+    let rows = statement.query_map([], subscription_row)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+pub(crate) fn delete_subscription(connection: &mut Connection, webhook_id: &str) -> Result<bool> {
+    let changed = connection.execute("DELETE FROM webhooks WHERE id = ?1", [webhook_id])?;
+    Ok(changed > 0)
 }
 
 pub(crate) fn create_pending(
@@ -294,17 +312,12 @@ pub(crate) fn active_subscriptions_for_event(
     event: &str,
 ) -> Result<Vec<WebhookSubscription>> {
     let mut statement = connection.prepare(
-        "SELECT id, url, events, secret, active FROM webhooks WHERE active = 1 ORDER BY created_at, id",
+        "SELECT id, url, events, secret, active, created_at
+         FROM webhooks
+         WHERE active = 1
+         ORDER BY created_at, id",
     )?;
-    let rows = statement.query_map([], |row| {
-        Ok(WebhookSubscription {
-            id: row.get(0)?,
-            url: row.get(1)?,
-            events: row.get(2)?,
-            secret: row.get(3)?,
-            active: row.get::<_, i64>(4)? == 1,
-        })
-    })?;
+    let rows = statement.query_map([], subscription_row)?;
 
     let subscriptions = rows
         .collect::<std::result::Result<Vec<_>, _>>()?
@@ -318,23 +331,29 @@ pub(crate) fn subscription_by_id(
     connection: &Connection,
     webhook_id: &str,
 ) -> Result<Option<WebhookSubscription>> {
-    let mut statement =
-        connection.prepare("SELECT id, url, events, secret, active FROM webhooks WHERE id = ?1")?;
-    let result = statement.query_row([webhook_id], |row| {
-        Ok(WebhookSubscription {
-            id: row.get(0)?,
-            url: row.get(1)?,
-            events: row.get(2)?,
-            secret: row.get(3)?,
-            active: row.get::<_, i64>(4)? == 1,
-        })
-    });
+    let mut statement = connection.prepare(
+        "SELECT id, url, events, secret, active, created_at
+         FROM webhooks
+         WHERE id = ?1",
+    )?;
+    let result = statement.query_row([webhook_id], subscription_row);
 
     match result {
         Ok(subscription) => Ok(Some(subscription)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+fn subscription_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WebhookSubscription> {
+    Ok(WebhookSubscription {
+        id: row.get(0)?,
+        url: row.get(1)?,
+        events: row.get(2)?,
+        secret: row.get(3)?,
+        active: row.get::<_, i64>(4)? == 1,
+        created_at: row.get(5)?,
+    })
 }
 
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WebhookDeliveryRow> {

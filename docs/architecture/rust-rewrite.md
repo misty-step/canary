@@ -501,6 +501,19 @@ the Rust server accepts production traffic:
     `expected_every_ms` is required and positive, `grace_ms` defaults to zero
     and may be zero, duplicate names return 422 validation errors, and missing
     deletes return the RFC 9457 404 problem body.
+48. Rust now implements the Phoenix admin webhook subscription surface:
+    `GET /api/v1/webhooks`, `POST /api/v1/webhooks`,
+    `DELETE /api/v1/webhooks/{id}`, and `POST /api/v1/webhooks/{id}/test`.
+    The server handler validates only the product contract Phoenix currently
+    enforces on creation: non-empty URL and event array, accepted event names
+    from the shared business/diagnostic event list, a generated `WHK-` id, a
+    one-time 32-character secret in the create response, and no secret exposure
+    in list responses. The store owns subscription list/insert/delete over the
+    existing webhook table used by the delivery worker, preserving the
+    single-writer boundary. The test route reuses the worker request builder and
+    outbound transport trait, but calls the blocking HTTP transport through
+    `spawn_blocking` and does not create service events, retry jobs, or delivery
+    ledger rows.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed

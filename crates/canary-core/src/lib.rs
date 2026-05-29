@@ -8,3 +8,5 @@ pub mod health;
 pub mod ids;
 pub mod ingest;
 pub mod query;
+pub mod secrets;
+pub mod webhook_events;

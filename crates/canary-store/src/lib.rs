@@ -371,12 +371,22 @@ impl Store {
         webhook_deliveries::subscription_by_id(&self.connection, webhook_id)
     }
 
+    /// Return all webhook subscriptions in admin list order.
+    pub fn webhook_subscriptions(&self) -> Result<Vec<WebhookSubscription>> {
+        webhook_deliveries::list_subscriptions(&self.connection)
+    }
+
     /// Insert one webhook subscription row.
     pub fn insert_webhook_subscription(
         &mut self,
         subscription: WebhookSubscriptionInsert,
     ) -> Result<()> {
         webhook_deliveries::insert_subscription(&mut self.connection, subscription)
+    }
+
+    /// Delete one webhook subscription row.
+    pub fn delete_webhook_subscription(&mut self, webhook_id: &str) -> Result<bool> {
+        webhook_deliveries::delete_subscription(&mut self.connection, webhook_id)
     }
 
     /// Insert one scheduled webhook delivery job.
@@ -891,6 +901,43 @@ mod tests {
         assert_eq!(subscriptions[0].id, "WHK-123456789abc");
         assert!(subscriptions[0].active);
         assert!(subscriptions[0].subscribes_to("health_check.state_change"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn admin_webhook_subscriptions_list_insert_and_delete_rows() -> Result<()> {
+        let mut store = migrated_store()?;
+        insert_webhook(
+            &store,
+            "WHK-zeta",
+            "[\"annotation.added\"]",
+            1,
+            "2026-05-28T20:02:00Z",
+        )?;
+        store.insert_webhook_subscription(WebhookSubscriptionInsert {
+            id: "WHK-alpha".to_owned(),
+            url: "https://example.test/alpha".to_owned(),
+            events: vec!["error.new_class".to_owned(), "canary.ping".to_owned()],
+            secret: "generated-secret".to_owned(),
+            active: true,
+            created_at: "2026-05-28T20:00:00Z".to_owned(),
+        })?;
+
+        let subscriptions = store.webhook_subscriptions()?;
+        assert_eq!(subscriptions.len(), 2);
+        assert_eq!(subscriptions[0].id, "WHK-alpha");
+        assert_eq!(subscriptions[0].url, "https://example.test/alpha");
+        assert_eq!(
+            subscriptions[0].events,
+            "[\"error.new_class\",\"canary.ping\"]"
+        );
+        assert!(subscriptions[0].active);
+        assert_eq!(subscriptions[1].id, "WHK-zeta");
+
+        assert!(store.delete_webhook_subscription("WHK-alpha")?);
+        assert!(store.webhook_subscription("WHK-alpha")?.is_none());
+        assert!(!store.delete_webhook_subscription("WHK-alpha")?);
 
         Ok(())
     }

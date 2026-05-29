@@ -41,12 +41,15 @@ use canary_ingest::{
 };
 use canary_store::{
     IncidentCorrelation, IncidentListOptions, MonitorInsert, MonitorRecord, Store, TargetInsert,
-    TargetRecord,
+    TargetRecord, WebhookSubscription, WebhookSubscriptionInsert,
 };
 use canary_store::{QueryError, ServiceQueryOptions};
 use canary_workers::health::{
     HealthPlanError, MonitorCheckInInput, MonitorCheckInStatus, MonitorMode, MonitorSnapshot,
     ObservationContext, plan_monitor_check_in,
+};
+use canary_workers::webhooks::{
+    TransportResult, WebhookEndpoint, WebhookJob, WebhookRequest, build_request,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -81,6 +84,22 @@ pub use webhooks::{
 
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 const PROBLEM_CONTENT_TYPE: &str = "application/problem+json; charset=utf-8";
+
+fn default_webhook_transport() -> Arc<dyn WebhookTransport> {
+    Arc::new(LazyHttpWebhookTransport)
+}
+
+struct LazyHttpWebhookTransport;
+
+impl WebhookTransport for LazyHttpWebhookTransport {
+    fn send(&self, request: &WebhookRequest) -> TransportResult {
+        let request = request.clone();
+        match HttpWebhookTransport::try_new() {
+            Ok(transport) => transport.send(&request),
+            Err(error) => TransportResult::RequestError(error),
+        }
+    }
+}
 const DEFAULT_WEBHOOK_DRAIN_INTERVAL: StdDuration = StdDuration::from_secs(5);
 const DEFAULT_WEBHOOK_DRAIN_MAX_JOBS: u32 = 25;
 const DEFAULT_TARGET_PROBE_INTERVAL: StdDuration = StdDuration::from_secs(1);
@@ -465,6 +484,9 @@ pub fn ingest_router(state: IngestState) -> Router {
         .route("/api/v1/errors/{id}", get(show_error))
         .route("/api/v1/monitors", get(list_monitors).post(create_monitor))
         .route("/api/v1/monitors/{id}", delete(delete_monitor))
+        .route("/api/v1/webhooks", get(list_webhooks).post(create_webhook))
+        .route("/api/v1/webhooks/{id}", delete(delete_webhook))
+        .route("/api/v1/webhooks/{id}/test", post(test_webhook))
         .route("/api/v1/targets", get(list_targets).post(create_target))
         .route(
             "/api/v1/targets/{id}",
@@ -483,6 +505,7 @@ pub struct IngestState {
     effect_sink: Arc<dyn IngestEffectSink>,
     health_fanout: HealthEventFanout,
     target_control: Arc<dyn TargetControlSink>,
+    webhook_transport: Arc<dyn WebhookTransport>,
     allow_private_targets: bool,
 }
 
@@ -514,6 +537,7 @@ impl IngestState {
             effect_sink: webhook_sink.clone(),
             health_fanout: HealthEventFanout::new_without_failure_sink(webhook_sink),
             target_control: Arc::new(NoopTargetControlSink),
+            webhook_transport: default_webhook_transport(),
             allow_private_targets: false,
         }
     }
@@ -539,6 +563,7 @@ impl IngestState {
             effect_sink,
             health_fanout: HealthEventFanout::new_without_failure_sink(Arc::new(NoopEventSink)),
             target_control: Arc::new(NoopTargetControlSink),
+            webhook_transport: default_webhook_transport(),
             allow_private_targets: false,
         }
     }
@@ -556,6 +581,7 @@ impl IngestState {
             effect_sink,
             health_fanout: HealthEventFanout::new_without_failure_sink(event_sink),
             target_control: Arc::new(NoopTargetControlSink),
+            webhook_transport: default_webhook_transport(),
             allow_private_targets: false,
         }
     }
@@ -573,6 +599,7 @@ impl IngestState {
             effect_sink,
             health_fanout,
             target_control: Arc::new(NoopTargetControlSink),
+            webhook_transport: default_webhook_transport(),
             allow_private_targets: false,
         }
     }
@@ -580,6 +607,12 @@ impl IngestState {
     /// Attach the target probe lifecycle control boundary used by admin routes.
     pub fn with_target_control(mut self, target_control: Arc<dyn TargetControlSink>) -> Self {
         self.target_control = target_control;
+        self
+    }
+
+    /// Attach the outbound webhook transport used by the admin test route.
+    pub fn with_webhook_transport(mut self, webhook_transport: Arc<dyn WebhookTransport>) -> Self {
+        self.webhook_transport = webhook_transport;
         self
     }
 
@@ -890,6 +923,146 @@ async fn delete_monitor(
     }
 }
 
+async fn list_webhooks(State(state): State<IngestState>, headers: HeaderMap) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+        return problem_response(*problem);
+    }
+
+    let store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+
+    match store.webhook_subscriptions() {
+        Ok(webhooks) => json_status_response(
+            StatusCode::OK.as_u16(),
+            json!({"webhooks": webhooks.into_iter().map(webhook_response).collect::<Vec<_>>()}),
+        ),
+        Err(_) => problem_response(internal_problem()),
+    }
+}
+
+async fn create_webhook(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    if let Err(problem) = check_content_length(&headers) {
+        return problem_response(*problem);
+    }
+
+    if body.len() as u64 > MAX_JSON_BODY_BYTES {
+        return problem_response(payload_too_large_problem(
+            "Request body exceeds 100KB limit.",
+        ));
+    }
+
+    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+        return problem_response(*problem);
+    }
+
+    let attrs = match decode_json_object(&body, None) {
+        Ok(attrs) => attrs,
+        Err(problem) => return problem_response(*problem),
+    };
+    let webhook = match parse_webhook_create(attrs) {
+        Ok(webhook) => webhook,
+        Err(problem) => return problem_response(*problem),
+    };
+    let response_body = webhook_insert_response(&webhook);
+
+    let mut store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    match store.insert_webhook_subscription(webhook) {
+        Ok(()) => json_status_response(StatusCode::CREATED.as_u16(), response_body),
+        Err(_) => problem_response(internal_problem()),
+    }
+}
+
+async fn delete_webhook(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+        return problem_response(*problem);
+    }
+
+    let mut store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    match store.delete_webhook_subscription(&id) {
+        Ok(true) => response(
+            StatusCode::NO_CONTENT.as_u16(),
+            "text/plain; charset=utf-8",
+            Body::empty(),
+        ),
+        Ok(false) => problem_response(not_found_problem("Webhook not found.")),
+        Err(_) => problem_response(internal_problem()),
+    }
+}
+
+async fn test_webhook(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+        return problem_response(*problem);
+    }
+
+    let subscription = {
+        let store = match state.store.lock() {
+            Ok(store) => store,
+            Err(_) => return problem_response(internal_problem()),
+        };
+        match store.webhook_subscription(&id) {
+            Ok(Some(subscription)) => subscription,
+            Ok(None) => return problem_response(not_found_problem("Webhook not found.")),
+            Err(_) => return problem_response(internal_problem()),
+        }
+    };
+
+    let endpoint = webhook_endpoint(subscription);
+    let payload = json!({
+        "event": "canary.ping",
+        "message": "Webhook test from Canary",
+        "test": true,
+        "timestamp": current_rfc3339(),
+    });
+    let job = WebhookJob {
+        webhook_id: endpoint.id.clone(),
+        payload,
+        event: "canary.ping".to_owned(),
+        delivery_id: Some(canary_core::ids::DeliveryId::generate().into_string()),
+        legacy_job_id: None,
+        attempt: 1,
+        max_attempts: 1,
+    };
+    let Some(request) = build_request(&endpoint, &job) else {
+        return problem_response(webhook_delivery_failed_problem("webhook_inactive"));
+    };
+
+    let transport = state.webhook_transport.clone();
+    match tokio::task::spawn_blocking(move || transport.send(&request)).await {
+        Ok(result) => match result {
+            TransportResult::HttpStatus(status) if (200..=299).contains(&status) => {
+                json_status_response(StatusCode::OK.as_u16(), json!({"status": "delivered"}))
+            }
+            TransportResult::HttpStatus(status) => {
+                problem_response(webhook_delivery_failed_problem(format!("HTTP {status}")))
+            }
+            TransportResult::RequestError(reason) => {
+                problem_response(webhook_delivery_failed_problem(reason))
+            }
+        },
+        Err(error) => problem_response(webhook_delivery_failed_problem(error.to_string())),
+    }
+}
+
 async fn create_target(
     State(state): State<IngestState>,
     headers: HeaderMap,
@@ -1181,6 +1354,39 @@ fn monitor_insert_response(monitor: &MonitorInsert) -> Value {
     })
 }
 
+fn webhook_response(webhook: WebhookSubscription) -> Value {
+    json!({
+        "id": webhook.id,
+        "url": webhook.url,
+        "events": webhook_events(&webhook.events),
+        "active": webhook.active,
+        "created_at": webhook.created_at,
+    })
+}
+
+fn webhook_insert_response(webhook: &WebhookSubscriptionInsert) -> Value {
+    json!({
+        "id": webhook.id,
+        "url": webhook.url,
+        "events": webhook.events,
+        "secret": webhook.secret,
+        "created_at": webhook.created_at,
+    })
+}
+
+fn webhook_events(encoded: &str) -> Vec<String> {
+    serde_json::from_str(encoded).unwrap_or_default()
+}
+
+fn webhook_endpoint(webhook: WebhookSubscription) -> WebhookEndpoint {
+    WebhookEndpoint {
+        id: webhook.id,
+        url: webhook.url,
+        secret: webhook.secret,
+        active: webhook.active,
+    }
+}
+
 fn target_response(target: TargetRecord) -> Value {
     json!({
         "id": target.id,
@@ -1208,6 +1414,52 @@ fn target_insert_response(target: &TargetInsert) -> Value {
         "expected_status": target.expected_status,
         "active": target.active,
         "created_at": target.created_at,
+    })
+}
+
+fn parse_webhook_create(
+    attrs: Map<String, Value>,
+) -> Result<WebhookSubscriptionInsert, Box<ProblemDetails>> {
+    let mut errors: ValidationErrors = BTreeMap::new();
+    let url = required_string(&attrs, "url", &mut errors);
+    let events = required_string_array(&attrs, "events", &mut errors);
+
+    if !errors.is_empty() {
+        return Err(Box::new(webhook_validation_problem(
+            "Invalid webhook configuration.",
+        )));
+    }
+
+    let Some(url) = url else {
+        return Err(Box::new(webhook_validation_problem(
+            "Invalid webhook configuration.",
+        )));
+    };
+    let Some(events) = events else {
+        return Err(Box::new(webhook_validation_problem(
+            "Invalid webhook configuration.",
+        )));
+    };
+
+    let invalid = events
+        .iter()
+        .filter(|event| !canary_core::webhook_events::valid(event))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !invalid.is_empty() {
+        return Err(Box::new(webhook_validation_problem(format!(
+            "Invalid event types: {}",
+            invalid.join(", ")
+        ))));
+    }
+
+    Ok(WebhookSubscriptionInsert {
+        id: canary_core::ids::WebhookId::generate().into_string(),
+        url,
+        events,
+        secret: canary_core::secrets::webhook_secret(),
+        active: true,
+        created_at: current_rfc3339(),
     })
 }
 
@@ -1490,6 +1742,41 @@ fn parse_check_in(attrs: Map<String, Value>) -> Result<ParsedCheckIn, Box<Proble
             context: encode_context(attrs.get("context")),
         },
     })
+}
+
+fn required_string_array(
+    attrs: &Map<String, Value>,
+    key: &str,
+    errors: &mut ValidationErrors,
+) -> Option<Vec<String>> {
+    match attrs.get(key) {
+        Some(Value::Array(values)) => {
+            let mut strings = Vec::new();
+            for (index, value) in values.iter().enumerate() {
+                match value {
+                    Value::String(event) if !event.is_empty() => strings.push(event.clone()),
+                    _ => {
+                        errors.insert(
+                            format!("{key}.{index}"),
+                            vec!["must be a non-empty string".to_owned()],
+                        );
+                    }
+                }
+            }
+            if errors
+                .keys()
+                .any(|field| field.starts_with(&format!("{key}.")))
+            {
+                None
+            } else {
+                Some(strings)
+            }
+        }
+        _ => {
+            errors.insert(key.to_owned(), vec!["must be an array".to_owned()]);
+            None
+        }
+    }
 }
 
 fn required_string(
@@ -1796,6 +2083,19 @@ fn monitor_validation_problem(errors: ValidationErrors) -> ProblemDetails {
         None,
     )
     .with_extra("errors", json!(errors))
+}
+
+fn webhook_validation_problem(detail: impl Into<String>) -> ProblemDetails {
+    ProblemDetails::new(422, ProblemCode::ValidationError, detail, None)
+}
+
+fn webhook_delivery_failed_problem(reason: impl Into<String>) -> ProblemDetails {
+    ProblemDetails::new(
+        502,
+        ProblemCode::Other("webhook_delivery_failed".to_owned()),
+        format!("Webhook test delivery failed: {}", reason.into()),
+        None,
+    )
 }
 
 fn target_validation_problem(errors: ValidationErrors) -> ProblemDetails {
@@ -3557,6 +3857,217 @@ mod tests {
         assert_eq!(
             json_body(duplicate_response).await?["errors"]["name"],
             json!(["has already been taken"])
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admin_webhook_mutations_follow_phoenix_contract() -> Result<(), Box<dyn Error>> {
+        let router = ingest_router(
+            test_ingest_state()?.with_webhook_transport(Arc::new(RecordingTransport::status(204))),
+        );
+
+        let create_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/webhooks",
+                ADMIN_KEY,
+                r#"{"url":"https://example.com/hook","events":["error.new_class","canary.ping"]}"#,
+            )?)
+            .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let created = json_body(create_response).await?;
+        let webhook_id = created["id"]
+            .as_str()
+            .ok_or("missing webhook id")?
+            .to_owned();
+        assert!(webhook_id.starts_with("WHK-"));
+        assert_eq!(created["url"], "https://example.com/hook");
+        assert_eq!(created["events"], json!(["error.new_class", "canary.ping"]));
+        assert_eq!(
+            created["secret"]
+                .as_str()
+                .ok_or("missing webhook secret")?
+                .len(),
+            32
+        );
+        assert!(created["created_at"].as_str().is_some());
+
+        let list_response = router
+            .clone()
+            .oneshot(read_request(ADMIN_KEY, "/api/v1/webhooks")?)
+            .await?;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let listed = json_body(list_response).await?;
+        let listed_webhook = listed["webhooks"]
+            .as_array()
+            .ok_or("webhooks should be an array")?
+            .iter()
+            .find(|webhook| webhook["id"] == webhook_id)
+            .ok_or("missing listed webhook")?;
+        assert_eq!(listed_webhook["url"], "https://example.com/hook");
+        assert_eq!(
+            listed_webhook["events"],
+            json!(["error.new_class", "canary.ping"])
+        );
+        assert_eq!(listed_webhook["active"], true);
+        assert!(listed_webhook.get("secret").is_none());
+
+        let test_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/webhooks/{webhook_id}/test"),
+                ADMIN_KEY,
+                "{}",
+            )?)
+            .await?;
+        assert_eq!(test_response.status(), StatusCode::OK);
+        assert_eq!(json_body(test_response).await?["status"], "delivered");
+
+        let delete_response = router
+            .clone()
+            .oneshot(
+                Request::delete(format!("/api/v1/webhooks/{webhook_id}"))
+                    .header("authorization", format!("Bearer {ADMIN_KEY}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+        let missing_response = router
+            .clone()
+            .oneshot(
+                Request::delete(format!("/api/v1/webhooks/{webhook_id}"))
+                    .header("authorization", format!("Bearer {ADMIN_KEY}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            json_body(missing_response).await?["detail"],
+            "Webhook not found."
+        );
+
+        let final_list = router
+            .oneshot(read_request(ADMIN_KEY, "/api/v1/webhooks")?)
+            .await?;
+        assert_eq!(json_body(final_list).await?["webhooks"], json!([]));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admin_webhook_test_delivery_uses_blocking_transport_boundary()
+    -> Result<(), Box<dyn Error>> {
+        let transport = Arc::new(ThreadRecordingTransport::status(500));
+        let router = ingest_router(test_ingest_state()?.with_webhook_transport(transport.clone()));
+        let caller_thread = thread::current().id();
+
+        let create_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/webhooks",
+                ADMIN_KEY,
+                r#"{"url":"https://example.com/hook","events":["canary.ping"]}"#,
+            )?)
+            .await?;
+        let webhook_id = json_body(create_response).await?["id"]
+            .as_str()
+            .ok_or("missing webhook id")?
+            .to_owned();
+
+        let failed_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/webhooks/{webhook_id}/test"),
+                ADMIN_KEY,
+                "{}",
+            )?)
+            .await?;
+        assert_eq!(failed_response.status(), StatusCode::BAD_GATEWAY);
+        let body = json_body(failed_response).await?;
+        assert_eq!(body["code"], "webhook_delivery_failed");
+        assert_eq!(body["detail"], "Webhook test delivery failed: HTTP 500");
+        assert!(
+            transport
+                .thread_ids()?
+                .iter()
+                .all(|thread_id| *thread_id != caller_thread)
+        );
+
+        let missing_response = router
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/webhooks/WHK-missing/test",
+                ADMIN_KEY,
+                "{}",
+            )?)
+            .await?;
+        assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admin_webhook_create_rejects_invalid_scope_and_events() -> Result<(), Box<dyn Error>> {
+        let router = ingest_router(test_ingest_state()?);
+
+        let forbidden_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/webhooks",
+                INGEST_KEY,
+                r#"{"url":"https://example.com/hook","events":["error.new_class"]}"#,
+            )?)
+            .await?;
+        assert_eq!(forbidden_response.status(), StatusCode::FORBIDDEN);
+        let list_after_forbidden = router
+            .clone()
+            .oneshot(read_request(ADMIN_KEY, "/api/v1/webhooks")?)
+            .await?;
+        assert_eq!(
+            json_body(list_after_forbidden).await?["webhooks"],
+            json!([])
+        );
+
+        let invalid_event_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/webhooks",
+                ADMIN_KEY,
+                r#"{"url":"https://example.com/hook","events":["bogus.event"]}"#,
+            )?)
+            .await?;
+        assert_eq!(
+            invalid_event_response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let invalid_event = json_body(invalid_event_response).await?;
+        assert_eq!(invalid_event["code"], "validation_error");
+        assert_eq!(invalid_event["detail"], "Invalid event types: bogus.event");
+
+        let invalid_shape_response = router
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/webhooks",
+                ADMIN_KEY,
+                r#"{"url":"","events":["error.new_class",7]}"#,
+            )?)
+            .await?;
+        assert_eq!(
+            invalid_shape_response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            json_body(invalid_shape_response).await?["detail"],
+            "Invalid webhook configuration."
         );
 
         Ok(())
