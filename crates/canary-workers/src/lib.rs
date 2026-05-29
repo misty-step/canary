@@ -5,4 +5,5 @@
 //! `canary-http`.
 
 pub mod health;
+pub mod retention;
 pub mod webhooks;

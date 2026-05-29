@@ -16,6 +16,7 @@ mod ingest;
 mod metrics;
 mod oban_jobs;
 mod query;
+mod retention;
 mod schema;
 mod webhook_deliveries;
 
@@ -46,6 +47,7 @@ pub use query::{
     ErrorSummaryItem, IncidentListOptions, QueryError, QueryResult, RecentTransition, SearchResult,
     ServiceQueryOptions, TimelineQueryError, TimelineQueryOptions, TimelineQueryResult,
 };
+pub use retention::{RetentionPrune, RetentionPruneReport};
 pub use webhook_deliveries::{
     WebhookDeliveryInsert, WebhookDeliveryListOptions, WebhookDeliveryPageError,
     WebhookDeliveryPageOptions, WebhookDeliveryPageResult, WebhookDeliveryRow,
@@ -556,6 +558,11 @@ impl Store {
     /// Gather a point-in-time Prometheus metrics snapshot.
     pub fn metrics_snapshot(&self) -> Result<MetricsSnapshot> {
         metrics::snapshot(&self.connection)
+    }
+
+    /// Prune old errors, service events, and target checks in bounded batches.
+    pub fn prune_retention(&mut self, prune: RetentionPrune) -> Result<RetentionPruneReport> {
+        retention::prune(&mut self.connection, prune)
     }
 
     /// Count persisted errors.
@@ -2066,6 +2073,99 @@ mod tests {
             health::target_checks_at(&store.connection, "TGT-api", "99h", now),
             Err(QueryError::InvalidWindow)
         ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn retention_prune_deletes_old_rows_in_batches_and_keeps_recent_rows()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        store.insert_target(TargetInsert {
+            id: "TGT-retention".to_owned(),
+            url: "https://retention.example.test/health".to_owned(),
+            name: "retention".to_owned(),
+            service: "retention".to_owned(),
+            method: "GET".to_owned(),
+            headers: None,
+            interval_ms: 60_000,
+            timeout_ms: 10_000,
+            expected_status: "200".to_owned(),
+            body_contains: None,
+            degraded_after: 2,
+            down_after: 3,
+            up_after: 1,
+            active: true,
+            created_at: "2026-05-28T20:00:00Z".to_owned(),
+        })?;
+
+        for index in 0..1005 {
+            store.connection.execute(
+                "INSERT INTO errors (
+                    id, service, error_class, message, group_hash, created_at
+                 ) VALUES (?1, 'retention', 'RuntimeError', 'old', ?2, '2026-04-01T00:00:00Z')",
+                params![format!("ERR-old-{index}"), format!("grp-old-{index}")],
+            )?;
+        }
+        store.connection.execute(
+            "INSERT INTO errors (
+                id, service, error_class, message, group_hash, created_at
+             ) VALUES ('ERR-recent', 'retention', 'RuntimeError', 'recent', 'grp-recent', '2026-05-28T00:00:00Z')",
+            [],
+        )?;
+
+        store.connection.execute(
+            "INSERT INTO service_events (
+                id, service, event, entity_type, entity_ref, severity, summary, payload, created_at
+             ) VALUES (
+                'EVT-old', 'retention', 'error.new_class', 'error_group', 'grp-old',
+                'error', 'old event', '{\"event\":\"error.new_class\"}', '2026-04-01T00:00:00Z'
+             )",
+            [],
+        )?;
+        store.connection.execute(
+            "INSERT INTO service_events (
+                id, service, event, entity_type, entity_ref, severity, summary, payload, created_at
+             ) VALUES (
+                'EVT-recent', 'retention', 'error.new_class', 'error_group', 'grp-recent',
+                'error', 'recent event', '{\"event\":\"error.new_class\"}', '2026-05-28T00:00:00Z'
+             )",
+            [],
+        )?;
+
+        store.connection.execute(
+            "INSERT INTO target_checks (target_id, checked_at, result)
+             VALUES ('TGT-retention', '2026-05-01T00:00:00Z', 'success')",
+            [],
+        )?;
+        store.connection.execute(
+            "INSERT INTO target_checks (target_id, checked_at, result)
+             VALUES ('TGT-retention', '2026-05-28T00:00:00Z', 'success')",
+            [],
+        )?;
+
+        let report = store.prune_retention(RetentionPrune {
+            error_cutoff: "2026-05-01T00:00:00Z".to_owned(),
+            check_cutoff: "2026-05-22T00:00:00Z".to_owned(),
+        })?;
+
+        assert_eq!(
+            report,
+            RetentionPruneReport {
+                errors_deleted: 1005,
+                service_events_deleted: 1,
+                target_checks_deleted: 1,
+            }
+        );
+        assert_eq!(row_count(&store.connection, "errors")?, 1);
+        assert_eq!(row_count(&store.connection, "service_events")?, 1);
+        assert_eq!(row_count(&store.connection, "target_checks")?, 1);
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT id FROM errors", [], |row| row.get::<_, String>(0))?,
+            "ERR-recent"
+        );
 
         Ok(())
     }

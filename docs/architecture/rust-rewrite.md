@@ -622,6 +622,19 @@ the Rust server accepts production traffic:
     counters that Phoenix collects from BEAM telemetry remain a future adapter
     concern; this slice exposes the durable operational facts agents can rely
     on during the Rust rewrite.
+58. Rust now owns the retention-prune policy and store command that Phoenix
+    currently runs through `Canary.Workers.RetentionPrune`. `canary-workers`
+    converts a typed retention policy and one observed clock value into the two
+    Phoenix cutoffs: errors/service-events use `error_retention_days` and
+    target checks use `check_retention_days`. `canary-store` owns the bounded
+    rowid-delete loop over `errors`, `service_events`, and `target_checks`,
+    returning a typed deletion report. Each 1,000-row delete runs as its own
+    SQLite statement, matching Phoenix's `Repo.query!` loop and limiting the
+    single-writer lock held by one maintenance batch.
+    The Rust implementation keeps the table/column set fixed in code rather
+    than accepting dynamic table names from callers. Runtime scheduling and
+    operator logging are intentionally left for a later server boot-wiring
+    slice; the deletion semantics and tests are now in Rust.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -652,6 +665,8 @@ Phoenix behavior until the replacement is complete:
 1. Add a Phoenix-observed compatibility note for the intentional severity
    divergence above before cutover: this is a Rust correctness improvement over
    the current Phoenix read model, not a silent wire-shape change.
-2. Continue the remaining Rust HTTP/admin/API surface from the live OpenAPI and
-   Phoenix router contracts, keeping each slice behind a typed store or worker
-   boundary rather than a generic CRUD layer.
+2. Wire the Rust retention prune command into `CanaryServer::boot` as a small
+   named lifecycle worker with explicit cadence/configuration, not a generic
+   scheduler.
+3. Continue remaining Phoenix background behavior, especially TLS-expiry scans
+   and route rate limiting, behind typed store or worker boundaries.
