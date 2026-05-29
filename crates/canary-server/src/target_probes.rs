@@ -8,7 +8,7 @@
 use std::{
     collections::BTreeMap,
     io::Read,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs},
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, Condvar, Mutex,
@@ -28,7 +28,14 @@ use reqwest::{
     header::{HeaderName, HeaderValue},
     redirect::Policy,
 };
+use rustls::{
+    ClientConfig, ClientConnection, DigitallySignedStruct, Error as RustlsError, SignatureScheme,
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    pki_types::{CertificateDer, ServerName, UnixTime},
+};
 use serde_json::Value;
+use time::format_description::well_known::Rfc3339;
+use x509_parser::prelude::FromDer;
 
 use crate::{EventSink, current_rfc3339, current_unix_millis};
 
@@ -70,6 +77,8 @@ pub struct TargetProbeOutcome {
     pub state: String,
     /// Persisted target-state sequence after the probe.
     pub sequence: i64,
+    /// Persisted TLS certificate expiration timestamp, when captured.
+    pub tls_expires_at: Option<String>,
     /// Health transition event enqueued after commit, when any.
     pub transition_event: Option<String>,
 }
@@ -428,6 +437,7 @@ fn run_target_probe_once_with_history(
     let response_target_id = plan.commit.target_id.clone();
     let response_result = plan.commit.check.result.clone();
     let response_state = plan.commit.state.clone();
+    let response_tls_expires_at = plan.commit.check.tls_expires_at.clone();
     let commit = {
         let mut store = store
             .lock()
@@ -447,6 +457,7 @@ fn run_target_probe_once_with_history(
         result: response_result,
         state: response_state,
         sequence: commit.sequence,
+        tls_expires_at: response_tls_expires_at,
         transition_event,
     };
     let committed_state = health_state(&outcome.state)?;
@@ -572,6 +583,108 @@ impl ProbeTransport for ReqwestProbeTransport {
     }
 }
 
+#[derive(Debug)]
+struct AcceptAnyServerCertificate;
+
+impl ServerCertVerifier for AcceptAnyServerCertificate {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ED25519,
+        ]
+    }
+}
+
+fn extract_tls_expiry(
+    scheme: &str,
+    host: &str,
+    resolved_addrs: &[SocketAddr],
+    timeout: StdDuration,
+) -> Option<String> {
+    if scheme != "https" {
+        return None;
+    }
+    let server_name = ServerName::try_from(host.to_owned()).ok()?;
+    for addr in resolved_addrs {
+        if let Some(expiry) = extract_tls_expiry_from_addr(*addr, server_name.clone(), timeout) {
+            return Some(expiry);
+        }
+    }
+    None
+}
+
+fn extract_tls_expiry_from_addr(
+    addr: SocketAddr,
+    server_name: ServerName<'static>,
+    timeout: StdDuration,
+) -> Option<String> {
+    let mut stream = TcpStream::connect_timeout(&addr, timeout).ok()?;
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    stream.set_write_timeout(Some(timeout)).ok()?;
+    let config =
+        ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
+            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+            .ok()?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCertificate))
+            .with_no_client_auth();
+    let mut connection = ClientConnection::new(Arc::new(config), server_name).ok()?;
+
+    while connection.is_handshaking() {
+        connection.complete_io(&mut stream).ok()?;
+    }
+
+    let certificates = connection.peer_certificates()?;
+    let leaf = certificates.first()?;
+    certificate_not_after_rfc3339(leaf)
+}
+
+fn certificate_not_after_rfc3339(certificate: &CertificateDer<'_>) -> Option<String> {
+    let (_, certificate) = x509_parser::certificate::X509Certificate::from_der(certificate).ok()?;
+    certificate
+        .validity()
+        .not_after
+        .to_datetime()
+        .format(&Rfc3339)
+        .ok()
+}
+
 fn load_target_snapshot(
     store: &Arc<Mutex<Store>>,
     target_id: &str,
@@ -597,14 +710,20 @@ fn observe_target(
         }
     };
 
-    match transport.probe(request) {
-        Ok(response) => response_observation(
-            response,
-            &snapshot.expected_status,
-            snapshot.body_contains.as_deref(),
-            Some(elapsed_millis(started)),
-            options.region.clone(),
-        ),
+    match transport.probe(request.clone()) {
+        Ok(mut response) => {
+            let latency_ms = elapsed_millis(started);
+            if response.tls_expires_at.is_none() {
+                response.tls_expires_at = probe_request_tls_expiry(&request);
+            }
+            response_observation(
+                response,
+                &snapshot.expected_status,
+                snapshot.body_contains.as_deref(),
+                Some(latency_ms),
+                options.region.clone(),
+            )
+        }
         Err(ProbeTransportError::Timeout) => failed_observation(
             "timeout",
             format!("request timed out after {}ms", snapshot.timeout_ms),
@@ -630,6 +749,13 @@ fn observe_target(
             options.region.clone(),
         ),
     }
+}
+
+fn probe_request_tls_expiry(request: &ProbeRequest) -> Option<String> {
+    let timeout = timeout(request.timeout_ms);
+    let url = Url::parse(&request.url).ok()?;
+    let host = url.host_str()?;
+    extract_tls_expiry(url.scheme(), host, &request.resolved_addrs, timeout)
 }
 
 fn probe_request(
@@ -979,6 +1105,8 @@ fn is_global_ipv6(ip: Ipv6Addr) -> bool {
 mod tests {
     use std::{
         error::Error,
+        io::Write,
+        net::TcpListener,
         sync::{
             Mutex as StdMutex,
             atomic::{AtomicUsize, Ordering},
@@ -986,8 +1114,15 @@ mod tests {
     };
 
     use canary_store::{TargetInsert, WebhookSubscriptionInsert};
+    use rcgen::{CertificateParams, KeyPair, date_time_ymd};
+    use rustls::{
+        ServerConfig, ServerConnection, StreamOwned,
+        pki_types::{CertificateDer, PrivateKeyDer},
+    };
 
     use super::*;
+
+    type TlsTestServer = std::thread::JoinHandle<Result<(), String>>;
 
     #[derive(Debug)]
     struct StaticTransport {
@@ -1190,6 +1325,38 @@ mod tests {
     }
 
     #[test]
+    fn tls_expiry_capture_uses_approved_socket_address() -> Result<(), Box<dyn Error>> {
+        let (certificate, private_key, expected_expiry) = tls_test_certificate()?;
+        assert_eq!(
+            certificate_not_after_rfc3339(&certificate),
+            Some(expected_expiry.clone())
+        );
+        assert_eq!(
+            extract_tls_expiry(
+                "http",
+                "localhost",
+                &[SocketAddr::from(([127, 0, 0, 1], 443))],
+                StdDuration::from_secs(1),
+            ),
+            None
+        );
+        assert_eq!(
+            certificate_not_after_rfc3339(&CertificateDer::from(vec![0, 1, 2, 3])),
+            None
+        );
+
+        let (addr, server) = spawn_tls_expiry_server(certificate, private_key)?;
+        let observed = extract_tls_expiry("https", "localhost", &[addr], StdDuration::from_secs(5));
+        server
+            .join()
+            .map_err(|_| "tls expiry test server panicked")?
+            .map_err(|error| format!("tls expiry test server failed: {error}"))?;
+
+        assert_eq!(observed, Some(expected_expiry));
+        Ok(())
+    }
+
+    #[test]
     fn ssrf_block_persists_failed_probe_without_opening_transport() -> Result<(), Box<dyn Error>> {
         let store = seeded_store("http://127.0.0.1/health", "up")?;
         let transport = StaticTransport::ok(200, "ok");
@@ -1282,6 +1449,38 @@ mod tests {
             Some("application/json")
         );
         assert!(!request.headers.contains_key("host"));
+        Ok(())
+    }
+
+    #[test]
+    fn successful_https_probe_captures_tls_expiry_after_transport() -> Result<(), Box<dyn Error>> {
+        let (certificate, private_key, expected_expiry) = tls_test_certificate()?;
+        let (addr, server) = spawn_tls_expiry_server(certificate, private_key)?;
+        let store = seeded_store(
+            &format!("https://localhost:{}/health", addr.port()),
+            "unknown",
+        )?;
+        let transport = StaticTransport::ok(200, "ok");
+        let sink = RecordingSink::default();
+
+        let outcome = run_target_probe_once(
+            &store,
+            &sink,
+            &transport,
+            "TGT-api",
+            TargetProbeOptions {
+                allow_private_targets: true,
+                region: None,
+            },
+        )?;
+        server
+            .join()
+            .map_err(|_| "tls expiry test server panicked")?
+            .map_err(|error| format!("tls expiry test server failed: {error}"))?;
+
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(outcome.result, "success");
+        assert_eq!(outcome.tls_expires_at, Some(expected_expiry));
         Ok(())
     }
 
@@ -1542,5 +1741,58 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    fn tls_test_certificate()
+    -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>, String), Box<dyn Error>> {
+        let mut params = CertificateParams::new(vec!["localhost".to_owned()])?;
+        params.not_after = date_time_ymd(2030, 1, 2);
+        let signing_key = KeyPair::generate()?;
+        let certificate = params.self_signed(&signing_key)?;
+        let private_key = PrivateKeyDer::try_from(signing_key.serialize_der())
+            .map_err(|_| "failed to encode TLS test private key")?;
+        Ok((
+            certificate.der().clone(),
+            private_key,
+            "2030-01-02T00:00:00Z".to_owned(),
+        ))
+    }
+
+    fn spawn_tls_expiry_server(
+        certificate: CertificateDer<'static>,
+        private_key: PrivateKeyDer<'static>,
+    ) -> Result<(SocketAddr, TlsTestServer), Box<dyn Error>> {
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+        let addr = listener.local_addr()?;
+        let config = Arc::new(
+            ServerConfig::builder_with_provider(
+                rustls::crypto::aws_lc_rs::default_provider().into(),
+            )
+            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+            .map_err(|error| format!("failed to choose TLS test versions: {error}"))?
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate], private_key)
+            .map_err(|error| format!("failed to build TLS test server config: {error}"))?,
+        );
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().map_err(|error| error.to_string())?;
+            stream
+                .set_read_timeout(Some(StdDuration::from_secs(5)))
+                .map_err(|error| error.to_string())?;
+            stream
+                .set_write_timeout(Some(StdDuration::from_secs(5)))
+                .map_err(|error| error.to_string())?;
+            let mut connection =
+                ServerConnection::new(config).map_err(|error| error.to_string())?;
+            while connection.is_handshaking() {
+                connection
+                    .complete_io(&mut stream)
+                    .map_err(|error| error.to_string())?;
+            }
+            let mut tls = StreamOwned::new(connection, stream);
+            tls.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .map_err(|error| error.to_string())
+        });
+        Ok((addr, handle))
     }
 }

@@ -356,6 +356,19 @@ the Rust server accepts production traffic:
     keeps header security at the target-probe boundary instead of spreading it
     through store schemas, target lifecycle scheduling, or reqwest transport
     error handling.
+35. `canary-server::target_probes::probe_request_tls_expiry`: successful HTTPS
+    target probes now capture leaf-certificate expiry in Rust without reopening
+    the SSRF hole in Phoenix's raw `:ssl.connect` helper. The capture runs only
+    after the HTTP transport returns successfully and after probe latency has
+    been measured, then opens a bounded rustls handshake against the same
+    `SocketAddr` list produced by target URL validation and DNS SSRF approval.
+    Certificate verification is deliberately bypassed for metadata parity with
+    Phoenix, but DNS is not repeated and no unapproved address can be dialed.
+    Parsing failures, handshake failures, HTTP targets, malformed certificates,
+    and non-TLS responses all degrade to `None`; the probe result remains
+    governed by the HTTP observation. `TargetProbeOutcome` now carries the
+    persisted `tls_expires_at` value so focused runtime tests can prove the
+    metadata reached the health observation boundary.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -384,9 +397,8 @@ Phoenix behavior until the replacement is complete:
 ## Next Slices
 
 1. Harden the target probe runtime edge cases that were deliberately left out of
-   the lifecycle slice: guarded TLS expiry capture using the same SSRF-approved
-   address set, enqueue-failure telemetry, and explicit hot-update semantics for
-   target deactivate/pause/update while a probe is in flight.
+   the lifecycle slice: enqueue-failure telemetry and explicit hot-update
+   semantics for target deactivate/pause/update while a probe is in flight.
 2. Broaden monitor overdue parity fixtures around malformed persisted rows,
    TTL-vs-expected escalation, webhook enqueue failure receipts, and transaction
    rollback evidence for transition/correlation failures.
