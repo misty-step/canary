@@ -1,10 +1,14 @@
-use canary_core::query::{
-    ActiveIncident, ActiveIncidentSignal, ActiveIncidents, ErrorClassAggregate,
-    ErrorClassification, ErrorDetail, ErrorDetailGroup, ErrorGroupSummary, ErrorsByClass,
-    ErrorsByErrorClass, ErrorsByService, IncidentAnnotation, IncidentDetail,
-    IncidentDetailIncident, IncidentDetailSignal, IncidentTimelineEvent, QueryCursor, QueryWindow,
-    active_incidents_response, decode_cursor, error_detail_response, errors_by_class_response,
-    errors_by_error_class_response, errors_by_service_response, incident_detail_response,
+use canary_core::{
+    health::state_machine::HealthState,
+    query::{
+        ActiveIncident, ActiveIncidentSignal, ActiveIncidents, ErrorClassAggregate,
+        ErrorClassification, ErrorDetail, ErrorDetailGroup, ErrorGroupSummary, ErrorsByClass,
+        ErrorsByErrorClass, ErrorsByService, IncidentAnnotation, IncidentDetail,
+        IncidentDetailIncident, IncidentDetailSignal, IncidentTimelineEvent, QueryCursor,
+        QueryWindow, active_incidents_response, decode_cursor, error_detail_response,
+        errors_by_class_response, errors_by_error_class_response, errors_by_service_response,
+        incident_detail_response,
+    },
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
@@ -1000,7 +1004,7 @@ fn health_signal_active(connection: &Connection, signal_ref: &str) -> QueryResul
         None
     };
 
-    Ok(state.is_some_and(|state| state != "up"))
+    Ok(state.is_some_and(|state| HealthState::persisted_incident_signal_active(&state)))
 }
 
 fn error_group_signal_active(

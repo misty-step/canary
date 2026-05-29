@@ -365,15 +365,7 @@ fn monitor_mode(value: &str) -> Option<MonitorMode> {
 }
 
 fn health_state(value: &str) -> Option<HealthState> {
-    match value {
-        "unknown" => Some(HealthState::Unknown),
-        "up" => Some(HealthState::Up),
-        "degraded" => Some(HealthState::Degraded),
-        "down" => Some(HealthState::Down),
-        "paused" => Some(HealthState::Paused),
-        "flapping" => Some(HealthState::Flapping),
-        _ => None,
-    }
+    HealthState::parse_persisted(value)
 }
 
 #[cfg(test)]

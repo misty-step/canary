@@ -416,6 +416,7 @@ mod tests {
     use std::str::FromStr;
 
     use canary_core::{
+        health::state_machine::HealthState,
         ids::{ErrorId, EventId, IncidentId},
         ingest::classification::{Category, Classification, Component, Persistence},
     };
@@ -1091,6 +1092,66 @@ mod tests {
     }
 
     #[test]
+    fn correlate_incident_uses_typed_health_state_activity_contract() -> Result<()> {
+        let mut store = migrated_store()?;
+        store.insert_target(TargetInsert {
+            id: "TGT-paused".to_owned(),
+            url: "https://api.example.com".to_owned(),
+            name: "Paused API".to_owned(),
+            service: "api".to_owned(),
+            method: "GET".to_owned(),
+            headers: None,
+            interval_ms: 60_000,
+            timeout_ms: 10_000,
+            expected_status: "200".to_owned(),
+            body_contains: None,
+            degraded_after: 1,
+            down_after: 3,
+            up_after: 1,
+            active: true,
+            created_at: "2026-05-28T19:00:00Z".to_owned(),
+        })?;
+        store.connection.execute(
+            "INSERT INTO target_state (target_id, state) VALUES ('TGT-paused', 'paused')",
+            [],
+        )?;
+
+        let opened = store
+            .correlate_incident(incident_correlation(
+                "INC-paused000000",
+                "EVT-pausedopen",
+                "health_transition",
+                "TGT-paused",
+                "api",
+                "2026-05-28T20:00:00Z",
+            ))?
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        assert_eq!(opened.event, "incident.opened");
+        assert_eq!(active_signal_count(&store, "INC-paused000000")?, 1);
+
+        store.connection.execute(
+            "UPDATE target_state SET state = 'up' WHERE target_id = 'TGT-paused'",
+            [],
+        )?;
+        let resolved = store
+            .correlate_incident(incident_correlation(
+                "INC-unused0003",
+                "EVT-pausedup00",
+                "health_transition",
+                "TGT-paused",
+                "api",
+                "2026-05-28T20:01:00Z",
+            ))?
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+        assert_eq!(resolved.event, "incident.resolved");
+        assert_eq!(incident_row(&store, "INC-paused000000")?.1, "resolved");
+        assert_eq!(active_signal_count(&store, "INC-paused000000")?, 0);
+
+        Ok(())
+    }
+
+    #[test]
     fn api_keys_table_preserves_phoenix_hash_storage_shape() -> Result<()> {
         let store = migrated_store()?;
         let columns = columns(&store.connection, "api_keys")?;
@@ -1377,6 +1438,133 @@ mod tests {
         })?;
         assert_eq!(without.incidents, Vec::new());
         assert_eq!(without.summary, "No active incidents.");
+
+        Ok(())
+    }
+
+    #[test]
+    fn active_incidents_uses_typed_health_state_activity_contract()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        let now =
+            OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?;
+
+        for (incident_id, reference, state, table, id_column) in [
+            (
+                "INC-unknown",
+                "TGT-unknown",
+                HealthState::Unknown.as_str(),
+                "target_state",
+                "target_id",
+            ),
+            (
+                "INC-degraded",
+                "TGT-degraded",
+                HealthState::Degraded.as_str(),
+                "target_state",
+                "target_id",
+            ),
+            (
+                "INC-down",
+                "TGT-down",
+                HealthState::Down.as_str(),
+                "target_state",
+                "target_id",
+            ),
+            (
+                "INC-paused",
+                "TGT-paused",
+                HealthState::Paused.as_str(),
+                "target_state",
+                "target_id",
+            ),
+            (
+                "INC-flapping-monitor",
+                "MON-flapping",
+                HealthState::Flapping.as_str(),
+                "monitor_state",
+                "monitor_id",
+            ),
+            (
+                "INC-up",
+                "TGT-up",
+                HealthState::Up.as_str(),
+                "target_state",
+                "target_id",
+            ),
+        ] {
+            if reference.starts_with("TGT-") {
+                store.insert_target(TargetInsert {
+                    id: reference.to_owned(),
+                    url: format!("https://{}.example.com", reference.to_lowercase()),
+                    name: reference.to_owned(),
+                    service: reference.to_owned(),
+                    method: "GET".to_owned(),
+                    headers: None,
+                    interval_ms: 60_000,
+                    timeout_ms: 10_000,
+                    expected_status: "200".to_owned(),
+                    body_contains: None,
+                    degraded_after: 1,
+                    down_after: 3,
+                    up_after: 1,
+                    active: true,
+                    created_at: "2026-05-28T19:00:00Z".to_owned(),
+                })?;
+            } else {
+                store.insert_monitor(MonitorInsert {
+                    id: reference.to_owned(),
+                    name: reference.to_owned(),
+                    service: reference.to_owned(),
+                    mode: "ttl".to_owned(),
+                    expected_every_ms: 60_000,
+                    grace_ms: 5_000,
+                    created_at: "2026-05-28T19:00:00Z".to_owned(),
+                })?;
+            }
+
+            store.connection.execute(
+                &format!("INSERT INTO {table} ({id_column}, state) VALUES (?1, ?2)"),
+                params![reference, state],
+            )?;
+            insert_incident(&store, incident_id, reference, "2026-05-28T20:00:00Z")?;
+            insert_incident_signal(
+                &store,
+                incident_id,
+                "health_transition",
+                reference,
+                &now,
+                None,
+            )?;
+        }
+
+        insert_incident(&store, "INC-missing", "missing", "2026-05-28T20:00:00Z")?;
+        insert_incident_signal(
+            &store,
+            "INC-missing",
+            "health_transition",
+            "TGT-missing",
+            &now,
+            None,
+        )?;
+
+        let active_ids = store
+            .active_incidents(IncidentListOptions::default())?
+            .incidents
+            .into_iter()
+            .map(|incident| incident.id)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            active_ids,
+            BTreeSet::from([
+                "INC-degraded".to_owned(),
+                "INC-down".to_owned(),
+                "INC-flapping-monitor".to_owned(),
+                "INC-paused".to_owned(),
+                "INC-unknown".to_owned(),
+            ])
+        );
 
         Ok(())
     }

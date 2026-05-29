@@ -29,6 +29,47 @@ pub enum HealthState {
     Flapping,
 }
 
+impl HealthState {
+    /// Parse the health-state value persisted by Phoenix and Rust stores.
+    pub fn parse_persisted(value: &str) -> Option<Self> {
+        match value {
+            "unknown" => Some(Self::Unknown),
+            "up" => Some(Self::Up),
+            "degraded" => Some(Self::Degraded),
+            "down" => Some(Self::Down),
+            "paused" => Some(Self::Paused),
+            "flapping" => Some(Self::Flapping),
+            _ => None,
+        }
+    }
+
+    /// Persisted wire/database representation for this state.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Up => "up",
+            Self::Degraded => "degraded",
+            Self::Down => "down",
+            Self::Paused => "paused",
+            Self::Flapping => "flapping",
+        }
+    }
+
+    /// Whether this state keeps a health-transition incident signal active.
+    pub const fn incident_signal_active(self) -> bool {
+        !matches!(self, Self::Up)
+    }
+
+    /// Phoenix-compatible incident activity for a persisted health-state string.
+    ///
+    /// Unknown persisted values are treated as active, matching Phoenix's
+    /// `%{} -> true` branch for any loaded non-`up` state row.
+    pub fn persisted_incident_signal_active(value: &str) -> bool {
+        Self::parse_persisted(value)
+            .map_or(value != Self::Up.as_str(), Self::incident_signal_active)
+    }
+}
+
 /// Probe event fed into the state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HealthEvent {
@@ -380,5 +421,31 @@ mod tests {
             from: HealthState::Down,
             to: HealthState::Flapping,
         }));
+    }
+
+    #[test]
+    fn incident_signal_activity_matches_phoenix_non_up_contract() {
+        assert!(!HealthState::Up.incident_signal_active());
+
+        for state in [
+            HealthState::Unknown,
+            HealthState::Degraded,
+            HealthState::Down,
+            HealthState::Paused,
+            HealthState::Flapping,
+        ] {
+            assert!(
+                state.incident_signal_active(),
+                "{state:?} should stay active"
+            );
+            assert!(HealthState::persisted_incident_signal_active(
+                state.as_str()
+            ));
+        }
+
+        assert!(!HealthState::persisted_incident_signal_active("up"));
+        assert!(HealthState::persisted_incident_signal_active(
+            "vendor-new-state"
+        ));
     }
 }

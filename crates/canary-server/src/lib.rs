@@ -1400,15 +1400,8 @@ fn monitor_mode(value: &str) -> Result<MonitorMode, String> {
 }
 
 fn health_state(value: &str) -> Result<canary_core::health::state_machine::HealthState, String> {
-    match value {
-        "unknown" => Ok(canary_core::health::state_machine::HealthState::Unknown),
-        "up" => Ok(canary_core::health::state_machine::HealthState::Up),
-        "degraded" => Ok(canary_core::health::state_machine::HealthState::Degraded),
-        "down" => Ok(canary_core::health::state_machine::HealthState::Down),
-        "paused" => Ok(canary_core::health::state_machine::HealthState::Paused),
-        "flapping" => Ok(canary_core::health::state_machine::HealthState::Flapping),
-        _ => Err(format!("unknown health state: {value}")),
-    }
+    canary_core::health::state_machine::HealthState::parse_persisted(value)
+        .ok_or_else(|| format!("unknown health state: {value}"))
 }
 
 fn current_unix_millis() -> i64 {

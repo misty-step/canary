@@ -462,6 +462,16 @@ the Rust server accepts production traffic:
     `active_target_probe_schedules`, `target_probe_snapshot_by_id`,
     `monitor_check_in_snapshot_by_name`, and `monitor_overdue_candidates`)
     without adding a new health query abstraction.
+44. Health-state parsing and active-incident semantics now live on
+    `canary-core::health::state_machine::HealthState` instead of being
+    re-derived by each Rust caller. `parse_persisted`, `as_str`,
+    `incident_signal_active`, and `persisted_incident_signal_active` encode the
+    Phoenix-compatible rule that `up` is the only inactive persisted health
+    state for health-transition incident signals; `unknown`, `degraded`,
+    `down`, `paused`, `flapping`, and even a loaded future non-`up` state keep
+    the signal active. Store query reads and incident correlation both call this
+    typed rule, while target-probe, monitor-overdue, and check-in parsing use
+    the same parser instead of stringly duplicated match tables.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -490,9 +500,9 @@ Phoenix behavior until the replacement is complete:
 ## Next Slices
 
 1. Broaden Phoenix read-model parity around cursor mutation under concurrent
-   ingest and exact health-state activity semantics such as paused targets and
-   monitors. Keep this at the store/query boundary unless the live Phoenix
-   router contract requires a route.
+   ingest and severity decay while a health signal remains non-`up`. Keep this
+   at the store/query boundary unless the live Phoenix router contract requires
+   a route.
 2. Continue the remaining Rust HTTP/admin/API surface from the live OpenAPI and
    Phoenix router contracts, keeping each slice behind a typed store or worker
    boundary rather than a generic CRUD layer.

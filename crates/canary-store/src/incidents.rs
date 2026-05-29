@@ -6,7 +6,10 @@
 //! transaction so callers do not spread incident invariants through HTTP or
 //! worker code.
 
-use canary_core::ids::{EventId, IncidentId};
+use canary_core::{
+    health::state_machine::HealthState,
+    ids::{EventId, IncidentId},
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -286,7 +289,9 @@ fn signal_active(
         "health_transition" => {
             let target = state_by_ref(transaction, "target_state", "target_id", signal_ref)?;
             let monitor = state_by_ref(transaction, "monitor_state", "monitor_id", signal_ref)?;
-            Ok(target.or(monitor).is_some_and(|state| state != "up"))
+            Ok(target
+                .or(monitor)
+                .is_some_and(|state| HealthState::persisted_incident_signal_active(&state)))
         }
         _ => Ok(false),
     }

@@ -443,14 +443,7 @@ fn webhook_effect(effects: &[HealthEffect]) -> Option<HealthWebhookEvent> {
 }
 
 fn health_state_as_str(state: HealthState) -> &'static str {
-    match state {
-        HealthState::Unknown => "unknown",
-        HealthState::Up => "up",
-        HealthState::Degraded => "degraded",
-        HealthState::Down => "down",
-        HealthState::Paused => "paused",
-        HealthState::Flapping => "flapping",
-    }
+    state.as_str()
 }
 
 #[cfg(test)]

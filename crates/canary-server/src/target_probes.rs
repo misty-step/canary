@@ -1172,17 +1172,9 @@ fn retain_recent_transitions(transitions: &mut Vec<(HealthState, i64)>, now_mill
 }
 
 fn health_state(value: &str) -> Result<HealthState, TargetProbeRuntimeError> {
-    match value {
-        "unknown" => Ok(HealthState::Unknown),
-        "up" => Ok(HealthState::Up),
-        "degraded" => Ok(HealthState::Degraded),
-        "down" => Ok(HealthState::Down),
-        "paused" => Ok(HealthState::Paused),
-        "flapping" => Ok(HealthState::Flapping),
-        _ => Err(TargetProbeRuntimeError::InvalidTarget(format!(
-            "unknown health state: {value}"
-        ))),
-    }
+    HealthState::parse_persisted(value).ok_or_else(|| {
+        TargetProbeRuntimeError::InvalidTarget(format!("unknown health state: {value}"))
+    })
 }
 
 fn classify_reqwest_error(error: reqwest::Error) -> ProbeTransportError {
