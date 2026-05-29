@@ -2413,6 +2413,82 @@ mod tests {
     }
 
     #[test]
+    fn monitor_overdue_rolls_back_state_when_transition_insert_fails()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        store.connection.execute(
+            "INSERT INTO monitors (id, name, service, mode, expected_every_ms, grace_ms, created_at)
+             VALUES ('MON-worker', 'Worker heartbeat', 'worker', 'schedule', 60000, 5000, '2026-05-28T19:00:00Z')",
+            [],
+        )?;
+        store.connection.execute(
+            "INSERT INTO monitor_state (
+                monitor_id, state, last_check_in_status, last_check_in_at,
+                deadline_at, first_missed_at, sequence
+             ) VALUES (
+                'MON-worker', 'up', 'alive', '2026-05-28T19:59:00Z',
+                '2026-05-28T20:00:05Z', NULL, 2
+             )",
+            [],
+        )?;
+        store.connection.execute(
+            "INSERT INTO service_events (
+                id, service, event, entity_type, entity_ref, severity, summary, payload, created_at
+             ) VALUES (
+                'EVT-mondegraded0', 'worker', 'health_check.degraded', 'monitor',
+                'MON-worker', 'warning', 'duplicate event id', '{}', '2026-05-28T19:59:59Z'
+             )",
+            [],
+        )?;
+
+        let result = store.commit_monitor_overdue(MonitorOverdueCommit {
+            monitor_id: "MON-worker".to_owned(),
+            state: "degraded".to_owned(),
+            first_missed_at: Some("2026-05-28T20:01:00Z".to_owned()),
+            last_check_in_at: Some("2026-05-28T19:59:00Z".to_owned()),
+            last_check_in_status: Some("alive".to_owned()),
+            deadline_at: Some("2026-05-28T20:00:05Z".to_owned()),
+            now: "2026-05-28T20:01:00Z".to_owned(),
+            transition: MonitorTransitionEvent {
+                name: "Worker heartbeat".to_owned(),
+                service: "worker".to_owned(),
+                mode: "schedule".to_owned(),
+                expected_every_ms: 60_000,
+                grace_ms: 5_000,
+                previous_state: "up".to_owned(),
+                event_id: EventId::from_str("EVT-mondegraded0")?,
+                incident_id: IncidentId::from_str("INC-mondegraded0")?,
+                incident_event_id: EventId::from_str("EVT-monincident0")?,
+            },
+        });
+
+        assert!(result.is_err());
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT state, sequence, first_missed_at, last_transition_at
+                 FROM monitor_state WHERE monitor_id = 'MON-worker'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )?,
+            ("up".to_owned(), 2, None, None)
+        );
+        assert_eq!(
+            row_count(&store.connection, "incidents")?,
+            0,
+            "failed transition insert must not correlate an incident"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn monitor_overdue_candidates_return_deadline_rows_ordered_by_monitor_id() -> Result<()> {
         let mut store = migrated_store()?;
         for (id, deadline_at) in [

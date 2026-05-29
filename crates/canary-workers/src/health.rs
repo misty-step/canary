@@ -704,6 +704,28 @@ mod tests {
     }
 
     #[test]
+    fn monitor_overdue_ttl_mode_waits_for_expected_window_before_down() -> Result<(), Box<dyn Error>>
+    {
+        let mut monitor = overdue_monitor(
+            HealthState::Degraded,
+            Some("2026-05-28T19:59:00Z"),
+            Some("2026-05-28T19:59:30Z"),
+        );
+        monitor.mode = MonitorMode::Ttl;
+        monitor.expected_every_ms = 60_000;
+
+        assert!(plan_monitor_overdue(monitor.clone(), context()?)?.is_none());
+
+        monitor.first_missed_at = Some("2026-05-28T19:58:59Z".to_owned());
+        let plan = plan_monitor_overdue(monitor, context()?)?.ok_or("missing overdue plan")?;
+
+        assert_eq!(plan.commit.state, "down");
+        assert_eq!(plan.commit.transition.mode, "ttl");
+        assert_eq!(plan.commit.transition.previous_state, "degraded");
+        Ok(())
+    }
+
+    #[test]
     fn monitor_overdue_skips_error_status_down_state_and_unexpired_deadlines()
     -> Result<(), Box<dyn Error>> {
         let mut error_status = overdue_monitor(HealthState::Up, Some("2026-05-28T19:59:59Z"), None);

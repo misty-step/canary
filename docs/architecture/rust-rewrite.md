@@ -417,6 +417,17 @@ the Rust server accepts production traffic:
     fields fail validation instead of silently expanding the admin contract.
     This keeps target updates agent-friendly and compile-time visible without
     adding a generic CRUD patch layer, state resets, or scheduler-local truth.
+40. Rust monitor-overdue parity now has fixtures for the edge cases that made
+    the Phoenix behavior easy to damage accidentally. The pure planner proves
+    TTL monitors still escalate from degraded to down on `expected_every_ms`,
+    not the last check-in TTL. The store proves a failed transition insert rolls
+    back the state update, sequence bump, `first_missed_at`, and incident
+    correlation because they live inside one SQLite transaction. The server
+    adapter treats unsupported persisted monitor enum values as no-op candidate
+    rows for overdue evaluation instead of turning one malformed row into a
+    failed lifecycle pass. This keeps the Rust rewrite stricter where types own
+    behavior, but tolerant at the persisted-data boundary that Phoenix already
+    treated as best-effort.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -444,9 +455,6 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Broaden monitor overdue parity fixtures around malformed persisted rows,
-   TTL-vs-expected escalation, and transaction rollback evidence for
-   transition/correlation failures.
-2. Add a populated Phoenix fixture once health and annotation writes are ported
+1. Add a populated Phoenix fixture once health and annotation writes are ported
    so Rust read models are checked against Phoenix-inserted production-shaped
    rows, not only an empty migrated schema.

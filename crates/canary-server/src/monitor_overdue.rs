@@ -242,7 +242,9 @@ pub fn run_monitor_overdue_once(
     now: String,
     now_millis: i64,
 ) -> Result<Option<MonitorOverdueOutcome>, MonitorOverdueRuntimeError> {
-    let snapshot = monitor_overdue_snapshot(candidate)?;
+    let Some(snapshot) = monitor_overdue_snapshot(candidate) else {
+        return Ok(None);
+    };
     let context = ObservationContext {
         now,
         now_millis,
@@ -338,10 +340,8 @@ fn run_lifecycle_worker(
     }
 }
 
-fn monitor_overdue_snapshot(
-    candidate: MonitorOverdueCandidate,
-) -> Result<MonitorOverdueSnapshot, MonitorOverdueRuntimeError> {
-    Ok(MonitorOverdueSnapshot {
+fn monitor_overdue_snapshot(candidate: MonitorOverdueCandidate) -> Option<MonitorOverdueSnapshot> {
+    Some(MonitorOverdueSnapshot {
         id: candidate.id,
         name: candidate.name,
         service: candidate.service,
@@ -356,27 +356,23 @@ fn monitor_overdue_snapshot(
     })
 }
 
-fn monitor_mode(value: &str) -> Result<MonitorMode, MonitorOverdueRuntimeError> {
+fn monitor_mode(value: &str) -> Option<MonitorMode> {
     match value {
-        "schedule" => Ok(MonitorMode::Schedule),
-        "ttl" => Ok(MonitorMode::Ttl),
-        _ => Err(MonitorOverdueRuntimeError::InvalidMonitor(format!(
-            "unknown monitor mode: {value}"
-        ))),
+        "schedule" => Some(MonitorMode::Schedule),
+        "ttl" => Some(MonitorMode::Ttl),
+        _ => None,
     }
 }
 
-fn health_state(value: &str) -> Result<HealthState, MonitorOverdueRuntimeError> {
+fn health_state(value: &str) -> Option<HealthState> {
     match value {
-        "unknown" => Ok(HealthState::Unknown),
-        "up" => Ok(HealthState::Up),
-        "degraded" => Ok(HealthState::Degraded),
-        "down" => Ok(HealthState::Down),
-        "paused" => Ok(HealthState::Paused),
-        "flapping" => Ok(HealthState::Flapping),
-        _ => Err(MonitorOverdueRuntimeError::InvalidMonitor(format!(
-            "unknown health state: {value}"
-        ))),
+        "unknown" => Some(HealthState::Unknown),
+        "up" => Some(HealthState::Up),
+        "degraded" => Some(HealthState::Degraded),
+        "down" => Some(HealthState::Down),
+        "paused" => Some(HealthState::Paused),
+        "flapping" => Some(HealthState::Flapping),
+        _ => None,
     }
 }
 
@@ -385,7 +381,9 @@ mod tests {
     use std::error::Error;
     use std::sync::Mutex as StdMutex;
 
-    use canary_store::{MonitorCheckInCommit, MonitorCheckInObservation, MonitorInsert};
+    use canary_store::{
+        MonitorCheckInCommit, MonitorCheckInObservation, MonitorInsert, MonitorOverdueCandidate,
+    };
 
     use crate::EventSink;
 
@@ -550,6 +548,45 @@ mod tests {
                 event: "health_check.degraded".to_owned(),
             }),
             Some(&1)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn run_candidate_treats_unsupported_persisted_monitor_rows_as_noop()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = Store::open_in_memory()?;
+        store.migrate()?;
+        let store = Arc::new(Mutex::new(store));
+        let sink = Arc::new(RecordingSink::default());
+        let fanout = HealthEventFanout::new_without_failure_sink(sink.clone());
+
+        let outcome = run_monitor_overdue_once(
+            &store,
+            &fanout,
+            MonitorOverdueCandidate {
+                id: "MON-unsupported".to_owned(),
+                name: "Unsupported worker".to_owned(),
+                service: "worker".to_owned(),
+                mode: "unsupported".to_owned(),
+                expected_every_ms: 60_000,
+                grace_ms: 5_000,
+                state: "up".to_owned(),
+                last_check_in_status: Some("alive".to_owned()),
+                last_check_in_at: Some("2026-05-28T19:59:00Z".to_owned()),
+                deadline_at: Some("2026-05-28T20:00:05Z".to_owned()),
+                first_missed_at: None,
+            },
+            "2026-05-28T20:00:06Z".to_owned(),
+            0,
+        )?;
+
+        assert!(outcome.is_none());
+        assert!(
+            sink.events
+                .lock()
+                .map_err(|_| "events lock poisoned")?
+                .is_empty()
         );
         Ok(())
     }
