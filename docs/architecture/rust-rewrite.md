@@ -199,6 +199,15 @@ the Rust server accepts production traffic:
     scheduler for all retry/backoff authority. The implementation is blocking
     and must be wired from a dedicated worker/drain context rather than an Axum
     request task.
+23. `canary-server::WebhookDeliveryDrainWorker`: scheduled webhook delivery now
+    has a concrete lifecycle adapter that runs `WebhookDeliveryDrain` on one
+    named OS thread. The worker drains immediately, repeats on an explicit
+    interval, exposes stop/join shutdown, and wakes promptly when stopped so
+    long idle intervals do not delay process teardown. Each pass is isolated so
+    a panic in a transport or drain dependency does not permanently kill webhook
+    delivery. This keeps the blocking `HttpWebhookTransport` path outside Axum
+    request tasks while preserving the existing bounded drain and avoiding a
+    generic scheduler or job framework.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -226,8 +235,10 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Add the concrete runtime wiring that runs `WebhookDeliveryDrain` off the Axum
-   request path, so blocking outbound HTTP cannot starve request handlers.
+1. Add a top-level server bootstrap that opens the configured SQLite store,
+   wires `StoreWebhookScheduler`, `HttpWebhookTransport`, and
+   `WebhookDeliveryDrainWorker`, and serves the public plus authenticated Axum
+   routers with graceful shutdown.
 2. Add a concrete incident-correlation effect sink once the Rust incident write
    path exists, keeping correlation failures isolated from ingest success.
 3. Add compatibility checks against a migrated Phoenix fixture database before

@@ -40,8 +40,8 @@ mod webhooks;
 use webhooks::NoopWebhookCooldown;
 pub use webhooks::{
     HttpWebhookTransport, StoreWebhookScheduler, WebhookCircuit, WebhookCooldown,
-    WebhookDeliveryDrain, WebhookDeliveryDrainReport, WebhookDeliveryRuntime,
-    WebhookEnqueueEffectSink, WebhookScheduler, WebhookTransport,
+    WebhookDeliveryDrain, WebhookDeliveryDrainReport, WebhookDeliveryDrainWorker,
+    WebhookDeliveryRuntime, WebhookEnqueueEffectSink, WebhookScheduler, WebhookTransport,
 };
 
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
@@ -570,9 +570,12 @@ mod tests {
     use std::error::Error;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::{Arc, Mutex as StdMutex};
-    use std::thread::JoinHandle;
-    use std::time::Duration as StdDuration;
+    use std::sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::thread::{self, JoinHandle, ThreadId};
+    use std::time::{Duration as StdDuration, Instant};
 
     use axum::{
         body::{Body, to_bytes},
@@ -1342,6 +1345,91 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn webhook_delivery_drain_worker_runs_delivery_on_dedicated_thread()
+    -> Result<(), Box<dyn Error>> {
+        let test_thread_id = thread::current().id();
+        let store = runtime_store(true)?;
+        let scheduler = StoreWebhookScheduler::new(store.clone());
+        scheduler.schedule(&webhook_job("DLV-worker-ok", 1, 4))?;
+        let transport = Arc::new(ThreadRecordingTransport::status(204));
+        let runtime = WebhookDeliveryRuntime::new_without_circuit(store.clone(), transport.clone());
+        let drain = WebhookDeliveryDrain::new(store.clone(), runtime, 10);
+
+        let worker = WebhookDeliveryDrainWorker::spawn(drain, StdDuration::from_secs(60))?;
+
+        wait_for_delivery_status(&store, "DLV-worker-ok", WebhookDeliveryStatus::Delivered)?;
+        worker.join()?;
+        let thread_ids = transport.thread_ids()?;
+
+        assert_eq!(thread_ids.len(), 1);
+        assert_ne!(thread_ids[0], test_thread_id);
+        let mut store = store.lock().map_err(|_| "store lock poisoned")?;
+        assert!(
+            store
+                .claim_due_webhook_delivery_jobs("9999-01-01T00:00:00Z", 10)?
+                .is_empty()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_drain_worker_stop_wakes_sleeping_thread() -> Result<(), Box<dyn Error>> {
+        let store = runtime_store(true)?;
+        let runtime = WebhookDeliveryRuntime::new_without_circuit(
+            store.clone(),
+            Arc::new(RecordingTransport::status(204)),
+        );
+        let drain = WebhookDeliveryDrain::new(store, runtime, 10);
+        let worker = WebhookDeliveryDrainWorker::spawn(drain, StdDuration::from_secs(60))?;
+        let started = Instant::now();
+
+        worker.join()?;
+
+        assert!(started.elapsed() < StdDuration::from_secs(2));
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_drain_worker_rejects_zero_interval() -> Result<(), Box<dyn Error>> {
+        let store = runtime_store(true)?;
+        let runtime = WebhookDeliveryRuntime::new_without_circuit(
+            store.clone(),
+            Arc::new(RecordingTransport::status(204)),
+        );
+        let drain = WebhookDeliveryDrain::new(store, runtime, 10);
+
+        let error = WebhookDeliveryDrainWorker::spawn(drain, StdDuration::ZERO)
+            .err()
+            .ok_or("zero interval should be rejected")?;
+
+        assert_eq!(error, "webhook drain interval must be greater than zero");
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_drain_worker_survives_panicking_transport() -> Result<(), Box<dyn Error>> {
+        let store = runtime_store(true)?;
+        let scheduler = StoreWebhookScheduler::new(store.clone());
+        scheduler.schedule(&webhook_job("DLV-worker-panic", 1, 4))?;
+        scheduler.schedule(&webhook_job("DLV-worker-after-panic", 1, 4))?;
+        let transport = Arc::new(PanicOnceTransport::new());
+        let runtime = WebhookDeliveryRuntime::new_without_circuit(store.clone(), transport);
+        let drain = WebhookDeliveryDrain::new(store.clone(), runtime, 1);
+
+        let worker = WebhookDeliveryDrainWorker::spawn(drain, StdDuration::from_millis(10))?;
+
+        wait_for_delivery_status(
+            &store,
+            "DLV-worker-after-panic",
+            WebhookDeliveryStatus::Delivered,
+        )?;
+        worker.join()?;
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn error_ingest_accepts_admin_scope() -> Result<(), Box<dyn Error>> {
         let response = ingest_router(test_ingest_state()?)
@@ -1908,7 +1996,7 @@ mod tests {
             .iter()
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
             .collect::<Vec<_>>();
-        let handle = std::thread::spawn(move || -> std::io::Result<CapturedHttpRequest> {
+        let handle = thread::spawn(move || -> std::io::Result<CapturedHttpRequest> {
             let (mut stream, _) = listener.accept()?;
             stream.set_read_timeout(Some(StdDuration::from_secs(2)))?;
             let mut bytes = Vec::new();
@@ -1996,6 +2084,33 @@ mod tests {
         })?)
     }
 
+    fn wait_for_delivery_status(
+        store: &Arc<Mutex<Store>>,
+        delivery_id: &str,
+        status: WebhookDeliveryStatus,
+    ) -> Result<(), Box<dyn Error>> {
+        let deadline = Instant::now() + StdDuration::from_secs(2);
+        loop {
+            {
+                let store = store.lock().map_err(|_| "store lock poisoned")?;
+                let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
+                    delivery_id: Some(delivery_id.to_owned()),
+                    ..Default::default()
+                })?;
+                if rows.first().is_some_and(|row| row.status == status) {
+                    return Ok(());
+                }
+            }
+
+            if Instant::now() >= deadline {
+                return Err(
+                    format!("timed out waiting for {delivery_id} to become {status:?}").into(),
+                );
+            }
+            thread::sleep(StdDuration::from_millis(10));
+        }
+    }
+
     struct RecordingTransport {
         response: TransportResult,
         requests: StdMutex<Vec<WebhookRequest>>,
@@ -2016,6 +2131,57 @@ mod tests {
                 requests.push(request.clone());
             }
             self.response.clone()
+        }
+    }
+
+    struct ThreadRecordingTransport {
+        response: TransportResult,
+        thread_ids: StdMutex<Vec<ThreadId>>,
+    }
+
+    impl ThreadRecordingTransport {
+        fn status(status: u16) -> Self {
+            Self {
+                response: TransportResult::HttpStatus(status),
+                thread_ids: StdMutex::new(Vec::new()),
+            }
+        }
+
+        fn thread_ids(&self) -> Result<Vec<ThreadId>, Box<dyn Error>> {
+            self.thread_ids
+                .lock()
+                .map(|thread_ids| thread_ids.clone())
+                .map_err(|_| "thread id lock poisoned".into())
+        }
+    }
+
+    impl WebhookTransport for ThreadRecordingTransport {
+        fn send(&self, _request: &WebhookRequest) -> TransportResult {
+            if let Ok(mut thread_ids) = self.thread_ids.lock() {
+                thread_ids.push(thread::current().id());
+            }
+            self.response.clone()
+        }
+    }
+
+    struct PanicOnceTransport {
+        should_panic: AtomicBool,
+    }
+
+    impl PanicOnceTransport {
+        fn new() -> Self {
+            Self {
+                should_panic: AtomicBool::new(true),
+            }
+        }
+    }
+
+    impl WebhookTransport for PanicOnceTransport {
+        fn send(&self, _request: &WebhookRequest) -> TransportResult {
+            if self.should_panic.swap(false, Ordering::SeqCst) {
+                std::panic::resume_unwind(Box::new("test transport panic"));
+            }
+            TransportResult::HttpStatus(204)
         }
     }
 

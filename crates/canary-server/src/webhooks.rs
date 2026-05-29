@@ -1,5 +1,10 @@
 use std::{
-    sync::{Arc, Mutex},
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::{self, JoinHandle},
     time::Duration as StdDuration,
 };
 
@@ -276,6 +281,65 @@ pub struct WebhookDeliveryDrainReport {
     pub discarded: u32,
 }
 
+/// Dedicated OS-thread runner for scheduled webhook delivery drains.
+///
+/// `HttpWebhookTransport` is intentionally blocking. This worker keeps that
+/// blocking path out of Axum request tasks while reusing the bounded sequential
+/// `WebhookDeliveryDrain` instead of introducing a generic job framework.
+pub struct WebhookDeliveryDrainWorker {
+    stop: Arc<DrainStop>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl WebhookDeliveryDrainWorker {
+    /// Spawn one named background thread that drains immediately, then on the interval.
+    pub fn spawn(drain: WebhookDeliveryDrain, interval: StdDuration) -> Result<Self, String> {
+        if interval.is_zero() {
+            return Err("webhook drain interval must be greater than zero".to_owned());
+        }
+
+        let stop = Arc::new(DrainStop::default());
+        let thread_stop = stop.clone();
+        let handle = thread::Builder::new()
+            .name("canary-webhook-drain".to_owned())
+            .spawn(move || run_drain_worker(drain, interval, thread_stop))
+            .map_err(|error| format!("failed to spawn webhook drain worker: {error}"))?;
+
+        Ok(Self {
+            stop,
+            handle: Some(handle),
+        })
+    }
+
+    /// Request shutdown without waiting for an in-flight drain pass to finish.
+    pub fn stop(&self) {
+        self.stop.request();
+    }
+
+    /// Request shutdown and wait for the worker thread to exit.
+    pub fn join(mut self) -> Result<(), String> {
+        self.stop();
+        self.join_handle()
+    }
+
+    fn join_handle(&mut self) -> Result<(), String> {
+        let Some(handle) = self.handle.take() else {
+            return Ok(());
+        };
+        match handle.join() {
+            Ok(()) => Ok(()),
+            Err(_) => Err("webhook drain worker panicked".to_owned()),
+        }
+    }
+}
+
+impl Drop for WebhookDeliveryDrainWorker {
+    fn drop(&mut self) {
+        self.stop.request();
+        let _ = self.join_handle();
+    }
+}
+
 impl WebhookDeliveryDrain {
     /// Build a drain with an explicit maximum number of jobs per pass.
     pub fn new(store: Arc<Mutex<Store>>, runtime: WebhookDeliveryRuntime, max_jobs: u32) -> Self {
@@ -363,6 +427,47 @@ impl WebhookDeliveryDrain {
         store
             .complete_webhook_delivery_job(job_id, completion)
             .map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Default)]
+struct DrainStop {
+    stopping: AtomicBool,
+    lock: Mutex<()>,
+    condvar: Condvar,
+}
+
+impl DrainStop {
+    fn request(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        self.condvar.notify_all();
+    }
+
+    fn is_requested(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
+    }
+
+    fn wait(&self, interval: StdDuration) -> bool {
+        if self.is_requested() {
+            return true;
+        }
+
+        let Ok(guard) = self.lock.lock() else {
+            return true;
+        };
+        let _ = self
+            .condvar
+            .wait_timeout_while(guard, interval, |_| !self.stopping.load(Ordering::SeqCst));
+        self.is_requested()
+    }
+}
+
+fn run_drain_worker(drain: WebhookDeliveryDrain, interval: StdDuration, stop: Arc<DrainStop>) {
+    while !stop.is_requested() {
+        let _ = catch_unwind(AssertUnwindSafe(|| drain.drain_due(&current_rfc3339())));
+        if stop.wait(interval) {
+            break;
+        }
     }
 }
 
