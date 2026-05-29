@@ -25,6 +25,9 @@ impl RateLimiter {
 
     fn check_at(&mut self, kind: RateLimitKind, identity: &str, now: Instant) -> RateLimitDecision {
         let policy = kind.policy();
+        self.buckets.retain(|key, bucket| {
+            now.duration_since(bucket.window_start) < window_duration(key.kind)
+        });
         let key = RateLimitBucketKey {
             kind,
             identity: identity.to_owned(),
@@ -143,5 +146,29 @@ mod tests {
             ),
             RateLimitDecision::Allowed
         );
+    }
+
+    #[test]
+    fn expired_buckets_are_pruned_on_check() {
+        let mut limiter = RateLimiter::default();
+        let start = Instant::now();
+
+        for index in 0..10 {
+            assert_eq!(
+                limiter.check_at(RateLimitKind::AuthFail, &format!("ip-{index}"), start),
+                RateLimitDecision::Allowed
+            );
+        }
+        assert_eq!(limiter.buckets.len(), 10);
+
+        assert_eq!(
+            limiter.check_at(
+                RateLimitKind::AuthFail,
+                "ip-current",
+                start + Duration::from_millis(60_000)
+            ),
+            RateLimitDecision::Allowed
+        );
+        assert_eq!(limiter.buckets.len(), 1);
     }
 }

@@ -104,6 +104,7 @@ pub use webhooks::{
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 const PROBLEM_CONTENT_TYPE: &str = "application/problem+json; charset=utf-8";
 const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
+const UNKNOWN_AUTH_FAIL_IDENTITY: &str = "unknown";
 
 fn default_webhook_transport() -> Arc<dyn WebhookTransport> {
     Arc::new(LazyHttpWebhookTransport)
@@ -147,6 +148,8 @@ pub struct ServerConfig {
     pub retention_prune_interval: StdDuration,
     /// Retention policy used by the maintenance prune worker.
     pub retention_policy: RetentionPolicy,
+    /// Client identity source for silent invalid-key accounting.
+    pub auth_fail_identity: AuthFailIdentityConfig,
 }
 
 impl ServerConfig {
@@ -162,6 +165,7 @@ impl ServerConfig {
             monitor_overdue_interval: DEFAULT_MONITOR_OVERDUE_INTERVAL,
             retention_prune_interval: DEFAULT_RETENTION_PRUNE_INTERVAL,
             retention_policy: RetentionPolicy::default(),
+            auth_fail_identity: AuthFailIdentityConfig::default(),
         }
     }
 }
@@ -264,6 +268,7 @@ impl CanaryServer {
         .map_err(ServerBootError::RetentionPruneWorker)?;
         let ingest_state = ingest_state
             .with_target_control(Arc::new(target_probe_worker.controller()))
+            .with_auth_fail_identity(config.auth_fail_identity)
             .with_allow_private_targets(allow_private_targets);
         let router = public_router(PublicReadiness::ready()).merge(ingest_router(ingest_state));
 
@@ -587,7 +592,21 @@ pub struct IngestState {
     target_control: Arc<dyn TargetControlSink>,
     webhook_transport: Arc<dyn WebhookTransport>,
     rate_limiter: Arc<Mutex<RateLimiter>>,
+    auth_fail_identity: AuthFailIdentityConfig,
     allow_private_targets: bool,
+}
+
+/// Client identity source used only for Phoenix-compatible invalid-key
+/// accounting.
+///
+/// Phoenix records invalid supplied API keys against `conn.remote_ip` and
+/// deliberately ignores the rate-limit result. Rust keeps the same silent
+/// accounting contract while making proxy-header trust explicit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AuthFailIdentityConfig {
+    /// Trust proxy-set client IP headers such as `fly-client-ip` and
+    /// `x-forwarded-for`.
+    pub trust_proxy_headers: bool,
 }
 
 impl IngestState {
@@ -620,6 +639,7 @@ impl IngestState {
             target_control: Arc::new(NoopTargetControlSink),
             webhook_transport: default_webhook_transport(),
             rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
+            auth_fail_identity: AuthFailIdentityConfig::default(),
             allow_private_targets: false,
         }
     }
@@ -647,6 +667,7 @@ impl IngestState {
             target_control: Arc::new(NoopTargetControlSink),
             webhook_transport: default_webhook_transport(),
             rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
+            auth_fail_identity: AuthFailIdentityConfig::default(),
             allow_private_targets: false,
         }
     }
@@ -666,6 +687,7 @@ impl IngestState {
             target_control: Arc::new(NoopTargetControlSink),
             webhook_transport: default_webhook_transport(),
             rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
+            auth_fail_identity: AuthFailIdentityConfig::default(),
             allow_private_targets: false,
         }
     }
@@ -685,6 +707,7 @@ impl IngestState {
             target_control: Arc::new(NoopTargetControlSink),
             webhook_transport: default_webhook_transport(),
             rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
+            auth_fail_identity: AuthFailIdentityConfig::default(),
             allow_private_targets: false,
         }
     }
@@ -698,6 +721,13 @@ impl IngestState {
     /// Attach the outbound webhook transport used by the admin test route.
     pub fn with_webhook_transport(mut self, webhook_transport: Arc<dyn WebhookTransport>) -> Self {
         self.webhook_transport = webhook_transport;
+        self
+    }
+
+    /// Configure the client identity source used for silent invalid-key
+    /// accounting.
+    pub fn with_auth_fail_identity(mut self, config: AuthFailIdentityConfig) -> Self {
+        self.auth_fail_identity = config;
         self
     }
 
@@ -3566,11 +3596,13 @@ fn require_scope(
         ))
     })?
     else {
+        account_auth_fail(state, headers);
         return Err(Box::new(invalid_api_key_problem(None)));
     };
     drop(store);
 
     let Some(scope) = ApiKeyScope::parse(&key.scope) else {
+        account_auth_fail(state, headers);
         return Err(Box::new(invalid_api_key_problem(None)));
     };
     if scope.allows(permission) {
@@ -3580,6 +3612,71 @@ fn require_scope(
             scope, permission, None,
         )))
     }
+}
+
+fn account_auth_fail(state: &IngestState, headers: &HeaderMap) {
+    let identity = auth_fail_identity(headers, state.auth_fail_identity);
+    let _ = enforce_rate_limit(state, RateLimitKind::AuthFail, &identity);
+}
+
+fn auth_fail_identity(headers: &HeaderMap, config: AuthFailIdentityConfig) -> String {
+    if config.trust_proxy_headers
+        && let Some(identity) = trusted_proxy_client_identity(headers)
+    {
+        return identity;
+    }
+
+    UNKNOWN_AUTH_FAIL_IDENTITY.to_owned()
+}
+
+fn trusted_proxy_client_identity(headers: &HeaderMap) -> Option<String> {
+    header_proxy_token(headers, "fly-client-ip")
+        .or_else(|| forwarded_for_identity(headers))
+        .or_else(|| header_proxy_token(headers, "x-forwarded-for"))
+        .filter(|identity| !identity.is_empty())
+}
+
+fn forwarded_for_identity(headers: &HeaderMap) -> Option<String> {
+    let value = headers
+        .get(HeaderName::from_static("forwarded"))
+        .and_then(header_value_to_str)?;
+
+    value
+        .split(',')
+        .next_back()
+        .into_iter()
+        .flat_map(|entry| entry.split(';'))
+        .find_map(|part| {
+            let (name, value) = part.split_once('=')?;
+            if !name.trim().eq_ignore_ascii_case("for") {
+                return None;
+            }
+            Some(normalize_forwarded_for(value))
+        })
+        .filter(|identity| !identity.is_empty())
+}
+
+fn header_proxy_token(headers: &HeaderMap, name: &'static str) -> Option<String> {
+    headers
+        .get(HeaderName::from_static(name))
+        .and_then(header_value_to_str)
+        .and_then(|value| value.split(',').next_back())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(normalize_forwarded_for)
+}
+
+fn header_value_to_str(value: &HeaderValue) -> Option<&str> {
+    value.to_str().ok()
+}
+
+fn normalize_forwarded_for(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches('"')
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_owned()
 }
 
 fn enforce_rate_limit(
@@ -8047,6 +8144,161 @@ mod tests {
             .as_u64()
             .ok_or("retry_after should be a number")?;
         assert!((1..=60).contains(&retry_after));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_api_keys_are_silently_accounted_by_proxy_identity()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?.with_auth_fail_identity(AuthFailIdentityConfig {
+            trust_proxy_headers: true,
+        });
+        let router = ingest_router(state.clone());
+
+        for _ in 0..11 {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post("/api/v1/errors")
+                        .header("authorization", "Bearer sk_live_unknown_secret")
+                        .header("fly-client-ip", "203.0.113.9")
+                        .header(CONTENT_TYPE, APPLICATION_JSON)
+                        .body(Body::from(valid_error_body()))?,
+                )
+                .await?;
+            let status = response.status();
+            let body = json_body(response).await?;
+
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert_eq!(body["code"], "invalid_api_key");
+        }
+
+        let mut limiter = state
+            .rate_limiter
+            .lock()
+            .map_err(|_| "rate limiter lock poisoned")?;
+        assert!(matches!(
+            limiter.check(RateLimitKind::AuthFail, "203.0.113.9"),
+            RateLimitDecision::Limited { .. }
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_auth_fail_identity_ignores_spoofed_proxy_headers() -> Result<(), Box<dyn Error>>
+    {
+        let state = test_ingest_state()?;
+        let router = ingest_router(state.clone());
+
+        for _ in 0..10 {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post("/api/v1/errors")
+                        .header("authorization", "Bearer sk_live_unknown_secret")
+                        .header("x-forwarded-for", "198.51.100.4")
+                        .header(CONTENT_TYPE, APPLICATION_JSON)
+                        .body(Body::from(valid_error_body()))?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let mut limiter = state
+            .rate_limiter
+            .lock()
+            .map_err(|_| "rate limiter lock poisoned")?;
+        assert_eq!(
+            limiter.check(RateLimitKind::AuthFail, "198.51.100.4"),
+            RateLimitDecision::Allowed
+        );
+        assert!(matches!(
+            limiter.check(RateLimitKind::AuthFail, UNKNOWN_AUTH_FAIL_IDENTITY),
+            RateLimitDecision::Limited { .. }
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_authorization_does_not_account_auth_fail() -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?.with_auth_fail_identity(AuthFailIdentityConfig {
+            trust_proxy_headers: true,
+        });
+        let router = ingest_router(state.clone());
+
+        for _ in 0..20 {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post("/api/v1/errors")
+                        .header("fly-client-ip", "203.0.113.10")
+                        .header(CONTENT_TYPE, APPLICATION_JSON)
+                        .body(Body::from(valid_error_body()))?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let mut limiter = state
+            .rate_limiter
+            .lock()
+            .map_err(|_| "rate limiter lock poisoned")?;
+        assert_eq!(
+            limiter.check(RateLimitKind::AuthFail, "203.0.113.10"),
+            RateLimitDecision::Allowed
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn auth_fail_identity_parses_trusted_proxy_headers_in_priority_order()
+    -> Result<(), Box<dyn Error>> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.4, 203.0.113.11"),
+        );
+        headers.insert(
+            "forwarded",
+            HeaderValue::from_static("for=198.51.100.8;proto=https, for=192.0.2.7"),
+        );
+        headers.insert("fly-client-ip", HeaderValue::from_static("203.0.113.9"));
+
+        assert_eq!(
+            auth_fail_identity(
+                &headers,
+                AuthFailIdentityConfig {
+                    trust_proxy_headers: true
+                }
+            ),
+            "203.0.113.9"
+        );
+
+        headers.remove("fly-client-ip");
+        assert_eq!(
+            auth_fail_identity(
+                &headers,
+                AuthFailIdentityConfig {
+                    trust_proxy_headers: true
+                }
+            ),
+            "192.0.2.7"
+        );
+
+        headers.remove("forwarded");
+        assert_eq!(
+            auth_fail_identity(
+                &headers,
+                AuthFailIdentityConfig {
+                    trust_proxy_headers: true
+                }
+            ),
+            "203.0.113.11"
+        );
 
         Ok(())
     }

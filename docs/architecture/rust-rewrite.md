@@ -643,10 +643,7 @@ the Rust server accepts production traffic:
     ingest routes use the 100/minute ingest bucket; read routes, `GET /metrics`,
     and admin annotation writes use the 30/minute query bucket. Public routes
     remain outside auth and rate limiting, and ordinary admin mutations remain
-    unrate-limited to match the Phoenix router. The Phoenix `auth_fail` bucket
-    is represented in the policy module but not wired yet because correct
-    parity needs a proxy-aware client identity boundary rather than a fake
-    global IP key.
+    unrate-limited to match the Phoenix router.
 60. `CanaryServer::boot` now starts a named Rust retention-prune lifecycle
     worker. `ServerConfig` owns the explicit cadence and `RetentionPolicy`;
     the default policy stays Phoenix-compatible at 30 days for errors/service
@@ -656,6 +653,20 @@ the Rust server accepts production traffic:
     Each store mutex guard covers only one 1,000-row delete statement, so a
     long maintenance pass does not monopolize the single SQLite writer across
     the whole multi-batch prune.
+61. Rust now accounts for Phoenix's silent `auth_fail` bucket on invalid
+    supplied API keys. Missing `Authorization` headers still return the same
+    401 Problem Details without touching the bucket; invalid or revoked bearer
+    keys increment `RateLimitKind::AuthFail` and deliberately discard the
+    limiter result, so even an exhausted invalid-key bucket remains an
+    `invalid_api_key` 401 rather than a visible 429. `ServerConfig` exposes an
+    explicit `AuthFailIdentityConfig`: proxy-set client IP headers such as
+    `fly-client-ip`, `Forwarded`, and `x-forwarded-for` are trusted only when
+    enabled, multi-hop proxy headers use the proxy-side/rightmost value rather
+    than the client-supplied leftmost value, and the default ignores those
+    spoofable headers. The fixed-window limiter now also prunes expired buckets
+    during checks so high-cardinality invalid-key traffic does not retain
+    stale identities indefinitely. This is a narrow accounting boundary, not a
+    generic request-identity framework.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -686,8 +697,5 @@ Phoenix behavior until the replacement is complete:
 1. Add a Phoenix-observed compatibility note for the intentional severity
    divergence above before cutover: this is a Rust correctness improvement over
    the current Phoenix read model, not a silent wire-shape change.
-2. Add the proxy-aware client identity boundary needed to account for Phoenix's
-   silent `auth_fail` rate-limit bucket without turning invalid API keys into
-   observable 429 responses.
-3. Continue remaining Phoenix background behavior, especially TLS-expiry scans,
+2. Continue remaining Phoenix background behavior, especially TLS-expiry scans,
    behind typed store or worker boundaries.
