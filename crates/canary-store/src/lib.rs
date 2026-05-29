@@ -23,8 +23,9 @@ pub use health::{
     HealthTransitionCommit, MonitorCheckInCommit, MonitorCheckInCommitResult,
     MonitorCheckInObservation, MonitorCheckInSnapshot, MonitorInsert, MonitorOverdueCandidate,
     MonitorOverdueCommit, MonitorOverdueCommitResult, MonitorRecord, MonitorTransitionEvent,
-    TargetCheckObservation, TargetConflict, TargetInsert, TargetIntervalUpdate, TargetProbeCommit,
-    TargetProbeCommitResult, TargetProbeSnapshot, TargetRecord, TargetTransitionEvent,
+    TargetCheckObservation, TargetCheckRead, TargetConflict, TargetInsert, TargetIntervalUpdate,
+    TargetProbeCommit, TargetProbeCommitResult, TargetProbeSnapshot, TargetRecord,
+    TargetTransitionEvent,
 };
 pub use incidents::{IncidentCorrelation, IncidentCorrelationEvent};
 pub use ingest::{
@@ -141,6 +142,15 @@ impl Store {
     /// Return read-model target rows for health-status endpoints.
     pub fn health_targets(&self) -> Result<Vec<HealthTargetStatus>> {
         health::health_targets(&self.connection)
+    }
+
+    /// Query recent target checks for one target.
+    pub fn target_checks(
+        &self,
+        target_id: &str,
+        window: &str,
+    ) -> QueryResult<Vec<TargetCheckRead>> {
+        health::target_checks(&self.connection, target_id, window)
     }
 
     /// Delete one target row.
@@ -1658,6 +1668,75 @@ mod tests {
         assert_eq!(targets[1].service, "Worker");
         assert_eq!(targets[1].state, "unknown");
         assert_eq!(targets[1].recent_checks, Vec::<HealthCheckSummary>::new());
+
+        Ok(())
+    }
+
+    #[test]
+    fn target_checks_filters_window_orders_newest_first_and_caps_rows()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        store.insert_target(TargetInsert {
+            id: "TGT-api".to_owned(),
+            url: "https://api.example.test/health".to_owned(),
+            name: "API".to_owned(),
+            service: "api".to_owned(),
+            method: "GET".to_owned(),
+            headers: None,
+            interval_ms: 60_000,
+            timeout_ms: 10_000,
+            expected_status: "200".to_owned(),
+            body_contains: None,
+            degraded_after: 2,
+            down_after: 3,
+            up_after: 1,
+            active: true,
+            created_at: "2026-05-28T20:00:00Z".to_owned(),
+        })?;
+        let now = OffsetDateTime::parse("2026-05-28T21:00:00Z", &Rfc3339)?;
+        let old = (now - time::Duration::hours(25)).format(&Rfc3339)?;
+        store.connection.execute(
+            "INSERT INTO target_checks (
+                target_id, checked_at, status_code, latency_ms, result, tls_expires_at, error_detail
+             ) VALUES ('TGT-api', ?1, 500, 999, 'error', NULL, 'too old')",
+            params![old],
+        )?;
+        for index in 0..501 {
+            let checked_at = (now - time::Duration::seconds(index)).format(&Rfc3339)?;
+            store.connection.execute(
+                "INSERT INTO target_checks (
+                    target_id, checked_at, status_code, latency_ms, result, tls_expires_at, error_detail
+                 ) VALUES ('TGT-api', ?1, 200, ?2, 'ok', ?3, NULL)",
+                params![
+                    checked_at,
+                    index,
+                    if index == 0 {
+                        Some("2026-09-01T00:00:00Z")
+                    } else {
+                        None
+                    },
+                ],
+            )?;
+        }
+
+        let checks = health::target_checks_at(&store.connection, "TGT-api", "24h", now)?;
+
+        assert_eq!(checks.len(), 500);
+        assert_eq!(checks[0].latency_ms, Some(0));
+        assert_eq!(
+            checks[0].tls_expires_at.as_deref(),
+            Some("2026-09-01T00:00:00Z")
+        );
+        assert_eq!(checks[499].latency_ms, Some(499));
+        assert!(
+            !checks
+                .iter()
+                .any(|check| check.error_detail.as_deref() == Some("too old"))
+        );
+        assert!(matches!(
+            health::target_checks_at(&store.connection, "TGT-api", "99h", now),
+            Err(QueryError::InvalidWindow)
+        ));
 
         Ok(())
     }

@@ -547,6 +547,16 @@ the Rust server accepts production traffic:
     rows and adds Phoenix-compatible `overall`, deterministic summary text, and
     `error_summary`. Invalid windows reuse the shared RFC 9457 validation
     problem constants.
+52. Rust now implements the Phoenix target check history surface:
+    `GET /api/v1/targets/:id/checks`. The store owns the bounded history query:
+    parse the canonical query window, filter by target id and cutoff, order
+    newest first, and cap the result at 500 rows. The server owns only
+    read-scope auth, the `24h` default, response projection, and the one
+    endpoint-specific Phoenix quirk: invalid windows return the terse
+    `"Invalid window."` RFC 9457 detail without the richer `errors.window`
+    payload used by `/api/v1/status`. Missing targets intentionally return
+    `200` with an empty `checks` array because the Phoenix query reads check
+    history directly and does not perform a target existence lookup.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed

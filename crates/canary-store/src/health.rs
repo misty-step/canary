@@ -7,12 +7,17 @@
 
 use std::collections::BTreeMap;
 
-use canary_core::ids::{EventId, IncidentId};
+use canary_core::{
+    ids::{EventId, IncidentId},
+    query::QueryWindow,
+};
 use rusqlite::{OptionalExtension, params, params_from_iter};
 use serde_json::json;
 
 use crate::{
-    IncidentCorrelation, IncidentCorrelationEvent, Result, incidents::correlate_in_transaction,
+    IncidentCorrelation, IncidentCorrelationEvent, Result,
+    incidents::correlate_in_transaction,
+    query::{QueryError, QueryResult},
 };
 
 /// Persisted event emitted by a health transition.
@@ -331,6 +336,23 @@ pub struct HealthCheckSummary {
     pub status_code: Option<i64>,
     /// Probe latency in milliseconds, when measured.
     pub latency_ms: Option<i64>,
+}
+
+/// Target-check row returned by the target checks API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetCheckRead {
+    /// Probe timestamp.
+    pub checked_at: String,
+    /// Phoenix-compatible probe result.
+    pub result: String,
+    /// HTTP status code returned by the target, when available.
+    pub status_code: Option<i64>,
+    /// Probe latency in milliseconds, when measured.
+    pub latency_ms: Option<i64>,
+    /// TLS certificate expiration timestamp, when known.
+    pub tls_expires_at: Option<String>,
+    /// Probe error detail, when the probe failed before a valid response.
+    pub error_detail: Option<String>,
 }
 
 /// HTTP target row returned by health-status read models.
@@ -903,6 +925,48 @@ pub(crate) fn health_targets(connection: &rusqlite::Connection) -> Result<Vec<He
     }
 
     Ok(targets)
+}
+
+pub(crate) fn target_checks(
+    connection: &rusqlite::Connection,
+    target_id: &str,
+    window: &str,
+) -> QueryResult<Vec<TargetCheckRead>> {
+    target_checks_at(
+        connection,
+        target_id,
+        window,
+        time::OffsetDateTime::now_utc(),
+    )
+}
+
+pub(crate) fn target_checks_at(
+    connection: &rusqlite::Connection,
+    target_id: &str,
+    window: &str,
+    now: time::OffsetDateTime,
+) -> QueryResult<Vec<TargetCheckRead>> {
+    let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
+    let cutoff = window.cutoff_at(now);
+    let mut statement = connection.prepare(
+        "SELECT checked_at, result, status_code, latency_ms, tls_expires_at, error_detail
+         FROM target_checks
+         WHERE target_id = ?1 AND checked_at >= ?2
+         ORDER BY checked_at DESC
+         LIMIT 500",
+    )?;
+    let rows = statement.query_map(params![target_id, cutoff], |row| {
+        Ok(TargetCheckRead {
+            checked_at: row.get(0)?,
+            result: row.get(1)?,
+            status_code: row.get(2)?,
+            latency_ms: row.get(3)?,
+            tls_expires_at: row.get(4)?,
+            error_detail: row.get(5)?,
+        })
+    })?;
+    let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 pub(crate) fn delete_target(

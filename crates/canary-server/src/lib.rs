@@ -42,7 +42,8 @@ use canary_ingest::{
 use canary_store::{
     ApiKeyInsert, ApiKeyRecord, ErrorSummaryItem, HealthMonitorStatus, HealthTargetStatus,
     IncidentCorrelation, IncidentListOptions, MonitorInsert, MonitorRecord, Store, StoreError,
-    TargetConflict, TargetInsert, TargetRecord, WebhookSubscription, WebhookSubscriptionInsert,
+    TargetCheckRead, TargetConflict, TargetInsert, TargetRecord, WebhookSubscription,
+    WebhookSubscriptionInsert,
 };
 use canary_store::{QueryError, ServiceQueryOptions};
 use canary_workers::health::{
@@ -482,6 +483,7 @@ pub fn ingest_router(state: IngestState) -> Router {
         .route("/api/v1/query", get(query_errors))
         .route("/api/v1/status", get(status))
         .route("/api/v1/health-status", get(health_status))
+        .route("/api/v1/targets/{id}/checks", get(target_checks))
         .route("/api/v1/incidents", get(list_incidents))
         .route("/api/v1/incidents/{id}", get(show_incident))
         .route("/api/v1/errors/{id}", get(show_error))
@@ -1566,6 +1568,37 @@ async fn status(
     )
 }
 
+async fn target_checks(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(params): Query<StatusParams>,
+) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+        return problem_response(*problem);
+    }
+
+    let window = params.window.as_deref().unwrap_or("24h");
+    let store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    let checks = match store.target_checks(&id, window) {
+        Ok(checks) => checks,
+        Err(QueryError::InvalidWindow) => return problem_response(target_checks_window_problem()),
+        Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
+    };
+
+    json_status_response(
+        StatusCode::OK.as_u16(),
+        json!({
+            "target_id": id,
+            "window": window,
+            "checks": checks.iter().map(target_check_response).collect::<Vec<_>>(),
+        }),
+    )
+}
+
 enum QueryKind {
     Service {
         service: String,
@@ -1715,6 +1748,17 @@ fn error_summary_response(item: &ErrorSummaryItem) -> Value {
         "service": item.service,
         "total_count": item.total_count,
         "unique_classes": item.unique_classes,
+    })
+}
+
+fn target_check_response(check: &TargetCheckRead) -> Value {
+    json!({
+        "checked_at": check.checked_at,
+        "result": check.result,
+        "status_code": check.status_code,
+        "latency_ms": check.latency_ms,
+        "tls_expires_at": check.tls_expires_at,
+        "error_detail": check.error_detail,
     })
 }
 
@@ -2997,6 +3041,10 @@ fn invalid_window_problem() -> ProblemDetails {
     )
 }
 
+fn target_checks_window_problem() -> ProblemDetails {
+    ProblemDetails::new(422, ProblemCode::ValidationError, "Invalid window.", None)
+}
+
 fn internal_problem() -> ProblemDetails {
     ProblemDetails::new(
         500,
@@ -3073,8 +3121,9 @@ mod tests {
     };
     use canary_http::public::{APPLICATION_JSON, OPENAPI_JSON};
     use canary_store::{
-        API_KEY_PREFIX_LEN, ApiKeyInsert, MonitorInsert, WebhookDeliveryJobInsert,
-        WebhookDeliveryJobState, WebhookDeliveryStatus, WebhookSubscriptionInsert,
+        API_KEY_PREFIX_LEN, ApiKeyInsert, MonitorInsert, TargetCheckObservation, TargetProbeCommit,
+        WebhookDeliveryJobInsert, WebhookDeliveryJobState, WebhookDeliveryStatus,
+        WebhookSubscriptionInsert,
     };
     use canary_workers::webhooks::{CircuitDecision, TransportResult, WebhookJob, WebhookRequest};
     use serde_json::{Value, json};
@@ -5568,6 +5617,125 @@ mod tests {
 
         assert_eq!(unauthorized_status, StatusCode::UNAUTHORIZED);
         assert_eq!(unauthorized_body["code"], "invalid_api_key");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn target_checks_accepts_read_scope_and_returns_recent_checks()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?.with_allow_private_targets(true);
+        let router = ingest_router(state.clone());
+
+        let target_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/targets",
+                ADMIN_KEY,
+                r#"{
+                    "url":"http://127.0.0.1:9/health",
+                    "name":"Local API",
+                    "service":"local-api",
+                    "allow_private":true
+                }"#,
+            )?)
+            .await?;
+        assert_eq!(target_response.status(), StatusCode::CREATED);
+        let target = json_body(target_response).await?;
+        let target_id = target["id"].as_str().ok_or("missing target id")?.to_owned();
+        {
+            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            store.commit_target_probe(TargetProbeCommit {
+                target_id: target_id.clone(),
+                state: "up".to_owned(),
+                consecutive_failures: 0,
+                consecutive_successes: 1,
+                check_succeeded: true,
+                check: TargetCheckObservation {
+                    status_code: Some(200),
+                    latency_ms: Some(42),
+                    result: "ok".to_owned(),
+                    tls_expires_at: Some("2026-09-01T00:00:00Z".to_owned()),
+                    error_detail: None,
+                    region: None,
+                },
+                now: current_rfc3339(),
+                transition: None,
+            })?;
+        }
+
+        let response = router
+            .oneshot(read_request(
+                READ_KEY,
+                &format!("/api/v1/targets/{target_id}/checks"),
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["target_id"], target_id);
+        assert_eq!(body["window"], "24h");
+        assert_eq!(body["checks"][0]["result"], "ok");
+        assert_eq!(body["checks"][0]["status_code"], 200);
+        assert_eq!(body["checks"][0]["latency_ms"], 42);
+        assert_eq!(body["checks"][0]["tls_expires_at"], "2026-09-01T00:00:00Z");
+        assert_eq!(body["checks"][0]["error_detail"], Value::Null);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn target_checks_keeps_phoenix_error_and_empty_missing_target_behavior()
+    -> Result<(), Box<dyn Error>> {
+        let missing = ingest_router(test_ingest_state()?)
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/targets/TGT-missing/checks",
+            )?)
+            .await?;
+        let missing_status = missing.status();
+        let missing_body = json_body(missing).await?;
+
+        assert_eq!(missing_status, StatusCode::OK);
+        assert_eq!(missing_body["target_id"], "TGT-missing");
+        assert_eq!(missing_body["window"], "24h");
+        assert_eq!(missing_body["checks"], json!([]));
+
+        let unauthorized = ingest_router(test_ingest_state()?)
+            .oneshot(Request::get("/api/v1/targets/TGT-any/checks").body(Body::empty())?)
+            .await?;
+        let unauthorized_status = unauthorized.status();
+        let unauthorized_body = json_body(unauthorized).await?;
+
+        assert_eq!(unauthorized_status, StatusCode::UNAUTHORIZED);
+        assert_eq!(unauthorized_body["code"], "invalid_api_key");
+
+        let cases = [
+            (
+                read_request(READ_KEY, "/api/v1/targets/TGT-any/checks?window=99h")?,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_error",
+                "Invalid window.",
+            ),
+            (
+                read_request(INGEST_KEY, "/api/v1/targets/TGT-any/checks")?,
+                StatusCode::FORBIDDEN,
+                "insufficient_scope",
+                "API key scope `ingest-only` cannot access this read endpoint. Use an `admin` or `read-only` key.",
+            ),
+        ];
+
+        for (request, expected_status, expected_code, expected_detail) in cases {
+            let response = ingest_router(test_ingest_state()?).oneshot(request).await?;
+            let status = response.status();
+            let body = json_body(response).await?;
+
+            assert_eq!(status, expected_status);
+            assert_eq!(body["code"], expected_code);
+            assert_eq!(body["detail"], expected_detail);
+        }
 
         Ok(())
     }
