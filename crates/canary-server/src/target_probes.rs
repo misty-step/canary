@@ -23,12 +23,32 @@ use canary_store::{ActiveTargetProbeSchedule, Store, TargetProbeSnapshot};
 use canary_workers::health::{
     ObservationContext, TargetProbeObservation, TargetSnapshot, plan_target_probe,
 };
-use reqwest::{Method, Url, redirect::Policy};
+use reqwest::{
+    Method, Url,
+    header::{HeaderName, HeaderValue},
+    redirect::Policy,
+};
 use serde_json::Value;
 
 use crate::{EventSink, current_rfc3339, current_unix_millis};
 
 const MAX_PROBE_BODY_BYTES: u64 = 64 * 1024;
+const MAX_TARGET_HEADERS: usize = 64;
+const MAX_TARGET_HEADER_BYTES: usize = 8 * 1024;
+const FORBIDDEN_TARGET_HEADERS: &[&str] = &[
+    "connection",
+    "content-length",
+    "expect",
+    "host",
+    "keep-alive",
+    "proxy-connection",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
 
 /// Options for one target probe execution.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -665,14 +685,56 @@ fn parse_headers(headers: Option<&str>) -> Result<BTreeMap<String, String>, Stri
     let object = value
         .as_object()
         .ok_or_else(|| "target headers must be a JSON object".to_owned())?;
+    if object.len() > MAX_TARGET_HEADERS {
+        return Err(format!(
+            "target headers exceed {MAX_TARGET_HEADERS} configured entries"
+        ));
+    }
     let mut parsed = BTreeMap::new();
+    let mut serialized_bytes = 0_usize;
     for (name, value) in object {
         let Some(value) = value.as_str() else {
             return Err(format!("target header {name} must be a string"));
         };
-        parsed.insert(name.clone(), value.to_owned());
+        let normalized_name = validate_header_name(name)?;
+        validate_header_value(&normalized_name, value)?;
+        serialized_bytes = serialized_bytes
+            .saturating_add(normalized_name.len())
+            .saturating_add(2)
+            .saturating_add(value.len())
+            .saturating_add(2);
+        if serialized_bytes > MAX_TARGET_HEADER_BYTES {
+            return Err(format!(
+                "target headers exceed {MAX_TARGET_HEADER_BYTES} serialized bytes"
+            ));
+        }
+        if parsed
+            .insert(normalized_name.clone(), value.to_owned())
+            .is_some()
+        {
+            return Err(format!(
+                "duplicate target header {normalized_name} after case normalization"
+            ));
+        }
     }
     Ok(parsed)
+}
+
+fn validate_header_name(name: &str) -> Result<String, String> {
+    let header_name = HeaderName::from_bytes(name.as_bytes())
+        .map_err(|_| format!("invalid target header name: {name}"))?;
+    let normalized = header_name.as_str().to_owned();
+    if FORBIDDEN_TARGET_HEADERS.contains(&normalized.as_str()) {
+        return Err(format!(
+            "target header {normalized} is managed by Canary probe transport"
+        ));
+    }
+    Ok(normalized)
+}
+
+fn validate_header_value(name: &str, value: &str) -> Result<(), String> {
+    HeaderValue::from_str(value).map_err(|_| format!("invalid value for target header {name}"))?;
+    Ok(())
 }
 
 fn resolve_and_validate(
@@ -953,6 +1015,26 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct RecordingRequestTransport {
+        calls: AtomicUsize,
+        last_request: StdMutex<Option<ProbeRequest>>,
+    }
+
+    impl ProbeTransport for RecordingRequestTransport {
+        fn probe(&self, request: ProbeRequest) -> Result<ProbeHttpResponse, ProbeTransportError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.last_request.lock().map_err(|_| {
+                ProbeTransportError::Connection("request lock poisoned".to_owned())
+            })? = Some(request);
+            Ok(ProbeHttpResponse {
+                status_code: 200,
+                body: "ok".to_owned(),
+                tls_expires_at: None,
+            })
+        }
+    }
+
     #[derive(Debug)]
     struct QueueTransport {
         calls: AtomicUsize,
@@ -1032,6 +1114,82 @@ mod tests {
     }
 
     #[test]
+    fn configured_headers_are_validated_and_normalized() -> Result<(), Box<dyn Error>> {
+        let headers = parse_headers(Some(
+            r#"{"X-Canary-Probe":"true","Authorization":"Bearer health-token"}"#,
+        ))?;
+
+        assert_eq!(
+            headers
+                .get("x-canary-probe")
+                .ok_or("missing normalized custom header")?,
+            "true"
+        );
+        assert_eq!(
+            headers
+                .get("authorization")
+                .ok_or("missing normalized authorization header")?,
+            "Bearer health-token"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn configured_headers_reject_transport_owned_or_malformed_values() -> Result<(), Box<dyn Error>>
+    {
+        for (headers, expected) in [
+            (
+                r#"{"Host":"evil.example"}"#,
+                "target header host is managed by Canary probe transport",
+            ),
+            (
+                r#"{"Content-Length":"100"}"#,
+                "target header content-length is managed by Canary probe transport",
+            ),
+            (
+                r#"{"Expect":"100-continue"}"#,
+                "target header expect is managed by Canary probe transport",
+            ),
+            (
+                r#"{"Proxy-Connection":"keep-alive"}"#,
+                "target header proxy-connection is managed by Canary probe transport",
+            ),
+            (
+                r#"{"Bad Header":"value"}"#,
+                "invalid target header name: Bad Header",
+            ),
+            (
+                r#"{"X-Canary":"bad\r\nsplit"}"#,
+                "invalid value for target header x-canary",
+            ),
+            (
+                r#"{"X-Canary":"one","x-canary":"two"}"#,
+                "duplicate target header x-canary after case normalization",
+            ),
+        ] {
+            assert_parse_header_error(headers, expected)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn configured_headers_reject_unbounded_count_or_size() -> Result<(), Box<dyn Error>> {
+        let too_many = (0..=MAX_TARGET_HEADERS)
+            .map(|index| format!(r#""X-Test-{index}":"ok""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let too_many_json = format!("{{{too_many}}}");
+        assert_parse_header_error(
+            &too_many_json,
+            "target headers exceed 64 configured entries",
+        )?;
+
+        let oversized = format!(r#"{{"X-Large":"{}"}}"#, "x".repeat(MAX_TARGET_HEADER_BYTES));
+        assert_parse_header_error(&oversized, "target headers exceed 8192 serialized bytes")?;
+        Ok(())
+    }
+
+    #[test]
     fn ssrf_block_persists_failed_probe_without_opening_transport() -> Result<(), Box<dyn Error>> {
         let store = seeded_store("http://127.0.0.1/health", "up")?;
         let transport = StaticTransport::ok(200, "ok");
@@ -1055,6 +1213,75 @@ mod tests {
             0,
             "no webhook subscriptions exist in this fixture"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_configured_header_persists_failed_probe_without_opening_transport()
+    -> Result<(), Box<dyn Error>> {
+        let store = seeded_store_with_headers(
+            "http://127.0.0.1/health",
+            "up",
+            Some(r#"{"Host":"evil.example"}"#.to_owned()),
+        )?;
+        let transport = StaticTransport::ok(200, "ok");
+        let sink = RecordingSink::default();
+
+        let outcome = run_target_probe_once(
+            &store,
+            &sink,
+            &transport,
+            "TGT-api",
+            TargetProbeOptions {
+                allow_private_targets: true,
+                region: None,
+            },
+        )?;
+
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(outcome.result, "connection_error");
+        assert_eq!(outcome.state, "degraded");
+        Ok(())
+    }
+
+    #[test]
+    fn valid_configured_headers_reach_transport_normalized() -> Result<(), Box<dyn Error>> {
+        let store = seeded_store_with_headers(
+            "http://127.0.0.1/health",
+            "unknown",
+            Some(r#"{"X-Trace-Id":"abc","Accept":"application/json"}"#.to_owned()),
+        )?;
+        let transport = RecordingRequestTransport::default();
+        let sink = RecordingSink::default();
+
+        let outcome = run_target_probe_once(
+            &store,
+            &sink,
+            &transport,
+            "TGT-api",
+            TargetProbeOptions {
+                allow_private_targets: true,
+                region: None,
+            },
+        )?;
+
+        let request = transport
+            .last_request
+            .lock()
+            .map_err(|_| "request lock poisoned")?
+            .clone()
+            .ok_or("missing recorded request")?;
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(outcome.result, "success");
+        assert_eq!(
+            request.headers.get("x-trace-id").map(String::as_str),
+            Some("abc")
+        );
+        assert_eq!(
+            request.headers.get("accept").map(String::as_str),
+            Some("application/json")
+        );
+        assert!(!request.headers.contains_key("host"));
         Ok(())
     }
 
@@ -1260,6 +1487,14 @@ mod tests {
     }
 
     fn seeded_store(url: &str, state: &str) -> Result<Arc<Mutex<Store>>, Box<dyn Error>> {
+        seeded_store_with_headers(url, state, None)
+    }
+
+    fn seeded_store_with_headers(
+        url: &str,
+        state: &str,
+        headers: Option<String>,
+    ) -> Result<Arc<Mutex<Store>>, Box<dyn Error>> {
         let mut store = Store::open_in_memory()?;
         store.migrate()?;
         store.insert_target(TargetInsert {
@@ -1268,7 +1503,7 @@ mod tests {
             name: "API".to_owned(),
             service: "api".to_owned(),
             method: "GET".to_owned(),
-            headers: None,
+            headers,
             interval_ms: 60_000,
             timeout_ms: 10_000,
             expected_status: "200".to_owned(),
@@ -1297,5 +1532,15 @@ mod tests {
             transition: None,
         })?;
         Ok(Arc::new(Mutex::new(store)))
+    }
+
+    fn assert_parse_header_error(headers: &str, expected: &str) -> Result<(), Box<dyn Error>> {
+        match parse_headers(Some(headers)) {
+            Ok(parsed) => Err(format!("expected {headers} to fail, parsed {parsed:?}").into()),
+            Err(error) => {
+                assert_eq!(error, expected);
+                Ok(())
+            }
+        }
     }
 }

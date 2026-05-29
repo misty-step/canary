@@ -341,6 +341,21 @@ the Rust server accepts production traffic:
     best-effort enqueues the already-recorded transition/incident events. It
     does not introduce a generic scheduler, does not write SQL, and does not
     insert `monitor_check_ins`.
+34. `canary-server::target_probes::parse_headers`: configured target headers
+    now have the validation Phoenix lacked before the transport opens a socket.
+    The persisted shape stays simple and compatible — a JSON object of string
+    values — but Rust parses each header name and value with the HTTP header
+    types, normalizes names case-insensitively, rejects duplicate normalized
+    names, rejects authority/framing/hop-by-hop headers owned by Canary's probe
+    transport (`Host`, `Content-Length`, `Transfer-Encoding`, `Connection`,
+    `Keep-Alive`, `Upgrade`, `TE`, `Trailer`, `Expect`, and proxy hop headers),
+    and bounds both entry count and serialized header bytes. Validation failures
+    follow the same runtime shape as SSRF failures: no transport call is opened,
+    a `connection_error` target check is still committed, and the existing state
+    machine decides whether that failed observation changes health state. This
+    keeps header security at the target-probe boundary instead of spreading it
+    through store schemas, target lifecycle scheduling, or reqwest transport
+    error handling.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -370,9 +385,8 @@ Phoenix behavior until the replacement is complete:
 
 1. Harden the target probe runtime edge cases that were deliberately left out of
    the lifecycle slice: guarded TLS expiry capture using the same SSRF-approved
-   address set, target header validation for forbidden or malformed headers,
-   enqueue-failure telemetry, and explicit hot-update semantics for target
-   deactivate/pause/update while a probe is in flight.
+   address set, enqueue-failure telemetry, and explicit hot-update semantics for
+   target deactivate/pause/update while a probe is in flight.
 2. Broaden monitor overdue parity fixtures around malformed persisted rows,
    TTL-vs-expected escalation, webhook enqueue failure receipts, and transaction
    rollback evidence for transition/correlation failures.
