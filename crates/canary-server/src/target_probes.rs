@@ -305,6 +305,17 @@ impl TargetProbeLifecycle {
 
     /// Load active targets, execute due probes with bounded isolation, and update next due times.
     pub fn run_due(&mut self, now_millis: i64) -> Result<TargetProbeLifecycleReport, String> {
+        self.run_due_until(now_millis, || false)
+    }
+
+    fn run_due_until<F>(
+        &mut self,
+        now_millis: i64,
+        mut should_stop: F,
+    ) -> Result<TargetProbeLifecycleReport, String>
+    where
+        F: FnMut() -> bool,
+    {
         let active = self.load_active_schedules()?;
         self.reconcile(active, now_millis);
         self.drain_control_commands(now_millis);
@@ -323,45 +334,72 @@ impl TargetProbeLifecycle {
         };
 
         for batch in due_targets.chunks(MAX_CONCURRENT_TARGET_PROBES) {
-            let mut handles = Vec::with_capacity(batch.len());
+            let (completion_sender, completion_receiver) = mpsc::channel();
+            let mut pending = 0_usize;
             for target_id in batch {
                 let runtime = Arc::clone(&self.runtime);
                 let target_id = target_id.clone();
                 let thread_target_id = target_id.clone();
+                let completion_target_id = target_id.clone();
+                let sender = completion_sender.clone();
                 let handle = thread::Builder::new()
                     .name("canary-target-probe".to_owned())
-                    .spawn(move || runtime.run_once(&thread_target_id));
-                match handle {
-                    Ok(handle) => handles.push((target_id, handle)),
-                    Err(_) => {
-                        report.failed += 1;
-                        self.advance_target_schedule(&target_id, now_millis);
-                    }
+                    .spawn(move || {
+                        let result =
+                            catch_unwind(AssertUnwindSafe(|| runtime.run_once(&thread_target_id)));
+                        let _ = sender.send((completion_target_id, result));
+                    });
+                if handle.is_ok() {
+                    pending += 1;
+                } else {
+                    report.failed += 1;
+                    self.advance_target_schedule(&target_id, now_millis);
                 }
             }
+            drop(completion_sender);
 
-            for (target_id, handle) in handles {
-                let result = match handle.join() {
-                    Ok(result) => result,
-                    Err(_) => {
+            while pending > 0 {
+                if should_stop() {
+                    return Ok(report);
+                }
+                match completion_receiver.recv_timeout(StdDuration::from_millis(10)) {
+                    Ok((target_id, Ok(result))) => {
+                        self.record_probe_result(&mut report, &target_id, result, now_millis);
+                        pending -= 1;
+                    }
+                    Ok((target_id, Err(_))) => {
                         report.failed += 1;
                         self.advance_target_schedule(&target_id, now_millis);
-                        continue;
+                        pending -= 1;
                     }
-                };
-                match result {
-                    Ok(outcome) => {
-                        report.probed += 1;
-                        report.event_fanout_failed += outcome.event_fanout.failed;
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        report.failed += pending;
+                        break;
                     }
-                    Err(TargetProbeRuntimeError::TargetNotFound) => report.skipped_missing += 1,
-                    Err(_) => report.failed += 1,
                 }
-                self.advance_target_schedule(&target_id, now_millis);
             }
         }
 
         Ok(report)
+    }
+
+    fn record_probe_result(
+        &mut self,
+        report: &mut TargetProbeLifecycleReport,
+        target_id: &str,
+        result: Result<TargetProbeOutcome, TargetProbeRuntimeError>,
+        now_millis: i64,
+    ) {
+        match result {
+            Ok(outcome) => {
+                report.probed += 1;
+                report.event_fanout_failed += outcome.event_fanout.failed;
+            }
+            Err(TargetProbeRuntimeError::TargetNotFound) => report.skipped_missing += 1,
+            Err(_) => report.failed += 1,
+        }
+        self.advance_target_schedule(target_id, now_millis);
     }
 
     fn load_active_schedules(&self) -> Result<Vec<ActiveTargetProbeSchedule>, String> {
@@ -480,7 +518,7 @@ pub struct TargetProbeLifecycleController {
 }
 
 impl TargetProbeLifecycleWorker {
-    /// Spawn one named background thread that probes due active targets sequentially.
+    /// Spawn one named background thread that coordinates bounded target probes.
     pub fn spawn(
         mut lifecycle: TargetProbeLifecycle,
         config: TargetProbeLifecycleConfig,
@@ -732,7 +770,7 @@ fn run_lifecycle_worker(
     while !control.is_stopping() {
         if !control.is_paused() {
             let _ = catch_unwind(AssertUnwindSafe(|| {
-                lifecycle.run_due(current_unix_millis())
+                lifecycle.run_due_until(current_unix_millis(), || control.is_stopping())
             }));
         }
         if control.wait(interval) {
@@ -1398,6 +1436,7 @@ mod tests {
     struct BlockingTransport {
         calls: AtomicUsize,
         slow_started: StdMutex<Option<std::sync::mpsc::Sender<()>>>,
+        slow_done: StdMutex<Option<std::sync::mpsc::Sender<()>>>,
         fast_done: StdMutex<Option<std::sync::mpsc::Sender<()>>>,
         release_slow: StdMutex<std::sync::mpsc::Receiver<()>>,
     }
@@ -1408,9 +1447,19 @@ mod tests {
             fast_done: std::sync::mpsc::Sender<()>,
             release_slow: std::sync::mpsc::Receiver<()>,
         ) -> Self {
+            Self::new_with_slow_done(slow_started, None, fast_done, release_slow)
+        }
+
+        fn new_with_slow_done(
+            slow_started: std::sync::mpsc::Sender<()>,
+            slow_done: Option<std::sync::mpsc::Sender<()>>,
+            fast_done: std::sync::mpsc::Sender<()>,
+            release_slow: std::sync::mpsc::Receiver<()>,
+        ) -> Self {
             Self {
                 calls: AtomicUsize::new(0),
                 slow_started: StdMutex::new(Some(slow_started)),
+                slow_done: StdMutex::new(slow_done),
                 fast_done: StdMutex::new(Some(fast_done)),
                 release_slow: StdMutex::new(release_slow),
             }
@@ -1436,6 +1485,16 @@ mod tests {
                     })?
                     .recv()
                     .map_err(|error| ProbeTransportError::Connection(error.to_string()))?;
+                if let Some(sender) = self
+                    .slow_done
+                    .lock()
+                    .map_err(|_| {
+                        ProbeTransportError::Connection("slow-done lock poisoned".to_owned())
+                    })?
+                    .take()
+                {
+                    let _ = sender.send(());
+                }
                 return Ok(response(200, "ok"));
             }
 
@@ -2115,6 +2174,119 @@ mod tests {
         assert_eq!(report.due, 10);
         assert_eq!(report.probed, 10);
         assert_eq!(transport.peak(), MAX_CONCURRENT_TARGET_PROBES);
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_worker_does_not_duplicate_long_running_probe_before_completion()
+    -> Result<(), Box<dyn Error>> {
+        let store = seeded_store("http://127.0.0.1/slow", "unknown")?;
+        let (slow_started_tx, slow_started_rx) = std::sync::mpsc::channel();
+        let (fast_done_tx, _fast_done_rx) = std::sync::mpsc::channel();
+        let (release_slow_tx, release_slow_rx) = std::sync::mpsc::channel();
+        let transport = Arc::new(BlockingTransport::new(
+            slow_started_tx,
+            fast_done_tx,
+            release_slow_rx,
+        ));
+        let sink = Arc::new(RecordingSink::default());
+        let runtime = TargetProbeRuntime::new(
+            store.clone(),
+            HealthEventFanout::new_without_failure_sink(sink),
+            transport.clone(),
+            TargetProbeOptions {
+                allow_private_targets: true,
+                region: None,
+            },
+        );
+        let lifecycle = TargetProbeLifecycle::new(store, runtime);
+        let worker = TargetProbeLifecycleWorker::spawn(
+            lifecycle,
+            TargetProbeLifecycleConfig {
+                tick_interval: StdDuration::from_millis(10),
+            },
+        )?;
+
+        slow_started_rx.recv_timeout(StdDuration::from_secs(1))?;
+        thread::sleep(StdDuration::from_millis(100));
+        assert_eq!(
+            transport.calls.load(Ordering::SeqCst),
+            1,
+            "a blocked target must not be relaunched on later lifecycle ticks"
+        );
+
+        release_slow_tx.send(())?;
+        worker.join()?;
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_worker_shutdown_does_not_wait_for_blocked_probe_transport()
+    -> Result<(), Box<dyn Error>> {
+        let store = seeded_store("http://127.0.0.1/slow", "unknown")?;
+        let (slow_started_tx, slow_started_rx) = std::sync::mpsc::channel();
+        let (slow_done_tx, slow_done_rx) = std::sync::mpsc::channel();
+        let (fast_done_tx, _fast_done_rx) = std::sync::mpsc::channel();
+        let (release_slow_tx, release_slow_rx) = std::sync::mpsc::channel();
+        let transport = Arc::new(BlockingTransport::new_with_slow_done(
+            slow_started_tx,
+            Some(slow_done_tx),
+            fast_done_tx,
+            release_slow_rx,
+        ));
+        let sink = Arc::new(RecordingSink::default());
+        let runtime = TargetProbeRuntime::new(
+            store.clone(),
+            HealthEventFanout::new_without_failure_sink(sink),
+            transport.clone(),
+            TargetProbeOptions {
+                allow_private_targets: true,
+                region: None,
+            },
+        );
+        let store_for_assert = store.clone();
+        let lifecycle = TargetProbeLifecycle::new(store, runtime);
+        let worker = TargetProbeLifecycleWorker::spawn(
+            lifecycle,
+            TargetProbeLifecycleConfig {
+                tick_interval: StdDuration::from_millis(10),
+            },
+        )?;
+
+        slow_started_rx.recv_timeout(StdDuration::from_secs(1))?;
+        let (joined_tx, joined_rx) = std::sync::mpsc::channel();
+        let join_thread = thread::spawn(move || {
+            let _ = joined_tx.send(worker.join());
+        });
+        joined_rx
+            .recv_timeout(StdDuration::from_secs(1))?
+            .map_err(|error| format!("worker join failed: {error}"))?;
+
+        release_slow_tx.send(())?;
+        slow_done_rx.recv_timeout(StdDuration::from_secs(1))?;
+        let started = Instant::now();
+        loop {
+            let target = {
+                let store = store_for_assert.lock().map_err(|_| "store lock poisoned")?;
+                store
+                    .health_targets()?
+                    .into_iter()
+                    .find(|target| target.id == "TGT-api")
+                    .ok_or("missing target")?
+            };
+            if target.state == "up" {
+                break;
+            }
+            if started.elapsed() > StdDuration::from_secs(1) {
+                return Err("detached probe did not finish after release".into());
+            }
+            thread::sleep(StdDuration::from_millis(10));
+        }
+        join_thread
+            .join()
+            .map_err(|_| "target lifecycle join test thread panicked")?;
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

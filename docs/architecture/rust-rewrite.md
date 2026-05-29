@@ -702,6 +702,17 @@ the Rust server accepts production traffic:
     `lifecycle_caps_concurrent_due_probe_fanout` lock the two important
     properties: a fast target commits while an unrelated slow target is still
     blocked, and fanout cannot silently become unbounded thread creation.
+65. Target-probe shutdown no longer waits for a blocked probe transport. Normal
+    lifecycle passes still wait for launched probes to finish, which preserves
+    completion-driven reports and prevents duplicate launches on later ticks.
+    The worker path now calls `run_due_until` with the shutdown flag; once
+    shutdown is requested, the coordinator stops waiting for outstanding probe
+    completions and exits the worker thread. Detached probe threads may finish
+    and commit through the same store mutex, but shutdown is no longer hostage
+    to a hung socket. The tests
+    `lifecycle_worker_does_not_duplicate_long_running_probe_before_completion`
+    and `lifecycle_worker_shutdown_does_not_wait_for_blocked_probe_transport`
+    lock both halves of that contract.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -729,12 +740,10 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Audit target-probe lifecycle shutdown and duplicate-run semantics under
-   long-running probes. The current bounded fanout prevents one slow target
-   from starving unrelated targets inside the same pass, but the worker still
-   joins the active batch before the next tick and before shutdown completes.
-   The next slice should decide whether that is the desired operational
-   contract or whether Canary needs per-target in-flight tracking plus a
-   bounded worker pool that can stop accepting new probes without waiting on
-   already-blocked sockets. Keep the adapter target-probe-specific; do not add
-   a generic scheduler.
+1. Decide whether target-probe reporting should become fully asynchronous.
+   The current contract keeps normal pass reports completion-driven and only
+   detaches outstanding probe threads during shutdown. A fuller design would
+   add target-scoped in-flight tracking plus a completion channel across
+   lifecycle ticks, letting the worker keep ticking while long probes continue
+   in the background. Do that only if a production behavior needs it; keep the
+   adapter target-probe-specific and preserve the single-writer store mutex.
