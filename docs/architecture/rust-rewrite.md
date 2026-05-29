@@ -190,6 +190,15 @@ the Rust server accepts production traffic:
     persists retry scheduling with the same delivery id, and exposes an explicit
     max-jobs limit. This remains a bespoke webhook delivery adapter, not a
     generic job framework or alternate scheduler abstraction.
+22. `canary-server::HttpWebhookTransport`: outbound webhook delivery now has a
+    concrete HTTP transport behind the existing `WebhookTransport` trait. It
+    sends the already-signed `WebhookRequest` body bytes unchanged, forwards the
+    six Phoenix-compatible webhook headers, maps response status codes directly
+    into `TransportResult::HttpStatus`, maps connection failures into
+    `TransportResult::RequestError`, disables redirects, and relies on the
+    scheduler for all retry/backoff authority. The implementation is blocking
+    and must be wired from a dedicated worker/drain context rather than an Axum
+    request task.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -217,8 +226,8 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Add a concrete HTTP transport implementation for webhook delivery, with
-   transport-level retry disabled so scheduler retry remains authoritative.
+1. Add the concrete runtime wiring that runs `WebhookDeliveryDrain` off the Axum
+   request path, so blocking outbound HTTP cannot starve request handlers.
 2. Add a concrete incident-correlation effect sink once the Rust incident write
    path exists, keeping correlation failures isolated from ingest success.
 3. Add compatibility checks against a migrated Phoenix fixture database before

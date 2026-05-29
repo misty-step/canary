@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration as StdDuration,
+};
 
 use canary_ingest::IngestEffect;
 use canary_store::{
@@ -65,6 +68,53 @@ pub trait WebhookCooldown: Send + Sync + 'static {
 pub trait WebhookTransport: Send + Sync + 'static {
     /// Send one signed webhook request.
     fn send(&self, request: &WebhookRequest) -> TransportResult;
+}
+
+/// Concrete HTTP transport for outbound webhook delivery.
+pub struct HttpWebhookTransport {
+    client: reqwest::blocking::Client,
+}
+
+impl HttpWebhookTransport {
+    const DEFAULT_TIMEOUT: StdDuration = StdDuration::from_secs(10);
+    const DEFAULT_CONNECT_TIMEOUT: StdDuration = StdDuration::from_secs(3);
+    const USER_AGENT: &'static str = concat!("canary-server/", env!("CARGO_PKG_VERSION"));
+
+    /// Build an HTTP transport with Phoenix-compatible timeout and no redirects.
+    ///
+    /// TLS certificate validation stays enabled. The blocking send path is meant
+    /// for the webhook drain worker, not an Axum request task.
+    pub fn try_new() -> Result<Self, String> {
+        Self::with_timeout(Self::DEFAULT_TIMEOUT)
+    }
+
+    /// Build an HTTP transport with an explicit timeout and no hidden retries.
+    pub fn with_timeout(timeout: StdDuration) -> Result<Self, String> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            .connect_timeout(Self::DEFAULT_CONNECT_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .http1_only()
+            .user_agent(Self::USER_AGENT)
+            .build()
+            .map_err(|error| format!("failed to build webhook HTTP transport: {error}"))?;
+
+        Ok(Self { client })
+    }
+}
+
+impl WebhookTransport for HttpWebhookTransport {
+    fn send(&self, request: &WebhookRequest) -> TransportResult {
+        let mut builder = self.client.post(&request.url).body(request.body.clone());
+        for (name, value) in request.headers.as_pairs() {
+            builder = builder.header(name, value);
+        }
+
+        match builder.send() {
+            Ok(response) => TransportResult::HttpStatus(response.status().as_u16()),
+            Err(error) => TransportResult::RequestError(error.to_string()),
+        }
+    }
 }
 
 /// Runtime boundary for webhook circuit state.

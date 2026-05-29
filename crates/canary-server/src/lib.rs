@@ -39,9 +39,9 @@ mod webhooks;
 
 use webhooks::NoopWebhookCooldown;
 pub use webhooks::{
-    StoreWebhookScheduler, WebhookCircuit, WebhookCooldown, WebhookDeliveryDrain,
-    WebhookDeliveryDrainReport, WebhookDeliveryRuntime, WebhookEnqueueEffectSink, WebhookScheduler,
-    WebhookTransport,
+    HttpWebhookTransport, StoreWebhookScheduler, WebhookCircuit, WebhookCooldown,
+    WebhookDeliveryDrain, WebhookDeliveryDrainReport, WebhookDeliveryRuntime,
+    WebhookEnqueueEffectSink, WebhookScheduler, WebhookTransport,
 };
 
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
@@ -568,7 +568,11 @@ struct QueryParams {
 #[cfg(test)]
 mod tests {
     use std::error::Error;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::{Arc, Mutex as StdMutex};
+    use std::thread::JoinHandle;
+    use std::time::Duration as StdDuration;
 
     use axum::{
         body::{Body, to_bytes},
@@ -969,6 +973,180 @@ mod tests {
         })?;
         assert_eq!(missing[0].status, WebhookDeliveryStatus::Discarded);
         assert_eq!(missing[0].reason.as_deref(), Some("webhook_not_found"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn http_webhook_transport_sends_signed_body_and_maps_status() -> Result<(), Box<dyn Error>> {
+        let (url, server) = spawn_webhook_server(202, &[])?;
+        let request = WebhookRequest {
+            url,
+            body: r#"{"event":"error.new_class","ok":true}"#.to_owned(),
+            headers: canary_http::webhooks::headers_for_body(
+                r#"{"event":"error.new_class","ok":true}"#,
+                "test-webhook-secret",
+                "error.new_class",
+                "DLV-http-ok",
+                Some(42),
+            ),
+        };
+        let transport = HttpWebhookTransport::try_new()?;
+
+        let result = transport.send(&request);
+        let captured = join_http_server(server)?;
+
+        assert_eq!(result, TransportResult::HttpStatus(202));
+        assert!(captured.head.starts_with("POST /hook HTTP/1.1"));
+        assert_eq!(captured.body, request.body);
+        assert!(
+            canary_http::webhooks::verify_signature(
+                captured.body.as_bytes(),
+                "test-webhook-secret",
+                &request.headers.signature,
+            ),
+            "receiver should be able to verify signature over exact received bytes"
+        );
+        assert_eq!(
+            header_value(&captured.head, "content-type").as_deref(),
+            Some("application/json")
+        );
+        assert_eq!(
+            header_value(&captured.head, "x-event").as_deref(),
+            Some("error.new_class")
+        );
+        assert_eq!(
+            header_value(&captured.head, "x-delivery-id").as_deref(),
+            Some("DLV-http-ok")
+        );
+        assert_eq!(
+            header_value(&captured.head, "x-webhook-version").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            header_value(&captured.head, "x-sequence").as_deref(),
+            Some("42")
+        );
+        assert_eq!(
+            header_value(&captured.head, "x-signature").as_deref(),
+            Some(request.headers.signature.as_str())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn http_webhook_transport_does_not_follow_redirects_or_retry() -> Result<(), Box<dyn Error>> {
+        let (url, server) =
+            spawn_webhook_server(307, &[("location", "http://127.0.0.1:1/second")])?;
+        let request = WebhookRequest {
+            url,
+            body: "{}".to_owned(),
+            headers: canary_http::webhooks::headers_for_body(
+                "{}",
+                "test-webhook-secret",
+                "error.new_class",
+                "DLV-http-redirect",
+                None,
+            ),
+        };
+        let transport = HttpWebhookTransport::try_new()?;
+
+        let result = transport.send(&request);
+        let captured = join_http_server(server)?;
+
+        assert_eq!(result, TransportResult::HttpStatus(307));
+        assert!(captured.head.starts_with("POST /hook HTTP/1.1"));
+        assert_eq!(captured.body, "{}");
+
+        Ok(())
+    }
+
+    #[test]
+    fn http_webhook_transport_leaves_failure_status_for_scheduler() -> Result<(), Box<dyn Error>> {
+        let (url, server) = spawn_webhook_server(503, &[])?;
+        let request = WebhookRequest {
+            url,
+            body: "{}".to_owned(),
+            headers: canary_http::webhooks::headers_for_body(
+                "{}",
+                "test-webhook-secret",
+                "error.new_class",
+                "DLV-http-503",
+                None,
+            ),
+        };
+        let transport = HttpWebhookTransport::try_new()?;
+
+        let result = transport.send(&request);
+        let captured = join_http_server(server)?;
+
+        assert_eq!(result, TransportResult::HttpStatus(503));
+        assert_eq!(captured.body, "{}");
+
+        Ok(())
+    }
+
+    #[test]
+    fn http_webhook_transport_maps_connection_failures_to_request_errors()
+    -> Result<(), Box<dyn Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        drop(listener);
+        let request = WebhookRequest {
+            url: format!("http://{addr}/hook"),
+            body: "{}".to_owned(),
+            headers: canary_http::webhooks::headers_for_body(
+                "{}",
+                "test-webhook-secret",
+                "error.new_class",
+                "DLV-http-error",
+                None,
+            ),
+        };
+        let transport = HttpWebhookTransport::with_timeout(StdDuration::from_millis(200))?;
+
+        let TransportResult::RequestError(reason) = transport.send(&request) else {
+            return Err("connection failure should map to request error".into());
+        };
+        assert!(!reason.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_runtime_uses_http_transport_and_records_ledger()
+    -> Result<(), Box<dyn Error>> {
+        let (url, server) = spawn_webhook_server(204, &[])?;
+        let store = runtime_store_with_url(true, &url)?;
+        let runtime = WebhookDeliveryRuntime::new_without_circuit(
+            store.clone(),
+            Arc::new(HttpWebhookTransport::try_new()?),
+        );
+
+        let execution = runtime.deliver(&webhook_job("DLV-runtime-http", 1, 4))?;
+        let captured = join_http_server(server)?;
+
+        assert_eq!(
+            execution.outcome,
+            canary_workers::webhooks::DeliveryOutcome::Delivered
+        );
+        assert_eq!(
+            captured.body,
+            r#"{"error":{"group_hash":"group-runtime"},"sequence":7}"#
+        );
+        assert_eq!(
+            header_value(&captured.head, "x-delivery-id").as_deref(),
+            Some("DLV-runtime-http")
+        );
+        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
+            delivery_id: Some("DLV-runtime-http".to_owned()),
+            ..Default::default()
+        })?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, WebhookDeliveryStatus::Delivered);
+        assert_eq!(rows[0].attempt_count, 1);
 
         Ok(())
     }
@@ -1674,11 +1852,18 @@ mod tests {
     }
 
     fn runtime_store(active_webhook: bool) -> Result<Arc<Mutex<Store>>, Box<dyn Error>> {
+        runtime_store_with_url(active_webhook, "https://example.test/hook")
+    }
+
+    fn runtime_store_with_url(
+        active_webhook: bool,
+        url: &str,
+    ) -> Result<Arc<Mutex<Store>>, Box<dyn Error>> {
         let mut store = Store::open_in_memory()?;
         store.migrate()?;
         store.insert_webhook_subscription(WebhookSubscriptionInsert {
             id: "WHK-test".to_owned(),
-            url: "https://example.test/hook".to_owned(),
+            url: url.to_owned(),
             events: vec!["error.new_class".to_owned()],
             secret: "test-webhook-secret".to_owned(),
             active: active_webhook,
@@ -1701,6 +1886,92 @@ mod tests {
             attempt,
             max_attempts,
         }
+    }
+
+    #[derive(Debug)]
+    struct CapturedHttpRequest {
+        head: String,
+        body: String,
+    }
+
+    type HttpServerHandle = JoinHandle<std::io::Result<CapturedHttpRequest>>;
+
+    fn spawn_webhook_server(
+        status: u16,
+        headers: &[(&str, &str)],
+    ) -> Result<(String, HttpServerHandle), Box<dyn Error>> {
+        // One accepted connection is intentional: redirect following or hidden
+        // retries should show up as the original status, not extra requests.
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let headers = headers
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect::<Vec<_>>();
+        let handle = std::thread::spawn(move || -> std::io::Result<CapturedHttpRequest> {
+            let (mut stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(StdDuration::from_secs(2)))?;
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !http_request_complete(&bytes) {
+                let read = stream.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buffer[..read]);
+            }
+
+            let mut response = format!("HTTP/1.1 {status} test\r\ncontent-length: 0\r\n");
+            for (name, value) in headers {
+                response.push_str(&format!("{name}: {value}\r\n"));
+            }
+            response.push_str("connection: close\r\n\r\n");
+            stream.write_all(response.as_bytes())?;
+
+            let raw = String::from_utf8(bytes)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            let Some((head, body)) = raw.split_once("\r\n\r\n") else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "request missing header terminator",
+                ));
+            };
+            Ok(CapturedHttpRequest {
+                head: head.to_owned(),
+                body: body.to_owned(),
+            })
+        });
+
+        Ok((format!("http://{addr}/hook"), handle))
+    }
+
+    fn join_http_server(handle: HttpServerHandle) -> std::io::Result<CapturedHttpRequest> {
+        handle
+            .join()
+            .map_err(|_| std::io::Error::other("HTTP test server panicked"))?
+    }
+
+    fn http_request_complete(bytes: &[u8]) -> bool {
+        let raw = String::from_utf8_lossy(bytes);
+        let Some((head, body)) = raw.split_once("\r\n\r\n") else {
+            return false;
+        };
+        let content_length = header_value(head, "content-length")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+
+        body.len() >= content_length
+    }
+
+    fn header_value(head: &str, header: &str) -> Option<String> {
+        head.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case(header) {
+                Some(value.trim().to_owned())
+            } else {
+                None
+            }
+        })
     }
 
     fn insert_due_webhook_job(
