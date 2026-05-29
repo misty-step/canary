@@ -133,6 +133,15 @@ pub struct TargetProbeSnapshot {
     pub consecutive_successes: u32,
 }
 
+/// Active target row needed by the probe lifecycle adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveTargetProbeSchedule {
+    /// Target id.
+    pub target_id: String,
+    /// Probe interval in milliseconds.
+    pub interval_ms: i64,
+}
+
 /// Monitor configuration and state needed to plan one check-in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MonitorCheckInSnapshot {
@@ -530,6 +539,26 @@ pub(crate) fn target_probe_snapshot_by_id(
         consecutive_failures,
         consecutive_successes,
     }))
+}
+
+pub(crate) fn active_target_probe_schedules(
+    connection: &rusqlite::Connection,
+) -> Result<Vec<ActiveTargetProbeSchedule>> {
+    let mut statement = connection.prepare(
+        "SELECT id, COALESCE(interval_ms, 60000)
+         FROM targets
+         WHERE active = 1
+         ORDER BY id",
+    )?;
+    let schedules = statement
+        .query_map([], |row| {
+            Ok(ActiveTargetProbeSchedule {
+                target_id: row.get(0)?,
+                interval_ms: row.get(1)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(schedules)
 }
 
 pub(crate) fn monitor_check_in_snapshot_by_name(

@@ -19,10 +19,10 @@ mod webhook_deliveries;
 
 pub use api_keys::{API_KEY_PREFIX_LEN, ApiKeyInsert, VerifiedApiKey};
 pub use health::{
-    HealthTransitionCommit, MonitorCheckInCommit, MonitorCheckInCommitResult,
-    MonitorCheckInObservation, MonitorCheckInSnapshot, MonitorInsert, MonitorTransitionEvent,
-    TargetCheckObservation, TargetInsert, TargetProbeCommit, TargetProbeCommitResult,
-    TargetProbeSnapshot, TargetTransitionEvent,
+    ActiveTargetProbeSchedule, HealthTransitionCommit, MonitorCheckInCommit,
+    MonitorCheckInCommitResult, MonitorCheckInObservation, MonitorCheckInSnapshot, MonitorInsert,
+    MonitorTransitionEvent, TargetCheckObservation, TargetInsert, TargetProbeCommit,
+    TargetProbeCommitResult, TargetProbeSnapshot, TargetTransitionEvent,
 };
 pub use incidents::{IncidentCorrelation, IncidentCorrelationEvent};
 pub use ingest::{
@@ -119,6 +119,11 @@ impl Store {
         target_id: &str,
     ) -> Result<Option<TargetProbeSnapshot>> {
         health::target_probe_snapshot_by_id(&mut self.connection, target_id)
+    }
+
+    /// Return active target ids and intervals for the probe lifecycle adapter.
+    pub fn active_target_probe_schedules(&self) -> Result<Vec<ActiveTargetProbeSchedule>> {
+        health::active_target_probe_schedules(&self.connection)
     }
 
     /// Persist one monitor check-in, including state and optional transition effects.
@@ -1728,6 +1733,51 @@ mod tests {
             "unknown"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn active_target_probe_schedules_return_only_active_targets_ordered_by_id() -> Result<()> {
+        let mut store = migrated_store()?;
+        for (id, active, interval_ms) in [
+            ("TGT-b", true, 45_000),
+            ("TGT-inactive", false, 60_000),
+            ("TGT-a", true, 30_000),
+        ] {
+            store.insert_target(TargetInsert {
+                id: id.to_owned(),
+                url: format!("https://{id}.example.test/health"),
+                name: id.to_owned(),
+                service: id.to_owned(),
+                method: "GET".to_owned(),
+                headers: None,
+                interval_ms,
+                timeout_ms: 7_500,
+                expected_status: "200".to_owned(),
+                body_contains: None,
+                degraded_after: 1,
+                down_after: 3,
+                up_after: 1,
+                active,
+                created_at: "2026-05-28T19:00:00Z".to_owned(),
+            })?;
+        }
+
+        let schedules = store.active_target_probe_schedules()?;
+
+        assert_eq!(
+            schedules,
+            vec![
+                ActiveTargetProbeSchedule {
+                    target_id: "TGT-a".to_owned(),
+                    interval_ms: 30_000,
+                },
+                ActiveTargetProbeSchedule {
+                    target_id: "TGT-b".to_owned(),
+                    interval_ms: 45_000,
+                },
+            ]
+        );
         Ok(())
     }
 

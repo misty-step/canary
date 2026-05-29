@@ -9,12 +9,17 @@ use std::{
     collections::BTreeMap,
     io::Read,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
-    sync::{Arc, Mutex},
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::{self, JoinHandle},
     time::{Duration as StdDuration, Instant},
 };
 
 use canary_core::health::state_machine::{Counters, HealthState, Thresholds};
-use canary_store::{Store, TargetProbeSnapshot};
+use canary_store::{ActiveTargetProbeSchedule, Store, TargetProbeSnapshot};
 use canary_workers::health::{
     ObservationContext, TargetProbeObservation, TargetSnapshot, plan_target_probe,
 };
@@ -115,6 +120,245 @@ pub struct ProbeRequest {
     pub resolved_addrs: Vec<SocketAddr>,
 }
 
+/// Runtime boundary for executing target probes.
+pub struct TargetProbeRuntime {
+    store: Arc<Mutex<Store>>,
+    event_sink: Arc<dyn EventSink>,
+    transport: Arc<dyn ProbeTransport>,
+    options: TargetProbeOptions,
+    transition_history: Mutex<BTreeMap<String, Vec<(HealthState, i64)>>>,
+}
+
+impl TargetProbeRuntime {
+    /// Build a target probe runtime from explicit side-effect boundaries.
+    pub fn new(
+        store: Arc<Mutex<Store>>,
+        event_sink: Arc<dyn EventSink>,
+        transport: Arc<dyn ProbeTransport>,
+        options: TargetProbeOptions,
+    ) -> Self {
+        Self {
+            store,
+            event_sink,
+            transport,
+            options,
+            transition_history: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Execute and persist exactly one target probe.
+    pub fn run_once(&self, target_id: &str) -> Result<TargetProbeOutcome, TargetProbeRuntimeError> {
+        let history = self
+            .transition_history
+            .lock()
+            .map_err(|_| TargetProbeRuntimeError::StoreLock)?
+            .get(target_id)
+            .cloned()
+            .unwrap_or_default();
+        let run = run_target_probe_once_with_history(
+            &self.store,
+            self.event_sink.as_ref(),
+            self.transport.as_ref(),
+            target_id,
+            self.options.clone(),
+            history,
+        )?;
+        if let Some((state, timestamp)) = run.history_transition {
+            let mut history = self
+                .transition_history
+                .lock()
+                .map_err(|_| TargetProbeRuntimeError::StoreLock)?;
+            let target_history = history.entry(target_id.to_owned()).or_default();
+            target_history.insert(0, (state, timestamp));
+            retain_recent_transitions(target_history, timestamp);
+        }
+        Ok(run.outcome)
+    }
+}
+
+/// Configuration for the target probe lifecycle worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetProbeLifecycleConfig {
+    /// Minimum delay between lifecycle passes.
+    pub tick_interval: StdDuration,
+}
+
+impl Default for TargetProbeLifecycleConfig {
+    fn default() -> Self {
+        Self {
+            tick_interval: StdDuration::from_secs(1),
+        }
+    }
+}
+
+/// Summary of one lifecycle pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TargetProbeLifecycleReport {
+    /// Active target schedules loaded from the store.
+    pub loaded: usize,
+    /// Due targets selected for execution.
+    pub due: usize,
+    /// Probes that completed and committed an observation.
+    pub probed: usize,
+    /// Probes skipped because the target was concurrently deactivated or deleted.
+    pub skipped_missing: usize,
+    /// Probes that failed before a commit could be planned.
+    pub failed: usize,
+}
+
+/// Bounded lifecycle adapter for active HTTP target probes.
+pub struct TargetProbeLifecycle {
+    store: Arc<Mutex<Store>>,
+    runtime: TargetProbeRuntime,
+    schedules: BTreeMap<String, ScheduledTarget>,
+}
+
+impl TargetProbeLifecycle {
+    /// Build a lifecycle adapter from the shared store and probe runtime.
+    pub fn new(store: Arc<Mutex<Store>>, runtime: TargetProbeRuntime) -> Self {
+        Self {
+            store,
+            runtime,
+            schedules: BTreeMap::new(),
+        }
+    }
+
+    /// Load active targets, execute due probes sequentially, and update next due times.
+    pub fn run_due(&mut self, now_millis: i64) -> Result<TargetProbeLifecycleReport, String> {
+        let active = self.load_active_schedules()?;
+        self.reconcile(active, now_millis);
+
+        let due_targets = self
+            .schedules
+            .iter()
+            .filter(|(_, schedule)| schedule.next_due_millis <= now_millis)
+            .map(|(target_id, _)| target_id.clone())
+            .collect::<Vec<_>>();
+
+        let mut report = TargetProbeLifecycleReport {
+            loaded: self.schedules.len(),
+            due: due_targets.len(),
+            ..TargetProbeLifecycleReport::default()
+        };
+
+        for target_id in due_targets {
+            match self.runtime.run_once(&target_id) {
+                Ok(_) => report.probed += 1,
+                Err(TargetProbeRuntimeError::TargetNotFound) => report.skipped_missing += 1,
+                Err(_) => report.failed += 1,
+            }
+
+            if let Some(schedule) = self.schedules.get_mut(&target_id) {
+                schedule.next_due_millis =
+                    next_due_millis(&target_id, schedule.interval_ms, now_millis);
+            }
+        }
+
+        Ok(report)
+    }
+
+    fn load_active_schedules(&self) -> Result<Vec<ActiveTargetProbeSchedule>, String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| "store lock poisoned".to_owned())?;
+        store
+            .active_target_probe_schedules()
+            .map_err(|error| error.to_string())
+    }
+
+    fn reconcile(&mut self, active: Vec<ActiveTargetProbeSchedule>, now_millis: i64) {
+        let mut next = BTreeMap::new();
+        for target in active {
+            let interval_ms = target.interval_ms.max(1_000);
+            let next_due_millis = self
+                .schedules
+                .remove(&target.target_id)
+                .filter(|existing| existing.interval_ms == interval_ms)
+                .map(|existing| existing.next_due_millis)
+                .unwrap_or(now_millis);
+            next.insert(
+                target.target_id,
+                ScheduledTarget {
+                    interval_ms,
+                    next_due_millis,
+                },
+            );
+        }
+        self.schedules = next;
+    }
+}
+
+/// Dedicated OS-thread runner for target probe lifecycle passes.
+pub struct TargetProbeLifecycleWorker {
+    control: Arc<LifecycleControl>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl TargetProbeLifecycleWorker {
+    /// Spawn one named background thread that probes due active targets sequentially.
+    pub fn spawn(
+        lifecycle: TargetProbeLifecycle,
+        config: TargetProbeLifecycleConfig,
+    ) -> Result<Self, String> {
+        if config.tick_interval.is_zero() {
+            return Err(
+                "target probe lifecycle tick interval must be greater than zero".to_owned(),
+            );
+        }
+
+        let control = Arc::new(LifecycleControl::default());
+        let thread_control = control.clone();
+        let handle = thread::Builder::new()
+            .name("canary-target-probes".to_owned())
+            .spawn(move || run_lifecycle_worker(lifecycle, config.tick_interval, thread_control))
+            .map_err(|error| format!("failed to spawn target probe worker: {error}"))?;
+
+        Ok(Self {
+            control,
+            handle: Some(handle),
+        })
+    }
+
+    /// Pause future lifecycle passes without stopping the worker.
+    pub fn pause(&self) {
+        self.control.pause();
+    }
+
+    /// Resume lifecycle passes and wake the worker promptly.
+    pub fn resume(&self) {
+        self.control.resume();
+    }
+
+    /// Request shutdown without waiting for an in-flight probe to finish.
+    pub fn stop(&self) {
+        self.control.stop();
+    }
+
+    /// Request shutdown and wait for the worker thread to exit.
+    pub fn join(mut self) -> Result<(), String> {
+        self.stop();
+        self.join_handle()
+    }
+
+    fn join_handle(&mut self) -> Result<(), String> {
+        let Some(handle) = self.handle.take() else {
+            return Ok(());
+        };
+        match handle.join() {
+            Ok(()) => Ok(()),
+            Err(_) => Err("target probe worker panicked".to_owned()),
+        }
+    }
+}
+
+impl Drop for TargetProbeLifecycleWorker {
+    fn drop(&mut self) {
+        self.stop();
+        let _ = self.join_handle();
+    }
+}
+
 /// Execute and persist exactly one target probe.
 pub fn run_target_probe_once(
     store: &Arc<Mutex<Store>>,
@@ -123,10 +367,35 @@ pub fn run_target_probe_once(
     target_id: &str,
     options: TargetProbeOptions,
 ) -> Result<TargetProbeOutcome, TargetProbeRuntimeError> {
+    Ok(run_target_probe_once_with_history(
+        store,
+        event_sink,
+        transport,
+        target_id,
+        options,
+        Vec::new(),
+    )?
+    .outcome)
+}
+
+struct TargetProbeRun {
+    outcome: TargetProbeOutcome,
+    history_transition: Option<(HealthState, i64)>,
+}
+
+fn run_target_probe_once_with_history(
+    store: &Arc<Mutex<Store>>,
+    event_sink: &dyn EventSink,
+    transport: &dyn ProbeTransport,
+    target_id: &str,
+    options: TargetProbeOptions,
+    transition_history: Vec<(HealthState, i64)>,
+) -> Result<TargetProbeRun, TargetProbeRuntimeError> {
     let snapshot = load_target_snapshot(store, target_id)?;
     let observed = observe_target(&snapshot, transport, &options);
     let current = load_target_snapshot(store, target_id)?;
-    let target = target_snapshot(&snapshot, &current)?;
+    let target = target_snapshot(&snapshot, &current, transition_history)?;
+    let previous_state = target.state;
     let context = ObservationContext {
         now: current_rfc3339(),
         now_millis: current_unix_millis(),
@@ -134,6 +403,7 @@ pub fn run_target_probe_once(
         incident_id: canary_core::ids::IncidentId::generate(),
         incident_event_id: canary_core::ids::EventId::generate(),
     };
+    let now_millis = context.now_millis;
     let plan = plan_target_probe(target, observed, context);
     let response_target_id = plan.commit.target_id.clone();
     let response_result = plan.commit.check.result.clone();
@@ -152,13 +422,91 @@ pub fn run_target_probe_once(
         transition.event.clone()
     });
 
-    Ok(TargetProbeOutcome {
+    let outcome = TargetProbeOutcome {
         target_id: response_target_id,
         result: response_result,
         state: response_state,
         sequence: commit.sequence,
         transition_event,
+    };
+    let committed_state = health_state(&outcome.state)?;
+    let history_transition =
+        (committed_state != previous_state).then_some((committed_state, now_millis));
+
+    Ok(TargetProbeRun {
+        outcome,
+        history_transition,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScheduledTarget {
+    interval_ms: i64,
+    next_due_millis: i64,
+}
+
+#[derive(Default)]
+struct LifecycleControl {
+    stopping: AtomicBool,
+    paused: AtomicBool,
+    lock: Mutex<()>,
+    condvar: Condvar,
+}
+
+impl LifecycleControl {
+    fn stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        self.condvar.notify_all();
+    }
+
+    fn pause(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+        self.condvar.notify_all();
+    }
+
+    fn resume(&self) {
+        self.paused.store(false, Ordering::SeqCst);
+        self.condvar.notify_all();
+    }
+
+    fn is_stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
+    }
+
+    fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
+    }
+
+    fn wait(&self, interval: StdDuration) -> bool {
+        if self.is_stopping() {
+            return true;
+        }
+
+        let Ok(guard) = self.lock.lock() else {
+            return true;
+        };
+        let _ = self
+            .condvar
+            .wait_timeout_while(guard, interval, |_| !self.stopping.load(Ordering::SeqCst));
+        self.is_stopping()
+    }
+}
+
+fn run_lifecycle_worker(
+    mut lifecycle: TargetProbeLifecycle,
+    interval: StdDuration,
+    control: Arc<LifecycleControl>,
+) {
+    while !control.is_stopping() {
+        if !control.is_paused() {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                lifecycle.run_due(current_unix_millis())
+            }));
+        }
+        if control.wait(interval) {
+            break;
+        }
+    }
 }
 
 impl ProbeTransport for ReqwestProbeTransport {
@@ -437,6 +785,7 @@ fn status_matches(status: u16, expected: &str) -> bool {
 fn target_snapshot(
     probed: &TargetProbeSnapshot,
     current: &TargetProbeSnapshot,
+    transitions: Vec<(HealthState, i64)>,
 ) -> Result<TargetSnapshot, TargetProbeRuntimeError> {
     Ok(TargetSnapshot {
         id: probed.id.clone(),
@@ -447,7 +796,7 @@ fn target_snapshot(
         counters: Counters {
             consecutive_failures: current.consecutive_failures,
             consecutive_successes: current.consecutive_successes,
-            transitions: Vec::new(),
+            transitions,
         },
         thresholds: Thresholds {
             degraded_after: probed.degraded_after,
@@ -455,6 +804,12 @@ fn target_snapshot(
             up_after: probed.up_after,
         },
     })
+}
+
+fn retain_recent_transitions(transitions: &mut Vec<(HealthState, i64)>, now_millis: i64) {
+    const FLAP_WINDOW_MILLIS: i64 = 10 * 60 * 1_000;
+    transitions.retain(|(_, timestamp)| now_millis.saturating_sub(*timestamp) < FLAP_WINDOW_MILLIS);
+    transitions.truncate(16);
 }
 
 fn health_state(value: &str) -> Result<HealthState, TargetProbeRuntimeError> {
@@ -493,6 +848,22 @@ fn timeout(timeout_ms: i64) -> StdDuration {
 
 fn elapsed_millis(started: Instant) -> i64 {
     i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)
+}
+
+fn next_due_millis(target_id: &str, interval_ms: i64, now_millis: i64) -> i64 {
+    let interval_ms = interval_ms.max(1_000);
+    let jitter_range = (interval_ms / 10).max(1);
+    let jitter = deterministic_jitter(target_id, jitter_range);
+    now_millis.saturating_add((interval_ms + jitter).max(1_000))
+}
+
+fn deterministic_jitter(target_id: &str, jitter_range: i64) -> i64 {
+    let span = jitter_range.saturating_mul(2).saturating_add(1);
+    let mut hash = 0_i64;
+    for byte in target_id.bytes() {
+        hash = hash.wrapping_mul(31).wrapping_add(i64::from(byte));
+    }
+    hash.rem_euclid(span) - jitter_range
 }
 
 fn is_global_ip(ip: IpAddr) -> bool {
@@ -579,6 +950,36 @@ mod tests {
         fn probe(&self, _request: ProbeRequest) -> Result<ProbeHttpResponse, ProbeTransportError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.result.clone()
+        }
+    }
+
+    #[derive(Debug)]
+    struct QueueTransport {
+        calls: AtomicUsize,
+        responses: StdMutex<Vec<ProbeHttpResponse>>,
+    }
+
+    impl QueueTransport {
+        fn new(responses: Vec<ProbeHttpResponse>) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                responses: StdMutex::new(responses),
+            }
+        }
+    }
+
+    impl ProbeTransport for QueueTransport {
+        fn probe(&self, _request: ProbeRequest) -> Result<ProbeHttpResponse, ProbeTransportError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut responses = self.responses.lock().map_err(|_| {
+                ProbeTransportError::Connection("responses lock poisoned".to_owned())
+            })?;
+            if responses.is_empty() {
+                return Err(ProbeTransportError::Connection(
+                    "no queued response".to_owned(),
+                ));
+            }
+            Ok(responses.remove(0))
         }
     }
 
@@ -697,6 +1098,165 @@ mod tests {
             ["health_check.recovered"]
         );
         Ok(())
+    }
+
+    #[test]
+    fn lifecycle_loads_active_targets_and_runs_due_probes_sequentially()
+    -> Result<(), Box<dyn Error>> {
+        let store = seeded_store("http://127.0.0.1/health", "unknown")?;
+        {
+            let mut store = store.lock().map_err(|_| "store lock poisoned")?;
+            store.insert_target(TargetInsert {
+                id: "TGT-inactive".to_owned(),
+                url: "http://127.0.0.1/inactive".to_owned(),
+                name: "Inactive".to_owned(),
+                service: "inactive".to_owned(),
+                method: "GET".to_owned(),
+                headers: None,
+                interval_ms: 60_000,
+                timeout_ms: 10_000,
+                expected_status: "200".to_owned(),
+                body_contains: Some("ok".to_owned()),
+                degraded_after: 1,
+                down_after: 3,
+                up_after: 1,
+                active: false,
+                created_at: "2026-05-28T20:00:00Z".to_owned(),
+            })?;
+        }
+        let transport = Arc::new(StaticTransport::ok(200, "ok"));
+        let sink = Arc::new(RecordingSink::default());
+        let runtime = TargetProbeRuntime::new(
+            store.clone(),
+            sink,
+            transport.clone(),
+            TargetProbeOptions {
+                allow_private_targets: true,
+                region: None,
+            },
+        );
+        let mut lifecycle = TargetProbeLifecycle::new(store, runtime);
+
+        let first = lifecycle.run_due(1_000)?;
+        let second = lifecycle.run_due(1_000)?;
+
+        assert_eq!(
+            first,
+            TargetProbeLifecycleReport {
+                loaded: 1,
+                due: 1,
+                probed: 1,
+                skipped_missing: 0,
+                failed: 0,
+            }
+        );
+        assert_eq!(
+            second,
+            TargetProbeLifecycleReport {
+                loaded: 1,
+                due: 0,
+                probed: 0,
+                skipped_missing: 0,
+                failed: 0,
+            }
+        );
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_reloads_interval_changes_without_duplicate_due_runs() -> Result<(), Box<dyn Error>>
+    {
+        let store = seeded_store("http://127.0.0.1/health", "unknown")?;
+        let transport = Arc::new(StaticTransport::ok(200, "ok"));
+        let sink = Arc::new(RecordingSink::default());
+        let runtime = TargetProbeRuntime::new(
+            store.clone(),
+            sink,
+            transport.clone(),
+            TargetProbeOptions {
+                allow_private_targets: true,
+                region: None,
+            },
+        );
+        let mut lifecycle = TargetProbeLifecycle::new(store, runtime);
+
+        let first = lifecycle.run_due(1_000)?;
+        let second = lifecycle.run_due(1_001)?;
+
+        assert_eq!(first.probed, 1);
+        assert_eq!(second.due, 0);
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_rejects_zero_tick_interval() -> Result<(), Box<dyn Error>> {
+        let store = seeded_store("http://127.0.0.1/health", "unknown")?;
+        let transport = Arc::new(StaticTransport::ok(200, "ok"));
+        let sink = Arc::new(RecordingSink::default());
+        let runtime = TargetProbeRuntime::new(
+            store.clone(),
+            sink,
+            transport,
+            TargetProbeOptions {
+                allow_private_targets: true,
+                region: None,
+            },
+        );
+        let lifecycle = TargetProbeLifecycle::new(store, runtime);
+
+        let error = match TargetProbeLifecycleWorker::spawn(
+            lifecycle,
+            TargetProbeLifecycleConfig {
+                tick_interval: StdDuration::ZERO,
+            },
+        ) {
+            Ok(_) => return Err("zero intervals should be rejected".into()),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            "target probe lifecycle tick interval must be greater than zero"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_keeps_bounded_transition_history_for_flap_detection() -> Result<(), Box<dyn Error>> {
+        let store = seeded_store("http://127.0.0.1/health", "unknown")?;
+        let transport = Arc::new(QueueTransport::new(vec![
+            response(200, "ok"),
+            response(500, "down"),
+            response(200, "ok"),
+            response(500, "down"),
+        ]));
+        let sink = Arc::new(RecordingSink::default());
+        let runtime = TargetProbeRuntime::new(
+            store,
+            sink,
+            transport.clone(),
+            TargetProbeOptions {
+                allow_private_targets: true,
+                region: None,
+            },
+        );
+
+        assert_eq!(runtime.run_once("TGT-api")?.state, "up");
+        assert_eq!(runtime.run_once("TGT-api")?.state, "degraded");
+        assert_eq!(runtime.run_once("TGT-api")?.state, "up");
+        assert_eq!(runtime.run_once("TGT-api")?.state, "flapping");
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 4);
+        Ok(())
+    }
+
+    fn response(status_code: u16, body: &str) -> ProbeHttpResponse {
+        ProbeHttpResponse {
+            status_code,
+            body: body.to_owned(),
+            tls_expires_at: None,
+        }
     }
 
     fn seeded_store(url: &str, state: &str) -> Result<Arc<Mutex<Store>>, Box<dyn Error>> {

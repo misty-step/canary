@@ -53,7 +53,9 @@ mod webhooks;
 
 pub use target_probes::{
     ProbeHttpResponse, ProbeRequest, ProbeTransport, ProbeTransportError, ReqwestProbeTransport,
-    TargetProbeOptions, TargetProbeOutcome, TargetProbeRuntimeError, run_target_probe_once,
+    TargetProbeLifecycle, TargetProbeLifecycleConfig, TargetProbeLifecycleReport,
+    TargetProbeLifecycleWorker, TargetProbeOptions, TargetProbeOutcome, TargetProbeRuntime,
+    TargetProbeRuntimeError, run_target_probe_once,
 };
 use webhooks::NoopWebhookCooldown;
 pub use webhooks::{
@@ -66,6 +68,7 @@ const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 const PROBLEM_CONTENT_TYPE: &str = "application/problem+json; charset=utf-8";
 const DEFAULT_WEBHOOK_DRAIN_INTERVAL: StdDuration = StdDuration::from_secs(5);
 const DEFAULT_WEBHOOK_DRAIN_MAX_JOBS: u32 = 25;
+const DEFAULT_TARGET_PROBE_INTERVAL: StdDuration = StdDuration::from_secs(1);
 
 /// Runtime configuration for the top-level Canary server process.
 #[derive(Debug, Clone)]
@@ -78,6 +81,10 @@ pub struct ServerConfig {
     pub webhook_drain_interval: StdDuration,
     /// Maximum scheduled webhook jobs claimed by one drain pass.
     pub webhook_drain_max_jobs: u32,
+    /// Minimum interval between active target probe lifecycle passes.
+    pub target_probe_interval: StdDuration,
+    /// Runtime options for HTTP target probes.
+    pub target_probe_options: TargetProbeOptions,
 }
 
 impl ServerConfig {
@@ -88,6 +95,8 @@ impl ServerConfig {
             ingest: IngestConfig::default(),
             webhook_drain_interval: DEFAULT_WEBHOOK_DRAIN_INTERVAL,
             webhook_drain_max_jobs: DEFAULT_WEBHOOK_DRAIN_MAX_JOBS,
+            target_probe_interval: DEFAULT_TARGET_PROBE_INTERVAL,
+            target_probe_options: TargetProbeOptions::default(),
         }
     }
 }
@@ -96,6 +105,7 @@ impl ServerConfig {
 pub struct CanaryServer {
     router: Router,
     webhook_worker: WebhookDeliveryDrainWorker,
+    target_probe_worker: TargetProbeLifecycleWorker,
 }
 
 impl CanaryServer {
@@ -104,6 +114,11 @@ impl CanaryServer {
         if config.webhook_drain_max_jobs == 0 {
             return Err(ServerBootError::InvalidConfig(
                 "webhook drain max jobs must be greater than zero".to_owned(),
+            ));
+        }
+        if config.target_probe_interval.is_zero() {
+            return Err(ServerBootError::InvalidConfig(
+                "target probe interval must be greater than zero".to_owned(),
             ));
         }
 
@@ -125,7 +140,7 @@ impl CanaryServer {
             store.clone(),
             config.ingest,
             effect_sink,
-            webhook_sink,
+            webhook_sink.clone(),
         );
 
         let transport = Arc::new(build_http_webhook_transport().map_err(ServerBootError::Http)?);
@@ -134,11 +149,27 @@ impl CanaryServer {
         let webhook_worker =
             WebhookDeliveryDrainWorker::spawn(drain, config.webhook_drain_interval)
                 .map_err(ServerBootError::WebhookWorker)?;
+        let target_event_sink: Arc<dyn EventSink> = webhook_sink;
+        let target_transport: Arc<dyn ProbeTransport> = Arc::new(ReqwestProbeTransport);
+        let target_runtime = TargetProbeRuntime::new(
+            ingest_state.store.clone(),
+            target_event_sink,
+            target_transport,
+            config.target_probe_options,
+        );
+        let target_probe_worker = TargetProbeLifecycleWorker::spawn(
+            TargetProbeLifecycle::new(ingest_state.store.clone(), target_runtime),
+            TargetProbeLifecycleConfig {
+                tick_interval: config.target_probe_interval,
+            },
+        )
+        .map_err(ServerBootError::TargetProbeWorker)?;
         let router = public_router(PublicReadiness::ready()).merge(ingest_router(ingest_state));
 
         Ok(Self {
             router,
             webhook_worker,
+            target_probe_worker,
         })
     }
 
@@ -158,6 +189,9 @@ impl CanaryServer {
             .with_graceful_shutdown(shutdown)
             .await
             .map_err(ServerRunError::Listen)?;
+        self.target_probe_worker
+            .join()
+            .map_err(ServerRunError::TargetProbeWorker)?;
         self.webhook_worker
             .join()
             .map_err(ServerRunError::WebhookWorker)
@@ -175,6 +209,8 @@ pub enum ServerBootError {
     Http(String),
     /// Webhook drain worker failed to start.
     WebhookWorker(String),
+    /// Target probe lifecycle worker failed to start.
+    TargetProbeWorker(String),
 }
 
 impl fmt::Display for ServerBootError {
@@ -184,6 +220,7 @@ impl fmt::Display for ServerBootError {
             Self::Store(error) => write!(formatter, "store boot failed: {error}"),
             Self::Http(error) => formatter.write_str(error),
             Self::WebhookWorker(error) => formatter.write_str(error),
+            Self::TargetProbeWorker(error) => formatter.write_str(error),
         }
     }
 }
@@ -197,6 +234,8 @@ pub enum ServerRunError {
     Listen(std::io::Error),
     /// The webhook worker did not shut down cleanly.
     WebhookWorker(String),
+    /// The target probe worker did not shut down cleanly.
+    TargetProbeWorker(String),
 }
 
 impl fmt::Display for ServerRunError {
@@ -204,6 +243,7 @@ impl fmt::Display for ServerRunError {
         match self {
             Self::Listen(error) => write!(formatter, "server listen failed: {error}"),
             Self::WebhookWorker(error) => formatter.write_str(error),
+            Self::TargetProbeWorker(error) => formatter.write_str(error),
         }
     }
 }

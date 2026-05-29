@@ -307,6 +307,22 @@ the Rust server accepts production traffic:
     address set. This still deliberately avoids periodic scheduling, jitter,
     telemetry, and cross-restart flap history; those belong to the target
     runtime lifecycle slice, not the single-observation adapter.
+32. `canary-server::TargetProbeRuntime`,
+    `canary-server::TargetProbeLifecycle`, and
+    `canary-store::active_target_probe_schedules`: active HTTP target probes now
+    have a Rust lifecycle adapter wired into `CanaryServer::boot`. Store owns the
+    narrow active-target schedule query. Server owns the rest of the runtime
+    boundary: one named lifecycle worker, explicit stop/pause/resume hooks,
+    bounded sequential due passes, deterministic interval jitter, active-target
+    reconciliation, in-memory per-target transition history for flap detection,
+    and panic isolation around each pass. The lifecycle consumes the existing
+    single-probe adapter rather than exposing a scheduler/job framework, and
+    post-commit event fanout still goes through the same webhook enqueue sink as
+    ingest and monitor check-ins. Tests lock active-only loading, no duplicate
+    due execution before the jittered interval, zero-interval rejection, and
+    runtime transition history driving the pure flapping state machine. TLS
+    expiry capture, hot target control semantics, and cross-restart transition
+    history remain separate slices.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -334,11 +350,11 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Add the Rust target runtime lifecycle around the single-probe adapter:
-   active-target boot loading, per-target serialized execution, interval jitter,
-   explicit stop/pause/resume hooks, telemetry, guarded TLS expiry capture, and
-   a policy for in-memory transition history used by flap detection. Do not add
-   a generic scheduler framework.
+1. Harden the target probe runtime edge cases that were deliberately left out of
+   the lifecycle slice: guarded TLS expiry capture using the same SSRF-approved
+   address set, target header validation for forbidden or malformed headers,
+   enqueue-failure telemetry, and explicit hot-update semantics for target
+   deactivate/pause/update while a probe is in flight.
 2. Add monitor overdue evaluation as its own planner and store command. It does
    not insert a `monitor_check_ins` row, so it should not be forced through the
    check-in command.
