@@ -79,6 +79,17 @@ mod tests {
     }
 
     #[test]
+    fn default_policy_matches_phoenix_retention_config() {
+        assert_eq!(
+            RetentionPolicy::default(),
+            RetentionPolicy {
+                error_retention_days: 30,
+                check_retention_days: 7,
+            }
+        );
+    }
+
+    #[test]
     fn plan_retention_prune_rejects_negative_days() -> Result<(), String> {
         let now = OffsetDateTime::parse("2026-05-29T12:00:00Z", &Rfc3339)
             .map_err(|error| error.to_string())?;

@@ -17,7 +17,7 @@ Self-hosted observability for agent-driven infrastructure. Elixir/Phoenix + SQLi
 - **Fly.io port binding.** The prod endpoint config must explicitly include `port:` in the `http:` keyword list. A second `config :canary, CanaryWeb.Endpoint` block in `runtime.exs` replaces (not merges) the `http:` key — omitting `port:` causes random port binding.
 - **Health.Manager boot resilience.** Uses `rescue` in `handle_info(:boot)` to retry in 5s if DB isn't ready. Required because in test mode (Ecto sandbox) and during production boot races, the targets table may not exist yet.
 - **SQLite WAL and `rm -f`.** Deleting the DB while the app is running does nothing — SQLite WAL keeps the file handle open. Must stop the machine first, then SSH in to delete, then restart.
-- **Retention prune lock time.** Retention deletes share the single SQLite writer with ingest, probes, and webhook delivery. Keep pruning in bounded 1k-row statements; do not wrap the whole prune pass in one long transaction.
+- **Retention prune lock time.** Retention deletes share the single SQLite writer with ingest, probes, and webhook delivery. Keep pruning in bounded 1k-row statements and release the shared store mutex between batches; do not wrap the whole prune pass in one long transaction or one long store lock.
 - **Rate limiter locality.** Phoenix rate limits are ETS-local and the Rust rewrite currently matches that with process-local fixed-window buckets. Do not claim fleet-wide rate limiting without adding a shared limiter.
 
 ## Invariants

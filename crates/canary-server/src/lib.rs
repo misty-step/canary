@@ -59,6 +59,7 @@ use canary_workers::health::{
     HealthPlanError, MonitorCheckInInput, MonitorCheckInStatus, MonitorMode, MonitorSnapshot,
     ObservationContext, plan_monitor_check_in,
 };
+use canary_workers::retention::RetentionPolicy;
 use canary_workers::webhooks::{
     TransportResult, WebhookEndpoint, WebhookJob, WebhookRequest, build_request,
 };
@@ -68,6 +69,7 @@ use serde_json::{Map, Value, json};
 mod health_fanout;
 mod monitor_overdue;
 mod rate_limit;
+mod retention_prune;
 mod target_probes;
 mod webhooks;
 
@@ -81,6 +83,10 @@ pub use monitor_overdue::{
     MonitorOverdueRuntimeError, run_monitor_overdue_once,
 };
 use rate_limit::{RateLimitDecision, RateLimiter};
+pub use retention_prune::{
+    RetentionPruneLifecycle, RetentionPruneLifecycleConfig, RetentionPruneLifecycleReport,
+    RetentionPruneLifecycleWorker,
+};
 pub use target_probes::{
     ProbeHttpResponse, ProbeRequest, ProbeTransport, ProbeTransportError, ReqwestProbeTransport,
     TargetProbeLifecycle, TargetProbeLifecycleCommand, TargetProbeLifecycleConfig,
@@ -118,6 +124,7 @@ const DEFAULT_WEBHOOK_DRAIN_INTERVAL: StdDuration = StdDuration::from_secs(5);
 const DEFAULT_WEBHOOK_DRAIN_MAX_JOBS: u32 = 25;
 const DEFAULT_TARGET_PROBE_INTERVAL: StdDuration = StdDuration::from_secs(1);
 const DEFAULT_MONITOR_OVERDUE_INTERVAL: StdDuration = StdDuration::from_secs(1);
+const DEFAULT_RETENTION_PRUNE_INTERVAL: StdDuration = StdDuration::from_secs(24 * 60 * 60);
 
 /// Runtime configuration for the top-level Canary server process.
 #[derive(Debug, Clone)]
@@ -136,6 +143,10 @@ pub struct ServerConfig {
     pub target_probe_options: TargetProbeOptions,
     /// Minimum interval between non-HTTP monitor overdue evaluation passes.
     pub monitor_overdue_interval: StdDuration,
+    /// Minimum interval between retention prune passes.
+    pub retention_prune_interval: StdDuration,
+    /// Retention policy used by the maintenance prune worker.
+    pub retention_policy: RetentionPolicy,
 }
 
 impl ServerConfig {
@@ -149,6 +160,8 @@ impl ServerConfig {
             target_probe_interval: DEFAULT_TARGET_PROBE_INTERVAL,
             target_probe_options: TargetProbeOptions::default(),
             monitor_overdue_interval: DEFAULT_MONITOR_OVERDUE_INTERVAL,
+            retention_prune_interval: DEFAULT_RETENTION_PRUNE_INTERVAL,
+            retention_policy: RetentionPolicy::default(),
         }
     }
 }
@@ -159,6 +172,7 @@ pub struct CanaryServer {
     webhook_worker: WebhookDeliveryDrainWorker,
     target_probe_worker: TargetProbeLifecycleWorker,
     monitor_overdue_worker: MonitorOverdueLifecycleWorker,
+    retention_prune_worker: RetentionPruneLifecycleWorker,
     enqueue_failure_sink: Arc<EnqueueFailureRecorder>,
 }
 
@@ -178,6 +192,11 @@ impl CanaryServer {
         if config.monitor_overdue_interval.is_zero() {
             return Err(ServerBootError::InvalidConfig(
                 "monitor overdue interval must be greater than zero".to_owned(),
+            ));
+        }
+        if config.retention_prune_interval.is_zero() {
+            return Err(ServerBootError::InvalidConfig(
+                "retention prune interval must be greater than zero".to_owned(),
             ));
         }
 
@@ -236,6 +255,13 @@ impl CanaryServer {
             },
         )
         .map_err(ServerBootError::MonitorOverdueWorker)?;
+        let retention_prune_worker = RetentionPruneLifecycleWorker::spawn(
+            RetentionPruneLifecycle::new(ingest_state.store.clone(), config.retention_policy),
+            RetentionPruneLifecycleConfig {
+                tick_interval: config.retention_prune_interval,
+            },
+        )
+        .map_err(ServerBootError::RetentionPruneWorker)?;
         let ingest_state = ingest_state
             .with_target_control(Arc::new(target_probe_worker.controller()))
             .with_allow_private_targets(allow_private_targets);
@@ -246,6 +272,7 @@ impl CanaryServer {
             webhook_worker,
             target_probe_worker,
             monitor_overdue_worker,
+            retention_prune_worker,
             enqueue_failure_sink,
         })
     }
@@ -258,6 +285,11 @@ impl CanaryServer {
     /// Return health-transition webhook enqueue failures observed by this process.
     pub fn enqueue_failure_snapshot(&self) -> BTreeMap<EnqueueFailureKey, u64> {
         self.enqueue_failure_sink.snapshot()
+    }
+
+    /// Return retention-prune lifecycle failures observed by this process.
+    pub fn retention_prune_failure_count(&self) -> u64 {
+        self.retention_prune_worker.failure_count()
     }
 
     /// Serve the composed router until `shutdown` resolves, then stop the worker.
@@ -277,6 +309,9 @@ impl CanaryServer {
         self.monitor_overdue_worker
             .join()
             .map_err(ServerRunError::MonitorOverdueWorker)?;
+        self.retention_prune_worker
+            .join()
+            .map_err(ServerRunError::RetentionPruneWorker)?;
         self.webhook_worker
             .join()
             .map_err(ServerRunError::WebhookWorker)
@@ -298,6 +333,8 @@ pub enum ServerBootError {
     TargetProbeWorker(String),
     /// Monitor overdue lifecycle worker failed to start.
     MonitorOverdueWorker(String),
+    /// Retention prune lifecycle worker failed to start.
+    RetentionPruneWorker(String),
 }
 
 impl fmt::Display for ServerBootError {
@@ -309,6 +346,7 @@ impl fmt::Display for ServerBootError {
             Self::WebhookWorker(error) => formatter.write_str(error),
             Self::TargetProbeWorker(error) => formatter.write_str(error),
             Self::MonitorOverdueWorker(error) => formatter.write_str(error),
+            Self::RetentionPruneWorker(error) => formatter.write_str(error),
         }
     }
 }
@@ -326,6 +364,8 @@ pub enum ServerRunError {
     TargetProbeWorker(String),
     /// The monitor overdue worker did not shut down cleanly.
     MonitorOverdueWorker(String),
+    /// The retention prune worker did not shut down cleanly.
+    RetentionPruneWorker(String),
 }
 
 impl fmt::Display for ServerRunError {
@@ -335,6 +375,7 @@ impl fmt::Display for ServerRunError {
             Self::WebhookWorker(error) => formatter.write_str(error),
             Self::TargetProbeWorker(error) => formatter.write_str(error),
             Self::MonitorOverdueWorker(error) => formatter.write_str(error),
+            Self::RetentionPruneWorker(error) => formatter.write_str(error),
         }
     }
 }
@@ -4173,11 +4214,16 @@ mod tests {
         body::{Body, to_bytes},
         http::{Request, StatusCode, header::CONTENT_TYPE},
     };
+    use canary_core::{
+        ids::{ErrorId, EventId},
+        ingest::classification::{Category, Classification, Component, Persistence},
+    };
     use canary_http::public::{APPLICATION_JSON, OPENAPI_JSON};
     use canary_store::{
-        API_KEY_PREFIX_LEN, ApiKeyInsert, MonitorInsert, TargetCheckObservation, TargetProbeCommit,
-        WebhookDeliveryInsert, WebhookDeliveryJobInsert, WebhookDeliveryJobState,
-        WebhookDeliveryStatus, WebhookSubscriptionInsert,
+        API_KEY_PREFIX_LEN, ApiKeyInsert, ErrorIngest, ErrorIngestIds, ErrorIngestPayload,
+        MonitorInsert, TargetCheckObservation, TargetProbeCommit, WebhookDeliveryInsert,
+        WebhookDeliveryJobInsert, WebhookDeliveryJobState, WebhookDeliveryStatus,
+        WebhookSubscriptionInsert,
     };
     use canary_workers::webhooks::{CircuitDecision, TransportResult, WebhookJob, WebhookRequest};
     use serde_json::{Value, json};
@@ -4405,6 +4451,51 @@ mod tests {
 
         drop_server(server).await?;
         fs::remove_file(path)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canary_server_boot_wires_retention_prune_worker() -> Result<(), Box<dyn Error>> {
+        let path = temp_db_path("retention-prune");
+        {
+            let mut store = Store::open(&path)?;
+            store.migrate()?;
+            for index in 0..1005 {
+                store.commit_error_ingest(test_error_ingest(index, "2026-04-01T00:00:00Z"))?;
+            }
+            store.commit_error_ingest(test_error_ingest(2000, "2026-05-28T00:00:00Z"))?;
+        }
+
+        let config = ServerConfig {
+            retention_prune_interval: StdDuration::from_millis(10),
+            ..ServerConfig::new(path.clone())
+        };
+        let server = CanaryServer::boot(config)?;
+        wait_for_error_count(&path, 1)?;
+
+        drop_server(server).await?;
+        fs::remove_file(path)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn canary_server_boot_rejects_zero_retention_prune_interval() -> Result<(), Box<dyn Error>> {
+        let path = temp_db_path("retention-zero");
+        let config = ServerConfig {
+            retention_prune_interval: StdDuration::ZERO,
+            ..ServerConfig::new(path)
+        };
+
+        let error = match CanaryServer::boot(config) {
+            Ok(_) => return Err("zero interval should be rejected".into()),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "retention prune interval must be greater than zero"
+        );
 
         Ok(())
     }
@@ -8087,6 +8178,20 @@ mod tests {
         }
     }
 
+    fn wait_for_error_count(path: &Path, expected: u64) -> Result<(), Box<dyn Error>> {
+        let deadline = Instant::now() + StdDuration::from_secs(3);
+        loop {
+            let store = Store::open(path)?;
+            if store.error_count()? == expected {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("timed out waiting for {expected} errors").into());
+            }
+            thread::sleep(StdDuration::from_millis(20));
+        }
+    }
+
     async fn drop_server(server: CanaryServer) -> Result<(), Box<dyn Error>> {
         tokio::task::spawn_blocking(move || drop(server)).await?;
         Ok(())
@@ -8198,6 +8303,34 @@ mod tests {
             created_at: "2026-05-28T20:00:00Z".to_owned(),
         })?;
         Ok(())
+    }
+
+    fn test_error_ingest(index: usize, created_at: &str) -> ErrorIngest {
+        ErrorIngest {
+            ids: ErrorIngestIds {
+                error_id: ErrorId::generate(),
+                event_id: EventId::generate(),
+            },
+            payload: ErrorIngestPayload {
+                service: "retention".to_owned(),
+                error_class: "RuntimeError".to_owned(),
+                message: "old".to_owned(),
+                message_template: "old".to_owned(),
+                stack_trace: None,
+                context_json: None,
+                severity: "error".to_owned(),
+                environment: "production".to_owned(),
+                group_hash: format!("grp-retention-{index}"),
+                fingerprint_json: None,
+                region: None,
+                classification: Classification {
+                    category: Category::Application,
+                    persistence: Persistence::Persistent,
+                    component: Component::Runtime,
+                },
+                created_at: created_at.to_owned(),
+            },
+        }
     }
 
     fn valid_error_body() -> &'static str {

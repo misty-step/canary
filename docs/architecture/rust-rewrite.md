@@ -647,6 +647,15 @@ the Rust server accepts production traffic:
     is represented in the policy module but not wired yet because correct
     parity needs a proxy-aware client identity boundary rather than a fake
     global IP key.
+60. `CanaryServer::boot` now starts a named Rust retention-prune lifecycle
+    worker. `ServerConfig` owns the explicit cadence and `RetentionPolicy`;
+    the default policy stays Phoenix-compatible at 30 days for errors/service
+    events and 7 days for target checks. The server worker observes one UTC
+    clock per pass, asks `canary-workers` for fixed cutoffs, and calls a new
+    `canary-store` one-batch command for each table until old rows are gone.
+    Each store mutex guard covers only one 1,000-row delete statement, so a
+    long maintenance pass does not monopolize the single SQLite writer across
+    the whole multi-batch prune.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -677,12 +686,8 @@ Phoenix behavior until the replacement is complete:
 1. Add a Phoenix-observed compatibility note for the intentional severity
    divergence above before cutover: this is a Rust correctness improvement over
    the current Phoenix read model, not a silent wire-shape change.
-2. Wire the Rust retention prune command into `CanaryServer::boot` as a small
-   named lifecycle worker with explicit cadence/configuration, not a generic
-   scheduler. The worker must not hold the store mutex for a whole prune pass
-   over many batches.
-3. Add the proxy-aware client identity boundary needed to account for Phoenix's
+2. Add the proxy-aware client identity boundary needed to account for Phoenix's
    silent `auth_fail` rate-limit bucket without turning invalid API keys into
    observable 429 responses.
-4. Continue remaining Phoenix background behavior, especially TLS-expiry scans,
+3. Continue remaining Phoenix background behavior, especially TLS-expiry scans,
    behind typed store or worker boundaries.

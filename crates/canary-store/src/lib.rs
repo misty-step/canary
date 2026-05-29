@@ -47,7 +47,10 @@ pub use query::{
     ErrorSummaryItem, IncidentListOptions, QueryError, QueryResult, RecentTransition, SearchResult,
     ServiceQueryOptions, TimelineQueryError, TimelineQueryOptions, TimelineQueryResult,
 };
-pub use retention::{RetentionPrune, RetentionPruneReport};
+pub use retention::{
+    RetentionPrune, RetentionPruneBatch, RetentionPruneBatchReport, RetentionPruneReport,
+    RetentionPruneTable,
+};
 pub use webhook_deliveries::{
     WebhookDeliveryInsert, WebhookDeliveryListOptions, WebhookDeliveryPageError,
     WebhookDeliveryPageOptions, WebhookDeliveryPageResult, WebhookDeliveryRow,
@@ -563,6 +566,14 @@ impl Store {
     /// Prune old errors, service events, and target checks in bounded batches.
     pub fn prune_retention(&mut self, prune: RetentionPrune) -> Result<RetentionPruneReport> {
         retention::prune(&mut self.connection, prune)
+    }
+
+    /// Execute one bounded retention prune statement.
+    pub fn prune_retention_batch(
+        &mut self,
+        batch: RetentionPruneBatch,
+    ) -> Result<RetentionPruneBatchReport> {
+        retention::prune_batch(&self.connection, batch)
     }
 
     /// Count persisted errors.
@@ -2166,6 +2177,49 @@ mod tests {
                 .query_row("SELECT id FROM errors", [], |row| row.get::<_, String>(0))?,
             "ERR-recent"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn retention_prune_batch_deletes_only_one_bounded_batch()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+
+        for index in 0..1005 {
+            store.connection.execute(
+                "INSERT INTO errors (
+                    id, service, error_class, message, group_hash, created_at
+                 ) VALUES (?1, 'retention', 'RuntimeError', 'old', ?2, '2026-04-01T00:00:00Z')",
+                params![format!("ERR-batch-{index}"), format!("grp-batch-{index}")],
+            )?;
+        }
+
+        let first = store.prune_retention_batch(RetentionPruneBatch {
+            table: RetentionPruneTable::Errors,
+            cutoff: "2026-05-01T00:00:00Z".to_owned(),
+        })?;
+        assert_eq!(
+            first,
+            RetentionPruneBatchReport {
+                deleted: 1000,
+                complete: false,
+            }
+        );
+        assert_eq!(row_count(&store.connection, "errors")?, 5);
+
+        let second = store.prune_retention_batch(RetentionPruneBatch {
+            table: RetentionPruneTable::Errors,
+            cutoff: "2026-05-01T00:00:00Z".to_owned(),
+        })?;
+        assert_eq!(
+            second,
+            RetentionPruneBatchReport {
+                deleted: 5,
+                complete: true,
+            }
+        );
+        assert_eq!(row_count(&store.connection, "errors")?, 0);
 
         Ok(())
     }
