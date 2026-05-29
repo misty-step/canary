@@ -22,9 +22,9 @@ pub use health::{
     ActiveTargetProbeSchedule, HealthTransitionCommit, MonitorCheckInCommit,
     MonitorCheckInCommitResult, MonitorCheckInObservation, MonitorCheckInSnapshot, MonitorInsert,
     MonitorOverdueCandidate, MonitorOverdueCommit, MonitorOverdueCommitResult, MonitorRecord,
-    MonitorTransitionEvent, TargetCheckObservation, TargetInsert, TargetIntervalUpdate,
-    TargetProbeCommit, TargetProbeCommitResult, TargetProbeSnapshot, TargetRecord,
-    TargetTransitionEvent,
+    MonitorTransitionEvent, TargetCheckObservation, TargetConflict, TargetInsert,
+    TargetIntervalUpdate, TargetProbeCommit, TargetProbeCommitResult, TargetProbeSnapshot,
+    TargetRecord, TargetTransitionEvent,
 };
 pub use incidents::{IncidentCorrelation, IncidentCorrelationEvent};
 pub use ingest::{
@@ -49,6 +49,9 @@ pub enum StoreError {
     /// SQLite rejected a connection, pragma, migration, or query.
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// A service-onboarding target conflicts with an existing target row.
+    #[error("target conflict")]
+    TargetConflict(TargetConflict),
 }
 
 /// Canary's single writable SQLite connection.
@@ -109,6 +112,23 @@ impl Store {
     /// Insert one HTTP target row.
     pub fn insert_target(&mut self, target: TargetInsert) -> Result<()> {
         health::insert_target(&self.connection, target)
+    }
+
+    /// Create one service-onboarding target and ingest key as one product unit.
+    pub fn commit_service_onboarding_target_and_key(
+        &mut self,
+        target: TargetInsert,
+        key: ApiKeyInsert,
+    ) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        let conflict = health::target_conflict(&transaction, &target.service, &target.url)?;
+        if conflict.service || conflict.url {
+            return Err(StoreError::TargetConflict(conflict));
+        }
+        health::insert_target(&transaction, target)?;
+        api_keys::insert(&transaction, key)?;
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Return admin-visible target rows ordered by display name.

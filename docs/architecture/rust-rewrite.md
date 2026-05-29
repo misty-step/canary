@@ -524,6 +524,18 @@ the Rust server accepts production traffic:
     responses expose only metadata plus `active`; create responses are the only
     place the raw key appears. Bcrypt hashing runs through `spawn_blocking` so
     the Axum request task does not perform CPU-heavy password hashing inline.
+50. Rust now implements `POST /api/v1/service-onboarding` as the product
+    transaction Phoenix exposes to agents. The endpoint validates the
+    onboarding request, creates a health target and a scoped ingest-only API
+    key, returns copy-paste snippets, and tracks the target after the SQLite
+    commit. The server deliberately does not call the existing target or key
+    HTTP handlers internally; it builds the typed target/key rows once and asks
+    the store to insert both in a single transaction. That keeps the
+    agent-facing route simple while preserving the Phoenix contract: trimmed
+    service/environment fields, production as the default environment,
+    optional positive interval, SSRF-aware URL validation, duplicate service
+    and URL validation errors, one-time raw key disclosure, and no lifecycle
+    command when auth or validation fails.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed

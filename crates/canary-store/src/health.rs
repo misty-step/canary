@@ -132,6 +132,15 @@ pub struct TargetRecord {
     pub created_at: String,
 }
 
+/// Existing target rows that would conflict with service onboarding.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TargetConflict {
+    /// Another target already owns the service name.
+    pub service: bool,
+    /// Another target already probes the exact URL.
+    pub url: bool,
+}
+
 /// Non-HTTP monitor row returned by admin monitor APIs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MonitorRecord {
@@ -690,6 +699,25 @@ pub(crate) fn insert_target(connection: &rusqlite::Connection, target: TargetIns
         ],
     )?;
     Ok(())
+}
+
+pub(crate) fn target_conflict(
+    connection: &rusqlite::Connection,
+    service: &str,
+    url: &str,
+) -> Result<TargetConflict> {
+    let service = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM targets WHERE service = ?1 LIMIT 1)",
+        [service],
+        |row| row.get::<_, i64>(0),
+    )? == 1;
+    let url = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM targets WHERE url = ?1 LIMIT 1)",
+        [url],
+        |row| row.get::<_, i64>(0),
+    )? == 1;
+
+    Ok(TargetConflict { service, url })
 }
 
 pub(crate) fn list_targets(connection: &rusqlite::Connection) -> Result<Vec<TargetRecord>> {
