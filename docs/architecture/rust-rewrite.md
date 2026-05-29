@@ -472,6 +472,24 @@ the Rust server accepts production traffic:
     the signal active. Store query reads and incident correlation both call this
     typed rule, while target-probe, monitor-overdue, and check-in parsing use
     the same parser instead of stringly duplicated match tables.
+45. Error-group query cursors now document and test their real Phoenix/Rust
+    semantics under concurrent ingest. `GroupCursor` is a keyset continuation
+    anchor over `(total_count DESC, group_hash ASC)`, not a snapshot token. If a
+    later group receives ingest and moves above the saved anchor between page
+    requests, the next page does not replay it; agents that need a fresh
+    high-frequency view restart from the first page. The store test
+    `errors_by_service_cursor_is_a_keyset_anchor_not_a_snapshot` locks this
+    behavior with a real `commit_error_ingest` mutation between page requests
+    so the rewrite does not accidentally promise snapshot pagination without a
+    product/API migration.
+46. Incident read-model severity now treats active health-transition signals as
+    stateful, not eventful. Error-group signals still use the 300-second
+    activity window because their current activity is represented by
+    `error_groups.last_seen_at`; health-transition signals have already passed a
+    current-state active check, so their `attached_at` age cannot make a still
+    non-`up` target or monitor severity-irrelevant. Query-time severity and
+    correlation-time stored severity use the same rule so agents do not see a
+    `medium` incident while three health checks are still actively failing.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -499,10 +517,9 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Broaden Phoenix read-model parity around cursor mutation under concurrent
-   ingest and severity decay while a health signal remains non-`up`. Keep this
-   at the store/query boundary unless the live Phoenix router contract requires
-   a route.
+1. Add a Phoenix-observed compatibility note for the intentional severity
+   divergence above before cutover: this is a Rust correctness improvement over
+   the current Phoenix read model, not a silent wire-shape change.
 2. Continue the remaining Rust HTTP/admin/API surface from the live OpenAPI and
    Phoenix router contracts, keeping each slice behind a typed store or worker
    boundary rather than a generic CRUD layer.

@@ -82,6 +82,13 @@ pub enum QueryCursor {
 }
 
 /// Structured cursor used by Phoenix for error-group pagination.
+///
+/// This is a keyset anchor for the current `(total_count DESC, group_hash ASC)`
+/// ordering, not a snapshot token. If ingest mutates a later group's
+/// `total_count` above this anchor between page requests, that newly-promoted
+/// group belongs to a fresh first page and will not be replayed on the next
+/// page. The important agent-facing guarantee is stable continuation without
+/// duplicating rows already observed under the old anchor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupCursor {
     /// Last row count from the previous page.

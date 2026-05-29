@@ -422,7 +422,7 @@ mod tests {
     };
     use rusqlite::params;
     use serde_json::{Value, json};
-    use time::OffsetDateTime;
+    use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
     use super::*;
 
@@ -1335,6 +1335,59 @@ mod tests {
     }
 
     #[test]
+    fn errors_by_service_cursor_is_a_keyset_anchor_not_a_snapshot()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        let now = "2026-05-28T20:00:00Z";
+
+        for rank in 1..=51 {
+            let group_hash = format!("group-{rank:03}");
+            store.connection.execute(
+                "INSERT INTO error_groups (
+                    group_hash, service, error_class, severity, first_seen_at, last_seen_at,
+                    last_error_id, total_count, status
+                 ) VALUES (?1, 'cadence', ?2, 'error', ?3, ?3, ?4, 49, 'active')",
+                params![
+                    group_hash,
+                    format!("RuntimeError{rank}"),
+                    now,
+                    format!("ERR-page-{rank}"),
+                ],
+            )?;
+        }
+
+        let first_page =
+            store.errors_by_service("cadence", "24h", ServiceQueryOptions::default())?;
+        assert_eq!(first_page.groups.len(), 50);
+        assert_eq!(first_page.groups[0].group_hash, "group-001");
+        assert_eq!(first_page.groups[49].group_hash, "group-050");
+
+        store.commit_error_ingest(error_ingest(
+            "ERR-123456789abc",
+            "EVT-123456789abc",
+            "group-051",
+            "2026-05-28T20:01:00Z",
+        ))?;
+
+        let second_page = store.errors_by_service(
+            "cadence",
+            "24h",
+            ServiceQueryOptions {
+                cursor: first_page.cursor,
+                ..ServiceQueryOptions::default()
+            },
+        )?;
+
+        assert_eq!(second_page.groups, Vec::new());
+        let fresh_first_page =
+            store.errors_by_service("cadence", "24h", ServiceQueryOptions::default())?;
+        assert_eq!(fresh_first_page.groups[0].group_hash, "group-051");
+        assert_eq!(fresh_first_page.groups[0].total_count, 50);
+
+        Ok(())
+    }
+
+    #[test]
     fn errors_by_class_counts_all_classes_beyond_visible_limit()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let store = migrated_store()?;
@@ -1595,6 +1648,61 @@ mod tests {
         }
 
         let result = store.active_incidents(IncidentListOptions::default())?;
+
+        assert_eq!(result.incidents.len(), 1);
+        assert_eq!(result.incidents[0].severity, "high");
+        assert_eq!(result.incidents[0].signal_count, 3);
+        assert_eq!(
+            result.summary,
+            "1 open incident across 1 service. 1 high-severity incident. Newest: api at 2026-05-28T20:00:00Z."
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn active_incidents_keeps_persistent_health_signals_severity_relevant()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        let attached_at = "2026-05-28T20:00:00Z";
+        let as_of = OffsetDateTime::parse("2026-05-28T20:10:00Z", &Rfc3339)?;
+
+        insert_incident(&store, "INC-health-high", "api", "2026-05-28T20:00:00Z")?;
+        for index in 1..=3 {
+            let target_id = format!("TGT-health-{index}");
+            store.insert_target(TargetInsert {
+                id: target_id.clone(),
+                url: format!("https://health-{index}.example.com"),
+                name: format!("Health {index}"),
+                service: "api".to_owned(),
+                method: "GET".to_owned(),
+                headers: None,
+                interval_ms: 60_000,
+                timeout_ms: 10_000,
+                expected_status: "200".to_owned(),
+                body_contains: None,
+                degraded_after: 1,
+                down_after: 3,
+                up_after: 1,
+                active: true,
+                created_at: "2026-05-28T19:00:00Z".to_owned(),
+            })?;
+            store.connection.execute(
+                "INSERT INTO target_state (target_id, state)
+                 VALUES (?1, 'down')",
+                [target_id.as_str()],
+            )?;
+            insert_incident_signal(
+                &store,
+                "INC-health-high",
+                "health_transition",
+                &target_id,
+                attached_at,
+                None,
+            )?;
+        }
+
+        let result = store.active_incidents_at(IncidentListOptions::default(), as_of)?;
 
         assert_eq!(result.incidents.len(), 1);
         assert_eq!(result.incidents[0].severity, "high");

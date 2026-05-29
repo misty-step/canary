@@ -1063,7 +1063,7 @@ fn incident_has_annotation(
 fn incident_severity(signals: &[ActiveIncidentSignal], now: OffsetDateTime) -> String {
     let recent_count = signals
         .iter()
-        .filter(|signal| within_incident_window(&signal.attached_at, now))
+        .filter(|signal| signal_counts_for_severity(signal, now))
         .count();
 
     if recent_count >= 3 {
@@ -1071,6 +1071,10 @@ fn incident_severity(signals: &[ActiveIncidentSignal], now: OffsetDateTime) -> S
     } else {
         "medium".to_owned()
     }
+}
+
+fn signal_counts_for_severity(signal: &ActiveIncidentSignal, now: OffsetDateTime) -> bool {
+    signal.signal_type == "health_transition" || within_incident_window(&signal.attached_at, now)
 }
 
 fn within_incident_window(timestamp: &str, now: OffsetDateTime) -> bool {

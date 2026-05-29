@@ -262,9 +262,13 @@ fn update_incident_state(
 fn desired_severity(active_signals: &[&SignalRow], now: &str) -> String {
     let recent = active_signals
         .iter()
-        .filter(|signal| within_active_window(&signal.attached_at, now))
+        .filter(|signal| signal_counts_for_severity(signal, now))
         .count();
     if recent >= 3 { "high" } else { "medium" }.to_owned()
+}
+
+fn signal_counts_for_severity(signal: &SignalRow, now: &str) -> bool {
+    signal.signal_type == "health_transition" || within_active_window(&signal.attached_at, now)
 }
 
 fn signal_active(
