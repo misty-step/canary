@@ -490,6 +490,17 @@ the Rust server accepts production traffic:
     non-`up` target or monitor severity-irrelevant. Query-time severity and
     correlation-time stored severity use the same rule so agents do not see a
     `medium` incident while three health checks are still actively failing.
+47. Rust now implements the Phoenix admin monitor surface:
+    `GET /api/v1/monitors`, `POST /api/v1/monitors`, and
+    `DELETE /api/v1/monitors/{id}`. The slice is intentionally hand-shaped like
+    the target admin routes, not generalized into a CRUD layer. The store owns
+    monitor list/create/delete, server handlers own Axum/auth/body conversion,
+    and creation bootstraps the Phoenix-compatible `monitor_state` row with
+    `unknown` state. The HTTP parser preserves the OpenAPI/Phoenix contract:
+    service defaults to name, mode is `schedule` or `ttl`,
+    `expected_every_ms` is required and positive, `grace_ms` defaults to zero
+    and may be zero, duplicate names return 422 validation errors, and missing
+    deletes return the RFC 9457 404 problem body.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed

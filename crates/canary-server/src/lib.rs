@@ -22,7 +22,7 @@ use axum::{
         HeaderMap, HeaderValue, Response, StatusCode,
         header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderName},
     },
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
 };
 use canary_http::public::{
     DependencyStatus, PublicResponse, healthz_response, openapi_response, readyz_response,
@@ -39,7 +39,10 @@ use canary_ingest::{
     IngestConfig, IngestContext, IngestEffect, IngestError, ValidationErrors,
     ingest as ingest_error,
 };
-use canary_store::{IncidentCorrelation, IncidentListOptions, Store, TargetInsert, TargetRecord};
+use canary_store::{
+    IncidentCorrelation, IncidentListOptions, MonitorInsert, MonitorRecord, Store, TargetInsert,
+    TargetRecord,
+};
 use canary_store::{QueryError, ServiceQueryOptions};
 use canary_workers::health::{
     HealthPlanError, MonitorCheckInInput, MonitorCheckInStatus, MonitorMode, MonitorSnapshot,
@@ -460,6 +463,8 @@ pub fn ingest_router(state: IngestState) -> Router {
         .route("/api/v1/incidents", get(list_incidents))
         .route("/api/v1/incidents/{id}", get(show_incident))
         .route("/api/v1/errors/{id}", get(show_error))
+        .route("/api/v1/monitors", get(list_monitors).post(create_monitor))
+        .route("/api/v1/monitors/{id}", delete(delete_monitor))
         .route("/api/v1/targets", get(list_targets).post(create_target))
         .route(
             "/api/v1/targets/{id}",
@@ -799,6 +804,92 @@ async fn list_targets(State(state): State<IngestState>, headers: HeaderMap) -> R
     }
 }
 
+async fn list_monitors(State(state): State<IngestState>, headers: HeaderMap) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+        return problem_response(*problem);
+    }
+
+    let store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+
+    match store.list_monitors() {
+        Ok(monitors) => json_status_response(
+            StatusCode::OK.as_u16(),
+            json!({"monitors": monitors.into_iter().map(monitor_response).collect::<Vec<_>>()}),
+        ),
+        Err(_) => problem_response(internal_problem()),
+    }
+}
+
+async fn create_monitor(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    if let Err(problem) = check_content_length(&headers) {
+        return problem_response(*problem);
+    }
+
+    if body.len() as u64 > MAX_JSON_BODY_BYTES {
+        return problem_response(payload_too_large_problem(
+            "Request body exceeds 100KB limit.",
+        ));
+    }
+
+    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+        return problem_response(*problem);
+    }
+
+    let attrs = match decode_json_object(&body, None) {
+        Ok(attrs) => attrs,
+        Err(problem) => return problem_response(*problem),
+    };
+    let monitor = match parse_monitor_create(attrs) {
+        Ok(monitor) => monitor,
+        Err(problem) => return problem_response(*problem),
+    };
+    let response_body = monitor_insert_response(&monitor);
+
+    let mut store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    match store.create_monitor(monitor) {
+        Ok(true) => json_status_response(StatusCode::CREATED.as_u16(), response_body),
+        Ok(false) => problem_response(monitor_validation_problem(BTreeMap::from([(
+            "name".to_owned(),
+            vec!["has already been taken".to_owned()],
+        )]))),
+        Err(_) => problem_response(internal_problem()),
+    }
+}
+
+async fn delete_monitor(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+        return problem_response(*problem);
+    }
+
+    let mut store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    match store.delete_monitor(&id) {
+        Ok(true) => response(
+            StatusCode::NO_CONTENT.as_u16(),
+            "text/plain; charset=utf-8",
+            Body::empty(),
+        ),
+        Ok(false) => problem_response(not_found_problem("Monitor not found.")),
+        Err(_) => problem_response(internal_problem()),
+    }
+}
+
 async fn create_target(
     State(state): State<IngestState>,
     headers: HeaderMap,
@@ -1066,6 +1157,30 @@ struct ParsedCheckIn {
     input: MonitorCheckInInput,
 }
 
+fn monitor_response(monitor: MonitorRecord) -> Value {
+    json!({
+        "id": monitor.id,
+        "name": monitor.name,
+        "service": monitor.service,
+        "mode": monitor.mode,
+        "expected_every_ms": monitor.expected_every_ms,
+        "grace_ms": monitor.grace_ms,
+        "created_at": monitor.created_at,
+    })
+}
+
+fn monitor_insert_response(monitor: &MonitorInsert) -> Value {
+    json!({
+        "id": monitor.id,
+        "name": monitor.name,
+        "service": monitor.service,
+        "mode": monitor.mode,
+        "expected_every_ms": monitor.expected_every_ms,
+        "grace_ms": monitor.grace_ms,
+        "created_at": monitor.created_at,
+    })
+}
+
 fn target_response(target: TargetRecord) -> Value {
     json!({
         "id": target.id,
@@ -1093,6 +1208,49 @@ fn target_insert_response(target: &TargetInsert) -> Value {
         "expected_status": target.expected_status,
         "active": target.active,
         "created_at": target.created_at,
+    })
+}
+
+fn parse_monitor_create(attrs: Map<String, Value>) -> Result<MonitorInsert, Box<ProblemDetails>> {
+    let mut errors: ValidationErrors = BTreeMap::new();
+    let name = required_string(&attrs, "name", &mut errors);
+    let mode = required_string(&attrs, "mode", &mut errors);
+    if let Some(mode) = mode.as_deref()
+        && !matches!(mode, "schedule" | "ttl")
+    {
+        errors.insert(
+            "mode".to_owned(),
+            vec!["must be one of: schedule, ttl".to_owned()],
+        );
+    }
+    let expected_every_ms = optional_positive_i64(&attrs, "expected_every_ms", 0, &mut errors);
+    if !attrs.contains_key("expected_every_ms") {
+        errors.insert(
+            "expected_every_ms".to_owned(),
+            vec!["must be a positive integer".to_owned()],
+        );
+    }
+    let grace_ms = optional_non_negative_i64(&attrs, "grace_ms", 0, &mut errors);
+
+    if !errors.is_empty() {
+        return Err(Box::new(monitor_validation_problem(errors)));
+    }
+
+    let Some(name) = name else {
+        return Err(Box::new(monitor_validation_problem(BTreeMap::new())));
+    };
+    let Some(mode) = mode else {
+        return Err(Box::new(monitor_validation_problem(BTreeMap::new())));
+    };
+
+    Ok(MonitorInsert {
+        id: canary_core::ids::MonitorId::generate().into_string(),
+        service: optional_string(attrs.get("service")).unwrap_or_else(|| name.clone()),
+        name,
+        mode,
+        expected_every_ms,
+        grace_ms,
+        created_at: current_rfc3339(),
     })
 }
 
@@ -1234,6 +1392,31 @@ fn optional_positive_i64(
             Some(value) => value,
             None => {
                 errors.insert(key.to_owned(), vec!["must be greater than 0".to_owned()]);
+                default
+            }
+        },
+        Some(Value::Null) | None => default,
+        Some(_) => {
+            errors.insert(key.to_owned(), vec!["must be an integer".to_owned()]);
+            default
+        }
+    }
+}
+
+fn optional_non_negative_i64(
+    attrs: &Map<String, Value>,
+    key: &str,
+    default: i64,
+    errors: &mut ValidationErrors,
+) -> i64 {
+    match attrs.get(key) {
+        Some(Value::Number(number)) => match number.as_i64().filter(|value| *value >= 0) {
+            Some(value) => value,
+            None => {
+                errors.insert(
+                    key.to_owned(),
+                    vec!["must be greater than or equal to 0".to_owned()],
+                );
                 default
             }
         },
@@ -1600,6 +1783,16 @@ fn check_in_validation_problem(errors: ValidationErrors) -> ProblemDetails {
         422,
         ProblemCode::ValidationError,
         "Invalid check-in payload.",
+        None,
+    )
+    .with_extra("errors", json!(errors))
+}
+
+fn monitor_validation_problem(errors: ValidationErrors) -> ProblemDetails {
+    ProblemDetails::new(
+        422,
+        ProblemCode::ValidationError,
+        "Invalid monitor configuration.",
         None,
     )
     .with_extra("errors", json!(errors))
@@ -3197,6 +3390,174 @@ mod tests {
             .oneshot(read_request(ADMIN_KEY, "/api/v1/targets")?)
             .await?;
         assert_eq!(json_body(list).await?["targets"], json!([]));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admin_monitor_mutations_follow_phoenix_contract() -> Result<(), Box<dyn Error>> {
+        let router = ingest_router(test_ingest_state()?);
+
+        let create_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/monitors",
+                ADMIN_KEY,
+                r#"{"name":"desktop-active-timer","mode":"ttl","expected_every_ms":90000}"#,
+            )?)
+            .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let created = json_body(create_response).await?;
+        let monitor_id = created["id"]
+            .as_str()
+            .ok_or("missing monitor id")?
+            .to_owned();
+        assert!(monitor_id.starts_with("MON-"));
+        assert_eq!(created["name"], "desktop-active-timer");
+        assert_eq!(created["service"], "desktop-active-timer");
+        assert_eq!(created["mode"], "ttl");
+        assert_eq!(created["expected_every_ms"], 90_000);
+        assert_eq!(created["grace_ms"], 0);
+        assert!(created["created_at"].as_str().is_some());
+
+        let list_response = router
+            .clone()
+            .oneshot(read_request(ADMIN_KEY, "/api/v1/monitors")?)
+            .await?;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let listed = json_body(list_response).await?;
+        assert!(
+            listed["monitors"]
+                .as_array()
+                .ok_or("monitors should be an array")?
+                .iter()
+                .any(|monitor| monitor["id"] == monitor_id)
+        );
+
+        let delete_response = router
+            .clone()
+            .oneshot(
+                Request::delete(format!("/api/v1/monitors/{monitor_id}"))
+                    .header("authorization", format!("Bearer {ADMIN_KEY}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+        let missing_response = router
+            .clone()
+            .oneshot(
+                Request::delete(format!("/api/v1/monitors/{monitor_id}"))
+                    .header("authorization", format!("Bearer {ADMIN_KEY}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            json_body(missing_response).await?["detail"],
+            "Monitor not found."
+        );
+
+        let final_list = router
+            .oneshot(read_request(ADMIN_KEY, "/api/v1/monitors")?)
+            .await?;
+        assert_eq!(json_body(final_list).await?["monitors"], json!([]));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admin_monitor_create_rejects_invalid_scope_and_shape() -> Result<(), Box<dyn Error>> {
+        let router = ingest_router(test_ingest_state()?);
+
+        let forbidden_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/monitors",
+                INGEST_KEY,
+                r#"{"name":"worker","mode":"ttl","expected_every_ms":90000}"#,
+            )?)
+            .await?;
+        assert_eq!(forbidden_response.status(), StatusCode::FORBIDDEN);
+        let list_after_forbidden = router
+            .clone()
+            .oneshot(read_request(ADMIN_KEY, "/api/v1/monitors")?)
+            .await?;
+        assert_eq!(
+            json_body(list_after_forbidden).await?["monitors"],
+            json!([])
+        );
+
+        let invalid_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/monitors",
+                ADMIN_KEY,
+                r#"{"name":"worker","mode":"sometimes","expected_every_ms":0,"grace_ms":-1}"#,
+            )?)
+            .await?;
+        assert_eq!(invalid_response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let invalid_body = json_body(invalid_response).await?;
+        assert_eq!(invalid_body["code"], "validation_error");
+        assert_eq!(invalid_body["detail"], "Invalid monitor configuration.");
+        assert_eq!(
+            invalid_body["errors"]["mode"],
+            json!(["must be one of: schedule, ttl"])
+        );
+        assert_eq!(
+            invalid_body["errors"]["expected_every_ms"],
+            json!(["must be greater than 0"])
+        );
+        assert_eq!(
+            invalid_body["errors"]["grace_ms"],
+            json!(["must be greater than or equal to 0"])
+        );
+
+        let missing_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/monitors",
+                ADMIN_KEY,
+                r#"{"name":"worker","mode":"ttl"}"#,
+            )?)
+            .await?;
+        assert_eq!(missing_response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(missing_response).await?["errors"]["expected_every_ms"],
+            json!(["must be a positive integer"])
+        );
+
+        let create_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/monitors",
+                ADMIN_KEY,
+                r#"{"name":"worker","mode":"ttl","expected_every_ms":90000}"#,
+            )?)
+            .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+
+        let duplicate_response = router
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/monitors",
+                ADMIN_KEY,
+                r#"{"name":"worker","mode":"ttl","expected_every_ms":90000}"#,
+            )?)
+            .await?;
+        assert_eq!(
+            duplicate_response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            json_body(duplicate_response).await?["errors"]["name"],
+            json!(["has already been taken"])
+        );
 
         Ok(())
     }

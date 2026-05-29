@@ -27,7 +27,7 @@ fn build_normalization_rules() -> Result<Vec<(Regex, &'static str)>, regex::Erro
             Regex::new(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b")?,
             "<email>",
         ),
-        (Regex::new(r#"(?:^|[\s('"=])(/[^\s'")\]]+)"#)?, "<path>"),
+        (Regex::new(r#"(?:^|[\s('"=])(/[^\s'")\]<]+)"#)?, "<path>"),
         (Regex::new(r"(?i)\b(?:0x)?[0-9a-f]{9,}\b")?, "<hex>"),
         (Regex::new(r"\b\d{4,}\b")?, "<int>"),
         (Regex::new(r"\s+")?, " "),
@@ -252,6 +252,12 @@ mod tests {
         assert_eq!(first.strategy, GroupingStrategy::MessageTemplate);
         assert_eq!(first.message_template, "failed for user <int>");
         assert_eq!(first.group_hash, second.group_hash);
+    }
+
+    #[test]
+    fn path_normalization_does_not_renormalize_placeholders() {
+        assert_eq!(strip_template("/\u{b}/#"), "/<path>");
+        assert_eq!(strip_template("/<path>"), "/<path>");
     }
 
     proptest::proptest! {

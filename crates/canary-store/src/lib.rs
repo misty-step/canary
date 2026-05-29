@@ -21,7 +21,7 @@ pub use api_keys::{API_KEY_PREFIX_LEN, ApiKeyInsert, VerifiedApiKey};
 pub use health::{
     ActiveTargetProbeSchedule, HealthTransitionCommit, MonitorCheckInCommit,
     MonitorCheckInCommitResult, MonitorCheckInObservation, MonitorCheckInSnapshot, MonitorInsert,
-    MonitorOverdueCandidate, MonitorOverdueCommit, MonitorOverdueCommitResult,
+    MonitorOverdueCandidate, MonitorOverdueCommit, MonitorOverdueCommitResult, MonitorRecord,
     MonitorTransitionEvent, TargetCheckObservation, TargetInsert, TargetIntervalUpdate,
     TargetProbeCommit, TargetProbeCommitResult, TargetProbeSnapshot, TargetRecord,
     TargetTransitionEvent,
@@ -171,6 +171,21 @@ impl Store {
     /// Insert one non-HTTP monitor row.
     pub fn insert_monitor(&mut self, monitor: MonitorInsert) -> Result<()> {
         health::insert_monitor(&self.connection, monitor)
+    }
+
+    /// Create one non-HTTP monitor and its initial unknown state row.
+    pub fn create_monitor(&mut self, monitor: MonitorInsert) -> Result<bool> {
+        health::create_monitor(&mut self.connection, monitor)
+    }
+
+    /// Return admin-visible monitor rows ordered by name.
+    pub fn list_monitors(&self) -> Result<Vec<MonitorRecord>> {
+        health::list_monitors(&self.connection)
+    }
+
+    /// Delete one non-HTTP monitor row.
+    pub fn delete_monitor(&mut self, monitor_id: &str) -> Result<bool> {
+        health::delete_monitor(&mut self.connection, monitor_id)
     }
 
     /// Return one monitor configuration and state snapshot by check-in name.
@@ -2246,6 +2261,77 @@ mod tests {
         assert!(store.delete_target("TGT-admin")?);
         assert!(store.list_targets()?.is_empty());
         assert!(!store.delete_target("TGT-admin")?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn admin_monitor_create_list_and_delete_are_persistent() -> Result<()> {
+        let mut store = migrated_store()?;
+
+        assert!(store.create_monitor(MonitorInsert {
+            id: "MON-zeta".to_owned(),
+            name: "zeta-worker".to_owned(),
+            service: "zeta-worker".to_owned(),
+            mode: "ttl".to_owned(),
+            expected_every_ms: 60_000,
+            grace_ms: 0,
+            created_at: "2026-05-28T19:00:00Z".to_owned(),
+        })?);
+        assert!(store.create_monitor(MonitorInsert {
+            id: "MON-alpha".to_owned(),
+            name: "alpha-worker".to_owned(),
+            service: "".to_owned(),
+            mode: "schedule".to_owned(),
+            expected_every_ms: 120_000,
+            grace_ms: 5_000,
+            created_at: "2026-05-28T19:01:00Z".to_owned(),
+        })?);
+
+        let monitors = store.list_monitors()?;
+        assert_eq!(monitors.len(), 2);
+        assert_eq!(monitors[0].id, "MON-alpha");
+        assert_eq!(monitors[0].service, "alpha-worker");
+        assert_eq!(monitors[1].id, "MON-zeta");
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT state FROM monitor_state WHERE monitor_id = 'MON-alpha'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?,
+            "unknown"
+        );
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT COUNT(*) FROM monitor_state WHERE monitor_id = 'MON-zeta'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            1
+        );
+
+        assert!(!store.create_monitor(MonitorInsert {
+            id: "MON-duplicate".to_owned(),
+            name: "alpha-worker".to_owned(),
+            service: "alpha-worker".to_owned(),
+            mode: "ttl".to_owned(),
+            expected_every_ms: 30_000,
+            grace_ms: 0,
+            created_at: "2026-05-28T19:02:00Z".to_owned(),
+        })?);
+        assert_eq!(store.list_monitors()?.len(), 2);
+
+        assert!(store.delete_monitor("MON-alpha")?);
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT COUNT(*) FROM monitor_state WHERE monitor_id = 'MON-alpha'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            0
+        );
+        assert_eq!(store.list_monitors()?.len(), 1);
+        assert!(!store.delete_monitor("MON-alpha")?);
 
         Ok(())
     }

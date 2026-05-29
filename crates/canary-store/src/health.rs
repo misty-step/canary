@@ -132,6 +132,25 @@ pub struct TargetRecord {
     pub created_at: String,
 }
 
+/// Non-HTTP monitor row returned by admin monitor APIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorRecord {
+    /// Monitor id.
+    pub id: String,
+    /// Unique monitor name used by check-in clients.
+    pub name: String,
+    /// Service name resolved with Phoenix's monitor service fallback.
+    pub service: String,
+    /// Monitor mode, `schedule` or `ttl`.
+    pub mode: String,
+    /// Expected interval in milliseconds.
+    pub expected_every_ms: i64,
+    /// Grace period in milliseconds.
+    pub grace_ms: i64,
+    /// Creation timestamp.
+    pub created_at: String,
+}
+
 /// Persisted outcome of updating one target's probe interval.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetIntervalUpdate {
@@ -571,6 +590,78 @@ pub(crate) fn insert_monitor(
         ],
     )?;
     Ok(())
+}
+
+pub(crate) fn create_monitor(
+    connection: &mut rusqlite::Connection,
+    monitor: MonitorInsert,
+) -> Result<bool> {
+    let transaction = connection.transaction()?;
+    let exists = transaction
+        .query_row(
+            "SELECT 1 FROM monitors WHERE name = ?1 LIMIT 1",
+            [&monitor.name],
+            |_row| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if exists {
+        transaction.commit()?;
+        return Ok(false);
+    }
+
+    transaction.execute(
+        "INSERT INTO monitors (id, name, service, mode, expected_every_ms, grace_ms, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            monitor.id,
+            monitor.name,
+            monitor.service,
+            monitor.mode,
+            monitor.expected_every_ms,
+            monitor.grace_ms,
+            monitor.created_at,
+        ],
+    )?;
+    transaction.execute(
+        "INSERT INTO monitor_state (monitor_id, state, sequence) VALUES (?1, 'unknown', 0)",
+        [&monitor.id],
+    )?;
+    transaction.commit()?;
+    Ok(true)
+}
+
+pub(crate) fn list_monitors(connection: &rusqlite::Connection) -> Result<Vec<MonitorRecord>> {
+    let mut statement = connection.prepare(
+        "SELECT
+            id, name, COALESCE(NULLIF(service, ''), name), mode,
+            expected_every_ms, COALESCE(grace_ms, 0), created_at
+         FROM monitors
+         ORDER BY name",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(MonitorRecord {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            service: row.get(2)?,
+            mode: row.get(3)?,
+            expected_every_ms: row.get(4)?,
+            grace_ms: row.get(5)?,
+            created_at: row.get(6)?,
+        })
+    })?;
+    let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub(crate) fn delete_monitor(
+    connection: &mut rusqlite::Connection,
+    monitor_id: &str,
+) -> Result<bool> {
+    let transaction = connection.transaction()?;
+    let changed = transaction.execute("DELETE FROM monitors WHERE id = ?1", [monitor_id])?;
+    transaction.commit()?;
+    Ok(changed > 0)
 }
 
 pub(crate) fn insert_target(connection: &rusqlite::Connection, target: TargetInsert) -> Result<()> {
