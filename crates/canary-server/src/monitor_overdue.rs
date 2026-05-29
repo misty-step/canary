@@ -20,7 +20,9 @@ use canary_workers::health::{
     HealthPlanError, MonitorMode, MonitorOverdueSnapshot, ObservationContext, plan_monitor_overdue,
 };
 
-use crate::{EventSink, current_rfc3339, current_unix_millis};
+use crate::{
+    EventFanoutReport, HealthEventFanout, HealthEventSource, current_rfc3339, current_unix_millis,
+};
 
 /// Persisted result of one overdue monitor transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +35,8 @@ pub struct MonitorOverdueOutcome {
     pub sequence: i64,
     /// Health transition event enqueued after commit.
     pub transition_event: String,
+    /// Advisory webhook fanout result for the transition event.
+    pub event_fanout: EventFanoutReport,
 }
 
 /// Runtime failure that prevented one overdue candidate from completing.
@@ -55,13 +59,16 @@ pub enum MonitorOverdueRuntimeError {
 /// Runtime boundary for evaluating non-HTTP monitor overdue rows.
 pub struct MonitorOverdueRuntime {
     store: Arc<Mutex<Store>>,
-    event_sink: Arc<dyn EventSink>,
+    health_fanout: HealthEventFanout,
 }
 
 impl MonitorOverdueRuntime {
     /// Build a monitor overdue runtime from explicit side-effect boundaries.
-    pub fn new(store: Arc<Mutex<Store>>, event_sink: Arc<dyn EventSink>) -> Self {
-        Self { store, event_sink }
+    pub fn new(store: Arc<Mutex<Store>>, health_fanout: HealthEventFanout) -> Self {
+        Self {
+            store,
+            health_fanout,
+        }
     }
 
     /// Evaluate and persist exactly one overdue candidate.
@@ -71,13 +78,7 @@ impl MonitorOverdueRuntime {
         now: String,
         now_millis: i64,
     ) -> Result<Option<MonitorOverdueOutcome>, MonitorOverdueRuntimeError> {
-        run_monitor_overdue_once(
-            &self.store,
-            self.event_sink.as_ref(),
-            candidate,
-            now,
-            now_millis,
-        )
+        run_monitor_overdue_once(&self.store, &self.health_fanout, candidate, now, now_millis)
     }
 }
 
@@ -107,6 +108,8 @@ pub struct MonitorOverdueLifecycleReport {
     pub transitioned: usize,
     /// Candidates that failed before or during commit.
     pub failed: usize,
+    /// Advisory health-transition webhook enqueue failures.
+    pub event_fanout_failed: usize,
 }
 
 /// Bounded lifecycle adapter for monitor overdue evaluation.
@@ -138,7 +141,10 @@ impl MonitorOverdueLifecycle {
                 .runtime
                 .run_candidate(candidate, now.clone(), now_millis)
             {
-                Ok(Some(_)) => report.transitioned += 1,
+                Ok(Some(outcome)) => {
+                    report.transitioned += 1;
+                    report.event_fanout_failed += outcome.event_fanout.failed;
+                }
                 Ok(None) => report.noop += 1,
                 Err(_) => report.failed += 1,
             }
@@ -231,7 +237,7 @@ impl Drop for MonitorOverdueLifecycleWorker {
 /// Evaluate and persist exactly one overdue monitor candidate.
 pub fn run_monitor_overdue_once(
     store: &Arc<Mutex<Store>>,
-    event_sink: &dyn EventSink,
+    health_fanout: &HealthEventFanout,
     candidate: MonitorOverdueCandidate,
     now: String,
     now_millis: i64,
@@ -256,16 +262,15 @@ pub fn run_monitor_overdue_once(
         store.commit_monitor_overdue(plan.commit)?
     };
 
-    let _ = event_sink.enqueue_event(&commit.transition.event, &commit.transition.payload_json);
-    if let Some(event) = &commit.transition.incident_event {
-        let _ = event_sink.enqueue_event(&event.event, &event.payload_json);
-    }
+    let event_fanout =
+        health_fanout.dispatch(HealthEventSource::MonitorOverdue, &commit.transition);
 
     Ok(Some(MonitorOverdueOutcome {
         monitor_id: response_monitor_id,
         state: response_state,
         sequence: commit.sequence,
         transition_event: commit.transition.event,
+        event_fanout,
     }))
 }
 
@@ -382,6 +387,8 @@ mod tests {
 
     use canary_store::{MonitorCheckInCommit, MonitorCheckInObservation, MonitorInsert};
 
+    use crate::EventSink;
+
     use super::*;
 
     #[derive(Default)]
@@ -396,6 +403,14 @@ mod tests {
                 .map_err(|_| "events lock poisoned".to_owned())?
                 .push(event.to_owned());
             Ok(())
+        }
+    }
+
+    struct FailingSink;
+
+    impl EventSink for FailingSink {
+        fn enqueue_event(&self, event: &str, _payload_json: &str) -> Result<(), String> {
+            Err(format!("simulated enqueue failure for {event}"))
         }
     }
 
@@ -434,10 +449,9 @@ mod tests {
 
         let store = Arc::new(Mutex::new(store));
         let sink = Arc::new(RecordingSink::default());
-        let lifecycle = MonitorOverdueLifecycle::new(
-            store.clone(),
-            MonitorOverdueRuntime::new(store, sink.clone()),
-        );
+        let fanout = HealthEventFanout::new_without_failure_sink(sink.clone());
+        let lifecycle =
+            MonitorOverdueLifecycle::new(store.clone(), MonitorOverdueRuntime::new(store, fanout));
 
         let degraded = lifecycle.run_due("2026-05-28T20:00:06Z".to_owned(), 0)?;
         assert_eq!(
@@ -447,6 +461,7 @@ mod tests {
                 noop: 0,
                 transitioned: 1,
                 failed: 0,
+                event_fanout_failed: 0,
             }
         );
         let waiting = lifecycle.run_due("2026-05-28T20:00:30Z".to_owned(), 0)?;
@@ -457,6 +472,7 @@ mod tests {
                 noop: 1,
                 transitioned: 0,
                 failed: 0,
+                event_fanout_failed: 0,
             }
         );
         let down = lifecycle.run_due("2026-05-28T20:01:06Z".to_owned(), 0)?;
@@ -477,6 +493,64 @@ mod tests {
             1
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_reports_enqueue_failures_without_failing_transition() -> Result<(), Box<dyn Error>>
+    {
+        let mut store = Store::open_in_memory()?;
+        store.migrate()?;
+        store.insert_monitor(MonitorInsert {
+            id: "MON-overdue".to_owned(),
+            name: "Overdue worker".to_owned(),
+            service: "worker".to_owned(),
+            mode: "schedule".to_owned(),
+            expected_every_ms: 60_000,
+            grace_ms: 5_000,
+            created_at: "2026-05-28T19:00:00Z".to_owned(),
+        })?;
+        store.commit_monitor_check_in(MonitorCheckInCommit {
+            monitor_id: "MON-overdue".to_owned(),
+            state: "up".to_owned(),
+            last_check_in_at: Some("2026-05-28T20:00:00Z".to_owned()),
+            last_check_in_status: Some("alive".to_owned()),
+            deadline_at: Some("2026-05-28T20:00:05Z".to_owned()),
+            check_in: MonitorCheckInObservation {
+                id: "CHK-overduealive".to_owned(),
+                external_id: None,
+                status: "alive".to_owned(),
+                observed_at: "2026-05-28T20:00:00Z".to_owned(),
+                ttl_ms: None,
+                summary: None,
+                context: None,
+            },
+            now: "2026-05-28T20:00:00Z".to_owned(),
+            transition: None,
+        })?;
+
+        let store = Arc::new(Mutex::new(store));
+        let recorder = Arc::new(crate::EnqueueFailureRecorder::default());
+        let lifecycle = MonitorOverdueLifecycle::new(
+            store.clone(),
+            MonitorOverdueRuntime::new(
+                store,
+                HealthEventFanout::new(Arc::new(FailingSink), recorder.clone()),
+            ),
+        );
+
+        let report = lifecycle.run_due("2026-05-28T20:00:06Z".to_owned(), 0)?;
+
+        assert_eq!(report.transitioned, 1);
+        assert_eq!(report.failed, 0);
+        assert_eq!(report.event_fanout_failed, 2);
+        assert_eq!(
+            recorder.snapshot().get(&crate::EnqueueFailureKey {
+                source: HealthEventSource::MonitorOverdue,
+                event: "health_check.degraded".to_owned(),
+            }),
+            Some(&1)
+        );
         Ok(())
     }
 }

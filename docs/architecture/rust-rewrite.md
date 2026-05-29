@@ -384,6 +384,18 @@ the Rust server accepts production traffic:
     This keeps hot-update behavior in the target lifecycle module; it does not
     introduce per-target worker threads, cancellation tokens, SQLite update
     hooks, or a generic scheduler.
+37. `canary-server::HealthEventFanout`: health-transition webhook enqueue is no
+    longer hand-coded as ignored `EventSink` results at each source. Target
+    probes, monitor overdue evaluation, and monitor check-ins now dispatch
+    committed transition and incident events through one typed fanout boundary
+    that returns an `EventFanoutReport` and records advisory enqueue failures by
+    source and event. The HTTP response contract stays unchanged: enqueue
+    failure after a committed health transition remains best-effort and cannot
+    turn a successful check-in into an error. The failure counter is process
+    local and intentionally outside SQLite/webhook delivery ledger semantics,
+    because delivery ids are created by the enqueue sink and may not exist when
+    enqueue itself fails. This gives agents a compile-time boundary to reuse
+    instead of reintroducing `let _ = enqueue_event(...)` fanout paths.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -411,13 +423,12 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Harden the target probe runtime edge cases that were deliberately left out of
-   the lifecycle slice: enqueue-failure telemetry for health-transition webhook
-   fanout and Rust admin route wiring that forwards target create/delete/pause/
-   resume/update commits into `TargetProbeLifecycleCommand`.
+1. Wire Rust admin target create/delete/pause/resume/update commits into
+   `TargetProbeLifecycleCommand`, keeping the typed lifecycle boundary as the
+   only runtime hot-update mechanism.
 2. Broaden monitor overdue parity fixtures around malformed persisted rows,
-   TTL-vs-expected escalation, webhook enqueue failure receipts, and transaction
-   rollback evidence for transition/correlation failures.
+   TTL-vs-expected escalation, and transaction rollback evidence for
+   transition/correlation failures.
 3. Add a populated Phoenix fixture once health and annotation writes are ported
    so Rust read models are checked against Phoenix-inserted production-shaped
    rows, not only an empty migrated schema.

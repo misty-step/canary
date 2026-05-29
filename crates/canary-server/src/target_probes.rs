@@ -38,7 +38,9 @@ use serde_json::Value;
 use time::format_description::well_known::Rfc3339;
 use x509_parser::prelude::FromDer;
 
-use crate::{EventSink, current_rfc3339, current_unix_millis};
+use crate::{
+    EventFanoutReport, HealthEventFanout, HealthEventSource, current_rfc3339, current_unix_millis,
+};
 
 const MAX_PROBE_BODY_BYTES: u64 = 64 * 1024;
 const MAX_TARGET_HEADERS: usize = 64;
@@ -82,6 +84,8 @@ pub struct TargetProbeOutcome {
     pub tls_expires_at: Option<String>,
     /// Health transition event enqueued after commit, when any.
     pub transition_event: Option<String>,
+    /// Advisory webhook fanout result for the transition event.
+    pub event_fanout: EventFanoutReport,
 }
 
 /// Runtime failure that prevented a probe command from being planned.
@@ -153,7 +157,7 @@ pub struct ProbeRequest {
 /// Runtime boundary for executing target probes.
 pub struct TargetProbeRuntime {
     store: Arc<Mutex<Store>>,
-    event_sink: Arc<dyn EventSink>,
+    health_fanout: HealthEventFanout,
     transport: Arc<dyn ProbeTransport>,
     options: TargetProbeOptions,
     transition_history: Mutex<BTreeMap<String, Vec<(HealthState, i64)>>>,
@@ -163,13 +167,13 @@ impl TargetProbeRuntime {
     /// Build a target probe runtime from explicit side-effect boundaries.
     pub fn new(
         store: Arc<Mutex<Store>>,
-        event_sink: Arc<dyn EventSink>,
+        health_fanout: HealthEventFanout,
         transport: Arc<dyn ProbeTransport>,
         options: TargetProbeOptions,
     ) -> Self {
         Self {
             store,
-            event_sink,
+            health_fanout,
             transport,
             options,
             transition_history: Mutex::new(BTreeMap::new()),
@@ -187,7 +191,7 @@ impl TargetProbeRuntime {
             .unwrap_or_default();
         let run = run_target_probe_once_with_history(
             &self.store,
-            self.event_sink.as_ref(),
+            &self.health_fanout,
             self.transport.as_ref(),
             target_id,
             self.options.clone(),
@@ -241,6 +245,8 @@ pub struct TargetProbeLifecycleReport {
     pub skipped_missing: usize,
     /// Probes that failed before a commit could be planned.
     pub failed: usize,
+    /// Advisory health-transition webhook enqueue failures.
+    pub event_fanout_failed: usize,
 }
 
 /// Runtime control message for active target probe scheduling.
@@ -317,7 +323,10 @@ impl TargetProbeLifecycle {
 
         for target_id in due_targets {
             match self.runtime.run_once(&target_id) {
-                Ok(_) => report.probed += 1,
+                Ok(outcome) => {
+                    report.probed += 1;
+                    report.event_fanout_failed += outcome.event_fanout.failed;
+                }
                 Err(TargetProbeRuntimeError::TargetNotFound) => report.skipped_missing += 1,
                 Err(_) => report.failed += 1,
             }
@@ -513,14 +522,14 @@ impl Drop for TargetProbeLifecycleWorker {
 /// Execute and persist exactly one target probe.
 pub fn run_target_probe_once(
     store: &Arc<Mutex<Store>>,
-    event_sink: &dyn EventSink,
+    health_fanout: &HealthEventFanout,
     transport: &dyn ProbeTransport,
     target_id: &str,
     options: TargetProbeOptions,
 ) -> Result<TargetProbeOutcome, TargetProbeRuntimeError> {
     Ok(run_target_probe_once_with_history(
         store,
-        event_sink,
+        health_fanout,
         transport,
         target_id,
         options,
@@ -536,7 +545,7 @@ struct TargetProbeRun {
 
 fn run_target_probe_once_with_history(
     store: &Arc<Mutex<Store>>,
-    event_sink: &dyn EventSink,
+    health_fanout: &HealthEventFanout,
     transport: &dyn ProbeTransport,
     target_id: &str,
     options: TargetProbeOptions,
@@ -566,11 +575,9 @@ fn run_target_probe_once_with_history(
             .map_err(|_| TargetProbeRuntimeError::StoreLock)?;
         store.commit_target_probe(plan.commit)?
     };
+    let mut event_fanout = EventFanoutReport::default();
     let transition_event = commit.transition.as_ref().map(|transition| {
-        let _ = event_sink.enqueue_event(&transition.event, &transition.payload_json);
-        if let Some(event) = &transition.incident_event {
-            let _ = event_sink.enqueue_event(&event.event, &event.payload_json);
-        }
+        event_fanout = health_fanout.dispatch(HealthEventSource::TargetProbe, transition);
         transition.event.clone()
     });
 
@@ -581,6 +588,7 @@ fn run_target_probe_once_with_history(
         sequence: commit.sequence,
         tls_expires_at: response_tls_expires_at,
         transition_event,
+        event_fanout,
     };
     let committed_state = health_state(&outcome.state)?;
     let history_transition =
@@ -1243,6 +1251,8 @@ mod tests {
         pki_types::{CertificateDer, PrivateKeyDer},
     };
 
+    use crate::EventSink;
+
     use super::*;
 
     type TlsTestServer = std::thread::JoinHandle<Result<(), String>>;
@@ -1363,6 +1373,14 @@ mod tests {
                 .map_err(|_| "events lock poisoned".to_owned())?
                 .push(event.to_owned());
             Ok(())
+        }
+    }
+
+    struct FailingSink;
+
+    impl EventSink for FailingSink {
+        fn enqueue_event(&self, event: &str, _payload_json: &str) -> Result<(), String> {
+            Err(format!("simulated enqueue failure for {event}"))
         }
     }
 
@@ -1511,11 +1529,12 @@ mod tests {
     fn ssrf_block_persists_failed_probe_without_opening_transport() -> Result<(), Box<dyn Error>> {
         let store = seeded_store("http://127.0.0.1/health", "up")?;
         let transport = StaticTransport::ok(200, "ok");
-        let sink = RecordingSink::default();
+        let sink = Arc::new(RecordingSink::default());
+        let fanout = HealthEventFanout::new_without_failure_sink(sink);
 
         let outcome = run_target_probe_once(
             &store,
-            &sink,
+            &fanout,
             &transport,
             "TGT-api",
             TargetProbeOptions::default(),
@@ -1543,11 +1562,12 @@ mod tests {
             Some(r#"{"Host":"evil.example"}"#.to_owned()),
         )?;
         let transport = StaticTransport::ok(200, "ok");
-        let sink = RecordingSink::default();
+        let sink = Arc::new(RecordingSink::default());
+        let fanout = HealthEventFanout::new_without_failure_sink(sink);
 
         let outcome = run_target_probe_once(
             &store,
-            &sink,
+            &fanout,
             &transport,
             "TGT-api",
             TargetProbeOptions {
@@ -1570,11 +1590,12 @@ mod tests {
             Some(r#"{"X-Trace-Id":"abc","Accept":"application/json"}"#.to_owned()),
         )?;
         let transport = RecordingRequestTransport::default();
-        let sink = RecordingSink::default();
+        let sink = Arc::new(RecordingSink::default());
+        let fanout = HealthEventFanout::new_without_failure_sink(sink);
 
         let outcome = run_target_probe_once(
             &store,
-            &sink,
+            &fanout,
             &transport,
             "TGT-api",
             TargetProbeOptions {
@@ -1612,11 +1633,12 @@ mod tests {
             "unknown",
         )?;
         let transport = StaticTransport::ok(200, "ok");
-        let sink = RecordingSink::default();
+        let sink = Arc::new(RecordingSink::default());
+        let fanout = HealthEventFanout::new_without_failure_sink(sink);
 
         let outcome = run_target_probe_once(
             &store,
-            &sink,
+            &fanout,
             &transport,
             "TGT-api",
             TargetProbeOptions {
@@ -1650,11 +1672,12 @@ mod tests {
             })?;
         }
         let transport = StaticTransport::ok(200, "ok");
-        let sink = RecordingSink::default();
+        let sink = Arc::new(RecordingSink::default());
+        let fanout = HealthEventFanout::new_without_failure_sink(sink.clone());
 
         let outcome = run_target_probe_once(
             &store,
-            &sink,
+            &fanout,
             &transport,
             "TGT-api",
             TargetProbeOptions {
@@ -1673,6 +1696,38 @@ mod tests {
                 .map_err(|_| "events lock poisoned")?
                 .as_slice(),
             ["health_check.recovered"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn transition_enqueue_failure_is_reported_without_failing_probe() -> Result<(), Box<dyn Error>>
+    {
+        let store = seeded_store("http://127.0.0.1/health", "unknown")?;
+        let transport = StaticTransport::ok(200, "ok");
+        let recorder = Arc::new(crate::EnqueueFailureRecorder::default());
+        let fanout = HealthEventFanout::new(Arc::new(FailingSink), recorder.clone());
+
+        let outcome = run_target_probe_once(
+            &store,
+            &fanout,
+            &transport,
+            "TGT-api",
+            TargetProbeOptions {
+                allow_private_targets: true,
+                region: None,
+            },
+        )?;
+
+        assert_eq!(outcome.result, "success");
+        assert_eq!(outcome.state, "up");
+        assert_eq!(outcome.event_fanout.failed, 1);
+        assert_eq!(
+            recorder.snapshot().get(&crate::EnqueueFailureKey {
+                source: HealthEventSource::TargetProbe,
+                event: "health_check.recovered".to_owned(),
+            }),
+            Some(&1)
         );
         Ok(())
     }
@@ -1705,7 +1760,7 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let runtime = TargetProbeRuntime::new(
             store.clone(),
-            sink,
+            HealthEventFanout::new_without_failure_sink(sink),
             transport.clone(),
             TargetProbeOptions {
                 allow_private_targets: true,
@@ -1725,6 +1780,7 @@ mod tests {
                 probed: 1,
                 skipped_missing: 0,
                 failed: 0,
+                event_fanout_failed: 0,
             }
         );
         assert_eq!(
@@ -1735,6 +1791,7 @@ mod tests {
                 probed: 0,
                 skipped_missing: 0,
                 failed: 0,
+                event_fanout_failed: 0,
             }
         );
         assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
@@ -1749,7 +1806,7 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let runtime = TargetProbeRuntime::new(
             store.clone(),
-            sink,
+            HealthEventFanout::new_without_failure_sink(sink),
             transport.clone(),
             TargetProbeOptions {
                 allow_private_targets: true,
@@ -1778,7 +1835,7 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let runtime = TargetProbeRuntime::new(
             store.clone(),
-            sink,
+            HealthEventFanout::new_without_failure_sink(sink),
             transport.clone(),
             TargetProbeOptions {
                 allow_private_targets: true,
@@ -1817,7 +1874,7 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let runtime = TargetProbeRuntime::new(
             store.clone(),
-            sink,
+            HealthEventFanout::new_without_failure_sink(sink),
             transport,
             TargetProbeOptions {
                 allow_private_targets: true,
@@ -1848,11 +1905,12 @@ mod tests {
     fn in_flight_deactivation_skips_commit_after_transport_returns() -> Result<(), Box<dyn Error>> {
         let store = seeded_store("http://127.0.0.1/health", "unknown")?;
         let transport = DeactivatingTransport::new(store.clone());
-        let sink = RecordingSink::default();
+        let sink = Arc::new(RecordingSink::default());
+        let fanout = HealthEventFanout::new_without_failure_sink(sink);
 
         let error = match run_target_probe_once(
             &store,
-            &sink,
+            &fanout,
             &transport,
             "TGT-api",
             TargetProbeOptions {
@@ -1878,7 +1936,7 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let runtime = TargetProbeRuntime::new(
             store.clone(),
-            sink,
+            HealthEventFanout::new_without_failure_sink(sink),
             transport,
             TargetProbeOptions {
                 allow_private_targets: true,
@@ -1916,7 +1974,7 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let runtime = TargetProbeRuntime::new(
             store,
-            sink,
+            HealthEventFanout::new_without_failure_sink(sink),
             transport.clone(),
             TargetProbeOptions {
                 allow_private_targets: true,

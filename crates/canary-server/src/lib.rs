@@ -48,10 +48,15 @@ use canary_workers::health::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+mod health_fanout;
 mod monitor_overdue;
 mod target_probes;
 mod webhooks;
 
+pub use health_fanout::{
+    EnqueueFailure, EnqueueFailureKey, EnqueueFailureRecorder, EnqueueFailureSink,
+    EventFanoutReport, HealthEventFanout, HealthEventSource,
+};
 pub use monitor_overdue::{
     MonitorOverdueLifecycle, MonitorOverdueLifecycleConfig, MonitorOverdueLifecycleReport,
     MonitorOverdueLifecycleWorker, MonitorOverdueOutcome, MonitorOverdueRuntime,
@@ -117,6 +122,7 @@ pub struct CanaryServer {
     webhook_worker: WebhookDeliveryDrainWorker,
     target_probe_worker: TargetProbeLifecycleWorker,
     monitor_overdue_worker: MonitorOverdueLifecycleWorker,
+    enqueue_failure_sink: Arc<EnqueueFailureRecorder>,
 }
 
 impl CanaryServer {
@@ -152,11 +158,14 @@ impl CanaryServer {
             store.clone(),
             webhook_sink.clone(),
         ));
-        let ingest_state = IngestState::new_with_shared_sinks(
+        let enqueue_failure_sink = Arc::new(EnqueueFailureRecorder::default());
+        let health_fanout =
+            HealthEventFanout::new(webhook_sink.clone(), enqueue_failure_sink.clone());
+        let ingest_state = IngestState::new_with_shared_fanout(
             store.clone(),
             config.ingest,
             effect_sink,
-            webhook_sink.clone(),
+            health_fanout.clone(),
         );
 
         let transport = Arc::new(build_http_webhook_transport().map_err(ServerBootError::Http)?);
@@ -165,11 +174,10 @@ impl CanaryServer {
         let webhook_worker =
             WebhookDeliveryDrainWorker::spawn(drain, config.webhook_drain_interval)
                 .map_err(ServerBootError::WebhookWorker)?;
-        let target_event_sink: Arc<dyn EventSink> = webhook_sink.clone();
         let target_transport: Arc<dyn ProbeTransport> = Arc::new(ReqwestProbeTransport);
         let target_runtime = TargetProbeRuntime::new(
             ingest_state.store.clone(),
-            target_event_sink.clone(),
+            health_fanout.clone(),
             target_transport,
             config.target_probe_options,
         );
@@ -183,7 +191,7 @@ impl CanaryServer {
         let monitor_overdue_worker = MonitorOverdueLifecycleWorker::spawn(
             MonitorOverdueLifecycle::new(
                 ingest_state.store.clone(),
-                MonitorOverdueRuntime::new(ingest_state.store.clone(), target_event_sink),
+                MonitorOverdueRuntime::new(ingest_state.store.clone(), health_fanout),
             ),
             MonitorOverdueLifecycleConfig {
                 tick_interval: config.monitor_overdue_interval,
@@ -197,12 +205,18 @@ impl CanaryServer {
             webhook_worker,
             target_probe_worker,
             monitor_overdue_worker,
+            enqueue_failure_sink,
         })
     }
 
     /// Return a clone of the composed public and authenticated router.
     pub fn router(&self) -> Router {
         self.router.clone()
+    }
+
+    /// Return health-transition webhook enqueue failures observed by this process.
+    pub fn enqueue_failure_snapshot(&self) -> BTreeMap<EnqueueFailureKey, u64> {
+        self.enqueue_failure_sink.snapshot()
     }
 
     /// Serve the composed router until `shutdown` resolves, then stop the worker.
@@ -450,7 +464,7 @@ pub struct IngestState {
     store: Arc<Mutex<Store>>,
     config: IngestConfig,
     effect_sink: Arc<dyn IngestEffectSink>,
-    event_sink: Arc<dyn EventSink>,
+    health_fanout: HealthEventFanout,
 }
 
 impl IngestState {
@@ -479,7 +493,7 @@ impl IngestState {
             store,
             config,
             effect_sink: webhook_sink.clone(),
-            event_sink: webhook_sink,
+            health_fanout: HealthEventFanout::new_without_failure_sink(webhook_sink),
         }
     }
 
@@ -502,7 +516,7 @@ impl IngestState {
             store,
             config,
             effect_sink,
-            event_sink: Arc::new(NoopEventSink),
+            health_fanout: HealthEventFanout::new_without_failure_sink(Arc::new(NoopEventSink)),
         }
     }
 
@@ -517,7 +531,22 @@ impl IngestState {
             store,
             config,
             effect_sink,
-            event_sink,
+            health_fanout: HealthEventFanout::new_without_failure_sink(event_sink),
+        }
+    }
+
+    /// Build ingest state from shared store plus explicit ingest and health fanout sinks.
+    pub fn new_with_shared_fanout(
+        store: Arc<Mutex<Store>>,
+        config: IngestConfig,
+        effect_sink: Arc<dyn IngestEffectSink>,
+        health_fanout: HealthEventFanout,
+    ) -> Self {
+        Self {
+            store,
+            config,
+            effect_sink,
+            health_fanout,
         }
     }
 }
@@ -679,14 +708,9 @@ async fn create_check_in(
     drop(store);
 
     if let Some(transition) = commit.transition {
-        let _ = state
-            .event_sink
-            .enqueue_event(&transition.event, &transition.payload_json);
-        if let Some(event) = transition.incident_event {
-            let _ = state
-                .event_sink
-                .enqueue_event(&event.event, &event.payload_json);
-        }
+        let _fanout_report = state
+            .health_fanout
+            .dispatch(HealthEventSource::MonitorCheckIn, &transition);
     }
 
     json_status_response(
@@ -2300,6 +2324,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn monitor_check_in_records_enqueue_failures_without_changing_response()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = Store::open_in_memory()?;
+        store.migrate()?;
+        seed_api_key(&mut store, "KEY-ingest", INGEST_KEY, "ingest-only", None)?;
+        seed_monitor(&mut store, "desktop-active-timer")?;
+        let store = Arc::new(Mutex::new(store));
+        let recorder = Arc::new(EnqueueFailureRecorder::default());
+        let state = IngestState::new_with_shared_fanout(
+            store,
+            IngestConfig::default(),
+            Arc::new(NoopIngestEffectSink),
+            HealthEventFanout::new(Arc::new(FailingEventSink), recorder.clone()),
+        );
+
+        let response = ingest_router(state)
+            .oneshot(check_in_request(
+                INGEST_KEY,
+                r#"{"monitor":"desktop-active-timer","status":"alive","observed_at":"2026-05-28T20:00:00Z"}"#,
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let snapshot = recorder.snapshot();
+        assert_eq!(
+            snapshot.get(&EnqueueFailureKey {
+                source: HealthEventSource::MonitorCheckIn,
+                event: "health_check.recovered".to_owned(),
+            }),
+            Some(&1)
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn monitor_check_in_returns_404_for_unknown_monitor() -> Result<(), Box<dyn Error>> {
         let state = test_ingest_state()?;
         let response = ingest_router(state)
@@ -3246,6 +3306,14 @@ mod tests {
                 .map_err(|_| "effect lock poisoned".to_owned())?;
             recorded.extend_from_slice(effects);
             Err("simulated effect sink failure".to_owned())
+        }
+    }
+
+    struct FailingEventSink;
+
+    impl EventSink for FailingEventSink {
+        fn enqueue_event(&self, event: &str, _payload_json: &str) -> Result<(), String> {
+            Err(format!("simulated enqueue failure for {event}"))
         }
     }
 
