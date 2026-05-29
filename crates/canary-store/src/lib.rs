@@ -2114,6 +2114,55 @@ mod tests {
     }
 
     #[test]
+    fn in_progress_monitor_check_in_does_not_update_last_success_at()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        store.connection.execute(
+            "INSERT INTO monitors (id, name, service, mode, expected_every_ms, grace_ms, created_at)
+             VALUES ('MON-worker', 'Worker heartbeat', 'worker', 'ttl', 60000, 5000, '2026-05-28T19:00:00Z')",
+            [],
+        )?;
+
+        store.commit_monitor_check_in(MonitorCheckInCommit {
+            monitor_id: "MON-worker".to_owned(),
+            state: "up".to_owned(),
+            last_check_in_at: Some("2026-05-28T20:04:00Z".to_owned()),
+            last_check_in_status: Some("in_progress".to_owned()),
+            deadline_at: Some("2026-05-28T20:05:05Z".to_owned()),
+            check_in: MonitorCheckInObservation {
+                id: "CHK-workerprogress".to_owned(),
+                external_id: None,
+                status: "in_progress".to_owned(),
+                observed_at: "2026-05-28T20:04:00Z".to_owned(),
+                ttl_ms: Some(60_000),
+                summary: Some("still running".to_owned()),
+                context: None,
+            },
+            now: "2026-05-28T20:04:00Z".to_owned(),
+            transition: None,
+        })?;
+
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT state, last_check_in_status, last_success_at, last_failure_at
+                 FROM monitor_state WHERE monitor_id = 'MON-worker'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )?,
+            ("up".to_owned(), Some("in_progress".to_owned()), None, None)
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn commit_error_ingest_creates_error_group_and_timeline_event() -> Result<()> {
         let mut store = migrated_store()?;
         let ingest = error_ingest(

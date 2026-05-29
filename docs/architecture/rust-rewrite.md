@@ -258,6 +258,21 @@ the Rust server accepts production traffic:
     transition sequence or writing timeline/incident rows. This matches the
     Phoenix distinction between "every probe/check-in is persisted" and "only
     state changes emit transition products."
+29. `canary-workers::health`: target probe and monitor check-in runtime
+    decisions now have a typed pure planning layer above the store command
+    boundary. The planner consumes already-observed target probe results,
+    current target snapshots, monitor check-in input, and generated ids, then
+    emits the exact `canary-store` commit command to persist. Target probes are
+    routed through the pure `canary-core` state machine, including flap
+    detection; only `health_check.recovered`, `health_check.degraded`, and
+    `health_check.down` webhook effects produce transition metadata. Monitor
+    check-ins preserve Phoenix semantics directly: `error` maps to `down`,
+    `alive`/`ok`/`in_progress` map to `up`, TTL deadlines use the observed
+    timestamp plus positive check-in TTL only in TTL mode, and `in_progress`
+    updates liveness without stamping `last_success_at`. The module explicitly
+    does not execute HTTP requests, perform SSRF checks, schedule probes, own
+    SQLite transactions, or enqueue webhooks; the next runtime adapters must
+    supply serialized per-target snapshots or transactionally locked reads.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -285,10 +300,14 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Add the Rust health runtime consumers for `commit_target_probe` and
-   `commit_monitor_check_in`: target probe execution with SSRF/status/body/TLS
-   result mapping, plus monitor check-in and overdue evaluation adapters that
-   feed the pure state machine and the atomic observation boundary.
-2. Add a populated Phoenix fixture once health and annotation writes are ported
+1. Wire the Rust health planner into concrete server/runtime consumers:
+   target probe execution with SSRF/status/body/TLS result mapping, monitor
+   check-in HTTP handler adaptation, and serialized per-target snapshot reads
+   before `Store::commit_target_probe` / `Store::commit_monitor_check_in`.
+   Do not add a generic scheduler framework.
+2. Add monitor overdue evaluation as its own planner and store command. It does
+   not insert a `monitor_check_ins` row, so it should not be forced through the
+   check-in command.
+3. Add a populated Phoenix fixture once health and annotation writes are ported
    so Rust read models are checked against Phoenix-inserted production-shaped
    rows, not only an empty migrated schema.

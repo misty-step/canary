@@ -230,9 +230,12 @@ dependencies = [
 name = "canary-workers"
 version = "0.1.0"
 dependencies = [
+ "canary-core",
  "canary-http",
+ "canary-store",
  "serde_json",
  "sha2",
+ "time",
 ]
 
 [[package]]

@@ -364,8 +364,9 @@ fn upsert_monitor_state_fields(
     write: MonitorStateWrite<'_>,
     sequence: i64,
 ) -> Result<()> {
-    let last_success_at = matches!(write.state, "up").then_some(write.now);
-    let last_failure_at = matches!(write.state, "degraded" | "down").then_some(write.now);
+    let last_success_at =
+        matches!(write.last_check_in_status, Some("alive" | "ok")).then_some(write.now);
+    let last_failure_at = matches!(write.last_check_in_status, Some("error")).then_some(write.now);
     let last_transition_at = write.transitioned.then_some(write.now);
     let first_missed_at = (write.transitioned && write.state != "up").then_some(write.now);
     transaction.execute(

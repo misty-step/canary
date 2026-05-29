@@ -4,4 +4,5 @@
 //! Persistence lives in `canary-store`; outbound webhook wire headers live in
 //! `canary-http`.
 
+pub mod health;
 pub mod webhooks;
