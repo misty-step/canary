@@ -599,6 +599,18 @@ the Rust server accepts production traffic:
     existing enqueue effect boundary. Annotation actions and metadata stay
     opaque by design; Canary stores coordination facts and wakes consumers, but
     does not interpret responder policy.
+56. Rust now implements the Phoenix unified agent report surface:
+    `GET /api/v1/report`. The core crate owns the Phoenix-compatible
+    offset cursor: base64url JSON carrying independent target, monitor, and
+    error-group offsets where `null` means that section is exhausted. The store
+    owns the report read models that were missing from earlier slices:
+    active window-wide error groups, recent target/monitor transitions, and
+    FTS error search with the same quoted-query and BM25 weighting as Phoenix.
+    The server owns read-scope auth, query-shape validation, positive-integer
+    limit parsing, CSV content negotiation, section pagination, RFC 9457
+    projection for invalid window/limit/cursor/query inputs, and the final
+    JSON/CSV wire shape. The route remains read-only: no ingest, correlation,
+    annotations, or webhook fanout occurs while rendering a report.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed

@@ -142,6 +142,17 @@ pub struct AnnotationCursor {
     pub id: String,
 }
 
+/// Offset cursor used by Phoenix for the unified report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportCursor {
+    /// Next target offset, or nil when targets are exhausted.
+    pub targets_offset: Option<usize>,
+    /// Next monitor offset, or nil when monitors are exhausted.
+    pub monitor_offset: Option<usize>,
+    /// Next error-group offset, or nil when error groups are exhausted.
+    pub error_groups_offset: Option<usize>,
+}
+
 /// Decode current structured cursors and legacy base64 group-hash cursors.
 pub fn decode_cursor(cursor: &str) -> Option<QueryCursor> {
     if let Ok(json) = BASE64_URL_SAFE_NO_PAD.decode(cursor)
@@ -215,6 +226,37 @@ pub fn decode_annotation_cursor(cursor: &str) -> Option<AnnotationCursor> {
 pub fn encode_annotation_cursor(cursor: &AnnotationCursor) -> Option<String> {
     let json = serde_json::to_vec(cursor).ok()?;
     Some(BASE64_URL_SAFE_NO_PAD.encode(json))
+}
+
+/// Decode a Phoenix report cursor.
+pub fn decode_report_cursor(cursor: &str) -> Option<ReportCursor> {
+    if cursor.is_empty() {
+        return Some(ReportCursor::default());
+    }
+    let decoded = BASE64_URL_SAFE_NO_PAD.decode(cursor).ok()?;
+    serde_json::from_slice::<ReportCursor>(&decoded).ok()
+}
+
+/// Encode a Phoenix report cursor.
+pub fn encode_report_cursor(cursor: &ReportCursor) -> Option<String> {
+    if cursor.targets_offset.is_none()
+        && cursor.monitor_offset.is_none()
+        && cursor.error_groups_offset.is_none()
+    {
+        return None;
+    }
+    let json = serde_json::to_vec(cursor).ok()?;
+    Some(BASE64_URL_SAFE_NO_PAD.encode(json))
+}
+
+impl Default for ReportCursor {
+    fn default() -> Self {
+        Self {
+            targets_offset: Some(0),
+            monitor_offset: Some(0),
+            error_groups_offset: Some(0),
+        }
+    }
 }
 
 /// Classification values attached to an error group.
@@ -1356,6 +1398,30 @@ mod tests {
         assert!(response.summary.contains("target"));
         assert!(response.summary.contains("beta"));
         assert!(response.summary.contains("2026-05-28T20:59:50Z"));
+        Ok(())
+    }
+
+    #[test]
+    fn report_cursor_round_trip_matches_phoenix_offset_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cursor = ReportCursor {
+            targets_offset: Some(5),
+            monitor_offset: None,
+            error_groups_offset: Some(10),
+        };
+
+        let encoded = encode_report_cursor(&cursor).ok_or("cursor should encode")?;
+        assert_eq!(decode_report_cursor(&encoded), Some(cursor));
+        assert_eq!(decode_report_cursor(""), Some(ReportCursor::default()));
+        assert_eq!(decode_report_cursor("W10"), None);
+        assert_eq!(
+            encode_report_cursor(&ReportCursor {
+                targets_offset: None,
+                monitor_offset: None,
+                error_groups_offset: None,
+            }),
+            None
+        );
         Ok(())
     }
 

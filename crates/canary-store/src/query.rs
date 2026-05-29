@@ -51,6 +51,42 @@ pub struct ErrorSummaryItem {
     pub unique_classes: i64,
 }
 
+/// Recent health transition row returned by the unified report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentTransition {
+    /// Surface type, `target` or `monitor`.
+    pub entity_type: String,
+    /// Surface id.
+    pub entity_ref: String,
+    /// Surface display name.
+    pub name: String,
+    /// Service name resolved through Phoenix's fallback.
+    pub service: String,
+    /// Current state.
+    pub state: String,
+    /// Transition timestamp.
+    pub transitioned_at: String,
+}
+
+/// Error full-text search result embedded in the unified report.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchResult {
+    /// Error id.
+    pub id: String,
+    /// Service name.
+    pub service: String,
+    /// Error class.
+    pub error_class: String,
+    /// Error message.
+    pub message: String,
+    /// Error-group hash.
+    pub group_hash: String,
+    /// Error timestamp.
+    pub created_at: String,
+    /// FTS score.
+    pub score: f64,
+}
+
 /// Query read-model failure.
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {
@@ -237,6 +273,138 @@ pub(crate) fn error_summary_at(
     })?;
     let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+pub(crate) fn report_error_groups(
+    connection: &Connection,
+    window: &str,
+) -> QueryResult<Vec<ErrorGroupSummary>> {
+    report_error_groups_at(connection, window, OffsetDateTime::now_utc())
+}
+
+pub(crate) fn report_error_groups_at(
+    connection: &Connection,
+    window: &str,
+    now: OffsetDateTime,
+) -> QueryResult<Vec<ErrorGroupSummary>> {
+    let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
+    let cutoff = window.cutoff_at(now);
+    let mut statement = connection.prepare(
+        "SELECT
+            g.group_hash,
+            g.error_class,
+            g.service,
+            g.total_count,
+            g.first_seen_at,
+            g.last_seen_at,
+            g.message_template,
+            g.severity,
+            g.status,
+            e.classification_category,
+            e.classification_persistence,
+            e.classification_component
+         FROM error_groups g
+         LEFT JOIN errors e ON e.id = g.last_error_id
+         WHERE g.last_seen_at >= ?1 AND g.status = 'active'
+         ORDER BY g.total_count DESC, g.service ASC, g.error_class ASC
+         LIMIT 50",
+    )?;
+    groups_from_rows(statement.query_map([cutoff], group_from_row)?)
+}
+
+pub(crate) fn recent_transitions(
+    connection: &Connection,
+    window: &str,
+) -> QueryResult<Vec<RecentTransition>> {
+    recent_transitions_at(connection, window, OffsetDateTime::now_utc())
+}
+
+pub(crate) fn recent_transitions_at(
+    connection: &Connection,
+    window: &str,
+    now: OffsetDateTime,
+) -> QueryResult<Vec<RecentTransition>> {
+    let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
+    let cutoff = window.cutoff_at(now);
+    let mut statement = connection.prepare(
+        "SELECT 'target', t.id, t.name, COALESCE(NULLIF(t.service, ''), t.name), s.state, s.last_transition_at
+         FROM targets t
+         JOIN target_state s ON s.target_id = t.id
+         WHERE s.last_transition_at >= ?1
+         UNION ALL
+         SELECT 'monitor', m.id, m.name, COALESCE(NULLIF(m.service, ''), m.name), s.state, s.last_transition_at
+         FROM monitors m
+         JOIN monitor_state s ON s.monitor_id = m.id
+         WHERE s.last_transition_at >= ?1
+         ORDER BY 6 DESC, 1 DESC, 3 DESC",
+    )?;
+    let rows = statement.query_map([cutoff], |row| {
+        Ok(RecentTransition {
+            entity_type: row.get(0)?,
+            entity_ref: row.get(1)?,
+            name: row.get(2)?,
+            service: row.get(3)?,
+            state: row.get(4)?,
+            transitioned_at: row.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub(crate) fn search_errors(
+    connection: &Connection,
+    query: &str,
+    window: &str,
+) -> QueryResult<Vec<SearchResult>> {
+    search_errors_at(connection, query, window, OffsetDateTime::now_utc())
+}
+
+pub(crate) fn search_errors_at(
+    connection: &Connection,
+    query: &str,
+    window: &str,
+    now: OffsetDateTime,
+) -> QueryResult<Vec<SearchResult>> {
+    let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let cutoff = window.cutoff_at(now);
+    let quoted = format!("\"{}\"", trimmed.replace('"', "\"\""));
+    let mut statement = match connection.prepare(
+        "SELECT e.id, e.service, e.error_class, e.message, e.group_hash, e.created_at,
+                -bm25(errors_fts, 1.0, 2.0, 5.0, 1.0) AS score
+         FROM errors_fts
+         JOIN errors AS e ON e.rowid = errors_fts.rowid
+         WHERE errors_fts MATCH ?1 AND e.created_at >= ?2
+         ORDER BY score DESC, e.created_at DESC
+         LIMIT 20",
+    ) {
+        Ok(statement) => statement,
+        Err(rusqlite::Error::SqliteFailure(_, _)) => return Ok(Vec::new()),
+        Err(error) => return Err(QueryError::Sqlite(error)),
+    };
+    let rows = match statement.query_map(params![quoted, cutoff], |row| {
+        Ok(SearchResult {
+            id: row.get(0)?,
+            service: row.get(1)?,
+            error_class: row.get(2)?,
+            message: row.get(3)?,
+            group_hash: row.get(4)?,
+            created_at: row.get(5)?,
+            score: row.get(6)?,
+        })
+    }) {
+        Ok(rows) => rows,
+        Err(rusqlite::Error::SqliteFailure(_, _)) => return Ok(Vec::new()),
+        Err(error) => return Err(QueryError::Sqlite(error)),
+    };
+    match rows.collect::<rusqlite::Result<Vec<_>>>() {
+        Ok(rows) => Ok(rows),
+        Err(rusqlite::Error::SqliteFailure(_, _)) => Ok(Vec::new()),
+        Err(error) => Err(QueryError::Sqlite(error)),
+    }
 }
 
 pub(crate) fn timeline(

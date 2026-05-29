@@ -41,8 +41,8 @@ pub use oban_jobs::{
     WebhookDeliveryJobState,
 };
 pub use query::{
-    ErrorSummaryItem, IncidentListOptions, QueryError, QueryResult, ServiceQueryOptions,
-    TimelineQueryError, TimelineQueryOptions, TimelineQueryResult,
+    ErrorSummaryItem, IncidentListOptions, QueryError, QueryResult, RecentTransition, SearchResult,
+    ServiceQueryOptions, TimelineQueryError, TimelineQueryOptions, TimelineQueryResult,
 };
 pub use webhook_deliveries::{
     WebhookDeliveryInsert, WebhookDeliveryListOptions, WebhookDeliveryPageError,
@@ -334,6 +334,33 @@ impl Store {
     /// Query active error counts grouped by service for combined status.
     pub fn error_summary(&self, window: &str) -> QueryResult<Vec<ErrorSummaryItem>> {
         query::error_summary(&self.connection, window)
+    }
+
+    /// Query active error groups for the unified report.
+    pub fn report_error_groups(
+        &self,
+        window: &str,
+    ) -> QueryResult<Vec<canary_core::query::ErrorGroupSummary>> {
+        query::report_error_groups(&self.connection, window)
+    }
+
+    /// Query active error groups for the unified report at a deterministic time.
+    pub fn report_error_groups_at(
+        &self,
+        window: &str,
+        now: time::OffsetDateTime,
+    ) -> QueryResult<Vec<canary_core::query::ErrorGroupSummary>> {
+        query::report_error_groups_at(&self.connection, window, now)
+    }
+
+    /// Query recent target and monitor transitions for the unified report.
+    pub fn recent_transitions(&self, window: &str) -> QueryResult<Vec<RecentTransition>> {
+        query::recent_transitions(&self.connection, window)
+    }
+
+    /// Search recent errors for the unified report.
+    pub fn search_errors(&self, query: &str, window: &str) -> QueryResult<Vec<SearchResult>> {
+        query::search_errors(&self.connection, query, window)
     }
 
     /// Query the durable service-event timeline.
@@ -2079,6 +2106,89 @@ mod tests {
         assert_eq!(summary[1].service, "worker");
         assert_eq!(summary[1].total_count, 11);
         assert_eq!(summary[1].unique_classes, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn report_read_models_match_phoenix_filters_ordering_and_search()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        store.insert_target(TargetInsert {
+            id: "TGT-api".to_owned(),
+            url: "https://example.com/api/health".to_owned(),
+            name: "api".to_owned(),
+            service: "api".to_owned(),
+            method: "GET".to_owned(),
+            headers: None,
+            interval_ms: 60_000,
+            timeout_ms: 10_000,
+            expected_status: "200".to_owned(),
+            body_contains: None,
+            degraded_after: 1,
+            down_after: 3,
+            up_after: 1,
+            active: true,
+            created_at: "2026-05-28T20:00:00Z".to_owned(),
+        })?;
+        store.connection.execute(
+            "INSERT INTO target_state (
+                target_id, state, consecutive_failures, last_checked_at, last_transition_at
+             ) VALUES ('TGT-api', 'degraded', 2, '2026-05-28T20:55:00Z', '2026-05-28T20:55:00Z')",
+            [],
+        )?;
+        for (hash, service, class, count, status) in [
+            ("group-a", "api", "TimeoutError", 7, "active"),
+            ("group-b", "worker", "RuntimeError", 5, "active"),
+            ("group-resolved", "api", "ResolvedError", 99, "resolved"),
+        ] {
+            store.connection.execute(
+                "INSERT INTO errors (
+                    id, service, error_class, message, stack_trace, group_hash, created_at,
+                    classification_category, classification_persistence, classification_component
+                 ) VALUES (?1, ?2, ?3, ?4, 'stack', ?5, '2026-05-28T20:50:00Z',
+                    'runtime', 'transient', 'application')",
+                params![
+                    format!("ERR-{hash}"),
+                    service,
+                    class,
+                    format!("timeout while reporting {service}"),
+                    hash
+                ],
+            )?;
+            store.connection.execute(
+                "INSERT INTO error_groups (
+                    group_hash, service, error_class, severity, first_seen_at, last_seen_at,
+                    last_error_id, total_count, status
+                 ) VALUES (?1, ?2, ?3, 'error', '2026-05-28T20:00:00Z',
+                    '2026-05-28T20:50:00Z', ?4, ?5, ?6)",
+                params![hash, service, class, format!("ERR-{hash}"), count, status],
+            )?;
+        }
+        let now = OffsetDateTime::parse("2026-05-28T21:00:00Z", &Rfc3339)?;
+
+        let groups = store.report_error_groups_at("1h", now)?;
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| group.group_hash.as_str())
+                .collect::<Vec<_>>(),
+            vec!["group-a", "group-b"]
+        );
+        assert_eq!(groups[0].classification.category, "runtime");
+
+        let transitions = query::recent_transitions_at(&store.connection, "1h", now)?;
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(transitions[0].entity_type, "target");
+        assert_eq!(transitions[0].entity_ref, "TGT-api");
+
+        let search = query::search_errors_at(&store.connection, "timeout", "1h", now)?;
+        assert_eq!(search.len(), 3);
+        assert!(search.iter().any(|result| result.service == "api"));
+        assert!(matches!(
+            query::report_error_groups_at(&store.connection, "99h", now),
+            Err(QueryError::InvalidWindow)
+        ));
 
         Ok(())
     }
