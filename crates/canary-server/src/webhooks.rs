@@ -1,13 +1,17 @@
 use std::sync::{Arc, Mutex};
 
 use canary_ingest::IngestEffect;
-use canary_store::{Store, WebhookDeliveryInsert, WebhookSubscription};
-use canary_workers::webhooks::{
-    CircuitDecision, CircuitEffect, DeliveryExecution, DeliveryLedgerAction, TransportResult,
-    WebhookEndpoint, WebhookEnqueueDecision, WebhookJob, WebhookLookup, WebhookRequest,
-    plan_enqueue_for_event, try_execute_delivery,
+use canary_store::{
+    Store, WebhookDeliveryInsert, WebhookDeliveryJobCompletion, WebhookDeliveryJobInsert,
+    WebhookDeliveryJobRow, WebhookSubscription,
 };
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use canary_workers::webhooks::{
+    CircuitDecision, CircuitEffect, DeliveryExecution, DeliveryLedgerAction, DeliveryOutcome,
+    MAX_ATTEMPTS, TransportResult, WebhookEndpoint, WebhookEnqueueDecision, WebhookJob,
+    WebhookLookup, WebhookRequest, plan_enqueue_for_event, try_execute_delivery,
+};
+use serde_json::{Value, json};
+use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::IngestEffectSink;
 
@@ -15,6 +19,37 @@ use crate::IngestEffectSink;
 pub trait WebhookScheduler: Send + Sync + 'static {
     /// Schedule one webhook job after its pending ledger row has been created.
     fn schedule(&self, job: &WebhookJob) -> Result<(), String>;
+}
+
+/// Store-backed scheduler for webhook delivery jobs.
+pub struct StoreWebhookScheduler {
+    store: Arc<Mutex<Store>>,
+}
+
+impl StoreWebhookScheduler {
+    /// Build a scheduler backed by the shared single-writer store.
+    pub fn new(store: Arc<Mutex<Store>>) -> Self {
+        Self { store }
+    }
+}
+
+impl WebhookScheduler for StoreWebhookScheduler {
+    fn schedule(&self, job: &WebhookJob) -> Result<(), String> {
+        let now = current_rfc3339();
+        let mut store = self
+            .store
+            .lock()
+            .map_err(|_| "store lock poisoned".to_owned())?;
+        store
+            .insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+                args: job_args(job),
+                scheduled_at: now.clone(),
+                now,
+                max_attempts: job.effective_max_attempts(),
+            })
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
 }
 
 /// Runtime boundary for webhook cooldown state.
@@ -171,6 +206,148 @@ impl WebhookDeliveryRuntime {
     }
 }
 
+/// Sequential scheduled-job drain for webhook delivery jobs.
+pub struct WebhookDeliveryDrain {
+    store: Arc<Mutex<Store>>,
+    runtime: WebhookDeliveryRuntime,
+    max_jobs: u32,
+}
+
+/// Summary of one drain pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WebhookDeliveryDrainReport {
+    /// Jobs claimed from the scheduler store.
+    pub claimed: u32,
+    /// Jobs completed after successful delivery or intentional skip.
+    pub completed: u32,
+    /// Jobs rescheduled for retry.
+    pub retried: u32,
+    /// Jobs permanently discarded by the scheduler.
+    pub discarded: u32,
+}
+
+impl WebhookDeliveryDrain {
+    /// Build a drain with an explicit maximum number of jobs per pass.
+    pub fn new(store: Arc<Mutex<Store>>, runtime: WebhookDeliveryRuntime, max_jobs: u32) -> Self {
+        Self {
+            store,
+            runtime,
+            max_jobs,
+        }
+    }
+
+    /// Claim due jobs, execute them sequentially, and persist retry/terminal state.
+    pub fn drain_due(&self, now: &str) -> Result<WebhookDeliveryDrainReport, String> {
+        let jobs = {
+            let mut store = self
+                .store
+                .lock()
+                .map_err(|_| "store lock poisoned".to_owned())?;
+            store
+                .claim_due_webhook_delivery_jobs(now, self.max_jobs)
+                .map_err(|error| error.to_string())?
+        };
+
+        let mut report = WebhookDeliveryDrainReport {
+            claimed: jobs.len() as u32,
+            ..WebhookDeliveryDrainReport::default()
+        };
+
+        for row in jobs {
+            let job = match job_from_row(&row) {
+                Ok(job) => job,
+                Err(_) => {
+                    self.complete_job(
+                        row.id,
+                        WebhookDeliveryJobCompletion::Discard {
+                            now: now.to_owned(),
+                        },
+                    )?;
+                    report.discarded += 1;
+                    continue;
+                }
+            };
+
+            let execution = self.runtime.deliver(&job)?;
+            match completion_for_execution(now, &execution)? {
+                DrainCompletion::Retry { scheduled_at } => {
+                    self.complete_job(
+                        row.id,
+                        WebhookDeliveryJobCompletion::Retry { scheduled_at },
+                    )?;
+                    report.retried += 1;
+                }
+                DrainCompletion::Complete => {
+                    self.complete_job(
+                        row.id,
+                        WebhookDeliveryJobCompletion::Complete {
+                            now: now.to_owned(),
+                        },
+                    )?;
+                    report.completed += 1;
+                }
+                DrainCompletion::Discard => {
+                    self.complete_job(
+                        row.id,
+                        WebhookDeliveryJobCompletion::Discard {
+                            now: now.to_owned(),
+                        },
+                    )?;
+                    report.discarded += 1;
+                }
+            }
+        }
+
+        Ok(report)
+    }
+
+    fn complete_job(
+        &self,
+        job_id: i64,
+        completion: WebhookDeliveryJobCompletion,
+    ) -> Result<(), String> {
+        let mut store = self
+            .store
+            .lock()
+            .map_err(|_| "store lock poisoned".to_owned())?;
+        store
+            .complete_webhook_delivery_job(job_id, completion)
+            .map_err(|error| error.to_string())
+    }
+}
+
+enum DrainCompletion {
+    Retry { scheduled_at: String },
+    Complete,
+    Discard,
+}
+
+fn completion_for_execution(
+    now: &str,
+    execution: &DeliveryExecution,
+) -> Result<DrainCompletion, String> {
+    if let Some(retry_after_seconds) = execution.retry_after_seconds {
+        return Ok(DrainCompletion::Retry {
+            scheduled_at: add_seconds(now, retry_after_seconds)?,
+        });
+    }
+
+    Ok(match &execution.outcome {
+        DeliveryOutcome::Delivered | DeliveryOutcome::Suppressed { .. } => {
+            DrainCompletion::Complete
+        }
+        DeliveryOutcome::Discarded { reason } if is_scheduler_discard(reason) => {
+            DrainCompletion::Discard
+        }
+        DeliveryOutcome::Discarded { .. } => DrainCompletion::Complete,
+        DeliveryOutcome::Retry { .. } => DrainCompletion::Complete,
+    })
+}
+
+fn is_scheduler_discard(reason: &str) -> bool {
+    reason == "request_error" || reason.starts_with("http_")
+}
+
 /// Effect sink that turns ingest webhook effects into ledger rows and jobs.
 pub struct WebhookEnqueueEffectSink {
     store: Arc<Mutex<Store>>,
@@ -325,6 +502,67 @@ fn delivery_insert(
         event: delivery.event,
         now: now.to_owned(),
     }
+}
+
+fn job_args(job: &WebhookJob) -> Value {
+    let mut args = json!({
+        "webhook_id": job.webhook_id,
+        "payload": job.payload,
+        "event": job.event,
+    });
+
+    if let Some(delivery_id) = &job.delivery_id {
+        args["delivery_id"] = Value::String(delivery_id.clone());
+    }
+
+    args
+}
+
+fn job_from_row(row: &WebhookDeliveryJobRow) -> Result<WebhookJob, String> {
+    let args = row
+        .args
+        .as_object()
+        .ok_or_else(|| "webhook job args must be a JSON object".to_owned())?;
+    let webhook_id = required_string(args.get("webhook_id"), "webhook_id")?;
+    let event = required_string(args.get("event"), "event")?;
+    let payload = args
+        .get("payload")
+        .cloned()
+        .ok_or_else(|| "webhook job args missing payload".to_owned())?;
+    let delivery_id = args
+        .get("delivery_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+
+    Ok(WebhookJob {
+        webhook_id,
+        payload,
+        event,
+        delivery_id,
+        legacy_job_id: Some(row.id),
+        attempt: row.attempt,
+        max_attempts: if row.max_attempts == 0 {
+            MAX_ATTEMPTS
+        } else {
+            row.max_attempts
+        },
+    })
+}
+
+fn required_string(value: Option<&Value>, field: &str) -> Result<String, String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("webhook job args missing {field}"))
+}
+
+fn add_seconds(now: &str, seconds: u64) -> Result<String, String> {
+    let now = OffsetDateTime::parse(now, &Rfc3339)
+        .map_err(|error| format!("invalid drain timestamp: {error}"))?;
+    now.checked_add(Duration::seconds(seconds as i64))
+        .ok_or_else(|| "retry timestamp overflow".to_owned())?
+        .format(&Rfc3339)
+        .map_err(|error| format!("failed to format retry timestamp: {error}"))
 }
 
 fn current_rfc3339() -> String {

@@ -10,6 +10,7 @@ use rusqlite::Connection;
 
 mod api_keys;
 mod ingest;
+mod oban_jobs;
 mod query;
 mod schema;
 mod webhook_deliveries;
@@ -17,6 +18,10 @@ mod webhook_deliveries;
 pub use api_keys::{API_KEY_PREFIX_LEN, ApiKeyInsert, VerifiedApiKey};
 pub use ingest::{
     ErrorIngest, ErrorIngestCommit, ErrorIngestIds, ErrorIngestPayload, ErrorServiceEvent,
+};
+pub use oban_jobs::{
+    WebhookDeliveryJobCompletion, WebhookDeliveryJobInsert, WebhookDeliveryJobRow,
+    WebhookDeliveryJobState,
 };
 pub use query::{IncidentListOptions, QueryError, QueryResult, ServiceQueryOptions};
 pub use webhook_deliveries::{
@@ -200,6 +205,34 @@ impl Store {
         webhook_deliveries::insert_subscription(&mut self.connection, subscription)
     }
 
+    /// Insert one scheduled webhook delivery job.
+    pub fn insert_webhook_delivery_job(&mut self, job: WebhookDeliveryJobInsert) -> Result<i64> {
+        oban_jobs::insert_webhook_delivery_job(&mut self.connection, job)
+    }
+
+    /// Claim due webhook delivery jobs and increment their attempt counters.
+    pub fn claim_due_webhook_delivery_jobs(
+        &mut self,
+        now: &str,
+        limit: u32,
+    ) -> Result<Vec<WebhookDeliveryJobRow>> {
+        oban_jobs::claim_due_webhook_delivery_jobs(&mut self.connection, now, limit)
+    }
+
+    /// Apply one scheduler-side completion transition for a claimed webhook job.
+    pub fn complete_webhook_delivery_job(
+        &mut self,
+        job_id: i64,
+        completion: WebhookDeliveryJobCompletion,
+    ) -> Result<()> {
+        oban_jobs::complete_webhook_delivery_job(&mut self.connection, job_id, completion)
+    }
+
+    /// Return one webhook delivery job row by id.
+    pub fn webhook_delivery_job(&self, job_id: i64) -> Result<Option<WebhookDeliveryJobRow>> {
+        oban_jobs::webhook_delivery_job(&self.connection, job_id)
+    }
+
     /// Count persisted errors.
     pub fn error_count(&self) -> Result<u64> {
         let count = self
@@ -228,7 +261,7 @@ mod tests {
         ingest::classification::{Category, Classification, Component, Persistence},
     };
     use rusqlite::params;
-    use serde_json::Value;
+    use serde_json::{Value, json};
     use time::OffsetDateTime;
 
     use super::*;
@@ -522,6 +555,132 @@ mod tests {
         assert_eq!(rows[0].delivery_id, "DLV-123456789abc");
         assert_eq!(rows[0].reason.as_deref(), Some("cooldown"));
         assert_eq!(rows[0].attempt_count, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_jobs_claim_due_rows_once_and_increment_attempt() -> Result<()> {
+        let mut store = migrated_store()?;
+        let due_job = store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+            args: json!({
+                "webhook_id": "WHK-test",
+                "payload": {"sequence": 7},
+                "event": "error.new_class",
+                "delivery_id": "DLV-due"
+            }),
+            scheduled_at: "2026-05-28T20:00:00Z".to_owned(),
+            now: "2026-05-28T20:00:00Z".to_owned(),
+            max_attempts: 4,
+        })?;
+        store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+            args: json!({
+                "webhook_id": "WHK-test",
+                "payload": {"sequence": 8},
+                "event": "error.new_class",
+                "delivery_id": "DLV-future"
+            }),
+            scheduled_at: "2026-05-28T20:10:00Z".to_owned(),
+            now: "2026-05-28T20:00:00Z".to_owned(),
+            max_attempts: 4,
+        })?;
+
+        let claimed = store.claim_due_webhook_delivery_jobs("2026-05-28T20:00:01Z", 10)?;
+
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, due_job);
+        assert_eq!(claimed[0].state, WebhookDeliveryJobState::Executing);
+        assert_eq!(claimed[0].attempt, 1);
+        assert_eq!(claimed[0].max_attempts, 4);
+        assert_eq!(claimed[0].args["delivery_id"], "DLV-due");
+        assert!(
+            store
+                .claim_due_webhook_delivery_jobs("2026-05-28T20:00:01Z", 10)?
+                .is_empty()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_jobs_complete_reschedule_and_discard_claimed_rows() -> Result<()> {
+        let mut store = migrated_store()?;
+        let job = store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+            args: json!({
+                "webhook_id": "WHK-test",
+                "payload": {"sequence": 7},
+                "event": "error.new_class",
+                "delivery_id": "DLV-retry"
+            }),
+            scheduled_at: "2026-05-28T20:00:00Z".to_owned(),
+            now: "2026-05-28T20:00:00Z".to_owned(),
+            max_attempts: 4,
+        })?;
+        assert_eq!(
+            store
+                .claim_due_webhook_delivery_jobs("2026-05-28T20:00:00Z", 1)?
+                .len(),
+            1
+        );
+
+        store.complete_webhook_delivery_job(
+            job,
+            WebhookDeliveryJobCompletion::Retry {
+                scheduled_at: "2026-05-28T20:00:06Z".to_owned(),
+            },
+        )?;
+        let retry = store
+            .webhook_delivery_job(job)?
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        assert_eq!(retry.state, WebhookDeliveryJobState::Scheduled);
+        assert_eq!(retry.scheduled_at, "2026-05-28T20:00:06Z");
+        assert_eq!(retry.attempt, 1);
+        assert!(
+            store
+                .claim_due_webhook_delivery_jobs("2026-05-28T20:00:05Z", 1)?
+                .is_empty()
+        );
+
+        let claimed_again = store.claim_due_webhook_delivery_jobs("2026-05-28T20:00:06Z", 1)?;
+        assert_eq!(claimed_again[0].attempt, 2);
+        store.complete_webhook_delivery_job(
+            job,
+            WebhookDeliveryJobCompletion::Complete {
+                now: "2026-05-28T20:00:07Z".to_owned(),
+            },
+        )?;
+        assert_eq!(
+            store
+                .webhook_delivery_job(job)?
+                .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?
+                .state,
+            WebhookDeliveryJobState::Completed
+        );
+
+        let discarded = store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+            args: json!({
+                "webhook_id": "WHK-test",
+                "payload": {"sequence": 9},
+                "event": "error.new_class",
+                "delivery_id": "DLV-discard"
+            }),
+            scheduled_at: "2026-05-28T20:01:00Z".to_owned(),
+            now: "2026-05-28T20:01:00Z".to_owned(),
+            max_attempts: 1,
+        })?;
+        store.complete_webhook_delivery_job(
+            discarded,
+            WebhookDeliveryJobCompletion::Discard {
+                now: "2026-05-28T20:01:01Z".to_owned(),
+            },
+        )?;
+        assert_eq!(
+            store
+                .webhook_delivery_job(discarded)?
+                .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?
+                .state,
+            WebhookDeliveryJobState::Discarded
+        );
 
         Ok(())
     }

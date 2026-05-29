@@ -181,6 +181,15 @@ the Rust server accepts production traffic:
     webhook-specific Store mapping, runtime boundaries, and timestamp helpers
     out of the Axum router surface. The split is intentionally one module, not a
     lifecycle taxonomy or a new crate.
+21. `canary-store::oban_jobs`, `canary-server::StoreWebhookScheduler`, and
+    `canary-server::WebhookDeliveryDrain`: webhook delivery now has a concrete
+    Oban-compatible scheduled-job adapter. Store owns insertion, due-job
+    claiming, attempt increments, and the single completion transition for
+    retry/complete/discard. Server owns the bounded sequential drain that turns
+    claimed rows into `WebhookJob` values, invokes `WebhookDeliveryRuntime`,
+    persists retry scheduling with the same delivery id, and exposes an explicit
+    max-jobs limit. This remains a bespoke webhook delivery adapter, not a
+    generic job framework or alternate scheduler abstraction.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -208,12 +217,9 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Add the concrete scheduled-job drain and retry adapter behind the scheduler
-   trait: retrieve due jobs, invoke `WebhookDeliveryRuntime`, persist retry
-   scheduling with the same delivery id, and keep concurrency limits explicit.
-2. Add a concrete HTTP transport implementation for webhook delivery, with
+1. Add a concrete HTTP transport implementation for webhook delivery, with
    transport-level retry disabled so scheduler retry remains authoritative.
-3. Add a concrete incident-correlation effect sink once the Rust incident write
+2. Add a concrete incident-correlation effect sink once the Rust incident write
    path exists, keeping correlation failures isolated from ingest success.
-4. Add compatibility checks against a migrated Phoenix fixture database before
+3. Add compatibility checks against a migrated Phoenix fixture database before
    any production traffic moves to the Rust server.

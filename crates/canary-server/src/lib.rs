@@ -39,8 +39,9 @@ mod webhooks;
 
 use webhooks::NoopWebhookCooldown;
 pub use webhooks::{
-    WebhookCircuit, WebhookCooldown, WebhookDeliveryRuntime, WebhookEnqueueEffectSink,
-    WebhookScheduler, WebhookTransport,
+    StoreWebhookScheduler, WebhookCircuit, WebhookCooldown, WebhookDeliveryDrain,
+    WebhookDeliveryDrainReport, WebhookDeliveryRuntime, WebhookEnqueueEffectSink, WebhookScheduler,
+    WebhookTransport,
 };
 
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
@@ -575,7 +576,8 @@ mod tests {
     };
     use canary_http::public::{APPLICATION_JSON, OPENAPI_JSON};
     use canary_store::{
-        API_KEY_PREFIX_LEN, ApiKeyInsert, WebhookDeliveryStatus, WebhookSubscriptionInsert,
+        API_KEY_PREFIX_LEN, ApiKeyInsert, WebhookDeliveryJobInsert, WebhookDeliveryJobState,
+        WebhookDeliveryStatus, WebhookSubscriptionInsert,
     };
     use canary_workers::webhooks::{CircuitDecision, TransportResult, WebhookJob, WebhookRequest};
     use serde_json::{Value, json};
@@ -967,6 +969,197 @@ mod tests {
         })?;
         assert_eq!(missing[0].status, WebhookDeliveryStatus::Discarded);
         assert_eq!(missing[0].reason.as_deref(), Some("webhook_not_found"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn store_webhook_scheduler_persists_claimable_job_args() -> Result<(), Box<dyn Error>> {
+        let store = runtime_store(true)?;
+        let scheduler = StoreWebhookScheduler::new(store.clone());
+
+        scheduler.schedule(&webhook_job("DLV-scheduled", 1, 4))?;
+
+        let mut store = store.lock().map_err(|_| "store lock poisoned")?;
+        let jobs = store.claim_due_webhook_delivery_jobs("9999-01-01T00:00:00Z", 10)?;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].args["delivery_id"], "DLV-scheduled");
+        assert_eq!(jobs[0].args["webhook_id"], "WHK-test");
+        assert_eq!(jobs[0].attempt, 1);
+        assert_eq!(jobs[0].max_attempts, 4);
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_drain_delivers_due_job_and_marks_completed() -> Result<(), Box<dyn Error>> {
+        let store = runtime_store(true)?;
+        let scheduler = StoreWebhookScheduler::new(store.clone());
+        scheduler.schedule(&webhook_job("DLV-drain-ok", 1, 4))?;
+        let transport = Arc::new(RecordingTransport::status(204));
+        let runtime = WebhookDeliveryRuntime::new_without_circuit(store.clone(), transport.clone());
+        let drain = WebhookDeliveryDrain::new(store.clone(), runtime, 10);
+
+        let report = drain.drain_due("9999-01-01T00:00:00Z")?;
+
+        assert_eq!(
+            report,
+            WebhookDeliveryDrainReport {
+                claimed: 1,
+                completed: 1,
+                retried: 0,
+                discarded: 0,
+            }
+        );
+        assert_eq!(
+            transport
+                .requests
+                .lock()
+                .map_err(|_| "transport lock poisoned")?
+                .len(),
+            1
+        );
+        let mut store = store.lock().map_err(|_| "store lock poisoned")?;
+        let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
+            delivery_id: Some("DLV-drain-ok".to_owned()),
+            ..Default::default()
+        })?;
+        assert_eq!(rows[0].status, WebhookDeliveryStatus::Delivered);
+        assert!(
+            store
+                .claim_due_webhook_delivery_jobs("9999-01-01T00:00:00Z", 10)?
+                .is_empty()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_drain_reschedules_retry_with_same_delivery_id() -> Result<(), Box<dyn Error>>
+    {
+        let store = runtime_store(true)?;
+        let job_id = insert_due_webhook_job(&store, "DLV-drain-retry", 4)?;
+        let transport = Arc::new(RecordingTransport::status(500));
+        let runtime = WebhookDeliveryRuntime::new_without_circuit(store.clone(), transport);
+        let drain = WebhookDeliveryDrain::new(store.clone(), runtime, 10);
+
+        let report = drain.drain_due("2026-05-28T20:00:00Z")?;
+
+        assert_eq!(
+            report,
+            WebhookDeliveryDrainReport {
+                claimed: 1,
+                completed: 0,
+                retried: 1,
+                discarded: 0,
+            }
+        );
+        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let job = store
+            .webhook_delivery_job(job_id)?
+            .ok_or("missing webhook delivery job")?;
+        assert_eq!(job.state, WebhookDeliveryJobState::Scheduled);
+        assert_eq!(job.scheduled_at, "2026-05-28T20:00:01Z");
+        assert_eq!(job.attempt, 1);
+        assert_eq!(job.args["delivery_id"], "DLV-drain-retry");
+        let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
+            delivery_id: Some("DLV-drain-retry".to_owned()),
+            ..Default::default()
+        })?;
+        assert_eq!(rows[0].status, WebhookDeliveryStatus::Retrying);
+        assert_eq!(rows[0].attempt_count, 1);
+        assert_eq!(rows[0].discarded_at, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_drain_discards_final_failure() -> Result<(), Box<dyn Error>> {
+        let store = runtime_store(true)?;
+        let job_id = insert_due_webhook_job(&store, "DLV-drain-final", 2)?;
+        let transport = Arc::new(RecordingTransport::status(500));
+        let runtime = WebhookDeliveryRuntime::new_without_circuit(store.clone(), transport);
+        let drain = WebhookDeliveryDrain::new(store.clone(), runtime, 10);
+
+        let first = drain.drain_due("2026-05-28T20:00:00Z")?;
+        let second = drain.drain_due("2026-05-28T20:00:01Z")?;
+
+        assert_eq!(first.retried, 1);
+        assert_eq!(
+            second,
+            WebhookDeliveryDrainReport {
+                claimed: 1,
+                completed: 0,
+                retried: 0,
+                discarded: 1,
+            }
+        );
+        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        assert_eq!(
+            store
+                .webhook_delivery_job(job_id)?
+                .ok_or("missing webhook delivery job")?
+                .state,
+            WebhookDeliveryJobState::Discarded
+        );
+        let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
+            delivery_id: Some("DLV-drain-final".to_owned()),
+            ..Default::default()
+        })?;
+        assert_eq!(rows[0].status, WebhookDeliveryStatus::Discarded);
+        assert_eq!(rows[0].reason.as_deref(), Some("http_500"));
+        assert_eq!(rows[0].attempt_count, 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_drain_open_circuit_completes_without_transport_or_retry()
+    -> Result<(), Box<dyn Error>> {
+        let store = runtime_store(true)?;
+        let job_id = insert_due_webhook_job(&store, "DLV-drain-open", 4)?;
+        let transport = Arc::new(RecordingTransport::status(204));
+        let runtime = WebhookDeliveryRuntime::new(
+            store.clone(),
+            transport.clone(),
+            Arc::new(RecordingCircuit::open()),
+        );
+        let drain = WebhookDeliveryDrain::new(store.clone(), runtime, 10);
+
+        let report = drain.drain_due("2026-05-28T20:00:00Z")?;
+
+        assert_eq!(
+            report,
+            WebhookDeliveryDrainReport {
+                claimed: 1,
+                completed: 1,
+                retried: 0,
+                discarded: 0,
+            }
+        );
+        assert_eq!(
+            transport
+                .requests
+                .lock()
+                .map_err(|_| "transport lock poisoned")?
+                .len(),
+            0
+        );
+        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        assert_eq!(
+            store
+                .webhook_delivery_job(job_id)?
+                .ok_or("missing webhook delivery job")?
+                .state,
+            WebhookDeliveryJobState::Completed
+        );
+        let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
+            delivery_id: Some("DLV-drain-open".to_owned()),
+            ..Default::default()
+        })?;
+        assert_eq!(rows[0].status, WebhookDeliveryStatus::Suppressed);
+        assert_eq!(rows[0].reason.as_deref(), Some("circuit_open"));
+        assert_eq!(rows[0].attempt_count, 0);
 
         Ok(())
     }
@@ -1508,6 +1701,28 @@ mod tests {
             attempt,
             max_attempts,
         }
+    }
+
+    fn insert_due_webhook_job(
+        store: &Arc<Mutex<Store>>,
+        delivery_id: &str,
+        max_attempts: u32,
+    ) -> Result<i64, Box<dyn Error>> {
+        let mut store = store.lock().map_err(|_| "store lock poisoned")?;
+        Ok(store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+            args: json!({
+                "webhook_id": "WHK-test",
+                "payload": {
+                    "error": {"group_hash": "group-runtime"},
+                    "sequence": 7
+                },
+                "event": "error.new_class",
+                "delivery_id": delivery_id
+            }),
+            scheduled_at: "2026-05-28T20:00:00Z".to_owned(),
+            now: "2026-05-28T20:00:00Z".to_owned(),
+            max_attempts,
+        })?)
     }
 
     struct RecordingTransport {
