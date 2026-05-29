@@ -323,6 +323,24 @@ the Rust server accepts production traffic:
     runtime transition history driving the pure flapping state machine. TLS
     expiry capture, hot target control semantics, and cross-restart transition
     history remain separate slices.
+33. `canary-workers::health::plan_monitor_overdue`,
+    `canary-store::commit_monitor_overdue`, and
+    `canary-server::MonitorOverdueLifecycle`: non-HTTP monitors now have the
+    Phoenix overdue path in Rust without pretending a missed deadline is a
+    check-in. Store exposes only deadline-bearing monitor-state candidates and a
+    separate overdue transition command that updates `monitor_state`, appends
+    the deterministic `health_check.degraded` or `health_check.down` service
+    event, and correlates the health signal in one transaction. The worker
+    planner owns the parity decision matrix: `now > deadline_at`, last status
+    `error` noops, existing `down` noops, `unknown`/`up` become `degraded` with
+    `first_missed_at = now`, and `degraded` becomes `down` only after
+    `expected_every_ms` has elapsed from the first miss. Malformed persisted
+    overdue timestamps noop so one bad row does not abort a lifecycle pass. The
+    server adapter is deliberately bespoke and small: one named worker loads
+    candidates, calls the planner, commits through the store command, and
+    best-effort enqueues the already-recorded transition/incident events. It
+    does not introduce a generic scheduler, does not write SQL, and does not
+    insert `monitor_check_ins`.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -355,9 +373,9 @@ Phoenix behavior until the replacement is complete:
    address set, target header validation for forbidden or malformed headers,
    enqueue-failure telemetry, and explicit hot-update semantics for target
    deactivate/pause/update while a probe is in flight.
-2. Add monitor overdue evaluation as its own planner and store command. It does
-   not insert a `monitor_check_ins` row, so it should not be forced through the
-   check-in command.
+2. Broaden monitor overdue parity fixtures around malformed persisted rows,
+   TTL-vs-expected escalation, webhook enqueue failure receipts, and transaction
+   rollback evidence for transition/correlation failures.
 3. Add a populated Phoenix fixture once health and annotation writes are ported
    so Rust read models are checked against Phoenix-inserted production-shaped
    rows, not only an empty migrated schema.

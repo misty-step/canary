@@ -16,7 +16,7 @@ use canary_core::{
     ids::{EventId, IncidentId},
 };
 use canary_store::{
-    MonitorCheckInCommit, MonitorCheckInObservation, MonitorTransitionEvent,
+    MonitorCheckInCommit, MonitorCheckInObservation, MonitorOverdueCommit, MonitorTransitionEvent,
     TargetCheckObservation, TargetProbeCommit, TargetTransitionEvent,
 };
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
@@ -226,6 +226,40 @@ pub struct PlannedMonitorCheckIn {
     pub commit: MonitorCheckInCommit,
 }
 
+/// Persisted monitor configuration and state needed for overdue evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorOverdueSnapshot {
+    /// Monitor row id.
+    pub id: String,
+    /// Monitor display name.
+    pub name: String,
+    /// Service name.
+    pub service: String,
+    /// Monitor mode.
+    pub mode: MonitorMode,
+    /// Configured expected interval.
+    pub expected_every_ms: i64,
+    /// Configured grace period.
+    pub grace_ms: i64,
+    /// Current health state.
+    pub state: HealthState,
+    /// Last check-in status, when any.
+    pub last_check_in_status: Option<String>,
+    /// Last check-in timestamp, when any.
+    pub last_check_in_at: Option<String>,
+    /// Deadline timestamp, when this monitor is eligible for overdue evaluation.
+    pub deadline_at: Option<String>,
+    /// First missed deadline timestamp, when already degraded from overdue.
+    pub first_missed_at: Option<String>,
+}
+
+/// Planned persistence for one overdue monitor evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedMonitorOverdue {
+    /// Store command to execute in one transaction.
+    pub commit: MonitorOverdueCommit,
+}
+
 /// Planning error for health observation adapters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HealthPlanError {
@@ -288,6 +322,67 @@ pub fn plan_monitor_check_in(
     })
 }
 
+/// Plan the exact store command for one overdue monitor evaluation.
+pub fn plan_monitor_overdue(
+    monitor: MonitorOverdueSnapshot,
+    context: ObservationContext,
+) -> Result<Option<PlannedMonitorOverdue>, HealthPlanError> {
+    let Some(deadline_at) = monitor.deadline_at.as_deref() else {
+        return Ok(None);
+    };
+    if !timestamp_after(&context.now, deadline_at, "deadline_at")? {
+        return Ok(None);
+    }
+    if monitor.last_check_in_status.as_deref() == Some("error")
+        || monitor.state == HealthState::Down
+    {
+        return Ok(None);
+    }
+
+    let next_state = match monitor.state {
+        HealthState::Unknown | HealthState::Up => Some(HealthState::Degraded),
+        HealthState::Degraded
+            if monitor_overdue_window_elapsed(
+                monitor.first_missed_at.as_deref(),
+                &context.now,
+                monitor.expected_every_ms,
+            )? =>
+        {
+            Some(HealthState::Down)
+        }
+        HealthState::Degraded | HealthState::Paused | HealthState::Flapping | HealthState::Down => {
+            None
+        }
+    };
+
+    let Some(next_state) = next_state else {
+        return Ok(None);
+    };
+
+    Ok(Some(PlannedMonitorOverdue {
+        commit: MonitorOverdueCommit {
+            monitor_id: monitor.id,
+            state: health_state_as_str(next_state).to_owned(),
+            first_missed_at: (next_state == HealthState::Degraded).then_some(context.now.clone()),
+            last_check_in_at: monitor.last_check_in_at,
+            last_check_in_status: monitor.last_check_in_status,
+            deadline_at: monitor.deadline_at,
+            now: context.now,
+            transition: MonitorTransitionEvent {
+                name: monitor.name,
+                service: monitor.service,
+                mode: monitor.mode.as_str().to_owned(),
+                expected_every_ms: monitor.expected_every_ms,
+                grace_ms: monitor.grace_ms,
+                previous_state: health_state_as_str(monitor.state).to_owned(),
+                event_id: context.event_id,
+                incident_id: context.incident_id,
+                incident_event_id: context.incident_event_id,
+            },
+        },
+    }))
+}
+
 fn deadline_at(
     monitor: &MonitorSnapshot,
     input: &MonitorCheckInInput,
@@ -307,6 +402,37 @@ fn effective_interval_ms(monitor: &MonitorSnapshot, input: &MonitorCheckInInput)
         (MonitorMode::Ttl, Some(ttl_ms)) if ttl_ms > 0 => ttl_ms,
         _ => monitor.expected_every_ms,
     }
+}
+
+fn timestamp_after(now: &str, then: &str, field: &'static str) -> Result<bool, HealthPlanError> {
+    let Some(now) = parse_monitor_timestamp("now", now) else {
+        return Ok(false);
+    };
+    let Some(then) = parse_monitor_timestamp(field, then) else {
+        return Ok(false);
+    };
+    Ok(now > then)
+}
+
+fn monitor_overdue_window_elapsed(
+    first_missed_at: Option<&str>,
+    now: &str,
+    expected_every_ms: i64,
+) -> Result<bool, HealthPlanError> {
+    let Some(first_missed_at) = first_missed_at else {
+        return Ok(false);
+    };
+    let Some(first_missed) = parse_monitor_timestamp("first_missed_at", first_missed_at) else {
+        return Ok(false);
+    };
+    let Some(now) = parse_monitor_timestamp("now", now) else {
+        return Ok(false);
+    };
+    Ok(now - first_missed >= Duration::milliseconds(expected_every_ms))
+}
+
+fn parse_monitor_timestamp(_field: &'static str, value: &str) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(value, &Rfc3339).ok()
 }
 
 fn webhook_effect(effects: &[HealthEffect]) -> Option<HealthWebhookEvent> {
@@ -515,6 +641,127 @@ mod tests {
         let transition = plan.commit.transition.ok_or("missing transition")?;
         assert_eq!(transition.previous_state, "up");
         assert_eq!(transition.mode, "schedule");
+
+        Ok(())
+    }
+
+    fn overdue_monitor(
+        state: HealthState,
+        deadline_at: Option<&str>,
+        first_missed_at: Option<&str>,
+    ) -> MonitorOverdueSnapshot {
+        MonitorOverdueSnapshot {
+            id: "MON-worker".to_owned(),
+            name: "Worker".to_owned(),
+            service: "worker".to_owned(),
+            mode: MonitorMode::Schedule,
+            expected_every_ms: 60_000,
+            grace_ms: 5_000,
+            state,
+            last_check_in_status: Some("alive".to_owned()),
+            last_check_in_at: Some("2026-05-28T19:59:00Z".to_owned()),
+            deadline_at: deadline_at.map(str::to_owned),
+            first_missed_at: first_missed_at.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn monitor_overdue_degrades_unknown_or_up_after_deadline() -> Result<(), Box<dyn Error>> {
+        let plan = plan_monitor_overdue(
+            overdue_monitor(HealthState::Up, Some("2026-05-28T19:59:59Z"), None),
+            context()?,
+        )?
+        .ok_or("missing overdue plan")?;
+
+        assert_eq!(plan.commit.state, "degraded");
+        assert_eq!(
+            plan.commit.first_missed_at.as_deref(),
+            Some("2026-05-28T20:00:00Z")
+        );
+        assert_eq!(plan.commit.last_check_in_status.as_deref(), Some("alive"));
+        assert_eq!(plan.commit.transition.previous_state, "up");
+
+        Ok(())
+    }
+
+    #[test]
+    fn monitor_overdue_escalates_degraded_after_expected_window() -> Result<(), Box<dyn Error>> {
+        let plan = plan_monitor_overdue(
+            overdue_monitor(
+                HealthState::Degraded,
+                Some("2026-05-28T19:59:00Z"),
+                Some("2026-05-28T19:58:59Z"),
+            ),
+            context()?,
+        )?
+        .ok_or("missing overdue plan")?;
+
+        assert_eq!(plan.commit.state, "down");
+        assert!(plan.commit.first_missed_at.is_none());
+        assert_eq!(plan.commit.transition.previous_state, "degraded");
+
+        Ok(())
+    }
+
+    #[test]
+    fn monitor_overdue_skips_error_status_down_state_and_unexpired_deadlines()
+    -> Result<(), Box<dyn Error>> {
+        let mut error_status = overdue_monitor(HealthState::Up, Some("2026-05-28T19:59:59Z"), None);
+        error_status.last_check_in_status = Some("error".to_owned());
+        assert!(plan_monitor_overdue(error_status, context()?)?.is_none());
+        assert!(
+            plan_monitor_overdue(
+                overdue_monitor(HealthState::Down, Some("2026-05-28T19:59:59Z"), None),
+                context()?,
+            )?
+            .is_none()
+        );
+        assert!(
+            plan_monitor_overdue(
+                overdue_monitor(HealthState::Up, Some("2026-05-28T20:00:00Z"), None),
+                context()?,
+            )?
+            .is_none()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn monitor_overdue_waits_for_first_missed_window_before_down() -> Result<(), Box<dyn Error>> {
+        let plan = plan_monitor_overdue(
+            overdue_monitor(
+                HealthState::Degraded,
+                Some("2026-05-28T19:59:00Z"),
+                Some("2026-05-28T19:59:01Z"),
+            ),
+            context()?,
+        )?;
+
+        assert!(plan.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn monitor_overdue_ignores_malformed_persisted_timestamps() -> Result<(), Box<dyn Error>> {
+        assert!(
+            plan_monitor_overdue(
+                overdue_monitor(HealthState::Up, Some("not-a-timestamp"), None),
+                context()?,
+            )?
+            .is_none()
+        );
+        assert!(
+            plan_monitor_overdue(
+                overdue_monitor(
+                    HealthState::Degraded,
+                    Some("2026-05-28T19:59:00Z"),
+                    Some("not-a-timestamp"),
+                ),
+                context()?,
+            )?
+            .is_none()
+        );
 
         Ok(())
     }

@@ -44,6 +44,15 @@ pub struct MonitorCheckInCommitResult {
     pub sequence: i64,
 }
 
+/// Persisted outcome of one monitor overdue evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorOverdueCommitResult {
+    /// Health transition emitted by this overdue evaluation.
+    pub transition: HealthTransitionCommit,
+    /// Persisted monitor-state sequence after the overdue evaluation.
+    pub sequence: i64,
+}
+
 /// Monitor row to insert.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MonitorInsert {
@@ -161,6 +170,33 @@ pub struct MonitorCheckInSnapshot {
     pub state: String,
 }
 
+/// Monitor configuration and state needed to evaluate overdue deadlines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorOverdueCandidate {
+    /// Monitor row id.
+    pub id: String,
+    /// Monitor display name.
+    pub name: String,
+    /// Service name.
+    pub service: String,
+    /// Monitor mode, `schedule` or `ttl`.
+    pub mode: String,
+    /// Configured expected interval.
+    pub expected_every_ms: i64,
+    /// Configured grace period.
+    pub grace_ms: i64,
+    /// Current monitor health state.
+    pub state: String,
+    /// Last check-in status, when any.
+    pub last_check_in_status: Option<String>,
+    /// Last check-in timestamp, when any.
+    pub last_check_in_at: Option<String>,
+    /// Current deadline timestamp.
+    pub deadline_at: Option<String>,
+    /// First missed deadline timestamp.
+    pub first_missed_at: Option<String>,
+}
+
 /// One observed HTTP target probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetProbeCommit {
@@ -237,6 +273,27 @@ pub struct MonitorCheckInCommit {
     pub now: String,
     /// Transition metadata, present only when this check-in changed state.
     pub transition: Option<MonitorTransitionEvent>,
+}
+
+/// One overdue monitor transition to persist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorOverdueCommit {
+    /// Monitor id.
+    pub monitor_id: String,
+    /// Persisted state after overdue evaluation.
+    pub state: String,
+    /// First missed deadline timestamp after this evaluation.
+    pub first_missed_at: Option<String>,
+    /// Last check-in timestamp to preserve in transition payloads.
+    pub last_check_in_at: Option<String>,
+    /// Last check-in status to preserve in transition payloads.
+    pub last_check_in_status: Option<String>,
+    /// Deadline to preserve in transition payloads and state.
+    pub deadline_at: Option<String>,
+    /// Timestamp for state and transition writes.
+    pub now: String,
+    /// Transition metadata emitted by this overdue evaluation.
+    pub transition: MonitorTransitionEvent,
 }
 
 /// Monitor transition metadata emitted by a check-in.
@@ -362,6 +419,7 @@ pub(crate) fn commit_monitor_check_in(
             last_check_in_at: check_in.last_check_in_at.as_deref(),
             last_check_in_status: check_in.last_check_in_status.as_deref(),
             deadline_at: check_in.deadline_at.as_deref(),
+            first_missed_at: MonitorFirstMissedAtWrite::Clear,
             now: &check_in.now,
             transitioned: check_in.transition.is_some(),
         },
@@ -397,6 +455,63 @@ pub(crate) fn commit_monitor_check_in(
 
     transaction.commit()?;
     Ok(MonitorCheckInCommitResult {
+        transition,
+        sequence,
+    })
+}
+
+pub(crate) fn commit_monitor_overdue(
+    connection: &mut rusqlite::Connection,
+    overdue: MonitorOverdueCommit,
+) -> Result<MonitorOverdueCommitResult> {
+    let transaction = connection.transaction()?;
+    let sequence = next_sequence(
+        &transaction,
+        "monitor_state",
+        "monitor_id",
+        &overdue.monitor_id,
+    )?;
+    upsert_monitor_state_fields(
+        &transaction,
+        MonitorStateWrite {
+            monitor_id: &overdue.monitor_id,
+            state: &overdue.state,
+            last_check_in_at: None,
+            last_check_in_status: None,
+            deadline_at: overdue.deadline_at.as_deref(),
+            first_missed_at: match overdue.first_missed_at.as_deref() {
+                Some(first_missed_at) => MonitorFirstMissedAtWrite::Set(first_missed_at),
+                None => MonitorFirstMissedAtWrite::Preserve,
+            },
+            now: &overdue.now,
+            transitioned: true,
+        },
+        sequence,
+    )?;
+    let transition = record_monitor_transition(
+        &transaction,
+        MonitorTransitionRecord {
+            monitor_id: &overdue.monitor_id,
+            name: &overdue.transition.name,
+            service: &overdue.transition.service,
+            mode: &overdue.transition.mode,
+            expected_every_ms: overdue.transition.expected_every_ms,
+            grace_ms: overdue.transition.grace_ms,
+            previous_state: &overdue.transition.previous_state,
+            state: &overdue.state,
+            last_check_in_at: overdue.last_check_in_at.as_deref(),
+            last_check_in_status: overdue.last_check_in_status.as_deref(),
+            deadline_at: overdue.deadline_at.as_deref(),
+            now: &overdue.now,
+            event_id: &overdue.transition.event_id,
+            incident_id: overdue.transition.incident_id,
+            incident_event_id: overdue.transition.incident_event_id,
+            sequence,
+        },
+    )?;
+
+    transaction.commit()?;
+    Ok(MonitorOverdueCommitResult {
         transition,
         sequence,
     })
@@ -611,6 +726,39 @@ pub(crate) fn monitor_check_in_snapshot_by_name(
     }))
 }
 
+pub(crate) fn monitor_overdue_candidates(
+    connection: &rusqlite::Connection,
+) -> Result<Vec<MonitorOverdueCandidate>> {
+    let mut statement = connection.prepare(
+        "SELECT
+            m.id, m.name, m.service, m.mode, m.expected_every_ms, m.grace_ms,
+            s.state, s.last_check_in_status, s.last_check_in_at, s.deadline_at,
+            s.first_missed_at
+         FROM monitors m
+         JOIN monitor_state s ON s.monitor_id = m.id
+         WHERE s.deadline_at IS NOT NULL
+         ORDER BY m.id",
+    )?;
+    let candidates = statement
+        .query_map([], |row| {
+            Ok(MonitorOverdueCandidate {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                service: row.get(2)?,
+                mode: row.get(3)?,
+                expected_every_ms: row.get(4)?,
+                grace_ms: row.get(5)?,
+                state: row.get(6)?,
+                last_check_in_status: row.get(7)?,
+                last_check_in_at: row.get(8)?,
+                deadline_at: row.get(9)?,
+                first_missed_at: row.get(10)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(candidates)
+}
+
 fn next_sequence(
     transaction: &rusqlite::Transaction<'_>,
     table: &str,
@@ -685,12 +833,19 @@ fn upsert_target_state_fields(
     Ok(())
 }
 
+enum MonitorFirstMissedAtWrite<'a> {
+    Clear,
+    Preserve,
+    Set(&'a str),
+}
+
 struct MonitorStateWrite<'a> {
     monitor_id: &'a str,
     state: &'a str,
     last_check_in_at: Option<&'a str>,
     last_check_in_status: Option<&'a str>,
     deadline_at: Option<&'a str>,
+    first_missed_at: MonitorFirstMissedAtWrite<'a>,
     now: &'a str,
     transitioned: bool,
 }
@@ -704,7 +859,11 @@ fn upsert_monitor_state_fields(
         matches!(write.last_check_in_status, Some("alive" | "ok")).then_some(write.now);
     let last_failure_at = matches!(write.last_check_in_status, Some("error")).then_some(write.now);
     let last_transition_at = write.transitioned.then_some(write.now);
-    let first_missed_at = (write.transitioned && write.state != "up").then_some(write.now);
+    let (first_missed_mode, first_missed_at) = match write.first_missed_at {
+        MonitorFirstMissedAtWrite::Clear => ("clear", None),
+        MonitorFirstMissedAtWrite::Preserve => ("preserve", None),
+        MonitorFirstMissedAtWrite::Set(first_missed_at) => ("set", Some(first_missed_at)),
+    };
     transaction.execute(
         "INSERT INTO monitor_state (
             monitor_id, state, last_check_in_status, last_check_in_at,
@@ -718,7 +877,11 @@ fn upsert_monitor_state_fields(
             last_success_at = COALESCE(excluded.last_success_at, monitor_state.last_success_at),
             last_failure_at = COALESCE(excluded.last_failure_at, monitor_state.last_failure_at),
             deadline_at = COALESCE(excluded.deadline_at, monitor_state.deadline_at),
-            first_missed_at = CASE WHEN excluded.state = 'up' THEN NULL ELSE COALESCE(monitor_state.first_missed_at, excluded.first_missed_at) END,
+            first_missed_at = CASE ?11
+                WHEN 'clear' THEN NULL
+                WHEN 'set' THEN excluded.first_missed_at
+                ELSE monitor_state.first_missed_at
+            END,
             last_transition_at = COALESCE(excluded.last_transition_at, monitor_state.last_transition_at),
             sequence = excluded.sequence",
         params![
@@ -732,6 +895,7 @@ fn upsert_monitor_state_fields(
             first_missed_at,
             last_transition_at,
             sequence,
+            first_missed_mode,
         ],
     )?;
     Ok(())

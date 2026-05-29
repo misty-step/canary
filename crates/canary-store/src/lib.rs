@@ -21,6 +21,7 @@ pub use api_keys::{API_KEY_PREFIX_LEN, ApiKeyInsert, VerifiedApiKey};
 pub use health::{
     ActiveTargetProbeSchedule, HealthTransitionCommit, MonitorCheckInCommit,
     MonitorCheckInCommitResult, MonitorCheckInObservation, MonitorCheckInSnapshot, MonitorInsert,
+    MonitorOverdueCandidate, MonitorOverdueCommit, MonitorOverdueCommitResult,
     MonitorTransitionEvent, TargetCheckObservation, TargetInsert, TargetProbeCommit,
     TargetProbeCommitResult, TargetProbeSnapshot, TargetTransitionEvent,
 };
@@ -134,6 +135,14 @@ impl Store {
         health::commit_monitor_check_in(&mut self.connection, check_in)
     }
 
+    /// Persist one overdue monitor transition without inserting a check-in row.
+    pub fn commit_monitor_overdue(
+        &mut self,
+        overdue: MonitorOverdueCommit,
+    ) -> Result<MonitorOverdueCommitResult> {
+        health::commit_monitor_overdue(&mut self.connection, overdue)
+    }
+
     /// Insert one non-HTTP monitor row.
     pub fn insert_monitor(&mut self, monitor: MonitorInsert) -> Result<()> {
         health::insert_monitor(&self.connection, monitor)
@@ -149,6 +158,11 @@ impl Store {
         name: &str,
     ) -> Result<Option<MonitorCheckInSnapshot>> {
         health::monitor_check_in_snapshot_by_name(&mut self.connection, name)
+    }
+
+    /// Return monitor state rows that have deadlines eligible for overdue evaluation.
+    pub fn monitor_overdue_candidates(&self) -> Result<Vec<MonitorOverdueCandidate>> {
+        health::monitor_overdue_candidates(&self.connection)
     }
 
     /// Insert one API-key row whose raw secret has already been bcrypt-hashed.
@@ -2148,7 +2162,7 @@ mod tests {
         assert_eq!(payload["sequence"], 1);
         assert_eq!(
             store.connection.query_row(
-                "SELECT state, sequence, last_check_in_status, deadline_at
+                "SELECT state, sequence, last_check_in_status, deadline_at, first_missed_at
                  FROM monitor_state WHERE monitor_id = 'MON-worker'",
                 [],
                 |row| {
@@ -2157,6 +2171,7 @@ mod tests {
                         row.get::<_, i64>(1)?,
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
                     ))
                 },
             )?,
@@ -2164,7 +2179,8 @@ mod tests {
                 "degraded".to_owned(),
                 1,
                 Some("alive".to_owned()),
-                Some("2026-05-28T20:01:05Z".to_owned())
+                Some("2026-05-28T20:01:05Z".to_owned()),
+                None
             )
         );
         assert_eq!(
@@ -2201,6 +2217,124 @@ mod tests {
             ("worker".to_owned(), "investigating".to_owned())
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn monitor_overdue_transition_updates_state_without_check_in_row()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        store.connection.execute(
+            "INSERT INTO monitors (id, name, service, mode, expected_every_ms, grace_ms, created_at)
+             VALUES ('MON-worker', 'Worker heartbeat', 'worker', 'schedule', 60000, 5000, '2026-05-28T19:00:00Z')",
+            [],
+        )?;
+        store.connection.execute(
+            "INSERT INTO monitor_state (
+                monitor_id, state, last_check_in_status, last_check_in_at, deadline_at, sequence
+             ) VALUES (
+                'MON-worker', 'up', 'alive', '2026-05-28T19:59:00Z', '2026-05-28T20:00:05Z', 2
+             )",
+            [],
+        )?;
+
+        let result = store.commit_monitor_overdue(MonitorOverdueCommit {
+            monitor_id: "MON-worker".to_owned(),
+            state: "degraded".to_owned(),
+            first_missed_at: Some("2026-05-28T20:01:00Z".to_owned()),
+            last_check_in_at: Some("2026-05-28T19:59:00Z".to_owned()),
+            last_check_in_status: Some("alive".to_owned()),
+            deadline_at: Some("2026-05-28T20:00:05Z".to_owned()),
+            now: "2026-05-28T20:01:00Z".to_owned(),
+            transition: MonitorTransitionEvent {
+                name: "Worker heartbeat".to_owned(),
+                service: "worker".to_owned(),
+                mode: "schedule".to_owned(),
+                expected_every_ms: 60_000,
+                grace_ms: 5_000,
+                previous_state: "up".to_owned(),
+                event_id: EventId::from_str("EVT-mondegraded0")?,
+                incident_id: IncidentId::from_str("INC-mondegraded0")?,
+                incident_event_id: EventId::from_str("EVT-monincident0")?,
+            },
+        })?;
+
+        assert_eq!(result.sequence, 3);
+        assert_eq!(result.transition.event, "health_check.degraded");
+        let payload: Value = serde_json::from_str(&result.transition.payload_json)?;
+        assert_eq!(payload["previous_state"], "up");
+        assert_eq!(payload["last_check_in_status"], "alive");
+        assert_eq!(payload["deadline_at"], "2026-05-28T20:00:05Z");
+        assert_eq!(row_count(&store.connection, "monitor_check_ins")?, 0);
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT state, sequence, first_missed_at, last_check_in_status, last_transition_at
+                 FROM monitor_state WHERE monitor_id = 'MON-worker'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )?,
+            (
+                "degraded".to_owned(),
+                3,
+                Some("2026-05-28T20:01:00Z".to_owned()),
+                Some("alive".to_owned()),
+                Some("2026-05-28T20:01:00Z".to_owned())
+            )
+        );
+        assert_eq!(
+            result
+                .transition
+                .incident_event
+                .as_ref()
+                .map(|event| event.event.as_str()),
+            Some("incident.opened")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn monitor_overdue_candidates_return_deadline_rows_ordered_by_monitor_id() -> Result<()> {
+        let mut store = migrated_store()?;
+        for (id, deadline_at) in [
+            ("MON-b", Some("2026-05-28T20:00:05Z")),
+            ("MON-no-deadline", None),
+            ("MON-a", Some("2026-05-28T20:00:05Z")),
+        ] {
+            store.insert_monitor(MonitorInsert {
+                id: id.to_owned(),
+                name: id.to_owned(),
+                service: "worker".to_owned(),
+                mode: "schedule".to_owned(),
+                expected_every_ms: 60_000,
+                grace_ms: 5_000,
+                created_at: "2026-05-28T19:00:00Z".to_owned(),
+            })?;
+            store.connection.execute(
+                "INSERT INTO monitor_state (monitor_id, state, last_check_in_status, deadline_at)
+                 VALUES (?1, 'up', 'alive', ?2)",
+                params![id, deadline_at],
+            )?;
+        }
+
+        let candidates = store.monitor_overdue_candidates()?;
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].id, "MON-a");
+        assert_eq!(candidates[1].id, "MON-b");
+        assert_eq!(candidates[0].state, "up");
+        assert_eq!(
+            candidates[0].deadline_at.as_deref(),
+            Some("2026-05-28T20:00:05Z")
+        );
         Ok(())
     }
 

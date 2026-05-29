@@ -48,9 +48,15 @@ use canary_workers::health::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+mod monitor_overdue;
 mod target_probes;
 mod webhooks;
 
+pub use monitor_overdue::{
+    MonitorOverdueLifecycle, MonitorOverdueLifecycleConfig, MonitorOverdueLifecycleReport,
+    MonitorOverdueLifecycleWorker, MonitorOverdueOutcome, MonitorOverdueRuntime,
+    MonitorOverdueRuntimeError, run_monitor_overdue_once,
+};
 pub use target_probes::{
     ProbeHttpResponse, ProbeRequest, ProbeTransport, ProbeTransportError, ReqwestProbeTransport,
     TargetProbeLifecycle, TargetProbeLifecycleConfig, TargetProbeLifecycleReport,
@@ -69,6 +75,7 @@ const PROBLEM_CONTENT_TYPE: &str = "application/problem+json; charset=utf-8";
 const DEFAULT_WEBHOOK_DRAIN_INTERVAL: StdDuration = StdDuration::from_secs(5);
 const DEFAULT_WEBHOOK_DRAIN_MAX_JOBS: u32 = 25;
 const DEFAULT_TARGET_PROBE_INTERVAL: StdDuration = StdDuration::from_secs(1);
+const DEFAULT_MONITOR_OVERDUE_INTERVAL: StdDuration = StdDuration::from_secs(1);
 
 /// Runtime configuration for the top-level Canary server process.
 #[derive(Debug, Clone)]
@@ -85,6 +92,8 @@ pub struct ServerConfig {
     pub target_probe_interval: StdDuration,
     /// Runtime options for HTTP target probes.
     pub target_probe_options: TargetProbeOptions,
+    /// Minimum interval between non-HTTP monitor overdue evaluation passes.
+    pub monitor_overdue_interval: StdDuration,
 }
 
 impl ServerConfig {
@@ -97,6 +106,7 @@ impl ServerConfig {
             webhook_drain_max_jobs: DEFAULT_WEBHOOK_DRAIN_MAX_JOBS,
             target_probe_interval: DEFAULT_TARGET_PROBE_INTERVAL,
             target_probe_options: TargetProbeOptions::default(),
+            monitor_overdue_interval: DEFAULT_MONITOR_OVERDUE_INTERVAL,
         }
     }
 }
@@ -106,6 +116,7 @@ pub struct CanaryServer {
     router: Router,
     webhook_worker: WebhookDeliveryDrainWorker,
     target_probe_worker: TargetProbeLifecycleWorker,
+    monitor_overdue_worker: MonitorOverdueLifecycleWorker,
 }
 
 impl CanaryServer {
@@ -119,6 +130,11 @@ impl CanaryServer {
         if config.target_probe_interval.is_zero() {
             return Err(ServerBootError::InvalidConfig(
                 "target probe interval must be greater than zero".to_owned(),
+            ));
+        }
+        if config.monitor_overdue_interval.is_zero() {
+            return Err(ServerBootError::InvalidConfig(
+                "monitor overdue interval must be greater than zero".to_owned(),
             ));
         }
 
@@ -149,11 +165,11 @@ impl CanaryServer {
         let webhook_worker =
             WebhookDeliveryDrainWorker::spawn(drain, config.webhook_drain_interval)
                 .map_err(ServerBootError::WebhookWorker)?;
-        let target_event_sink: Arc<dyn EventSink> = webhook_sink;
+        let target_event_sink: Arc<dyn EventSink> = webhook_sink.clone();
         let target_transport: Arc<dyn ProbeTransport> = Arc::new(ReqwestProbeTransport);
         let target_runtime = TargetProbeRuntime::new(
             ingest_state.store.clone(),
-            target_event_sink,
+            target_event_sink.clone(),
             target_transport,
             config.target_probe_options,
         );
@@ -164,12 +180,23 @@ impl CanaryServer {
             },
         )
         .map_err(ServerBootError::TargetProbeWorker)?;
+        let monitor_overdue_worker = MonitorOverdueLifecycleWorker::spawn(
+            MonitorOverdueLifecycle::new(
+                ingest_state.store.clone(),
+                MonitorOverdueRuntime::new(ingest_state.store.clone(), target_event_sink),
+            ),
+            MonitorOverdueLifecycleConfig {
+                tick_interval: config.monitor_overdue_interval,
+            },
+        )
+        .map_err(ServerBootError::MonitorOverdueWorker)?;
         let router = public_router(PublicReadiness::ready()).merge(ingest_router(ingest_state));
 
         Ok(Self {
             router,
             webhook_worker,
             target_probe_worker,
+            monitor_overdue_worker,
         })
     }
 
@@ -192,6 +219,9 @@ impl CanaryServer {
         self.target_probe_worker
             .join()
             .map_err(ServerRunError::TargetProbeWorker)?;
+        self.monitor_overdue_worker
+            .join()
+            .map_err(ServerRunError::MonitorOverdueWorker)?;
         self.webhook_worker
             .join()
             .map_err(ServerRunError::WebhookWorker)
@@ -211,6 +241,8 @@ pub enum ServerBootError {
     WebhookWorker(String),
     /// Target probe lifecycle worker failed to start.
     TargetProbeWorker(String),
+    /// Monitor overdue lifecycle worker failed to start.
+    MonitorOverdueWorker(String),
 }
 
 impl fmt::Display for ServerBootError {
@@ -221,6 +253,7 @@ impl fmt::Display for ServerBootError {
             Self::Http(error) => formatter.write_str(error),
             Self::WebhookWorker(error) => formatter.write_str(error),
             Self::TargetProbeWorker(error) => formatter.write_str(error),
+            Self::MonitorOverdueWorker(error) => formatter.write_str(error),
         }
     }
 }
@@ -236,6 +269,8 @@ pub enum ServerRunError {
     WebhookWorker(String),
     /// The target probe worker did not shut down cleanly.
     TargetProbeWorker(String),
+    /// The monitor overdue worker did not shut down cleanly.
+    MonitorOverdueWorker(String),
 }
 
 impl fmt::Display for ServerRunError {
@@ -244,6 +279,7 @@ impl fmt::Display for ServerRunError {
             Self::Listen(error) => write!(formatter, "server listen failed: {error}"),
             Self::WebhookWorker(error) => formatter.write_str(error),
             Self::TargetProbeWorker(error) => formatter.write_str(error),
+            Self::MonitorOverdueWorker(error) => formatter.write_str(error),
         }
     }
 }
