@@ -18,6 +18,7 @@ Self-hosted observability for agent-driven infrastructure. Elixir/Phoenix + SQLi
 - **Health.Manager boot resilience.** Uses `rescue` in `handle_info(:boot)` to retry in 5s if DB isn't ready. Required because in test mode (Ecto sandbox) and during production boot races, the targets table may not exist yet.
 - **SQLite WAL and `rm -f`.** Deleting the DB while the app is running does nothing — SQLite WAL keeps the file handle open. Must stop the machine first, then SSH in to delete, then restart.
 - **Retention prune lock time.** Retention deletes share the single SQLite writer with ingest, probes, and webhook delivery. Keep pruning in bounded 1k-row statements; do not wrap the whole prune pass in one long transaction.
+- **Rate limiter locality.** Phoenix rate limits are ETS-local and the Rust rewrite currently matches that with process-local fixed-window buckets. Do not claim fleet-wide rate limiting without adding a shared limiter.
 
 ## Invariants
 

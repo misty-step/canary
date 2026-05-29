@@ -7,5 +7,6 @@
 pub mod auth;
 pub mod problem_details;
 pub mod public;
+pub mod rate_limit;
 pub mod request;
 pub mod webhooks;

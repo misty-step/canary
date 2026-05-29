@@ -635,6 +635,18 @@ the Rust server accepts production traffic:
     than accepting dynamic table names from callers. Runtime scheduling and
     operator logging are intentionally left for a later server boot-wiring
     slice; the deletion semantics and tests are now in Rust.
+59. Rust now enforces Phoenix-compatible API-key rate limits on the request
+    path. `canary-http::rate_limit` owns the named buckets, exact Phoenix
+    constants, and RFC 9457 `rate_limited` body with `retry_after`. The server
+    owns only process-local fixed-window counters keyed by `(bucket, api_key_id)`
+    and calls the limiter immediately after successful scope authorization:
+    ingest routes use the 100/minute ingest bucket; read routes, `GET /metrics`,
+    and admin annotation writes use the 30/minute query bucket. Public routes
+    remain outside auth and rate limiting, and ordinary admin mutations remain
+    unrate-limited to match the Phoenix router. The Phoenix `auth_fail` bucket
+    is represented in the policy module but not wired yet because correct
+    parity needs a proxy-aware client identity boundary rather than a fake
+    global IP key.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -667,6 +679,10 @@ Phoenix behavior until the replacement is complete:
    the current Phoenix read model, not a silent wire-shape change.
 2. Wire the Rust retention prune command into `CanaryServer::boot` as a small
    named lifecycle worker with explicit cadence/configuration, not a generic
-   scheduler.
-3. Continue remaining Phoenix background behavior, especially TLS-expiry scans
-   and route rate limiting, behind typed store or worker boundaries.
+   scheduler. The worker must not hold the store mutex for a whole prune pass
+   over many batches.
+3. Add the proxy-aware client identity boundary needed to account for Phoenix's
+   silent `auth_fail` rate-limit bucket without turning invalid API keys into
+   observable 429 responses.
+4. Continue remaining Phoenix background behavior, especially TLS-expiry scans,
+   behind typed store or worker boundaries.

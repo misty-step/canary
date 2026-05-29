@@ -31,8 +31,12 @@ use canary_http::public::{
     DependencyStatus, PublicResponse, healthz_response, openapi_response, readyz_response,
 };
 use canary_http::{
-    auth::{ApiKeyScope, AuthError, Permission, authorize_with_lookup},
+    auth::{
+        ApiKeyScope, BearerToken, Permission, extract_bearer, insufficient_scope_problem,
+        invalid_api_key_problem, missing_authorization_problem,
+    },
     problem_details::{ProblemCode, ProblemDetails},
+    rate_limit::{RateLimitKind, rate_limited_problem},
     request::{
         MAX_JSON_BODY_BYTES, decode_json_object,
         payload_too_large_problem as http_payload_too_large_problem,
@@ -46,8 +50,8 @@ use canary_store::{
     AnnotationError, AnnotationInsert, AnnotationPageOptions, ApiKeyInsert, ApiKeyRecord,
     ErrorSummaryItem, HealthMonitorStatus, HealthTargetStatus, IncidentCorrelation,
     IncidentListOptions, MonitorInsert, MonitorRecord, RecentTransition, SearchResult, Store,
-    StoreError, TargetCheckRead, TargetConflict, TargetInsert, TargetRecord, WebhookSubscription,
-    WebhookSubscriptionInsert,
+    StoreError, TargetCheckRead, TargetConflict, TargetInsert, TargetRecord, VerifiedApiKey,
+    WebhookSubscription, WebhookSubscriptionInsert,
 };
 use canary_store::{QueryError, ServiceQueryOptions, TimelineQueryError, TimelineQueryOptions};
 use canary_store::{WebhookDeliveryPageError, WebhookDeliveryPageOptions};
@@ -63,6 +67,7 @@ use serde_json::{Map, Value, json};
 
 mod health_fanout;
 mod monitor_overdue;
+mod rate_limit;
 mod target_probes;
 mod webhooks;
 
@@ -75,6 +80,7 @@ pub use monitor_overdue::{
     MonitorOverdueLifecycleWorker, MonitorOverdueOutcome, MonitorOverdueRuntime,
     MonitorOverdueRuntimeError, run_monitor_overdue_once,
 };
+use rate_limit::{RateLimitDecision, RateLimiter};
 pub use target_probes::{
     ProbeHttpResponse, ProbeRequest, ProbeTransport, ProbeTransportError, ReqwestProbeTransport,
     TargetProbeLifecycle, TargetProbeLifecycleCommand, TargetProbeLifecycleConfig,
@@ -539,6 +545,7 @@ pub struct IngestState {
     health_fanout: HealthEventFanout,
     target_control: Arc<dyn TargetControlSink>,
     webhook_transport: Arc<dyn WebhookTransport>,
+    rate_limiter: Arc<Mutex<RateLimiter>>,
     allow_private_targets: bool,
 }
 
@@ -571,6 +578,7 @@ impl IngestState {
             health_fanout: HealthEventFanout::new_without_failure_sink(webhook_sink),
             target_control: Arc::new(NoopTargetControlSink),
             webhook_transport: default_webhook_transport(),
+            rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
             allow_private_targets: false,
         }
     }
@@ -597,6 +605,7 @@ impl IngestState {
             health_fanout: HealthEventFanout::new_without_failure_sink(Arc::new(NoopEventSink)),
             target_control: Arc::new(NoopTargetControlSink),
             webhook_transport: default_webhook_transport(),
+            rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
             allow_private_targets: false,
         }
     }
@@ -615,6 +624,7 @@ impl IngestState {
             health_fanout: HealthEventFanout::new_without_failure_sink(event_sink),
             target_control: Arc::new(NoopTargetControlSink),
             webhook_transport: default_webhook_transport(),
+            rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
             allow_private_targets: false,
         }
     }
@@ -633,6 +643,7 @@ impl IngestState {
             health_fanout,
             target_control: Arc::new(NoopTargetControlSink),
             webhook_transport: default_webhook_transport(),
+            rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
             allow_private_targets: false,
         }
     }
@@ -976,7 +987,7 @@ async fn list_webhooks(State(state): State<IngestState>, headers: HeaderMap) -> 
 }
 
 async fn metrics(State(state): State<IngestState>, headers: HeaderMap) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+    if let Err(problem) = require_query_limited_admin_scope(&state, &headers) {
         return problem_response(*problem);
     }
 
@@ -1481,7 +1492,7 @@ async fn query_errors(
     headers: HeaderMap,
     Query(params): Query<QueryParams>,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+    if let Err(problem) = require_read_scope(&state, &headers) {
         return problem_response(*problem);
     }
 
@@ -1546,7 +1557,7 @@ async fn timeline(
     headers: HeaderMap,
     Query(params): Query<TimelineParams>,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+    if let Err(problem) = require_read_scope(&state, &headers) {
         return problem_response(*problem);
     }
 
@@ -1581,7 +1592,7 @@ async fn webhook_deliveries(
     RawQuery(raw_query): RawQuery,
     Query(params): Query<WebhookDeliveryParams>,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+    if let Err(problem) = require_read_scope(&state, &headers) {
         return problem_response(*problem);
     }
 
@@ -1620,7 +1631,7 @@ async fn webhook_deliveries(
 }
 
 async fn health_status(State(state): State<IngestState>, headers: HeaderMap) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+    if let Err(problem) = require_read_scope(&state, &headers) {
         return problem_response(*problem);
     }
 
@@ -1652,7 +1663,7 @@ async fn status(
     headers: HeaderMap,
     Query(params): Query<StatusParams>,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+    if let Err(problem) = require_read_scope(&state, &headers) {
         return problem_response(*problem);
     }
 
@@ -1694,7 +1705,7 @@ async fn report(
     RawQuery(raw_query): RawQuery,
     Query(params): Query<ReportParams>,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+    if let Err(problem) = require_read_scope(&state, &headers) {
         return problem_response(*problem);
     }
     if query_param_is_array(raw_query.as_deref(), "q") {
@@ -1806,7 +1817,7 @@ async fn target_checks(
     Path(id): Path<String>,
     Query(params): Query<StatusParams>,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+    if let Err(problem) = require_read_scope(&state, &headers) {
         return problem_response(*problem);
     }
 
@@ -1896,7 +1907,7 @@ async fn list_annotations(
     headers: HeaderMap,
     Query(params): Query<AnnotationPageParams>,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+    if let Err(problem) = require_read_scope(&state, &headers) {
         return problem_response(*problem);
     }
     let Some(subject_type) = params.subject_type.filter(|value| !value.is_empty()) else {
@@ -1964,7 +1975,7 @@ fn list_annotations_for_subject(
     subject_id: String,
     not_found_detail: &'static str,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+    if let Err(problem) = require_read_scope(&state, &headers) {
         return problem_response(*problem);
     }
     let store = match state.store.lock() {
@@ -1992,7 +2003,7 @@ fn create_annotation_for_subject(
     subject_id: String,
     not_found_detail: &'static str,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+    if let Err(problem) = require_query_limited_admin_scope(&state, &headers) {
         return problem_response(*problem);
     }
     if let Err(problem) = check_content_length(&headers) {
@@ -3378,7 +3389,7 @@ async fn list_incidents(
     headers: HeaderMap,
     Query(params): Query<QueryParams>,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+    if let Err(problem) = require_read_scope(&state, &headers) {
         return problem_response(*problem);
     }
 
@@ -3411,7 +3422,7 @@ async fn show_error(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+    if let Err(problem) = require_read_scope(&state, &headers) {
         return problem_response(*problem);
     }
 
@@ -3438,7 +3449,7 @@ async fn show_incident(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+    if let Err(problem) = require_read_scope(&state, &headers) {
         return problem_response(*problem);
     }
 
@@ -3464,41 +3475,92 @@ fn require_ingest_scope(
     state: &IngestState,
     headers: &HeaderMap,
 ) -> Result<(), Box<ProblemDetails>> {
-    require_scope(state, headers, Permission::Ingest)
+    let key = require_scope(state, headers, Permission::Ingest)?;
+    enforce_rate_limit(state, RateLimitKind::Ingest, &key.id)
+}
+
+fn require_read_scope(state: &IngestState, headers: &HeaderMap) -> Result<(), Box<ProblemDetails>> {
+    let key = require_scope(state, headers, Permission::Read)?;
+    enforce_rate_limit(state, RateLimitKind::Query, &key.id)
+}
+
+fn require_query_limited_admin_scope(
+    state: &IngestState,
+    headers: &HeaderMap,
+) -> Result<(), Box<ProblemDetails>> {
+    let key = require_scope(state, headers, Permission::Admin)?;
+    enforce_rate_limit(state, RateLimitKind::Query, &key.id)
 }
 
 fn require_scope(
     state: &IngestState,
     headers: &HeaderMap,
     permission: Permission,
-) -> Result<(), Box<ProblemDetails>> {
+) -> Result<VerifiedApiKey, Box<ProblemDetails>> {
     let authorization_headers = headers
         .get_all(AUTHORIZATION)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .collect::<Vec<_>>();
 
-    authorize_with_lookup(
-        &authorization_headers,
-        permission,
-        |token| {
-            let store = state.store.lock().map_err(|_| ())?;
-            store
-                .verify_api_key(token)
-                .map(|verified| verified.and_then(|key| ApiKeyScope::parse(&key.scope)))
-                .map_err(|_| ())
-        },
-        None,
-    )
-    .map_err(|error| match error {
-        AuthError::Problem(problem) => problem,
-        AuthError::Lookup(()) => Box::new(ProblemDetails::new(
+    let token = match extract_bearer(&authorization_headers) {
+        BearerToken::Present(token) => token,
+        BearerToken::Missing => return Err(Box::new(missing_authorization_problem(None))),
+    };
+
+    let store = state.store.lock().map_err(|_| {
+        Box::new(ProblemDetails::new(
             500,
             ProblemCode::InternalError,
             "An unexpected error occurred.",
             None,
-        )),
-    })
+        ))
+    })?;
+    let Some(key) = store.verify_api_key(token).map_err(|_| {
+        Box::new(ProblemDetails::new(
+            500,
+            ProblemCode::InternalError,
+            "An unexpected error occurred.",
+            None,
+        ))
+    })?
+    else {
+        return Err(Box::new(invalid_api_key_problem(None)));
+    };
+    drop(store);
+
+    let Some(scope) = ApiKeyScope::parse(&key.scope) else {
+        return Err(Box::new(invalid_api_key_problem(None)));
+    };
+    if scope.allows(permission) {
+        Ok(key)
+    } else {
+        Err(Box::new(insufficient_scope_problem(
+            scope, permission, None,
+        )))
+    }
+}
+
+fn enforce_rate_limit(
+    state: &IngestState,
+    kind: RateLimitKind,
+    identity: &str,
+) -> Result<(), Box<ProblemDetails>> {
+    let mut limiter = state.rate_limiter.lock().map_err(|_| {
+        Box::new(ProblemDetails::new(
+            500,
+            ProblemCode::InternalError,
+            "An unexpected error occurred.",
+            None,
+        ))
+    })?;
+
+    match limiter.check(kind, identity) {
+        RateLimitDecision::Allowed => Ok(()),
+        RateLimitDecision::Limited {
+            retry_after_seconds,
+        } => Err(Box::new(rate_limited_problem(retry_after_seconds))),
+    }
 }
 
 fn check_content_length(headers: &HeaderMap) -> Result<(), Box<ProblemDetails>> {
@@ -7842,6 +7904,58 @@ mod tests {
         let body = json_body(response).await?;
         assert_eq!(body["is_new_class"], true);
         assert_eq!(error_count(&state)?, 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ingest_and_query_routes_enforce_phoenix_rate_limit_buckets()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        {
+            let mut limiter = state
+                .rate_limiter
+                .lock()
+                .map_err(|_| "rate limiter lock poisoned")?;
+            for _ in 0..100 {
+                assert_eq!(
+                    limiter.check(RateLimitKind::Ingest, "KEY-ingest"),
+                    RateLimitDecision::Allowed
+                );
+            }
+            for _ in 0..30 {
+                assert_eq!(
+                    limiter.check(RateLimitKind::Query, "KEY-read"),
+                    RateLimitDecision::Allowed
+                );
+            }
+        }
+        let router = ingest_router(state);
+
+        let response = router
+            .clone()
+            .oneshot(error_request(INGEST_KEY, "{}")?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["code"], "rate_limited");
+        let retry_after = body["retry_after"]
+            .as_u64()
+            .ok_or("retry_after should be a number")?;
+        assert!((1..=60).contains(&retry_after));
+
+        let response = router
+            .oneshot(read_request(READ_KEY, "/api/v1/incidents")?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["code"], "rate_limited");
+        let retry_after = body["retry_after"]
+            .as_u64()
+            .ok_or("retry_after should be a number")?;
+        assert!((1..=60).contains(&retry_after));
 
         Ok(())
     }
