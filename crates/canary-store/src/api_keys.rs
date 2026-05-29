@@ -38,6 +38,23 @@ pub struct VerifiedApiKey {
     pub scope: String,
 }
 
+/// Admin-visible API key metadata. The raw key and hash are never exposed here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiKeyRecord {
+    /// Stable API-key identifier.
+    pub id: String,
+    /// Human-readable key name.
+    pub name: String,
+    /// Phoenix wire-value scope.
+    pub scope: String,
+    /// First 12 characters of the raw key.
+    pub key_prefix: String,
+    /// ISO8601 creation timestamp.
+    pub created_at: String,
+    /// ISO8601 revocation timestamp, when inactive.
+    pub revoked_at: Option<String>,
+}
+
 pub(crate) fn insert(connection: &Connection, key: ApiKeyInsert) -> Result<()> {
     connection.execute(
         "INSERT INTO api_keys (
@@ -54,6 +71,38 @@ pub(crate) fn insert(connection: &Connection, key: ApiKeyInsert) -> Result<()> {
         ],
     )?;
     Ok(())
+}
+
+pub(crate) fn list(connection: &Connection) -> Result<Vec<ApiKeyRecord>> {
+    let mut statement = connection.prepare(
+        "SELECT id, name, scope, key_prefix, created_at, revoked_at
+         FROM api_keys
+         ORDER BY created_at DESC",
+    )?;
+    let keys = statement
+        .query_map([], |row| {
+            Ok(ApiKeyRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                scope: row.get(2)?,
+                key_prefix: row.get(3)?,
+                created_at: row.get(4)?,
+                revoked_at: row.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(keys)
+}
+
+pub(crate) fn revoke(connection: &Connection, key_id: &str, revoked_at: &str) -> Result<bool> {
+    let changed = connection.execute(
+        "UPDATE api_keys
+         SET revoked_at = ?2
+         WHERE id = ?1",
+        params![key_id, revoked_at],
+    )?;
+    Ok(changed > 0)
 }
 
 pub(crate) fn verify_key(connection: &Connection, raw_key: &str) -> Result<Option<VerifiedApiKey>> {

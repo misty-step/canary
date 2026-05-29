@@ -40,8 +40,9 @@ use canary_ingest::{
     ingest as ingest_error,
 };
 use canary_store::{
-    IncidentCorrelation, IncidentListOptions, MonitorInsert, MonitorRecord, Store, TargetInsert,
-    TargetRecord, WebhookSubscription, WebhookSubscriptionInsert,
+    ApiKeyInsert, ApiKeyRecord, IncidentCorrelation, IncidentListOptions, MonitorInsert,
+    MonitorRecord, Store, TargetInsert, TargetRecord, WebhookSubscription,
+    WebhookSubscriptionInsert,
 };
 use canary_store::{QueryError, ServiceQueryOptions};
 use canary_workers::health::{
@@ -487,6 +488,8 @@ pub fn ingest_router(state: IngestState) -> Router {
         .route("/api/v1/webhooks", get(list_webhooks).post(create_webhook))
         .route("/api/v1/webhooks/{id}", delete(delete_webhook))
         .route("/api/v1/webhooks/{id}/test", post(test_webhook))
+        .route("/api/v1/keys", get(list_api_keys).post(create_api_key))
+        .route("/api/v1/keys/{id}/revoke", post(revoke_api_key))
         .route("/api/v1/targets", get(list_targets).post(create_target))
         .route(
             "/api/v1/targets/{id}",
@@ -1005,6 +1008,105 @@ async fn delete_webhook(
     }
 }
 
+async fn list_api_keys(State(state): State<IngestState>, headers: HeaderMap) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+        return problem_response(*problem);
+    }
+
+    let store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+
+    match store.list_api_keys() {
+        Ok(keys) => json_status_response(
+            StatusCode::OK.as_u16(),
+            json!({"keys": keys.into_iter().map(api_key_response).collect::<Vec<_>>()}),
+        ),
+        Err(_) => problem_response(internal_problem()),
+    }
+}
+
+async fn create_api_key(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    if let Err(problem) = check_content_length(&headers) {
+        return problem_response(*problem);
+    }
+
+    if body.len() as u64 > MAX_JSON_BODY_BYTES {
+        return problem_response(payload_too_large_problem(
+            "Request body exceeds 100KB limit.",
+        ));
+    }
+
+    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+        return problem_response(*problem);
+    }
+
+    let attrs = match decode_optional_json_object(&body) {
+        Ok(attrs) => attrs,
+        Err(problem) => return problem_response(*problem),
+    };
+    let request = match parse_api_key_create(attrs) {
+        Ok(request) => request,
+        Err(problem) => return problem_response(*problem),
+    };
+    let raw_key = canary_core::secrets::api_key("live");
+    let key_hash = {
+        let raw_key = raw_key.clone();
+        match tokio::task::spawn_blocking(move || bcrypt::hash(raw_key, bcrypt::DEFAULT_COST)).await
+        {
+            Ok(Ok(hash)) => hash,
+            _ => return problem_response(internal_problem()),
+        }
+    };
+    let key = ApiKeyInsert {
+        id: canary_core::ids::ApiKeyId::generate().into_string(),
+        name: request.name,
+        key_prefix: raw_key
+            .chars()
+            .take(canary_store::API_KEY_PREFIX_LEN)
+            .collect(),
+        key_hash,
+        created_at: current_rfc3339(),
+        revoked_at: None,
+        scope: request.scope,
+    };
+    let response_body = api_key_insert_response(&key, &raw_key);
+
+    let mut store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    match store.insert_api_key(key) {
+        Ok(()) => json_status_response(StatusCode::CREATED.as_u16(), response_body),
+        Err(_) => problem_response(internal_problem()),
+    }
+}
+
+async fn revoke_api_key(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+        return problem_response(*problem);
+    }
+
+    let mut store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    match store.revoke_api_key(&id, &current_rfc3339()) {
+        Ok(true) => json_status_response(StatusCode::OK.as_u16(), json!({"status": "revoked"})),
+        Ok(false) => problem_response(not_found_problem("API key not found.")),
+        Err(_) => problem_response(internal_problem()),
+    }
+}
+
 async fn test_webhook(
     State(state): State<IngestState>,
     headers: HeaderMap,
@@ -1330,6 +1432,35 @@ struct ParsedCheckIn {
     input: MonitorCheckInInput,
 }
 
+struct ApiKeyCreate {
+    name: String,
+    scope: String,
+}
+
+fn api_key_response(key: ApiKeyRecord) -> Value {
+    json!({
+        "id": key.id,
+        "name": key.name,
+        "scope": key.scope,
+        "key_prefix": key.key_prefix,
+        "active": key.revoked_at.is_none(),
+        "created_at": key.created_at,
+        "revoked_at": key.revoked_at,
+    })
+}
+
+fn api_key_insert_response(key: &ApiKeyInsert, raw_key: &str) -> Value {
+    json!({
+        "id": key.id,
+        "name": key.name,
+        "scope": key.scope,
+        "key": raw_key,
+        "key_prefix": key.key_prefix,
+        "created_at": key.created_at,
+        "warning": "Store this key securely. It will not be shown again.",
+    })
+}
+
 fn monitor_response(monitor: MonitorRecord) -> Value {
     json!({
         "id": monitor.id,
@@ -1461,6 +1592,46 @@ fn parse_webhook_create(
         active: true,
         created_at: current_rfc3339(),
     })
+}
+
+fn parse_api_key_create(attrs: Map<String, Value>) -> Result<ApiKeyCreate, Box<ProblemDetails>> {
+    let mut errors: ValidationErrors = BTreeMap::new();
+    for field in attrs.keys() {
+        if !matches!(field.as_str(), "name" | "scope") {
+            errors.insert(field.clone(), vec!["is not permitted".to_owned()]);
+        }
+    }
+    let name = match attrs.get("name") {
+        Some(Value::String(value)) if !value.is_empty() => value.clone(),
+        Some(Value::String(_)) => {
+            errors.insert("name".to_owned(), vec!["can't be blank".to_owned()]);
+            "unnamed".to_owned()
+        }
+        Some(Value::Null) | None => "unnamed".to_owned(),
+        Some(_) => {
+            errors.insert("name".to_owned(), vec!["must be a string".to_owned()]);
+            "unnamed".to_owned()
+        }
+    };
+    let scope = match attrs.get("scope") {
+        Some(Value::String(value)) => value.clone(),
+        Some(Value::Null) | None => "admin".to_owned(),
+        Some(_) => {
+            errors.insert("scope".to_owned(), vec!["must be a string".to_owned()]);
+            "admin".to_owned()
+        }
+    };
+    if !matches!(scope.as_str(), "admin" | "ingest-only" | "read-only")
+        && !matches!(attrs.get("scope"), Some(value) if !value.is_string())
+    {
+        errors.insert("scope".to_owned(), vec!["is invalid".to_owned()]);
+    }
+
+    if errors.is_empty() {
+        Ok(ApiKeyCreate { name, scope })
+    } else {
+        Err(Box::new(api_key_validation_problem(errors)))
+    }
 }
 
 fn parse_monitor_create(attrs: Map<String, Value>) -> Result<MonitorInsert, Box<ProblemDetails>> {
@@ -2027,6 +2198,14 @@ fn check_content_length(headers: &HeaderMap) -> Result<(), Box<ProblemDetails>> 
     }
 }
 
+fn decode_optional_json_object(body: &Bytes) -> Result<Map<String, Value>, Box<ProblemDetails>> {
+    if body.is_empty() {
+        Ok(Map::new())
+    } else {
+        decode_json_object(body, None)
+    }
+}
+
 fn json_response<T>(contract: PublicResponse<T>) -> Response<Body>
 where
     T: Serialize,
@@ -2080,6 +2259,16 @@ fn monitor_validation_problem(errors: ValidationErrors) -> ProblemDetails {
         422,
         ProblemCode::ValidationError,
         "Invalid monitor configuration.",
+        None,
+    )
+    .with_extra("errors", json!(errors))
+}
+
+fn api_key_validation_problem(errors: ValidationErrors) -> ProblemDetails {
+    ProblemDetails::new(
+        422,
+        ProblemCode::ValidationError,
+        "Invalid API key request.",
         None,
     )
     .with_extra("errors", json!(errors))
@@ -4068,6 +4257,196 @@ mod tests {
         assert_eq!(
             json_body(invalid_shape_response).await?["detail"],
             "Invalid webhook configuration."
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admin_api_key_mutations_follow_phoenix_contract() -> Result<(), Box<dyn Error>> {
+        let router = ingest_router(test_ingest_state()?);
+
+        let create_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/keys",
+                ADMIN_KEY,
+                r#"{"name":"deploy","scope":"read-only"}"#,
+            )?)
+            .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let created = json_body(create_response).await?;
+        let key_id = created["id"].as_str().ok_or("missing key id")?.to_owned();
+        let raw_key = created["key"].as_str().ok_or("missing raw key")?.to_owned();
+        assert!(key_id.starts_with("KEY-"));
+        assert!(raw_key.starts_with("sk_live_"));
+        assert_eq!(created["name"], "deploy");
+        assert_eq!(created["scope"], "read-only");
+        assert_eq!(
+            created["key_prefix"],
+            &raw_key[..canary_store::API_KEY_PREFIX_LEN]
+        );
+        assert_eq!(
+            created["warning"],
+            "Store this key securely. It will not be shown again."
+        );
+        assert!(created["created_at"].as_str().is_some());
+
+        let list_response = router
+            .clone()
+            .oneshot(read_request(ADMIN_KEY, "/api/v1/keys")?)
+            .await?;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let listed = json_body(list_response).await?;
+        let listed_key = listed["keys"]
+            .as_array()
+            .ok_or("keys should be an array")?
+            .iter()
+            .find(|key| key["id"] == key_id)
+            .ok_or("missing listed key")?;
+        assert_eq!(listed_key["name"], "deploy");
+        assert_eq!(listed_key["scope"], "read-only");
+        assert_eq!(
+            listed_key["key_prefix"],
+            &raw_key[..canary_store::API_KEY_PREFIX_LEN]
+        );
+        assert_eq!(listed_key["active"], true);
+        assert_eq!(listed_key["revoked_at"], Value::Null);
+        assert!(listed_key.get("key").is_none());
+        assert!(listed_key.get("key_hash").is_none());
+
+        let read_with_created_key = router
+            .clone()
+            .oneshot(read_request(&raw_key, "/api/v1/incidents")?)
+            .await?;
+        assert_eq!(read_with_created_key.status(), StatusCode::OK);
+
+        let revoke_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/keys/{key_id}/revoke"),
+                ADMIN_KEY,
+                "{}",
+            )?)
+            .await?;
+        assert_eq!(revoke_response.status(), StatusCode::OK);
+        assert_eq!(json_body(revoke_response).await?["status"], "revoked");
+
+        let list_after_revoke = router
+            .clone()
+            .oneshot(read_request(ADMIN_KEY, "/api/v1/keys")?)
+            .await?;
+        let revoked_key = json_body(list_after_revoke).await?["keys"]
+            .as_array()
+            .ok_or("keys should be an array")?
+            .iter()
+            .find(|key| key["id"] == key_id)
+            .ok_or("missing revoked key")?
+            .clone();
+        assert_eq!(revoked_key["active"], false);
+        assert!(revoked_key["revoked_at"].as_str().is_some());
+
+        let read_with_revoked_key = router
+            .clone()
+            .oneshot(read_request(&raw_key, "/api/v1/incidents")?)
+            .await?;
+        assert_eq!(read_with_revoked_key.status(), StatusCode::UNAUTHORIZED);
+
+        let missing_response = router
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/keys/KEY-missing/revoke",
+                ADMIN_KEY,
+                "{}",
+            )?)
+            .await?;
+        assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            json_body(missing_response).await?["detail"],
+            "API key not found."
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admin_api_key_create_defaults_and_rejects_invalid_scope() -> Result<(), Box<dyn Error>>
+    {
+        let router = ingest_router(test_ingest_state()?);
+
+        let default_response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/keys")
+                    .header("authorization", format!("Bearer {ADMIN_KEY}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(default_response.status(), StatusCode::CREATED);
+        let default_key = json_body(default_response).await?;
+        assert_eq!(default_key["name"], "unnamed");
+        assert_eq!(default_key["scope"], "admin");
+
+        let forbidden_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/keys",
+                INGEST_KEY,
+                r#"{"name":"bad","scope":"admin"}"#,
+            )?)
+            .await?;
+        assert_eq!(forbidden_response.status(), StatusCode::FORBIDDEN);
+
+        let invalid_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/keys",
+                ADMIN_KEY,
+                r#"{"name":7,"scope":"super-admin"}"#,
+            )?)
+            .await?;
+        assert_eq!(invalid_response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let invalid_body = json_body(invalid_response).await?;
+        assert_eq!(invalid_body["detail"], "Invalid API key request.");
+        assert_eq!(invalid_body["errors"]["name"], json!(["must be a string"]));
+        assert_eq!(invalid_body["errors"]["scope"], json!(["is invalid"]));
+
+        let blank_name_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/keys",
+                ADMIN_KEY,
+                r#"{"name":"","scope":"admin"}"#,
+            )?)
+            .await?;
+        assert_eq!(
+            blank_name_response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let blank_name_body = json_body(blank_name_response).await?;
+        assert_eq!(blank_name_body["errors"]["name"], json!(["can't be blank"]));
+
+        let extra_field_response = router
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/keys",
+                ADMIN_KEY,
+                r#"{"name":"extra-key","scope":"admin","extra":true}"#,
+            )?)
+            .await?;
+        assert_eq!(
+            extra_field_response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let extra_field_body = json_body(extra_field_response).await?;
+        assert_eq!(
+            extra_field_body["errors"]["extra"],
+            json!(["is not permitted"])
         );
 
         Ok(())

@@ -514,6 +514,16 @@ the Rust server accepts production traffic:
     outbound transport trait, but calls the blocking HTTP transport through
     `spawn_blocking` and does not create service events, retry jobs, or delivery
     ledger rows.
+49. Rust now implements the Phoenix admin API-key surface:
+    `GET /api/v1/keys`, `POST /api/v1/keys`, and
+    `POST /api/v1/keys/{id}/revoke`. Store owns key metadata listing,
+    bcrypt-backed insert rows, active verification, and revocation updates over
+    the existing `api_keys` table. Server owns only admin auth, optional JSON
+    body decoding, Phoenix defaults (`name = "unnamed"`, `scope = "admin"`),
+    one-time raw `sk_live_` key generation, and response conversion. List
+    responses expose only metadata plus `active`; create responses are the only
+    place the raw key appears. Bcrypt hashing runs through `spawn_blocking` so
+    the Axum request task does not perform CPU-heavy password hashing inline.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed

@@ -79,6 +79,15 @@ defmodule CanaryWeb.OpenAPIControllerTest do
              "schemas",
              "ApiKeyCreateRequest",
              "properties",
+             "name",
+             "minLength"
+           ]) == 1
+
+    assert get_in(body, [
+             "components",
+             "schemas",
+             "ApiKeyCreateRequest",
+             "properties",
              "scope",
              "$ref"
            ]) ==
@@ -89,6 +98,9 @@ defmodule CanaryWeb.OpenAPIControllerTest do
 
     assert get_in(body, ["paths", "/api/v1/keys", "post", "responses", "403", "$ref"]) ==
              "#/components/responses/ForbiddenProblem"
+
+    assert get_in(body, ["paths", "/api/v1/keys", "post", "responses", "422", "$ref"]) ==
+             "#/components/responses/ValidationProblem"
   end
 
   test "documents incident action brief as part of the one-call responder payload", %{conn: conn} do

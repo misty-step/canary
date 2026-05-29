@@ -1664,6 +1664,9 @@
           "403": {
             "$ref": "#/components/responses/ForbiddenProblem"
           },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          },
           "500": {
             "$ref": "#/components/responses/InternalProblem"
           }
@@ -4371,7 +4374,8 @@
         "additionalProperties": false,
         "properties": {
           "name": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           },
           "scope": {
             "$ref": "#/components/schemas/ApiKeyScope"

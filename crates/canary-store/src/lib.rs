@@ -17,7 +17,7 @@ mod query;
 mod schema;
 mod webhook_deliveries;
 
-pub use api_keys::{API_KEY_PREFIX_LEN, ApiKeyInsert, VerifiedApiKey};
+pub use api_keys::{API_KEY_PREFIX_LEN, ApiKeyInsert, ApiKeyRecord, VerifiedApiKey};
 pub use health::{
     ActiveTargetProbeSchedule, HealthTransitionCommit, MonitorCheckInCommit,
     MonitorCheckInCommitResult, MonitorCheckInObservation, MonitorCheckInSnapshot, MonitorInsert,
@@ -208,6 +208,16 @@ impl Store {
     /// Insert one API-key row whose raw secret has already been bcrypt-hashed.
     pub fn insert_api_key(&mut self, key: ApiKeyInsert) -> Result<()> {
         api_keys::insert(&self.connection, key)
+    }
+
+    /// Return admin-visible API-key rows ordered newest first.
+    pub fn list_api_keys(&self) -> Result<Vec<ApiKeyRecord>> {
+        api_keys::list(&self.connection)
+    }
+
+    /// Revoke one API key by id.
+    pub fn revoke_api_key(&mut self, key_id: &str, revoked_at: &str) -> Result<bool> {
+        api_keys::revoke(&self.connection, key_id, revoked_at)
     }
 
     /// Verify a raw bearer token against active bcrypt-hashed API-key rows.
@@ -1313,6 +1323,48 @@ mod tests {
 
         assert_eq!(store.verify_api_key("sk_live_revoked_secret")?, None);
         assert_eq!(store.verify_api_key("sk_live_missing_secret")?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn admin_api_keys_list_and_revoke_metadata_without_hashes()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        insert_api_key(
+            &mut store,
+            "KEY-old",
+            "sk_live_old_secret",
+            "read-only",
+            None,
+        )?;
+        store.insert_api_key(ApiKeyInsert {
+            id: "KEY-new".to_owned(),
+            name: "deploy key".to_owned(),
+            key_prefix: api_keys::key_prefix("sk_live_new_secret"),
+            key_hash: bcrypt::hash("sk_live_new_secret", bcrypt::DEFAULT_COST)?,
+            created_at: "2026-05-28T21:00:00Z".to_owned(),
+            revoked_at: None,
+            scope: "admin".to_owned(),
+        })?;
+
+        let keys = store.list_api_keys()?;
+
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].id, "KEY-new");
+        assert_eq!(keys[0].name, "deploy key");
+        assert_eq!(keys[0].scope, "admin");
+        assert_eq!(keys[0].key_prefix, "sk_live_new_");
+        assert_eq!(keys[0].revoked_at, None);
+        assert_eq!(keys[1].id, "KEY-old");
+
+        assert!(store.revoke_api_key("KEY-new", "2026-05-28T22:00:00Z")?);
+        assert!(!store.revoke_api_key("KEY-missing", "2026-05-28T22:00:00Z")?);
+        assert_eq!(store.verify_api_key("sk_live_new_secret")?, None);
+        assert_eq!(
+            store.list_api_keys()?[0].revoked_at,
+            Some("2026-05-28T22:00:00Z".to_owned())
+        );
+
         Ok(())
     }
 

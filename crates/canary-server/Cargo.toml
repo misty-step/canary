@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 axum = "0.8"
+bcrypt = "0.17.1"
 canary-ingest = { path = "../canary-ingest" }
 canary-core = { path = "../canary-core" }
 canary-http = { path = "../canary-http" }
@@ -23,7 +24,6 @@ tokio = { version = "1.48", features = ["net"] }
 x509-parser = "0.18"
 
 [dev-dependencies]
-bcrypt = "0.17.1"
 rcgen = "0.14"
 tokio = { version = "1.48", features = ["macros", "net", "rt"] }
 tower = { version = "0.5", features = ["util"] }
