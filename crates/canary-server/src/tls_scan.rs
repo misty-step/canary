@@ -49,6 +49,8 @@ pub struct TlsExpiryScanLifecycleReport {
     pub failed: usize,
     /// Advisory webhook enqueue failures after service-event commit.
     pub event_fanout_failed: usize,
+    /// True when shutdown interrupted the pass between candidates.
+    pub interrupted: bool,
 }
 
 /// Bounded lifecycle adapter for TLS-expiry warning evaluation.
@@ -69,6 +71,15 @@ impl TlsExpiryScanLifecycle {
         now: OffsetDateTime,
         now_string: String,
     ) -> Result<TlsExpiryScanLifecycleReport, String> {
+        self.run_due_until(now, now_string, || false)
+    }
+
+    fn run_due_until(
+        &self,
+        now: OffsetDateTime,
+        now_string: String,
+        should_stop: impl Fn() -> bool,
+    ) -> Result<TlsExpiryScanLifecycleReport, String> {
         let candidates = self.load_candidates()?;
         let mut report = TlsExpiryScanLifecycleReport {
             loaded: candidates.len(),
@@ -76,6 +87,10 @@ impl TlsExpiryScanLifecycle {
         };
 
         for candidate in candidates {
+            if should_stop() {
+                report.interrupted = true;
+                break;
+            }
             match run_tls_expiry_scan_once(
                 &self.store,
                 self.event_sink.as_ref(),
@@ -309,7 +324,7 @@ fn run_lifecycle_worker(
             match catch_unwind(AssertUnwindSafe(|| {
                 let now = OffsetDateTime::now_utc();
                 let now_string = now.format(&Rfc3339).unwrap_or_else(|_| current_rfc3339());
-                lifecycle.run_due(now, now_string)
+                lifecycle.run_due_until(now, now_string, || control.is_stopping())
             })) {
                 Ok(Ok(_)) => {}
                 Ok(Err(_)) | Err(_) => control.record_failure(),
@@ -376,6 +391,7 @@ mod tests {
                 recorded: 1,
                 failed: 0,
                 event_fanout_failed: 0,
+                interrupted: false,
             }
         );
         assert_eq!(
@@ -410,6 +426,7 @@ mod tests {
 
         assert_eq!(report.recorded, 1);
         assert_eq!(report.event_fanout_failed, 1);
+        assert!(!report.interrupted);
         let store = store.lock().map_err(|_| "store lock poisoned")?;
         let timeline = store.timeline("24h", TimelineQueryOptions::default())?;
         assert_eq!(timeline.events.len(), 1);
@@ -417,11 +434,52 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn lifecycle_stops_between_candidates_when_shutdown_is_requested() -> Result<(), Box<dyn Error>>
+    {
+        let mut store = Store::open_in_memory()?;
+        store.migrate()?;
+        seed_tls_target_with_id(&mut store, "TGT-api-a", "api-a", "2026-06-05T00:00:00Z")?;
+        seed_tls_target_with_id(&mut store, "TGT-api-b", "api-b", "2026-06-05T00:00:00Z")?;
+        let store = Arc::new(Mutex::new(store));
+        let sink = Arc::new(RecordingSink::default());
+        let lifecycle = TlsExpiryScanLifecycle::new(store, sink);
+        let now = OffsetDateTime::parse("2026-05-29T00:00:00Z", &Rfc3339)?;
+        let checks = AtomicU64::new(0);
+
+        let report = lifecycle.run_due_until(now, "2026-05-29T00:00:00Z".to_owned(), || {
+            checks.fetch_add(1, Ordering::SeqCst) > 0
+        })?;
+
+        assert_eq!(
+            report,
+            TlsExpiryScanLifecycleReport {
+                loaded: 2,
+                planned: 1,
+                recorded: 1,
+                failed: 0,
+                event_fanout_failed: 0,
+                interrupted: true,
+            }
+        );
+
+        Ok(())
+    }
+
     fn seed_tls_target(store: &mut Store, tls_expires_at: &str) -> Result<(), Box<dyn Error>> {
+        seed_tls_target_with_id(store, "TGT-api", "api-web", tls_expires_at)
+    }
+
+    fn seed_tls_target_with_id(
+        store: &mut Store,
+        id: &str,
+        name: &str,
+        tls_expires_at: &str,
+    ) -> Result<(), Box<dyn Error>> {
         store.insert_target(TargetInsert {
-            id: "TGT-api".to_owned(),
+            id: id.to_owned(),
             url: "https://api.example.test/healthz".to_owned(),
-            name: "api-web".to_owned(),
+            name: name.to_owned(),
             service: "api".to_owned(),
             method: "GET".to_owned(),
             headers: None,
@@ -436,7 +494,7 @@ mod tests {
             created_at: "2026-05-29T00:00:00Z".to_owned(),
         })?;
         store.commit_target_probe(TargetProbeCommit {
-            target_id: "TGT-api".to_owned(),
+            target_id: id.to_owned(),
             state: "up".to_owned(),
             consecutive_failures: 0,
             consecutive_successes: 1,

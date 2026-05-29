@@ -721,6 +721,20 @@ the Rust server accepts production traffic:
     `lifecycle_caps_concurrent_due_probe_fanout` lock the production invariants:
     no duplicate in-flight target probes, bounded global fanout, ignored stale
     completions for removed targets, and bounded worker shutdown.
+66. The monitor-overdue and TLS-expiry lifecycle adapters now share the same
+    explicit stop-between-work-items contract as the stronger background
+    workers without introducing a generic worker framework. `run_due` remains
+    the simple public one-pass API, while private `run_due_until` variants let
+    the OS-thread workers observe shutdown between persisted candidates and
+    report `interrupted` when a pass exits early. Monitor overdue also now
+    records lifecycle failures through the worker control path instead of
+    silently swallowing store errors or panics. The focused tests
+    `monitor_overdue::tests::lifecycle_stops_between_candidates_when_shutdown_is_requested`,
+    `monitor_overdue::tests::worker_records_lifecycle_failures`, and
+    `tls_scan::tests::lifecycle_stops_between_candidates_when_shutdown_is_requested`
+    lock the production invariants: shutdown does not wait for a full backlog
+    of sequential candidates, advisory fanout failures remain non-fatal, and
+    repeated monitor-overdue lifecycle failures are visible to operators.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -748,9 +762,6 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Audit the remaining background lifecycle adapters for the same explicit
-   bounded-shutdown contract now used by webhooks, retention, monitor overdue,
-   TLS scan, and target probes. Prefer deleting bespoke differences over
-   introducing a generic worker framework; only extract shared code if a third
-   independently verified lifecycle invariant becomes duplicated enough to hide
-   bugs.
+1. Continue converging the Rust replacement around small, typed contracts:
+   review the next Phoenix parity surface with the same bias used here, keeping
+   lifecycle differences explicit unless duplicated invariants hide real bugs.

@@ -8,7 +8,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
     time::Duration as StdDuration,
@@ -110,6 +110,8 @@ pub struct MonitorOverdueLifecycleReport {
     pub failed: usize,
     /// Advisory health-transition webhook enqueue failures.
     pub event_fanout_failed: usize,
+    /// True when shutdown interrupted the pass between candidates.
+    pub interrupted: bool,
 }
 
 /// Bounded lifecycle adapter for monitor overdue evaluation.
@@ -130,6 +132,15 @@ impl MonitorOverdueLifecycle {
         now: String,
         now_millis: i64,
     ) -> Result<MonitorOverdueLifecycleReport, String> {
+        self.run_due_until(now, now_millis, || false)
+    }
+
+    fn run_due_until(
+        &self,
+        now: String,
+        now_millis: i64,
+        should_stop: impl Fn() -> bool,
+    ) -> Result<MonitorOverdueLifecycleReport, String> {
         let candidates = self.load_candidates()?;
         let mut report = MonitorOverdueLifecycleReport {
             loaded: candidates.len(),
@@ -137,6 +148,10 @@ impl MonitorOverdueLifecycle {
         };
 
         for candidate in candidates {
+            if should_stop() {
+                report.interrupted = true;
+                break;
+            }
             match self
                 .runtime
                 .run_candidate(candidate, now.clone(), now_millis)
@@ -203,6 +218,11 @@ impl MonitorOverdueLifecycleWorker {
     /// Resume lifecycle passes and wake the worker promptly.
     pub fn resume(&self) {
         self.control.resume();
+    }
+
+    /// Return lifecycle failures observed by this process.
+    pub fn failure_count(&self) -> u64 {
+        self.control.failure_count()
     }
 
     /// Request shutdown without waiting for an in-flight pass to finish.
@@ -280,6 +300,7 @@ pub fn run_monitor_overdue_once(
 struct LifecycleControl {
     stopping: AtomicBool,
     paused: AtomicBool,
+    failures: AtomicU64,
     lock: Mutex<()>,
     condvar: Condvar,
 }
@@ -308,6 +329,14 @@ impl LifecycleControl {
         self.paused.load(Ordering::SeqCst)
     }
 
+    fn record_failure(&self) {
+        self.failures.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn failure_count(&self) -> u64 {
+        self.failures.load(Ordering::SeqCst)
+    }
+
     fn wait(&self, interval: StdDuration) -> bool {
         if self.is_stopping() {
             return true;
@@ -330,9 +359,12 @@ fn run_lifecycle_worker(
 ) {
     while !control.is_stopping() {
         if !control.is_paused() {
-            let _ = catch_unwind(AssertUnwindSafe(|| {
+            match catch_unwind(AssertUnwindSafe(|| {
                 lifecycle.run_due(current_rfc3339(), current_unix_millis())
-            }));
+            })) {
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) | Err(_) => control.record_failure(),
+            }
         }
         if control.wait(interval) {
             break;
@@ -372,6 +404,8 @@ fn health_state(value: &str) -> Option<HealthState> {
 mod tests {
     use std::error::Error;
     use std::sync::Mutex as StdMutex;
+    use std::thread;
+    use std::time::Instant;
 
     use canary_store::{
         MonitorCheckInCommit, MonitorCheckInObservation, MonitorInsert, MonitorOverdueCandidate,
@@ -452,6 +486,7 @@ mod tests {
                 transitioned: 1,
                 failed: 0,
                 event_fanout_failed: 0,
+                interrupted: false,
             }
         );
         let waiting = lifecycle.run_due("2026-05-28T20:00:30Z".to_owned(), 0)?;
@@ -463,6 +498,7 @@ mod tests {
                 transitioned: 0,
                 failed: 0,
                 event_fanout_failed: 0,
+                interrupted: false,
             }
         );
         let down = lifecycle.run_due("2026-05-28T20:01:06Z".to_owned(), 0)?;
@@ -534,6 +570,7 @@ mod tests {
         assert_eq!(report.transitioned, 1);
         assert_eq!(report.failed, 0);
         assert_eq!(report.event_fanout_failed, 2);
+        assert!(!report.interrupted);
         assert_eq!(
             recorder.snapshot().get(&crate::EnqueueFailureKey {
                 source: HealthEventSource::MonitorOverdue,
@@ -541,6 +578,65 @@ mod tests {
             }),
             Some(&1)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_stops_between_candidates_when_shutdown_is_requested() -> Result<(), Box<dyn Error>>
+    {
+        let mut store = Store::open_in_memory()?;
+        store.migrate()?;
+        seed_overdue_monitor(&mut store, "MON-overdue-a")?;
+        seed_overdue_monitor(&mut store, "MON-overdue-b")?;
+
+        let store = Arc::new(Mutex::new(store));
+        let sink = Arc::new(RecordingSink::default());
+        let fanout = HealthEventFanout::new_without_failure_sink(sink);
+        let lifecycle =
+            MonitorOverdueLifecycle::new(store.clone(), MonitorOverdueRuntime::new(store, fanout));
+        let checks = AtomicU64::new(0);
+
+        let report = lifecycle.run_due_until("2026-05-28T20:00:06Z".to_owned(), 0, || {
+            checks.fetch_add(1, Ordering::SeqCst) > 0
+        })?;
+
+        assert_eq!(
+            report,
+            MonitorOverdueLifecycleReport {
+                loaded: 2,
+                noop: 0,
+                transitioned: 1,
+                failed: 0,
+                event_fanout_failed: 0,
+                interrupted: true,
+            }
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn worker_records_lifecycle_failures() -> Result<(), Box<dyn Error>> {
+        let store = Arc::new(Mutex::new(Store::open_in_memory()?));
+        let sink = Arc::new(RecordingSink::default());
+        let fanout = HealthEventFanout::new_without_failure_sink(sink);
+        let worker = MonitorOverdueLifecycleWorker::spawn(
+            MonitorOverdueLifecycle::new(store.clone(), MonitorOverdueRuntime::new(store, fanout)),
+            MonitorOverdueLifecycleConfig {
+                tick_interval: StdDuration::from_millis(10),
+            },
+        )?;
+
+        let deadline = Instant::now() + StdDuration::from_secs(1);
+        while worker.failure_count() == 0 {
+            if Instant::now() >= deadline {
+                return Err("timed out waiting for monitor overdue failure count".into());
+            }
+            thread::sleep(StdDuration::from_millis(10));
+        }
+
+        worker.join()?;
+
         Ok(())
     }
 
@@ -580,6 +676,37 @@ mod tests {
                 .map_err(|_| "events lock poisoned")?
                 .is_empty()
         );
+        Ok(())
+    }
+
+    fn seed_overdue_monitor(store: &mut Store, id: &str) -> Result<(), Box<dyn Error>> {
+        store.insert_monitor(MonitorInsert {
+            id: id.to_owned(),
+            name: format!("Overdue worker {id}"),
+            service: "worker".to_owned(),
+            mode: "schedule".to_owned(),
+            expected_every_ms: 60_000,
+            grace_ms: 5_000,
+            created_at: "2026-05-28T19:00:00Z".to_owned(),
+        })?;
+        store.commit_monitor_check_in(MonitorCheckInCommit {
+            monitor_id: id.to_owned(),
+            state: "up".to_owned(),
+            last_check_in_at: Some("2026-05-28T20:00:00Z".to_owned()),
+            last_check_in_status: Some("alive".to_owned()),
+            deadline_at: Some("2026-05-28T20:00:05Z".to_owned()),
+            check_in: MonitorCheckInObservation {
+                id: format!("CHK-{id}-alive"),
+                external_id: None,
+                status: "alive".to_owned(),
+                observed_at: "2026-05-28T20:00:00Z".to_owned(),
+                ttl_ms: None,
+                summary: None,
+                context: None,
+            },
+            now: "2026-05-28T20:00:00Z".to_owned(),
+            transition: None,
+        })?;
         Ok(())
     }
 }
