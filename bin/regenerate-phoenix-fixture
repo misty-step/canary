@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fixture="$repo_root/crates/canary-store/tests/fixtures/phoenix_schema.db"
+test_partition="_rust_fixture"
+test_db="$repo_root/canary_test${test_partition}.db"
+
+cd "$repo_root"
+
+rm -f "$test_db" "$test_db-shm" "$test_db-wal"
+MIX_ENV=test MIX_TEST_PARTITION="$test_partition" mix ecto.create --quiet
+MIX_ENV=test MIX_TEST_PARTITION="$test_partition" mix ecto.migrate --quiet
+
+mkdir -p "$(dirname "$fixture")"
+tmp="$(mktemp "${TMPDIR:-/tmp}/canary-phoenix-fixture.XXXXXX.db")"
+trap 'rm -f "$tmp" "$tmp-shm" "$tmp-wal"' EXIT
+
+cp "$test_db" "$tmp"
+sqlite3 "$tmp" "PRAGMA wal_checkpoint(TRUNCATE); VACUUM;"
+cp "$tmp" "$fixture"
+chmod 0644 "$fixture"
+rm -f "$test_db" "$test_db-shm" "$test_db-wal"
+
+echo "Regenerated $fixture"

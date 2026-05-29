@@ -225,6 +225,18 @@ the Rust server accepts production traffic:
     time, and best-effort webhook enqueue. This keeps correlation behind one
     deep persistence method instead of spreading incident rules through Axum
     handlers or worker glue.
+26. `crates/canary-store/tests/phoenix_fixture_compat.rs`: the Rust store now
+    has a checked Phoenix-migrated SQLite fixture gate before production
+    traffic moves. The fixture preserves Ecto's `schema_migrations` ledger and
+    `user_version = 0`; Rust tests compare tables, product columns, explicit
+    indexes, partial unique indexes, foreign keys, and the FTS trigger surface
+    against a fresh Rust-migrated schema. The same fixture is copied into
+    temporary writable databases to prove `Store::migrate` can restamp a
+    Phoenix DB without deleting the Ecto ledger and that Rust ingest, incident
+    correlation, FTS, and webhook delivery queries work against the
+    Phoenix-shaped file. `bin/regenerate-phoenix-fixture` is the only intended
+    refresh path, and it uses a partitioned Phoenix test database so normal
+    local test state is not the fixture source.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -252,8 +264,9 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Add compatibility checks against a migrated Phoenix fixture database before
-   any production traffic moves to the Rust server.
-2. Port health-transition writes into the Rust store so incident correlation can
+1. Port health-transition writes into the Rust store so incident correlation can
    attach both error groups and non-HTTP health signals through the same
    transaction boundary.
+2. Add a populated Phoenix fixture once health and annotation writes are ported
+   so Rust read models are checked against Phoenix-inserted production-shaped
+   rows, not only an empty migrated schema.

@@ -1,0 +1,485 @@
+//! Compatibility tests for Rust store operations on a Phoenix-migrated SQLite database.
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fs,
+    path::{Path, PathBuf},
+    str::FromStr,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use canary_core::{
+    ids::{ErrorId, EventId, IncidentId},
+    ingest::classification::{Category, Classification, Component, Persistence},
+};
+use canary_store::{
+    ErrorIngest, ErrorIngestIds, ErrorIngestPayload, IncidentCorrelation, Store,
+    WebhookDeliveryInsert, WebhookDeliveryListOptions, WebhookDeliveryStatus,
+};
+use rusqlite::{Connection, OpenFlags, params};
+
+const PHOENIX_FIXTURE: &str = "tests/fixtures/phoenix_schema.db";
+const RUST_SCHEMA_VERSION: u32 = 2026042200;
+
+const PHOENIX_MIGRATIONS: &[&str] = &[
+    "20260314000001",
+    "20260314230000",
+    "20260322120000",
+    "20260322164500",
+    "20260324121000",
+    "20260328190000",
+    "20260330120000",
+    "20260330140000",
+    "20260402230500",
+    "20260416173500",
+    "20260418010000",
+    "20260422000000",
+];
+
+const RUST_TABLES: &[&str] = &[
+    "annotations",
+    "api_keys",
+    "error_groups",
+    "errors",
+    "errors_fts",
+    "errors_fts_config",
+    "errors_fts_data",
+    "errors_fts_docsize",
+    "errors_fts_idx",
+    "incident_signals",
+    "incidents",
+    "monitor_check_ins",
+    "monitor_state",
+    "monitors",
+    "oban_jobs",
+    "seed_runs",
+    "service_events",
+    "target_checks",
+    "target_state",
+    "targets",
+    "webhook_deliveries",
+    "webhooks",
+];
+
+const PRODUCT_TABLES: &[&str] = &[
+    "annotations",
+    "api_keys",
+    "error_groups",
+    "errors",
+    "incident_signals",
+    "incidents",
+    "monitor_check_ins",
+    "monitor_state",
+    "monitors",
+    "oban_jobs",
+    "seed_runs",
+    "service_events",
+    "target_checks",
+    "target_state",
+    "targets",
+    "webhook_deliveries",
+    "webhooks",
+];
+
+const FOREIGN_KEY_TABLES: &[&str] = &[
+    "annotations",
+    "incident_signals",
+    "monitor_check_ins",
+    "monitor_state",
+];
+
+#[derive(Debug, PartialEq, Eq)]
+struct Column {
+    cid: i64,
+    name: String,
+    data_type: String,
+    not_null: bool,
+    default_value: Option<String>,
+    primary_key_position: i64,
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct IndexSql {
+    table: String,
+    name: String,
+    sql: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ForeignKey {
+    table: String,
+    from: String,
+    to: String,
+    on_delete: String,
+}
+
+#[test]
+fn phoenix_fixture_has_the_tables_rust_expects() -> Result<(), Box<dyn Error>> {
+    let fixture = open_fixture_read_only()?;
+    let mut names = table_names(&fixture)?;
+    assert!(names.remove("schema_migrations"));
+
+    assert_eq!(
+        names,
+        RUST_TABLES.iter().map(|name| (*name).to_owned()).collect()
+    );
+    assert_eq!(user_version(&fixture)?, 0);
+    assert_eq!(
+        migration_versions(&fixture)?,
+        PHOENIX_MIGRATIONS
+            .iter()
+            .map(|version| (*version).to_owned())
+            .collect::<Vec<_>>()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn phoenix_fixture_columns_match_rust_schema() -> Result<(), Box<dyn Error>> {
+    let fixture = open_fixture_read_only()?;
+    let (rust_dir, rust) = rust_schema_connection()?;
+
+    for table in PRODUCT_TABLES {
+        assert_eq!(
+            columns(&fixture, table)?,
+            columns(&rust, table)?,
+            "column drift in {table}; regenerate via bin/regenerate-phoenix-fixture after auditing the Rust schema"
+        );
+    }
+
+    fs::remove_dir_all(rust_dir)?;
+    Ok(())
+}
+
+#[test]
+fn phoenix_fixture_indexes_and_foreign_keys_match_rust_schema() -> Result<(), Box<dyn Error>> {
+    let fixture = open_fixture_read_only()?;
+    let (rust_dir, rust) = rust_schema_connection()?;
+
+    assert_eq!(index_sql(&fixture)?, index_sql(&rust)?);
+    assert!(index_sql(&fixture)?.iter().any(|index| {
+        index.name == "incidents_open_service_unique_index"
+            && index.sql.contains("WHERE state != 'resolved'")
+    }));
+
+    for table in FOREIGN_KEY_TABLES {
+        assert_eq!(
+            foreign_keys(&fixture, table)?,
+            foreign_keys(&rust, table)?,
+            "foreign-key drift in {table}"
+        );
+    }
+
+    fs::remove_dir_all(rust_dir)?;
+    Ok(())
+}
+
+#[test]
+fn rust_migrate_restamps_a_phoenix_fixture_without_schema_drift() -> Result<(), Box<dyn Error>> {
+    let (dir, path) = copy_fixture("restamp")?;
+    let before = Connection::open(&path)?;
+    let mut before_tables = table_names(&before)?;
+    assert!(before_tables.remove("schema_migrations"));
+    let (rust_dir, rust) = rust_schema_connection()?;
+    assert_eq!(before_tables, table_names(&rust)?);
+    fs::remove_dir_all(rust_dir)?;
+    assert_eq!(user_version(&before)?, 0);
+    drop(before);
+
+    let mut store = Store::open(&path)?;
+    store.migrate()?;
+    assert_eq!(store.schema_version()?, RUST_SCHEMA_VERSION);
+    drop(store);
+
+    let after = Connection::open(&path)?;
+    assert_eq!(
+        migration_versions(&after)?,
+        PHOENIX_MIGRATIONS
+            .iter()
+            .map(|version| (*version).to_owned())
+            .collect::<Vec<_>>()
+    );
+    let mut after_tables = table_names(&after)?;
+    assert!(after_tables.remove("schema_migrations"));
+    let (rust_dir, rust) = rust_schema_connection()?;
+    assert_eq!(after_tables, table_names(&rust)?);
+    fs::remove_dir_all(rust_dir)?;
+
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn rust_store_writes_work_against_a_phoenix_fixture() -> Result<(), Box<dyn Error>> {
+    let (dir, path) = copy_fixture("write")?;
+    let mut store = Store::open(&path)?;
+
+    let ingest = error_ingest(
+        "ERR-123456789abc",
+        "EVT-123456789abc",
+        "group-phoenix-fixture",
+        "2026-05-28T20:00:00Z",
+    )?;
+    let commit = store.commit_error_ingest(ingest)?;
+    assert!(commit.is_new_class);
+    assert_eq!(
+        commit
+            .service_event
+            .as_ref()
+            .map(|event| event.event.as_str()),
+        Some("error.new_class")
+    );
+
+    let incident = store.correlate_incident(IncidentCorrelation {
+        signal_type: "error_group".to_owned(),
+        signal_ref: "group-phoenix-fixture".to_owned(),
+        service: "cadence".to_owned(),
+        incident_id: IncidentId::from_str("INC-123456789abc")?,
+        event_id: EventId::from_str("EVT-abcdefghijkl")?,
+        now: "2026-05-28T20:00:01Z".to_owned(),
+    })?;
+    assert_eq!(
+        incident.as_ref().map(|event| event.event.as_str()),
+        Some("incident.opened")
+    );
+    assert_eq!(store.error_count()?, 1);
+    drop(store);
+
+    let connection = Connection::open(&path)?;
+    let fts_count = connection.query_row(
+        "SELECT count(*) FROM errors_fts WHERE errors_fts MATCH 'worker'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    assert_eq!(fts_count, 1);
+    assert_eq!(
+        trigger_names(&connection, "errors")?,
+        BTreeSet::from([
+            "errors_fts_delete".to_owned(),
+            "errors_fts_insert".to_owned(),
+            "errors_fts_update".to_owned(),
+        ])
+    );
+    assert_eq!(
+        service_event_count(&connection, "INC-123456789abc", "incident.opened")?,
+        1
+    );
+
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn webhook_delivery_queries_keep_order_on_a_phoenix_fixture() -> Result<(), Box<dyn Error>> {
+    let (dir, path) = copy_fixture("webhook-order")?;
+    let mut store = Store::open(&path)?;
+
+    for (delivery_id, now) in [
+        ("DLV-222222222222", "2026-05-28T20:00:02Z"),
+        ("DLV-111111111111", "2026-05-28T20:00:01Z"),
+        ("DLV-333333333333", "2026-05-28T20:00:02Z"),
+    ] {
+        store.create_pending_webhook_delivery(WebhookDeliveryInsert {
+            delivery_id: delivery_id.to_owned(),
+            webhook_id: "WHK-123456789abc".to_owned(),
+            event: "error.new_class".to_owned(),
+            now: now.to_owned(),
+        })?;
+    }
+
+    let rows = store.webhook_deliveries(WebhookDeliveryListOptions {
+        status: Some(WebhookDeliveryStatus::Pending),
+        ..WebhookDeliveryListOptions::default()
+    })?;
+    let ids = rows
+        .iter()
+        .map(|row| row.delivery_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec!["DLV-333333333333", "DLV-222222222222", "DLV-111111111111"]
+    );
+
+    drop(store);
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+fn fixture_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(PHOENIX_FIXTURE)
+}
+
+fn open_fixture_read_only() -> Result<Connection, Box<dyn Error>> {
+    Ok(Connection::open_with_flags(
+        fixture_path(),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?)
+}
+
+fn copy_fixture(name: &str) -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "canary-phoenix-fixture-{name}-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("phoenix_schema.db");
+    fs::copy(fixture_path(), &path)?;
+    Ok((dir, path))
+}
+
+fn rust_schema_connection() -> Result<(PathBuf, Connection), Box<dyn Error>> {
+    let (dir, path) = copy_fixture("rust-schema-empty")?;
+    fs::remove_file(&path)?;
+    let mut store = Store::open(&path)?;
+    store.migrate()?;
+    drop(store);
+    let connection = Connection::open(&path)?;
+    Ok((dir, connection))
+}
+
+fn table_names(connection: &Connection) -> Result<BTreeSet<String>, Box<dyn Error>> {
+    let mut statement = connection.prepare(
+        "SELECT name
+         FROM sqlite_schema
+         WHERE type = 'table'
+           AND name NOT LIKE 'sqlite_%'
+         ORDER BY name",
+    )?;
+    Ok(statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?)
+}
+
+fn columns(
+    connection: &Connection,
+    table: &str,
+) -> Result<BTreeMap<String, Column>, Box<dyn Error>> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    Ok(statement
+        .query_map([], |row| {
+            Ok(Column {
+                cid: row.get(0)?,
+                name: row.get(1)?,
+                data_type: row.get(2)?,
+                not_null: row.get::<_, i64>(3)? == 1,
+                default_value: row.get(4)?,
+                primary_key_position: row.get(5)?,
+            })
+        })?
+        .map(|column| column.map(|column| (column.name.clone(), column)))
+        .collect::<rusqlite::Result<BTreeMap<_, _>>>()?)
+}
+
+fn index_sql(connection: &Connection) -> Result<BTreeSet<IndexSql>, Box<dyn Error>> {
+    let mut statement = connection.prepare(
+        "SELECT tbl_name, name, sql
+         FROM sqlite_schema
+         WHERE type = 'index'
+           AND name NOT LIKE 'sqlite_autoindex%'
+         ORDER BY tbl_name, name",
+    )?;
+    Ok(statement
+        .query_map([], |row| {
+            Ok(IndexSql {
+                table: row.get(0)?,
+                name: row.get(1)?,
+                sql: normalize_sql(&row.get::<_, String>(2)?),
+            })
+        })?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?)
+}
+
+fn foreign_keys(connection: &Connection, table: &str) -> Result<Vec<ForeignKey>, Box<dyn Error>> {
+    let mut statement = connection.prepare(&format!("PRAGMA foreign_key_list({table})"))?;
+    Ok(statement
+        .query_map([], |row| {
+            Ok(ForeignKey {
+                table: row.get(2)?,
+                from: row.get(3)?,
+                to: row.get(4)?,
+                on_delete: row.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn trigger_names(connection: &Connection, table: &str) -> Result<BTreeSet<String>, Box<dyn Error>> {
+    let mut statement = connection.prepare(
+        "SELECT name FROM sqlite_schema
+         WHERE type = 'trigger' AND tbl_name = ?1
+         ORDER BY name",
+    )?;
+    Ok(statement
+        .query_map([table], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?)
+}
+
+fn service_event_count(
+    connection: &Connection,
+    entity_ref: &str,
+    event: &str,
+) -> Result<i64, Box<dyn Error>> {
+    Ok(connection.query_row(
+        "SELECT count(*) FROM service_events WHERE entity_ref = ?1 AND event = ?2",
+        params![entity_ref, event],
+        |row| row.get(0),
+    )?)
+}
+
+fn user_version(connection: &Connection) -> Result<u32, Box<dyn Error>> {
+    Ok(connection.query_row("PRAGMA user_version", [], |row| row.get(0))?)
+}
+
+fn migration_versions(connection: &Connection) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut statement =
+        connection.prepare("SELECT version FROM schema_migrations ORDER BY version")?;
+    Ok(statement
+        .query_map([], |row| {
+            row.get::<_, i64>(0).map(|version| version.to_string())
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn normalize_sql(sql: &str) -> String {
+    sql.replace('"', "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(" (", "(")
+}
+
+fn error_ingest(
+    error_id: &str,
+    event_id: &str,
+    group_hash: &str,
+    created_at: &str,
+) -> Result<ErrorIngest, Box<dyn Error>> {
+    Ok(ErrorIngest {
+        ids: ErrorIngestIds {
+            error_id: ErrorId::from_str(error_id)?,
+            event_id: EventId::from_str(event_id)?,
+        },
+        payload: ErrorIngestPayload {
+            service: "cadence".to_owned(),
+            error_class: "DBConnection.ConnectionError".to_owned(),
+            message: "worker pool timed out".to_owned(),
+            message_template: "worker pool timed out".to_owned(),
+            stack_trace: Some("stack line".to_owned()),
+            context_json: Some(r#"{"tenant":"alpha"}"#.to_owned()),
+            severity: "warning".to_owned(),
+            environment: "production".to_owned(),
+            group_hash: group_hash.to_owned(),
+            fingerprint_json: Some(r#"["route","handler"]"#.to_owned()),
+            region: Some("iad".to_owned()),
+            classification: Classification {
+                category: Category::Infrastructure,
+                persistence: Persistence::Transient,
+                component: Component::Database,
+            },
+            created_at: created_at.to_owned(),
+        },
+    })
+}
