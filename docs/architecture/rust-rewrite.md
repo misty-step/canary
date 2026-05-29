@@ -287,6 +287,26 @@ the Rust server accepts production traffic:
     correlation; the HTTP layer does not re-derive sequence numbers or state
     transitions. This wires the planner into a real runtime path without adding
     a scheduler, overdue evaluator, or target probe executor.
+31. `canary-server::target_probes` and
+    `canary-store::target_probe_snapshot_by_id`: the Rust service now has a
+    concrete single-target probe adapter instead of a scheduler-shaped
+    abstraction. Store owns active target lookup, Phoenix service-name fallback,
+    missing `target_state` bootstrap, and current counter snapshots. The server
+    adapter owns runtime-only concerns: URL/method/header validation, DNS
+    resolution, non-global address blocking, redirect-disabled HTTP execution,
+    Phoenix-compatible status/body result mapping, timeout/DNS/TLS/connection
+    error classification, bounded response body reads, target probe planning,
+    store commit, and post-commit health/incident webhook fanout. The real
+    `ReqwestProbeTransport` pins reqwest resolution to the addresses that passed
+    the SSRF guard while preserving the original host in the URL for Host/SNI.
+    Tests cover blocked probes without opening transport, successful
+    probe-to-commit-to-event fanout, response mapping, and non-global IP
+    classification. TLS expiry is still a guarded transport extension: the
+    current reqwest transport returns `None` rather than opening Phoenix's
+    second raw TLS socket path without pinning it to the same SSRF-approved
+    address set. This still deliberately avoids periodic scheduling, jitter,
+    telemetry, and cross-restart flap history; those belong to the target
+    runtime lifecycle slice, not the single-observation adapter.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -314,11 +334,11 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Wire the Rust target probe planner into a concrete runtime consumer: target
-   snapshot reads held through `Store::commit_target_probe`, SSRF validation,
-   HTTP status/body/redirect result mapping, latency capture, TLS expiry
-   capture, and post-commit webhook enqueue. Do not add a generic scheduler
-   framework.
+1. Add the Rust target runtime lifecycle around the single-probe adapter:
+   active-target boot loading, per-target serialized execution, interval jitter,
+   explicit stop/pause/resume hooks, telemetry, guarded TLS expiry capture, and
+   a policy for in-memory transition history used by flap detection. Do not add
+   a generic scheduler framework.
 2. Add monitor overdue evaluation as its own planner and store command. It does
    not insert a `monitor_check_ins` row, so it should not be forced through the
    check-in command.

@@ -21,7 +21,8 @@ pub use api_keys::{API_KEY_PREFIX_LEN, ApiKeyInsert, VerifiedApiKey};
 pub use health::{
     HealthTransitionCommit, MonitorCheckInCommit, MonitorCheckInCommitResult,
     MonitorCheckInObservation, MonitorCheckInSnapshot, MonitorInsert, MonitorTransitionEvent,
-    TargetCheckObservation, TargetProbeCommit, TargetProbeCommitResult, TargetTransitionEvent,
+    TargetCheckObservation, TargetInsert, TargetProbeCommit, TargetProbeCommitResult,
+    TargetProbeSnapshot, TargetTransitionEvent,
 };
 pub use incidents::{IncidentCorrelation, IncidentCorrelationEvent};
 pub use ingest::{
@@ -101,6 +102,23 @@ impl Store {
         probe: TargetProbeCommit,
     ) -> Result<TargetProbeCommitResult> {
         health::commit_target_probe(&mut self.connection, probe)
+    }
+
+    /// Insert one HTTP target row.
+    pub fn insert_target(&mut self, target: TargetInsert) -> Result<()> {
+        health::insert_target(&self.connection, target)
+    }
+
+    /// Return one active target configuration and state snapshot by id.
+    ///
+    /// If the target exists but has no state row yet, this method creates the
+    /// Phoenix-compatible `unknown` state while the single-writer store lock is
+    /// held by the caller.
+    pub fn target_probe_snapshot_by_id(
+        &mut self,
+        target_id: &str,
+    ) -> Result<Option<TargetProbeSnapshot>> {
+        health::target_probe_snapshot_by_id(&mut self.connection, target_id)
     }
 
     /// Persist one monitor check-in, including state and optional transition effects.
@@ -1654,6 +1672,56 @@ mod tests {
         assert_eq!(
             store.connection.query_row(
                 "SELECT state FROM monitor_state WHERE monitor_id = 'MON-worker'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?,
+            "unknown"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn target_probe_snapshot_finds_active_target_and_ensures_unknown_state() -> Result<()> {
+        let mut store = migrated_store()?;
+        store.insert_target(TargetInsert {
+            id: "TGT-api".to_owned(),
+            url: "https://api.example.test/health".to_owned(),
+            name: "api-web".to_owned(),
+            service: "api".to_owned(),
+            method: "GET".to_owned(),
+            headers: Some(r#"{"x-canary":"yes"}"#.to_owned()),
+            interval_ms: 60_000,
+            timeout_ms: 7_500,
+            expected_status: "200-299".to_owned(),
+            body_contains: Some("ok".to_owned()),
+            degraded_after: 2,
+            down_after: 4,
+            up_after: 2,
+            active: true,
+            created_at: "2026-05-28T19:00:00Z".to_owned(),
+        })?;
+
+        let snapshot = store
+            .target_probe_snapshot_by_id("TGT-api")?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+
+        assert_eq!(snapshot.name, "api-web");
+        assert_eq!(snapshot.service, "api");
+        assert_eq!(snapshot.url, "https://api.example.test/health");
+        assert_eq!(snapshot.method, "GET");
+        assert_eq!(snapshot.timeout_ms, 7_500);
+        assert_eq!(snapshot.expected_status, "200-299");
+        assert_eq!(snapshot.body_contains.as_deref(), Some("ok"));
+        assert_eq!(snapshot.degraded_after, 2);
+        assert_eq!(snapshot.down_after, 4);
+        assert_eq!(snapshot.up_after, 2);
+        assert_eq!(snapshot.state, "unknown");
+        assert_eq!(snapshot.consecutive_failures, 0);
+        assert_eq!(snapshot.consecutive_successes, 0);
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT state FROM target_state WHERE target_id = 'TGT-api'",
                 [],
                 |row| row.get::<_, String>(0),
             )?,

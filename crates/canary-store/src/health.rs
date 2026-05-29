@@ -31,6 +31,8 @@ pub struct HealthTransitionCommit {
 pub struct TargetProbeCommitResult {
     /// Health transition emitted by this probe, when the probe changed state.
     pub transition: Option<HealthTransitionCommit>,
+    /// Persisted target-state sequence after the probe.
+    pub sequence: i64,
 }
 
 /// Persisted outcome of one monitor check-in observation.
@@ -59,6 +61,76 @@ pub struct MonitorInsert {
     pub grace_ms: i64,
     /// Creation timestamp.
     pub created_at: String,
+}
+
+/// HTTP target row to insert.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetInsert {
+    /// Target id.
+    pub id: String,
+    /// Probe URL.
+    pub url: String,
+    /// Target display name.
+    pub name: String,
+    /// Service name resolved with Phoenix's target service fallback.
+    pub service: String,
+    /// HTTP method, currently `GET` or `HEAD`.
+    pub method: String,
+    /// JSON encoded request headers.
+    pub headers: Option<String>,
+    /// Probe interval in milliseconds.
+    pub interval_ms: i64,
+    /// Probe timeout in milliseconds.
+    pub timeout_ms: i64,
+    /// Expected HTTP status expression.
+    pub expected_status: String,
+    /// Required response body substring.
+    pub body_contains: Option<String>,
+    /// Consecutive failures before degraded.
+    pub degraded_after: u32,
+    /// Consecutive failures before down.
+    pub down_after: u32,
+    /// Consecutive successes before recovery.
+    pub up_after: u32,
+    /// Active flag.
+    pub active: bool,
+    /// Creation timestamp.
+    pub created_at: String,
+}
+
+/// Target configuration and state needed to execute and plan one probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetProbeSnapshot {
+    /// Target id.
+    pub id: String,
+    /// Target display name.
+    pub name: String,
+    /// Service name.
+    pub service: String,
+    /// Probe URL.
+    pub url: String,
+    /// HTTP method.
+    pub method: String,
+    /// JSON encoded request headers.
+    pub headers: Option<String>,
+    /// Probe timeout in milliseconds.
+    pub timeout_ms: i64,
+    /// Expected HTTP status expression.
+    pub expected_status: String,
+    /// Required response body substring.
+    pub body_contains: Option<String>,
+    /// Consecutive failures before degraded.
+    pub degraded_after: u32,
+    /// Consecutive failures before down.
+    pub down_after: u32,
+    /// Consecutive successes before recovery.
+    pub up_after: u32,
+    /// Current target health state.
+    pub state: String,
+    /// Current consecutive failure counter.
+    pub consecutive_failures: u32,
+    /// Current consecutive success counter.
+    pub consecutive_successes: u32,
 }
 
 /// Monitor configuration and state needed to plan one check-in.
@@ -248,7 +320,10 @@ pub(crate) fn commit_target_probe(
     };
 
     transaction.commit()?;
-    Ok(TargetProbeCommitResult { transition })
+    Ok(TargetProbeCommitResult {
+        transition,
+        sequence,
+    })
 }
 
 pub(crate) fn commit_monitor_check_in(
@@ -336,6 +411,125 @@ pub(crate) fn insert_monitor(
         ],
     )?;
     Ok(())
+}
+
+pub(crate) fn insert_target(connection: &rusqlite::Connection, target: TargetInsert) -> Result<()> {
+    connection.execute(
+        "INSERT INTO targets (
+            id, url, name, service, method, headers, interval_ms, timeout_ms,
+            expected_status, body_contains, degraded_after, down_after,
+            up_after, active, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            target.id,
+            target.url,
+            target.name,
+            target.service,
+            target.method,
+            target.headers,
+            target.interval_ms,
+            target.timeout_ms,
+            target.expected_status,
+            target.body_contains,
+            target.degraded_after,
+            target.down_after,
+            target.up_after,
+            if target.active { 1 } else { 0 },
+            target.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn target_probe_snapshot_by_id(
+    connection: &mut rusqlite::Connection,
+    target_id: &str,
+) -> Result<Option<TargetProbeSnapshot>> {
+    let transaction = connection.transaction()?;
+    let target = transaction
+        .query_row(
+            "SELECT
+                id, name, COALESCE(NULLIF(service, ''), name), url,
+                COALESCE(method, 'GET'), headers, COALESCE(timeout_ms, 10000),
+                COALESCE(expected_status, '200'), body_contains,
+                COALESCE(degraded_after, 1), COALESCE(down_after, 3),
+                COALESCE(up_after, 1)
+             FROM targets WHERE id = ?1 AND active = 1",
+            [target_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, u32>(9)?,
+                    row.get::<_, u32>(10)?,
+                    row.get::<_, u32>(11)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let Some((
+        id,
+        name,
+        service,
+        url,
+        method,
+        headers,
+        timeout_ms,
+        expected_status,
+        body_contains,
+        degraded_after,
+        down_after,
+        up_after,
+    )) = target
+    else {
+        transaction.commit()?;
+        return Ok(None);
+    };
+
+    transaction.execute(
+        "INSERT OR IGNORE INTO target_state (target_id, state) VALUES (?1, 'unknown')",
+        [&id],
+    )?;
+    let (state, consecutive_failures, consecutive_successes) = transaction.query_row(
+        "SELECT
+            state, COALESCE(consecutive_failures, 0), COALESCE(consecutive_successes, 0)
+         FROM target_state WHERE target_id = ?1",
+        [&id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, u32>(2)?,
+            ))
+        },
+    )?;
+    transaction.commit()?;
+
+    Ok(Some(TargetProbeSnapshot {
+        id,
+        name,
+        service,
+        url,
+        method,
+        headers,
+        timeout_ms,
+        expected_status,
+        body_contains,
+        degraded_after,
+        down_after,
+        up_after,
+        state,
+        consecutive_failures,
+        consecutive_successes,
+    }))
 }
 
 pub(crate) fn monitor_check_in_snapshot_by_name(

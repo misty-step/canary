@@ -48,8 +48,13 @@ use canary_workers::health::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+mod target_probes;
 mod webhooks;
 
+pub use target_probes::{
+    ProbeHttpResponse, ProbeRequest, ProbeTransport, ProbeTransportError, ReqwestProbeTransport,
+    TargetProbeOptions, TargetProbeOutcome, TargetProbeRuntimeError, run_target_probe_once,
+};
 use webhooks::NoopWebhookCooldown;
 pub use webhooks::{
     HttpWebhookTransport, StoreWebhookScheduler, WebhookCircuit, WebhookCooldown,
