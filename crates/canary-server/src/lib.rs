@@ -22,8 +22,7 @@ use axum::{
         HeaderMap, HeaderValue, Response, StatusCode,
         header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderName},
     },
-    routing::delete,
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use canary_http::public::{
     DependencyStatus, PublicResponse, healthz_response, openapi_response, readyz_response,
@@ -462,7 +461,10 @@ pub fn ingest_router(state: IngestState) -> Router {
         .route("/api/v1/incidents/{id}", get(show_incident))
         .route("/api/v1/errors/{id}", get(show_error))
         .route("/api/v1/targets", get(list_targets).post(create_target))
-        .route("/api/v1/targets/{id}", delete(delete_target))
+        .route(
+            "/api/v1/targets/{id}",
+            patch(update_target_interval).delete(delete_target),
+        )
         .route("/api/v1/targets/{id}/pause", post(pause_target))
         .route("/api/v1/targets/{id}/resume", post(resume_target))
         .with_state(state)
@@ -875,6 +877,59 @@ async fn delete_target(
     )
 }
 
+async fn update_target_interval(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response<Body> {
+    if let Err(problem) = check_content_length(&headers) {
+        return problem_response(*problem);
+    }
+
+    if body.len() as u64 > MAX_JSON_BODY_BYTES {
+        return problem_response(payload_too_large_problem(
+            "Request body exceeds 100KB limit.",
+        ));
+    }
+
+    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+        return problem_response(*problem);
+    }
+
+    let attrs = match decode_json_object(&body, None) {
+        Ok(attrs) => attrs,
+        Err(problem) => return problem_response(*problem),
+    };
+    let interval_ms = match parse_target_interval_update(&attrs) {
+        Ok(interval_ms) => interval_ms,
+        Err(problem) => return problem_response(*problem),
+    };
+
+    let mut store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    let update = match store.update_target_interval(&id, interval_ms) {
+        Ok(Some(update)) => update,
+        Ok(None) => return problem_response(not_found_problem("Target not found.")),
+        Err(_) => return problem_response(internal_problem()),
+    };
+    drop(store);
+
+    if update.prior_active && update.prior_interval_ms != update.target.interval_ms {
+        let _control_result =
+            state
+                .target_control
+                .control_target(TargetProbeLifecycleCommand::Reconfigure {
+                    target_id: id,
+                    interval_ms: update.target.interval_ms,
+                });
+    }
+
+    json_status_response(StatusCode::OK.as_u16(), target_response(update.target))
+}
+
 async fn pause_target(
     State(state): State<IngestState>,
     headers: HeaderMap,
@@ -1104,6 +1159,40 @@ fn parse_target_create(
         active: true,
         created_at: current_rfc3339(),
     })
+}
+
+fn parse_target_interval_update(attrs: &Map<String, Value>) -> Result<i64, Box<ProblemDetails>> {
+    let mut errors: ValidationErrors = BTreeMap::new();
+    if attrs.is_empty() {
+        errors.insert(
+            "interval_ms".to_owned(),
+            vec!["is required for target interval updates".to_owned()],
+        );
+        return Err(Box::new(target_validation_problem(errors)));
+    }
+
+    for key in attrs.keys() {
+        if key != "interval_ms" {
+            errors.insert(
+                key.clone(),
+                vec!["is not supported by this endpoint".to_owned()],
+            );
+        }
+    }
+
+    let interval_ms = optional_positive_i64(attrs, "interval_ms", 60_000, &mut errors);
+    if !attrs.contains_key("interval_ms") {
+        errors.insert(
+            "interval_ms".to_owned(),
+            vec!["is required for target interval updates".to_owned()],
+        );
+    }
+
+    if errors.is_empty() {
+        Ok(interval_ms)
+    } else {
+        Err(Box::new(target_validation_problem(errors)))
+    }
 }
 
 fn encode_target_headers(value: Option<&Value>, errors: &mut ValidationErrors) -> Option<String> {
@@ -2907,6 +2996,184 @@ mod tests {
                 },
                 TargetProbeLifecycleCommand::Untrack { target_id },
             ]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admin_target_interval_update_reconfigures_only_when_cadence_changes()
+    -> Result<(), Box<dyn Error>> {
+        let recorder = Arc::new(RecordingTargetControl::default());
+        let state = test_ingest_state()?
+            .with_target_control(recorder.clone())
+            .with_allow_private_targets(true);
+        let router = ingest_router(state);
+
+        let create_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/targets",
+                ADMIN_KEY,
+                r#"{
+                    "url":"http://127.0.0.1:9/health",
+                    "name":"Local API",
+                    "interval_ms":2500,
+                    "allow_private":true
+                }"#,
+            )?)
+            .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let target_id = json_body(create_response).await?["id"]
+            .as_str()
+            .ok_or("missing target id")?
+            .to_owned();
+
+        let update_response = router
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                &format!("/api/v1/targets/{target_id}"),
+                ADMIN_KEY,
+                r#"{"interval_ms":5000}"#,
+            )?)
+            .await?;
+        assert_eq!(update_response.status(), StatusCode::OK);
+        let updated = json_body(update_response).await?;
+        assert_eq!(updated["interval_ms"], 5000);
+        assert_eq!(updated["active"], true);
+
+        let unchanged_response = router
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                &format!("/api/v1/targets/{target_id}"),
+                ADMIN_KEY,
+                r#"{"interval_ms":5000}"#,
+            )?)
+            .await?;
+        assert_eq!(unchanged_response.status(), StatusCode::OK);
+
+        let pause_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/targets/{target_id}/pause"),
+                ADMIN_KEY,
+                "{}",
+            )?)
+            .await?;
+        assert_eq!(pause_response.status(), StatusCode::OK);
+
+        let inactive_update_response = router
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                &format!("/api/v1/targets/{target_id}"),
+                ADMIN_KEY,
+                r#"{"interval_ms":7500}"#,
+            )?)
+            .await?;
+        assert_eq!(inactive_update_response.status(), StatusCode::OK);
+
+        assert_eq!(
+            recorder.commands(),
+            vec![
+                TargetProbeLifecycleCommand::Track {
+                    target_id: target_id.clone(),
+                    interval_ms: 2500,
+                },
+                TargetProbeLifecycleCommand::Reconfigure {
+                    target_id: target_id.clone(),
+                    interval_ms: 5000,
+                },
+                TargetProbeLifecycleCommand::Pause { target_id },
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admin_target_interval_update_rejects_invalid_scope_and_shape()
+    -> Result<(), Box<dyn Error>> {
+        let recorder = Arc::new(RecordingTargetControl::default());
+        let state = test_ingest_state()?
+            .with_target_control(recorder.clone())
+            .with_allow_private_targets(true);
+        let router = ingest_router(state);
+
+        let create_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/targets",
+                ADMIN_KEY,
+                r#"{
+                    "url":"http://127.0.0.1:9/health",
+                    "name":"Local API",
+                    "allow_private":true
+                }"#,
+            )?)
+            .await?;
+        let target_id = json_body(create_response).await?["id"]
+            .as_str()
+            .ok_or("missing target id")?
+            .to_owned();
+
+        let forbidden_response = router
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                &format!("/api/v1/targets/{target_id}"),
+                INGEST_KEY,
+                r#"{"interval_ms":5000}"#,
+            )?)
+            .await?;
+        assert_eq!(forbidden_response.status(), StatusCode::FORBIDDEN);
+
+        let empty_response = router
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                &format!("/api/v1/targets/{target_id}"),
+                ADMIN_KEY,
+                "{}",
+            )?)
+            .await?;
+        assert_eq!(empty_response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let unsupported_response = router
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                &format!("/api/v1/targets/{target_id}"),
+                ADMIN_KEY,
+                r#"{"name":"New Name"}"#,
+            )?)
+            .await?;
+        assert_eq!(
+            unsupported_response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        let missing_response = router
+            .oneshot(json_request(
+                "PATCH",
+                "/api/v1/targets/TGT-missing",
+                ADMIN_KEY,
+                r#"{"interval_ms":5000}"#,
+            )?)
+            .await?;
+        assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+
+        assert_eq!(
+            recorder.commands(),
+            vec![TargetProbeLifecycleCommand::Track {
+                target_id,
+                interval_ms: 60000,
+            }]
         );
 
         Ok(())

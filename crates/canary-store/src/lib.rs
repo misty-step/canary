@@ -22,8 +22,9 @@ pub use health::{
     ActiveTargetProbeSchedule, HealthTransitionCommit, MonitorCheckInCommit,
     MonitorCheckInCommitResult, MonitorCheckInObservation, MonitorCheckInSnapshot, MonitorInsert,
     MonitorOverdueCandidate, MonitorOverdueCommit, MonitorOverdueCommitResult,
-    MonitorTransitionEvent, TargetCheckObservation, TargetInsert, TargetProbeCommit,
-    TargetProbeCommitResult, TargetProbeSnapshot, TargetRecord, TargetTransitionEvent,
+    MonitorTransitionEvent, TargetCheckObservation, TargetInsert, TargetIntervalUpdate,
+    TargetProbeCommit, TargetProbeCommitResult, TargetProbeSnapshot, TargetRecord,
+    TargetTransitionEvent,
 };
 pub use incidents::{IncidentCorrelation, IncidentCorrelationEvent};
 pub use ingest::{
@@ -123,6 +124,15 @@ impl Store {
     /// Update one target's active flag.
     pub fn update_target_active(&mut self, target_id: &str, active: bool) -> Result<bool> {
         health::update_target_active(&mut self.connection, target_id, active)
+    }
+
+    /// Update one target's probe interval and return the previous cadence context.
+    pub fn update_target_interval(
+        &mut self,
+        target_id: &str,
+        interval_ms: i64,
+    ) -> Result<Option<TargetIntervalUpdate>> {
+        health::update_target_interval(&mut self.connection, target_id, interval_ms)
     }
 
     /// Return one active target configuration and state snapshot by id.
@@ -1840,6 +1850,27 @@ mod tests {
         assert_eq!(targets[0].service, "Admin API");
         assert_eq!(targets[0].method, "HEAD");
         assert!(targets[0].active);
+
+        let interval_update = store
+            .update_target_interval("TGT-admin", 30_000)?
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        assert_eq!(interval_update.prior_interval_ms, 15_000);
+        assert!(interval_update.prior_active);
+        assert_eq!(interval_update.target.interval_ms, 30_000);
+        assert_eq!(interval_update.target.created_at, "2026-05-28T19:00:00Z");
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT interval_ms FROM targets WHERE id = 'TGT-admin'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            30_000
+        );
+        assert!(
+            store
+                .update_target_interval("TGT-missing", 30_000)?
+                .is_none()
+        );
 
         assert!(store.update_target_active("TGT-admin", false)?);
         assert_eq!(

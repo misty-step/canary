@@ -1216,6 +1216,56 @@
       }
     },
     "/api/v1/targets/{id}": {
+      "patch": {
+        "tags": [
+          "Targets"
+        ],
+        "summary": "Update a target probe interval",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TargetUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Target updated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Target"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          }
+        }
+      },
       "delete": {
         "tags": [
           "Targets"
@@ -3496,6 +3546,19 @@
           },
           "allow_private": {
             "type": "boolean"
+          }
+        }
+      },
+      "TargetUpdateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "interval_ms"
+        ],
+        "properties": {
+          "interval_ms": {
+            "type": "integer",
+            "minimum": 1
           }
         }
       },

@@ -132,6 +132,17 @@ pub struct TargetRecord {
     pub created_at: String,
 }
 
+/// Persisted outcome of updating one target's probe interval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetIntervalUpdate {
+    /// Admin-visible target row after the update.
+    pub target: TargetRecord,
+    /// Previous interval used by the probe lifecycle.
+    pub prior_interval_ms: i64,
+    /// Whether the target was active before the update committed.
+    pub prior_active: bool,
+}
+
 /// Target configuration and state needed to execute and plan one probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetProbeSnapshot {
@@ -649,6 +660,41 @@ pub(crate) fn update_target_active(
     Ok(changed > 0)
 }
 
+pub(crate) fn update_target_interval(
+    connection: &mut rusqlite::Connection,
+    target_id: &str,
+    interval_ms: i64,
+) -> Result<Option<TargetIntervalUpdate>> {
+    let transaction = connection.transaction()?;
+    let prior = transaction
+        .query_row(
+            "SELECT COALESCE(interval_ms, 60000), COALESCE(active, 1)
+             FROM targets
+             WHERE id = ?1",
+            [target_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? == 1)),
+        )
+        .optional()?;
+
+    let Some((prior_interval_ms, prior_active)) = prior else {
+        transaction.commit()?;
+        return Ok(None);
+    };
+
+    transaction.execute(
+        "UPDATE targets SET interval_ms = ?2 WHERE id = ?1",
+        params![target_id, interval_ms],
+    )?;
+    let target = target_record_by_id(&transaction, target_id)?;
+    transaction.commit()?;
+
+    Ok(Some(TargetIntervalUpdate {
+        target,
+        prior_interval_ms,
+        prior_active,
+    }))
+}
+
 pub(crate) fn target_probe_snapshot_by_id(
     connection: &mut rusqlite::Connection,
     target_id: &str,
@@ -738,6 +784,36 @@ pub(crate) fn target_probe_snapshot_by_id(
         consecutive_failures,
         consecutive_successes,
     }))
+}
+
+fn target_record_by_id(
+    connection: &rusqlite::Connection,
+    target_id: &str,
+) -> rusqlite::Result<TargetRecord> {
+    connection.query_row(
+        "SELECT
+            id, url, name, COALESCE(NULLIF(service, ''), name),
+            COALESCE(method, 'GET'), COALESCE(interval_ms, 60000),
+            COALESCE(timeout_ms, 10000), COALESCE(expected_status, '200'),
+            COALESCE(active, 1), created_at
+         FROM targets
+         WHERE id = ?1",
+        [target_id],
+        |row| {
+            Ok(TargetRecord {
+                id: row.get(0)?,
+                url: row.get(1)?,
+                name: row.get(2)?,
+                service: row.get(3)?,
+                method: row.get(4)?,
+                interval_ms: row.get(5)?,
+                timeout_ms: row.get(6)?,
+                expected_status: row.get(7)?,
+                active: row.get::<_, i64>(8)? == 1,
+                created_at: row.get(9)?,
+            })
+        },
+    )
 }
 
 pub(crate) fn active_target_probe_schedules(

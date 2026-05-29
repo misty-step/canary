@@ -408,6 +408,15 @@ the Rust server accepts production traffic:
     update the `targets.active` flag and existing `target_state` row in one
     store operation, preserving Phoenix's public response while avoiding a
     separate admin scheduler, SQL triggers, or route-local lifecycle state.
+39. `PATCH /api/v1/targets/:id` intentionally starts with the only runtime
+    target update that changes probe scheduling: `interval_ms`. The store
+    returns the prior interval and active flag in a typed
+    `TargetIntervalUpdate` outcome, so the Axum route can emit
+    `TargetProbeLifecycleCommand::Reconfigure` only after the SQLite update
+    commits, only for active targets, and only when cadence changed. Unsupported
+    fields fail validation instead of silently expanding the admin contract.
+    This keeps target updates agent-friendly and compile-time visible without
+    adding a generic CRUD patch layer, state resets, or scheduler-local truth.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -435,12 +444,9 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Add the remaining Rust target-admin parity not covered by the current
-   OpenAPI surface: update/reconfigure semantics for target interval changes,
-   with `Reconfigure` emitted only when runtime cadence changes.
-2. Broaden monitor overdue parity fixtures around malformed persisted rows,
+1. Broaden monitor overdue parity fixtures around malformed persisted rows,
    TTL-vs-expected escalation, and transaction rollback evidence for
    transition/correlation failures.
-3. Add a populated Phoenix fixture once health and annotation writes are ported
+2. Add a populated Phoenix fixture once health and annotation writes are ported
    so Rust read models are checked against Phoenix-inserted production-shaped
    rows, not only an empty migrated schema.
