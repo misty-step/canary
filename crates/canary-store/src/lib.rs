@@ -13,6 +13,7 @@ mod api_keys;
 mod health;
 mod incidents;
 mod ingest;
+mod metrics;
 mod oban_jobs;
 mod query;
 mod schema;
@@ -23,6 +24,7 @@ pub use annotations::{
     AnnotationSubjectType, subject_types as annotation_subject_types,
 };
 pub use api_keys::{API_KEY_PREFIX_LEN, ApiKeyInsert, ApiKeyRecord, VerifiedApiKey};
+pub use canary_core::metrics::MetricsSnapshot;
 pub use health::{
     ActiveTargetProbeSchedule, HealthCheckSummary, HealthMonitorStatus, HealthTargetStatus,
     HealthTransitionCommit, MonitorCheckInCommit, MonitorCheckInCommitResult,
@@ -549,6 +551,11 @@ impl Store {
     /// Return one webhook delivery job row by id.
     pub fn webhook_delivery_job(&self, job_id: i64) -> Result<Option<WebhookDeliveryJobRow>> {
         oban_jobs::webhook_delivery_job(&self.connection, job_id)
+    }
+
+    /// Gather a point-in-time Prometheus metrics snapshot.
+    pub fn metrics_snapshot(&self) -> Result<MetricsSnapshot> {
+        metrics::snapshot(&self.connection)
     }
 
     /// Count persisted errors.

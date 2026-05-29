@@ -611,6 +611,17 @@ the Rust server accepts production traffic:
     projection for invalid window/limit/cursor/query inputs, and the final
     JSON/CSV wire shape. The route remains read-only: no ingest, correlation,
     annotations, or webhook fanout occurs while rendering a report.
+57. Rust now implements the Phoenix Prometheus scrape surface: `GET /metrics`.
+    The route intentionally stays an admin-scoped snapshot endpoint rather than
+    growing a telemetry framework inside the server. `canary-store` owns the
+    narrow SQLite reads for durable counters, queue depths, and target/monitor
+    state gauges. `canary-core::metrics` owns the Prometheus text exposition
+    names, HELP/TYPE headers, and label escaping. The Axum handler owns only
+    admin auth, store locking, RFC 9457 failure projection, and the Phoenix
+    content type `text/plain; version=0.0.4; charset=utf-8`. Runtime-only
+    counters that Phoenix collects from BEAM telemetry remain a future adapter
+    concern; this slice exposes the durable operational facts agents can rely
+    on during the Rust rewrite.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed

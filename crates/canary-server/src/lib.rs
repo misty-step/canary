@@ -91,6 +91,7 @@ pub use webhooks::{
 
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 const PROBLEM_CONTENT_TYPE: &str = "application/problem+json; charset=utf-8";
+const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
 fn default_webhook_transport() -> Arc<dyn WebhookTransport> {
     Arc::new(LazyHttpWebhookTransport)
@@ -483,6 +484,7 @@ pub fn public_router(readiness: PublicReadiness) -> Router {
 /// Router for Canary's authenticated ingest endpoints.
 pub fn ingest_router(state: IngestState) -> Router {
     Router::new()
+        .route("/metrics", get(metrics))
         .route("/api/v1/errors", post(create_error))
         .route("/api/v1/check-ins", post(create_check_in))
         .route("/api/v1/query", get(query_errors))
@@ -968,6 +970,26 @@ async fn list_webhooks(State(state): State<IngestState>, headers: HeaderMap) -> 
         Ok(webhooks) => json_status_response(
             StatusCode::OK.as_u16(),
             json!({"webhooks": webhooks.into_iter().map(webhook_response).collect::<Vec<_>>()}),
+        ),
+        Err(_) => problem_response(internal_problem()),
+    }
+}
+
+async fn metrics(State(state): State<IngestState>, headers: HeaderMap) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+        return problem_response(*problem);
+    }
+
+    let store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+
+    match store.metrics_snapshot() {
+        Ok(snapshot) => response(
+            StatusCode::OK.as_u16(),
+            PROMETHEUS_CONTENT_TYPE,
+            Body::from(canary_core::metrics::render_prometheus(&snapshot)),
         ),
         Err(_) => problem_response(internal_problem()),
     }
@@ -7116,6 +7138,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metrics_requires_admin_scope_and_returns_prometheus_snapshot()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        {
+            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            seed_target(&mut store, "metrics-svc")?;
+            seed_monitor(&mut store, "metrics-monitor")?;
+            store.create_pending_webhook_delivery(WebhookDeliveryInsert {
+                delivery_id: "DLV-metrics".to_owned(),
+                webhook_id: "WHK-metrics".to_owned(),
+                event: "error.new_class".to_owned(),
+                now: "2026-05-28T20:00:00Z".to_owned(),
+            })?;
+            store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+                args: json!({"delivery_id": "DLV-metrics"}),
+                scheduled_at: "2026-05-28T20:00:00Z".to_owned(),
+                now: "2026-05-28T20:00:00Z".to_owned(),
+                max_attempts: 20,
+            })?;
+        }
+
+        let response = ingest_router(state.clone())
+            .oneshot(read_request(ADMIN_KEY, "/metrics")?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE),
+            Some(&HeaderValue::from_static(PROMETHEUS_CONTENT_TYPE))
+        );
+        let body = text_body(response).await?;
+        assert!(body.contains("# HELP canary_webhook_queue_depth"));
+        assert!(body.contains("# TYPE canary_oban_queue_depth gauge"));
+        assert!(body.contains("canary_webhook_queue_depth 1"));
+        assert!(body.contains("canary_webhook_delivery_total{status=\"pending\"} 1"));
+        assert!(body.contains("canary_oban_queue_depth{queue=\"webhooks\"} 1"));
+        assert!(body.contains(
+            "canary_probe_state{target_id=\"TGT-metrics-svc\",service=\"metrics-svc\",state=\"unknown\"} 1"
+        ));
+        assert!(body.contains(
+            "canary_monitor_state{monitor_id=\"MON-metrics-monitor\",service=\"metrics-monitor\",state=\"unknown\"} 1"
+        ));
+
+        let forbidden = ingest_router(state.clone())
+            .oneshot(read_request(READ_KEY, "/metrics")?)
+            .await?;
+        let forbidden_status = forbidden.status();
+        let forbidden_body = json_body(forbidden).await?;
+        assert_eq!(forbidden_status, StatusCode::FORBIDDEN);
+        assert_eq!(forbidden_body["code"], "insufficient_scope");
+
+        let unauthorized = ingest_router(state)
+            .oneshot(Request::get("/metrics").body(Body::empty())?)
+            .await?;
+        let unauthorized_status = unauthorized.status();
+        let unauthorized_body = json_body(unauthorized).await?;
+        assert_eq!(unauthorized_status, StatusCode::UNAUTHORIZED);
+        assert_eq!(unauthorized_body["code"], "invalid_api_key");
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn target_checks_accepts_read_scope_and_returns_recent_checks()
     -> Result<(), Box<dyn Error>> {
         let state = test_ingest_state()?.with_allow_private_targets(true);
@@ -7767,6 +7851,11 @@ mod tests {
         let body = serde_json::from_slice(&bytes)?;
 
         Ok(body)
+    }
+
+    async fn text_body(response: Response<Body>) -> Result<String, Box<dyn Error>> {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+        Ok(String::from_utf8(bytes.to_vec())?)
     }
 
     fn test_ingest_state() -> Result<IngestState, Box<dyn Error>> {
