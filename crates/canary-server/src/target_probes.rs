@@ -43,6 +43,7 @@ use crate::{
 };
 
 const MAX_PROBE_BODY_BYTES: u64 = 64 * 1024;
+const MAX_CONCURRENT_TARGET_PROBES: usize = 8;
 const MAX_TARGET_HEADERS: usize = 64;
 const MAX_TARGET_HEADER_BYTES: usize = 8 * 1024;
 const FORBIDDEN_TARGET_HEADERS: &[&str] = &[
@@ -286,7 +287,7 @@ pub enum TargetProbeLifecycleCommand {
 /// Bounded lifecycle adapter for active HTTP target probes.
 pub struct TargetProbeLifecycle {
     store: Arc<Mutex<Store>>,
-    runtime: TargetProbeRuntime,
+    runtime: Arc<TargetProbeRuntime>,
     schedules: BTreeMap<String, ScheduledTarget>,
     commands: Option<Receiver<TargetProbeLifecycleCommand>>,
 }
@@ -296,13 +297,13 @@ impl TargetProbeLifecycle {
     pub fn new(store: Arc<Mutex<Store>>, runtime: TargetProbeRuntime) -> Self {
         Self {
             store,
-            runtime,
+            runtime: Arc::new(runtime),
             schedules: BTreeMap::new(),
             commands: None,
         }
     }
 
-    /// Load active targets, execute due probes sequentially, and update next due times.
+    /// Load active targets, execute due probes with bounded isolation, and update next due times.
     pub fn run_due(&mut self, now_millis: i64) -> Result<TargetProbeLifecycleReport, String> {
         let active = self.load_active_schedules()?;
         self.reconcile(active, now_millis);
@@ -321,21 +322,42 @@ impl TargetProbeLifecycle {
             ..TargetProbeLifecycleReport::default()
         };
 
-        for target_id in due_targets {
-            match self.runtime.run_once(&target_id) {
-                Ok(outcome) => {
-                    report.probed += 1;
-                    report.event_fanout_failed += outcome.event_fanout.failed;
+        for batch in due_targets.chunks(MAX_CONCURRENT_TARGET_PROBES) {
+            let mut handles = Vec::with_capacity(batch.len());
+            for target_id in batch {
+                let runtime = Arc::clone(&self.runtime);
+                let target_id = target_id.clone();
+                let thread_target_id = target_id.clone();
+                let handle = thread::Builder::new()
+                    .name("canary-target-probe".to_owned())
+                    .spawn(move || runtime.run_once(&thread_target_id));
+                match handle {
+                    Ok(handle) => handles.push((target_id, handle)),
+                    Err(_) => {
+                        report.failed += 1;
+                        self.advance_target_schedule(&target_id, now_millis);
+                    }
                 }
-                Err(TargetProbeRuntimeError::TargetNotFound) => report.skipped_missing += 1,
-                Err(_) => report.failed += 1,
             }
 
-            if let Some(schedule) = self.schedules.get_mut(&target_id)
-                && !schedule.paused
-            {
-                schedule.next_due_millis =
-                    next_due_millis(&target_id, schedule.interval_ms, now_millis);
+            for (target_id, handle) in handles {
+                let result = match handle.join() {
+                    Ok(result) => result,
+                    Err(_) => {
+                        report.failed += 1;
+                        self.advance_target_schedule(&target_id, now_millis);
+                        continue;
+                    }
+                };
+                match result {
+                    Ok(outcome) => {
+                        report.probed += 1;
+                        report.event_fanout_failed += outcome.event_fanout.failed;
+                    }
+                    Err(TargetProbeRuntimeError::TargetNotFound) => report.skipped_missing += 1,
+                    Err(_) => report.failed += 1,
+                }
+                self.advance_target_schedule(&target_id, now_millis);
             }
         }
 
@@ -350,6 +372,14 @@ impl TargetProbeLifecycle {
         store
             .active_target_probe_schedules()
             .map_err(|error| error.to_string())
+    }
+
+    fn advance_target_schedule(&mut self, target_id: &str, now_millis: i64) {
+        if let Some(schedule) = self.schedules.get_mut(target_id)
+            && !schedule.paused
+        {
+            schedule.next_due_millis = next_due_millis(target_id, schedule.interval_ms, now_millis);
+        }
     }
 
     fn reconcile(&mut self, active: Vec<ActiveTargetProbeSchedule>, now_millis: i64) {
@@ -1271,7 +1301,7 @@ mod tests {
         io::Write,
         net::TcpListener,
         sync::{
-            Mutex as StdMutex,
+            Condvar, Mutex as StdMutex,
             atomic::{AtomicUsize, Ordering},
         },
     };
@@ -1362,6 +1392,113 @@ mod tests {
                 ));
             }
             Ok(responses.remove(0))
+        }
+    }
+
+    struct BlockingTransport {
+        calls: AtomicUsize,
+        slow_started: StdMutex<Option<std::sync::mpsc::Sender<()>>>,
+        fast_done: StdMutex<Option<std::sync::mpsc::Sender<()>>>,
+        release_slow: StdMutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl BlockingTransport {
+        fn new(
+            slow_started: std::sync::mpsc::Sender<()>,
+            fast_done: std::sync::mpsc::Sender<()>,
+            release_slow: std::sync::mpsc::Receiver<()>,
+        ) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                slow_started: StdMutex::new(Some(slow_started)),
+                fast_done: StdMutex::new(Some(fast_done)),
+                release_slow: StdMutex::new(release_slow),
+            }
+        }
+    }
+
+    impl ProbeTransport for BlockingTransport {
+        fn probe(&self, request: ProbeRequest) -> Result<ProbeHttpResponse, ProbeTransportError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if request.url.contains("/slow") {
+                if let Some(sender) = self
+                    .slow_started
+                    .lock()
+                    .map_err(|_| ProbeTransportError::Connection("slow lock poisoned".to_owned()))?
+                    .take()
+                {
+                    let _ = sender.send(());
+                }
+                self.release_slow
+                    .lock()
+                    .map_err(|_| {
+                        ProbeTransportError::Connection("release lock poisoned".to_owned())
+                    })?
+                    .recv()
+                    .map_err(|error| ProbeTransportError::Connection(error.to_string()))?;
+                return Ok(response(200, "ok"));
+            }
+
+            if let Some(sender) = self
+                .fast_done
+                .lock()
+                .map_err(|_| ProbeTransportError::Connection("fast lock poisoned".to_owned()))?
+                .take()
+            {
+                let _ = sender.send(());
+            }
+            Ok(response(200, "ok"))
+        }
+    }
+
+    #[derive(Debug)]
+    struct GatedPeakTransport {
+        in_flight: AtomicUsize,
+        peak: AtomicUsize,
+        release: Arc<(StdMutex<bool>, Condvar)>,
+    }
+
+    impl GatedPeakTransport {
+        fn new() -> Self {
+            Self {
+                in_flight: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+                release: Arc::new((StdMutex::new(false), Condvar::new())),
+            }
+        }
+
+        fn peak(&self) -> usize {
+            self.peak.load(Ordering::SeqCst)
+        }
+
+        fn release(&self) -> Result<(), String> {
+            let (lock, condvar) = &*self.release;
+            let mut released = lock
+                .lock()
+                .map_err(|_| "release lock poisoned".to_owned())?;
+            *released = true;
+            condvar.notify_all();
+            Ok(())
+        }
+    }
+
+    impl ProbeTransport for GatedPeakTransport {
+        fn probe(&self, _request: ProbeRequest) -> Result<ProbeHttpResponse, ProbeTransportError> {
+            let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            let _ = self
+                .peak
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |peak| {
+                    (in_flight > peak).then_some(in_flight)
+                });
+            let (lock, condvar) = &*self.release;
+            let released = lock
+                .lock()
+                .map_err(|_| ProbeTransportError::Connection("release lock poisoned".to_owned()))?;
+            let _guard = condvar
+                .wait_while(released, |released| !*released)
+                .map_err(|_| ProbeTransportError::Connection("release wait poisoned".to_owned()))?;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(response(200, "ok"))
         }
     }
 
@@ -1765,8 +1902,7 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_loads_active_targets_and_runs_due_probes_sequentially()
-    -> Result<(), Box<dyn Error>> {
+    fn lifecycle_loads_active_targets_and_runs_due_probes() -> Result<(), Box<dyn Error>> {
         let store = seeded_store("http://127.0.0.1/health", "unknown")?;
         {
             let mut store = store.lock().map_err(|_| "store lock poisoned")?;
@@ -1827,6 +1963,158 @@ mod tests {
             }
         );
         assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_isolates_fast_due_probe_from_slow_due_probe() -> Result<(), Box<dyn Error>> {
+        let store = seeded_store("http://127.0.0.1/slow", "unknown")?;
+        {
+            let mut store = store.lock().map_err(|_| "store lock poisoned")?;
+            store.insert_target(TargetInsert {
+                id: "TGT-worker".to_owned(),
+                url: "http://127.0.0.1/fast".to_owned(),
+                name: "Worker".to_owned(),
+                service: "worker".to_owned(),
+                method: "GET".to_owned(),
+                headers: None,
+                interval_ms: 60_000,
+                timeout_ms: 10_000,
+                expected_status: "200".to_owned(),
+                body_contains: Some("ok".to_owned()),
+                degraded_after: 1,
+                down_after: 3,
+                up_after: 1,
+                active: true,
+                created_at: "2026-05-28T20:00:00Z".to_owned(),
+            })?;
+        }
+        let (slow_started_tx, slow_started_rx) = std::sync::mpsc::channel();
+        let (fast_done_tx, fast_done_rx) = std::sync::mpsc::channel();
+        let (release_slow_tx, release_slow_rx) = std::sync::mpsc::channel();
+        let transport = Arc::new(BlockingTransport::new(
+            slow_started_tx,
+            fast_done_tx,
+            release_slow_rx,
+        ));
+        let sink = Arc::new(RecordingSink::default());
+        let runtime = TargetProbeRuntime::new(
+            store.clone(),
+            HealthEventFanout::new_without_failure_sink(sink),
+            transport.clone(),
+            TargetProbeOptions {
+                allow_private_targets: true,
+                region: None,
+            },
+        );
+        let mut lifecycle = TargetProbeLifecycle::new(store.clone(), runtime);
+
+        let handle = thread::spawn(move || lifecycle.run_due(1_000));
+        slow_started_rx.recv_timeout(StdDuration::from_secs(1))?;
+        fast_done_rx.recv_timeout(StdDuration::from_secs(1))?;
+        let started = Instant::now();
+        loop {
+            let worker = {
+                let store = store.lock().map_err(|_| "store lock poisoned")?;
+                store
+                    .health_targets()?
+                    .into_iter()
+                    .find(|target| target.id == "TGT-worker")
+                    .ok_or("missing worker target")?
+            };
+            if worker.state == "up" && worker.last_checked_at.is_some() {
+                break;
+            }
+            if started.elapsed() > StdDuration::from_secs(1) {
+                return Err(format!(
+                    "fast target did not commit while slow target was blocked: {worker:?}"
+                )
+                .into());
+            }
+            thread::sleep(StdDuration::from_millis(10));
+        }
+
+        release_slow_tx.send(())?;
+        let report = handle
+            .join()
+            .map_err(|_| "target lifecycle test thread panicked")??;
+
+        assert_eq!(
+            report,
+            TargetProbeLifecycleReport {
+                loaded: 2,
+                due: 2,
+                probed: 2,
+                skipped_missing: 0,
+                failed: 0,
+                event_fanout_failed: 0,
+            }
+        );
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_caps_concurrent_due_probe_fanout() -> Result<(), Box<dyn Error>> {
+        let store = seeded_store("http://127.0.0.1/target-api", "unknown")?;
+        {
+            let mut store = store.lock().map_err(|_| "store lock poisoned")?;
+            for index in 0..9 {
+                store.insert_target(TargetInsert {
+                    id: format!("TGT-concurrent-{index:02}"),
+                    url: format!("http://127.0.0.1/target-{index:02}"),
+                    name: format!("Target {index:02}"),
+                    service: "api".to_owned(),
+                    method: "GET".to_owned(),
+                    headers: None,
+                    interval_ms: 60_000,
+                    timeout_ms: 10_000,
+                    expected_status: "200".to_owned(),
+                    body_contains: Some("ok".to_owned()),
+                    degraded_after: 1,
+                    down_after: 3,
+                    up_after: 1,
+                    active: true,
+                    created_at: "2026-05-28T20:00:00Z".to_owned(),
+                })?;
+            }
+        }
+        let transport = Arc::new(GatedPeakTransport::new());
+        let sink = Arc::new(RecordingSink::default());
+        let runtime = TargetProbeRuntime::new(
+            store.clone(),
+            HealthEventFanout::new_without_failure_sink(sink),
+            transport.clone(),
+            TargetProbeOptions {
+                allow_private_targets: true,
+                region: None,
+            },
+        );
+        let mut lifecycle = TargetProbeLifecycle::new(store, runtime);
+
+        let handle = thread::spawn(move || lifecycle.run_due(1_000));
+        let started = Instant::now();
+        while transport.peak() < MAX_CONCURRENT_TARGET_PROBES {
+            if started.elapsed() > StdDuration::from_secs(1) {
+                return Err(format!(
+                    "probe fanout did not reach the configured cap; peak={}",
+                    transport.peak()
+                )
+                .into());
+            }
+            thread::sleep(StdDuration::from_millis(10));
+        }
+        assert_eq!(transport.peak(), MAX_CONCURRENT_TARGET_PROBES);
+
+        transport.release()?;
+        let report = handle
+            .join()
+            .map_err(|_| "target lifecycle test thread panicked")??;
+
+        assert_eq!(report.loaded, 10);
+        assert_eq!(report.due, 10);
+        assert_eq!(report.probed, 10);
+        assert_eq!(transport.peak(), MAX_CONCURRENT_TARGET_PROBES);
         Ok(())
     }
 

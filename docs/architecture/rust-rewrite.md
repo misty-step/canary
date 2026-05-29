@@ -693,6 +693,15 @@ the Rust server accepts production traffic:
     stay `medium`, while three stale active health signals remain `high`. This
     is a correctness improvement for agents reading incidents, not an
     accidental silent wire drift.
+64. `TargetProbeLifecycle` no longer lets one slow target transport serialize
+    every other due target behind it. A lifecycle pass still performs schedule
+    reconciliation and command handling on one worker thread, and all writes
+    still go through the shared `Store` mutex, but due probes now execute in
+    bounded per-pass batches capped by `MAX_CONCURRENT_TARGET_PROBES`. The
+    server tests `lifecycle_isolates_fast_due_probe_from_slow_due_probe` and
+    `lifecycle_caps_concurrent_due_probe_fanout` lock the two important
+    properties: a fast target commits while an unrelated slow target is still
+    blocked, and fanout cannot silently become unbounded thread creation.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -720,11 +729,12 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Add target-probe concurrency and socket-hang isolation without losing the
-   single-writer store boundary. The current Rust `TargetProbeLifecycle`
-   executes due probes sequentially on `canary-target-probes`; Phoenix's BEAM
-   supervision isolates slow target HTTP requests from unrelated targets. The
-   next slice should first add a starvation test with one slow due target and
-   one fast due target, then introduce a bounded worker/task pool or equivalent
-   adapter so one blocked transport cannot delay every other probe. Keep the
-   runtime adapter bespoke; do not introduce a generic scheduler.
+1. Audit target-probe lifecycle shutdown and duplicate-run semantics under
+   long-running probes. The current bounded fanout prevents one slow target
+   from starving unrelated targets inside the same pass, but the worker still
+   joins the active batch before the next tick and before shutdown completes.
+   The next slice should decide whether that is the desired operational
+   contract or whether Canary needs per-target in-flight tracking plus a
+   bounded worker pool that can stop accepting new probes without waiting on
+   already-blocked sockets. Keep the adapter target-probe-specific; do not add
+   a generic scheduler.
