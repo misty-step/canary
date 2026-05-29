@@ -237,6 +237,15 @@ the Rust server accepts production traffic:
     Phoenix-shaped file. `bin/regenerate-phoenix-fixture` is the only intended
     refresh path, and it uses a partitioned Phoenix test database so normal
     local test state is not the fixture source.
+27. `canary-store::commit_health_transition`: target and monitor health
+    transitions now enter the store through one deep command boundary. The
+    command writes the appropriate health state row, appends the deterministic
+    `health_check.*` service event payload, and runs incident correlation in
+    the same SQLite transaction, so `health_transition` signal activity is read
+    from the state row written by the transition itself. HTTP target and
+    non-HTTP monitor payloads remain distinct variants of one health signal
+    concept; callers do not sequence `target_state`/`monitor_state`, timeline,
+    and incident writes themselves.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -264,9 +273,9 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Port health-transition writes into the Rust store so incident correlation can
-   attach both error groups and non-HTTP health signals through the same
-   transaction boundary.
+1. Wire Rust target probes and monitor check-ins to `commit_health_transition`,
+   including target-check and monitor-check-in row persistence around the
+   already-atomic transition boundary.
 2. Add a populated Phoenix fixture once health and annotation writes are ported
    so Rust read models are checked against Phoenix-inserted production-shaped
    rows, not only an empty migrated schema.

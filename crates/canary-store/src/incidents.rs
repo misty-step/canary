@@ -70,19 +70,26 @@ pub(crate) fn correlate(
     command: IncidentCorrelation,
 ) -> Result<Option<IncidentCorrelationEvent>> {
     let transaction = connection.transaction()?;
+    let event = correlate_in_transaction(&transaction, command)?;
+    transaction.commit()?;
+    Ok(event)
+}
+
+pub(crate) fn correlate_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    command: IncidentCorrelation,
+) -> Result<Option<IncidentCorrelationEvent>> {
     let signal_active = signal_active(
-        &transaction,
+        transaction,
         &command.signal_type,
         &command.signal_ref,
         &command.now,
     )?;
-    let event = match open_incident(&transaction, &command.service)? {
-        None if !signal_active => None,
-        None => Some(create_incident(&transaction, &command)?),
-        Some(incident) => update_incident(&transaction, &incident, &command, signal_active)?,
-    };
-    transaction.commit()?;
-    Ok(event)
+    match open_incident(transaction, &command.service)? {
+        None if !signal_active => Ok(None),
+        None => create_incident(transaction, &command).map(Some),
+        Some(incident) => update_incident(transaction, &incident, &command, signal_active),
+    }
 }
 
 fn create_incident(
