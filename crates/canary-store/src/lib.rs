@@ -20,8 +20,8 @@ mod webhook_deliveries;
 pub use api_keys::{API_KEY_PREFIX_LEN, ApiKeyInsert, VerifiedApiKey};
 pub use health::{
     HealthTransitionCommit, MonitorCheckInCommit, MonitorCheckInCommitResult,
-    MonitorCheckInObservation, MonitorTransitionEvent, TargetCheckObservation, TargetProbeCommit,
-    TargetProbeCommitResult, TargetTransitionEvent,
+    MonitorCheckInObservation, MonitorCheckInSnapshot, MonitorInsert, MonitorTransitionEvent,
+    TargetCheckObservation, TargetProbeCommit, TargetProbeCommitResult, TargetTransitionEvent,
 };
 pub use incidents::{IncidentCorrelation, IncidentCorrelationEvent};
 pub use ingest::{
@@ -109,6 +109,23 @@ impl Store {
         check_in: MonitorCheckInCommit,
     ) -> Result<MonitorCheckInCommitResult> {
         health::commit_monitor_check_in(&mut self.connection, check_in)
+    }
+
+    /// Insert one non-HTTP monitor row.
+    pub fn insert_monitor(&mut self, monitor: MonitorInsert) -> Result<()> {
+        health::insert_monitor(&self.connection, monitor)
+    }
+
+    /// Return one monitor configuration and state snapshot by check-in name.
+    ///
+    /// If the monitor exists but has no state row yet, this method creates the
+    /// Phoenix-compatible `unknown` state while the single-writer store lock is
+    /// held by the caller.
+    pub fn monitor_check_in_snapshot_by_name(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<MonitorCheckInSnapshot>> {
+        health::monitor_check_in_snapshot_by_name(&mut self.connection, name)
     }
 
     /// Insert one API-key row whose raw secret has already been bcrypt-hashed.
@@ -1612,6 +1629,41 @@ mod tests {
     }
 
     #[test]
+    fn monitor_check_in_snapshot_finds_monitor_and_ensures_unknown_state() -> Result<()> {
+        let mut store = migrated_store()?;
+        store.insert_monitor(MonitorInsert {
+            id: "MON-worker".to_owned(),
+            name: "Worker heartbeat".to_owned(),
+            service: "worker".to_owned(),
+            mode: "ttl".to_owned(),
+            expected_every_ms: 60_000,
+            grace_ms: 5_000,
+            created_at: "2026-05-28T19:00:00Z".to_owned(),
+        })?;
+
+        let snapshot = store
+            .monitor_check_in_snapshot_by_name("Worker heartbeat")?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+
+        assert_eq!(snapshot.id, "MON-worker");
+        assert_eq!(snapshot.service, "worker");
+        assert_eq!(snapshot.mode, "ttl");
+        assert_eq!(snapshot.expected_every_ms, 60_000);
+        assert_eq!(snapshot.grace_ms, 5_000);
+        assert_eq!(snapshot.state, "unknown");
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT state FROM monitor_state WHERE monitor_id = 'MON-worker'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?,
+            "unknown"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn target_health_transition_updates_state_timeline_and_incident_in_one_commit()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut store = migrated_store()?;
@@ -1931,35 +1983,36 @@ mod tests {
             [],
         )?;
 
-        let commit = store
-            .commit_monitor_check_in(MonitorCheckInCommit {
-                monitor_id: "MON-worker".to_owned(),
-                state: "degraded".to_owned(),
-                last_check_in_at: Some("2026-05-28T20:00:00Z".to_owned()),
-                last_check_in_status: Some("alive".to_owned()),
-                deadline_at: Some("2026-05-28T20:01:05Z".to_owned()),
-                check_in: MonitorCheckInObservation {
-                    id: "CHK-workeralive0".to_owned(),
-                    external_id: Some("deploy-42".to_owned()),
-                    status: "alive".to_owned(),
-                    observed_at: "2026-05-28T20:00:00Z".to_owned(),
-                    ttl_ms: Some(60_000),
-                    summary: Some("worker heartbeat".to_owned()),
-                    context: Some(r#"{"release":"2026.05.28"}"#.to_owned()),
-                },
-                now: "2026-05-28T20:02:00Z".to_owned(),
-                transition: Some(MonitorTransitionEvent {
-                    name: "Worker heartbeat".to_owned(),
-                    service: "worker".to_owned(),
-                    mode: "ttl".to_owned(),
-                    expected_every_ms: 60_000,
-                    grace_ms: 5_000,
-                    previous_state: "unknown".to_owned(),
-                    event_id: EventId::from_str("EVT-mondegraded0")?,
-                    incident_id: IncidentId::from_str("INC-mondegraded0")?,
-                    incident_event_id: EventId::from_str("EVT-monincident0")?,
-                }),
-            })?
+        let result = store.commit_monitor_check_in(MonitorCheckInCommit {
+            monitor_id: "MON-worker".to_owned(),
+            state: "degraded".to_owned(),
+            last_check_in_at: Some("2026-05-28T20:00:00Z".to_owned()),
+            last_check_in_status: Some("alive".to_owned()),
+            deadline_at: Some("2026-05-28T20:01:05Z".to_owned()),
+            check_in: MonitorCheckInObservation {
+                id: "CHK-workeralive0".to_owned(),
+                external_id: Some("deploy-42".to_owned()),
+                status: "alive".to_owned(),
+                observed_at: "2026-05-28T20:00:00Z".to_owned(),
+                ttl_ms: Some(60_000),
+                summary: Some("worker heartbeat".to_owned()),
+                context: Some(r#"{"release":"2026.05.28"}"#.to_owned()),
+            },
+            now: "2026-05-28T20:02:00Z".to_owned(),
+            transition: Some(MonitorTransitionEvent {
+                name: "Worker heartbeat".to_owned(),
+                service: "worker".to_owned(),
+                mode: "ttl".to_owned(),
+                expected_every_ms: 60_000,
+                grace_ms: 5_000,
+                previous_state: "unknown".to_owned(),
+                event_id: EventId::from_str("EVT-mondegraded0")?,
+                incident_id: IncidentId::from_str("INC-mondegraded0")?,
+                incident_event_id: EventId::from_str("EVT-monincident0")?,
+            }),
+        })?;
+        assert_eq!(result.sequence, 1);
+        let commit = result
             .transition
             .ok_or("monitor check-in should emit transition")?;
 

@@ -38,6 +38,46 @@ pub struct TargetProbeCommitResult {
 pub struct MonitorCheckInCommitResult {
     /// Health transition emitted by this check-in, when it changed state.
     pub transition: Option<HealthTransitionCommit>,
+    /// Persisted monitor-state sequence after the check-in.
+    pub sequence: i64,
+}
+
+/// Monitor row to insert.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorInsert {
+    /// Monitor id.
+    pub id: String,
+    /// Unique monitor name used by check-in clients.
+    pub name: String,
+    /// Service name resolved with Phoenix's monitor service fallback.
+    pub service: String,
+    /// Monitor mode, `schedule` or `ttl`.
+    pub mode: String,
+    /// Expected interval in milliseconds.
+    pub expected_every_ms: i64,
+    /// Grace period in milliseconds.
+    pub grace_ms: i64,
+    /// Creation timestamp.
+    pub created_at: String,
+}
+
+/// Monitor configuration and state needed to plan one check-in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorCheckInSnapshot {
+    /// Monitor id.
+    pub id: String,
+    /// Unique monitor name.
+    pub name: String,
+    /// Service name.
+    pub service: String,
+    /// Monitor mode, `schedule` or `ttl`.
+    pub mode: String,
+    /// Expected interval in milliseconds.
+    pub expected_every_ms: i64,
+    /// Grace period in milliseconds.
+    pub grace_ms: i64,
+    /// Current monitor health state.
+    pub state: String,
 }
 
 /// One observed HTTP target probe.
@@ -272,7 +312,80 @@ pub(crate) fn commit_monitor_check_in(
     };
 
     transaction.commit()?;
-    Ok(MonitorCheckInCommitResult { transition })
+    Ok(MonitorCheckInCommitResult {
+        transition,
+        sequence,
+    })
+}
+
+pub(crate) fn insert_monitor(
+    connection: &rusqlite::Connection,
+    monitor: MonitorInsert,
+) -> Result<()> {
+    connection.execute(
+        "INSERT INTO monitors (id, name, service, mode, expected_every_ms, grace_ms, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            monitor.id,
+            monitor.name,
+            monitor.service,
+            monitor.mode,
+            monitor.expected_every_ms,
+            monitor.grace_ms,
+            monitor.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn monitor_check_in_snapshot_by_name(
+    connection: &mut rusqlite::Connection,
+    name: &str,
+) -> Result<Option<MonitorCheckInSnapshot>> {
+    let transaction = connection.transaction()?;
+    let monitor = transaction
+        .query_row(
+            "SELECT id, name, service, mode, expected_every_ms, grace_ms
+             FROM monitors WHERE name = ?1",
+            [name],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let Some((id, name, service, mode, expected_every_ms, grace_ms)) = monitor else {
+        transaction.commit()?;
+        return Ok(None);
+    };
+
+    transaction.execute(
+        "INSERT OR IGNORE INTO monitor_state (monitor_id, state) VALUES (?1, 'unknown')",
+        [&id],
+    )?;
+    let state = transaction.query_row(
+        "SELECT state FROM monitor_state WHERE monitor_id = ?1",
+        [&id],
+        |row| row.get::<_, String>(0),
+    )?;
+    transaction.commit()?;
+
+    Ok(Some(MonitorCheckInSnapshot {
+        id,
+        name,
+        service,
+        mode,
+        expected_every_ms,
+        grace_ms,
+        state,
+    }))
 }
 
 fn next_sequence(

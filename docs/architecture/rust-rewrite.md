@@ -273,6 +273,20 @@ the Rust server accepts production traffic:
     does not execute HTTP requests, perform SSRF checks, schedule probes, own
     SQLite transactions, or enqueue webhooks; the next runtime adapters must
     supply serialized per-target snapshots or transactionally locked reads.
+30. `canary-server::create_check_in` and
+    `canary-store::monitor_check_in_snapshot_by_name`: the Rust service now
+    accepts non-HTTP monitor check-ins on `POST /api/v1/check-ins` under the
+    same ingest-scope auth boundary as Phoenix. The handler reuses the existing
+    JSON size/auth/problem-details adapters, loads the monitor configuration and
+    current state while holding the single store mutex, feeds that snapshot into
+    `canary-workers::health::plan_monitor_check_in`, commits the resulting
+    `MonitorCheckInCommit`, returns the committed state sequence from the store
+    transaction, and best-effort enqueues the recorded health/incident service
+    events after commit. Store owns monitor lookup, missing state bootstrap,
+    observation persistence, timeline payload construction, and incident
+    correlation; the HTTP layer does not re-derive sequence numbers or state
+    transitions. This wires the planner into a real runtime path without adding
+    a scheduler, overdue evaluator, or target probe executor.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -300,11 +314,11 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Wire the Rust health planner into concrete server/runtime consumers:
-   target probe execution with SSRF/status/body/TLS result mapping, monitor
-   check-in HTTP handler adaptation, and serialized per-target snapshot reads
-   before `Store::commit_target_probe` / `Store::commit_monitor_check_in`.
-   Do not add a generic scheduler framework.
+1. Wire the Rust target probe planner into a concrete runtime consumer: target
+   snapshot reads held through `Store::commit_target_probe`, SSRF validation,
+   HTTP status/body/redirect result mapping, latency capture, TLS expiry
+   capture, and post-commit webhook enqueue. Do not add a generic scheduler
+   framework.
 2. Add monitor overdue evaluation as its own planner and store command. It does
    not insert a `monitor_check_ins` row, so it should not be forced through the
    check-in command.

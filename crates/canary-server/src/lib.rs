@@ -4,6 +4,7 @@
 //! HTTP responses. Domain decisions and body shapes stay out of the router.
 
 use std::{
+    collections::BTreeMap,
     error::Error,
     fmt,
     future::Future,
@@ -40,8 +41,12 @@ use canary_ingest::{
 };
 use canary_store::{IncidentCorrelation, IncidentListOptions, Store};
 use canary_store::{QueryError, ServiceQueryOptions};
+use canary_workers::health::{
+    HealthPlanError, MonitorCheckInInput, MonitorCheckInStatus, MonitorMode, MonitorSnapshot,
+    ObservationContext, plan_monitor_check_in,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Map, Value, json};
 
 mod webhooks;
 
@@ -107,9 +112,16 @@ impl CanaryServer {
             scheduler,
             Arc::new(NoopWebhookCooldown),
         ));
-        let effect_sink = Arc::new(RuntimeIngestEffectSink::new(store.clone(), webhook_sink));
-        let ingest_state =
-            IngestState::new_with_shared_effect_sink(store.clone(), config.ingest, effect_sink);
+        let effect_sink = Arc::new(RuntimeIngestEffectSink::new(
+            store.clone(),
+            webhook_sink.clone(),
+        ));
+        let ingest_state = IngestState::new_with_shared_sinks(
+            store.clone(),
+            config.ingest,
+            effect_sink,
+            webhook_sink,
+        );
 
         let transport = Arc::new(build_http_webhook_transport().map_err(ServerBootError::Http)?);
         let runtime = WebhookDeliveryRuntime::new_without_circuit(store.clone(), transport);
@@ -287,6 +299,27 @@ fn current_rfc3339() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
 }
 
+/// Sink for already-recorded service events that should fan out to webhooks.
+pub trait EventSink: Send + Sync + 'static {
+    /// Enqueue one event payload. Errors are advisory after the store commit.
+    fn enqueue_event(&self, event: &str, payload_json: &str) -> Result<(), String>;
+}
+
+#[derive(Debug, Default)]
+struct NoopEventSink;
+
+impl EventSink for NoopEventSink {
+    fn enqueue_event(&self, _event: &str, _payload_json: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+impl EventSink for WebhookEnqueueEffectSink {
+    fn enqueue_event(&self, event: &str, payload_json: &str) -> Result<(), String> {
+        WebhookEnqueueEffectSink::enqueue_event(self, event, payload_json)
+    }
+}
+
 /// Snapshot of dependency readiness for the public readiness endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PublicReadiness {
@@ -322,6 +355,7 @@ pub fn public_router(readiness: PublicReadiness) -> Router {
 pub fn ingest_router(state: IngestState) -> Router {
     Router::new()
         .route("/api/v1/errors", post(create_error))
+        .route("/api/v1/check-ins", post(create_check_in))
         .route("/api/v1/query", get(query_errors))
         .route("/api/v1/incidents", get(list_incidents))
         .route("/api/v1/incidents/{id}", get(show_incident))
@@ -335,6 +369,7 @@ pub struct IngestState {
     store: Arc<Mutex<Store>>,
     config: IngestConfig,
     effect_sink: Arc<dyn IngestEffectSink>,
+    event_sink: Arc<dyn EventSink>,
 }
 
 impl IngestState {
@@ -354,7 +389,7 @@ impl IngestState {
         scheduler: Arc<dyn WebhookScheduler>,
     ) -> Self {
         let store = Arc::new(Mutex::new(store));
-        let effect_sink = Arc::new(WebhookEnqueueEffectSink::new(
+        let webhook_sink = Arc::new(WebhookEnqueueEffectSink::new(
             store.clone(),
             scheduler,
             Arc::new(NoopWebhookCooldown),
@@ -362,7 +397,8 @@ impl IngestState {
         Self {
             store,
             config,
-            effect_sink,
+            effect_sink: webhook_sink.clone(),
+            event_sink: webhook_sink,
         }
     }
 
@@ -385,6 +421,22 @@ impl IngestState {
             store,
             config,
             effect_sink,
+            event_sink: Arc::new(NoopEventSink),
+        }
+    }
+
+    /// Build ingest state from shared store plus explicit ingest and event sinks.
+    pub fn new_with_shared_sinks(
+        store: Arc<Mutex<Store>>,
+        config: IngestConfig,
+        effect_sink: Arc<dyn IngestEffectSink>,
+        event_sink: Arc<dyn EventSink>,
+    ) -> Self {
+        Self {
+            store,
+            config,
+            effect_sink,
+            event_sink,
         }
     }
 }
@@ -480,6 +532,94 @@ async fn create_error(
     }
 }
 
+async fn create_check_in(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    if let Err(problem) = check_content_length(&headers) {
+        return problem_response(*problem);
+    }
+
+    if body.len() as u64 > MAX_JSON_BODY_BYTES {
+        return problem_response(payload_too_large_problem(
+            "Request body exceeds 100KB limit.",
+        ));
+    }
+
+    if let Err(problem) = require_ingest_scope(&state, &headers) {
+        return problem_response(*problem);
+    }
+
+    let attrs = match decode_json_object(&body, None) {
+        Ok(attrs) => attrs,
+        Err(problem) => return problem_response(*problem),
+    };
+    let check_in = match parse_check_in(attrs) {
+        Ok(check_in) => check_in,
+        Err(problem) => return problem_response(*problem),
+    };
+
+    let mut store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+
+    let snapshot = match store.monitor_check_in_snapshot_by_name(&check_in.monitor_name) {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => return problem_response(not_found_problem("Monitor not found.")),
+        Err(_) => return problem_response(internal_problem()),
+    };
+    let monitor = match monitor_snapshot(snapshot) {
+        Ok(monitor) => monitor,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    let context = ObservationContext {
+        now: check_in.observed_at.clone(),
+        now_millis: current_unix_millis(),
+        event_id: canary_core::ids::EventId::generate(),
+        incident_id: canary_core::ids::IncidentId::generate(),
+        incident_event_id: canary_core::ids::EventId::generate(),
+    };
+    let plan = match plan_monitor_check_in(monitor, check_in.input, context) {
+        Ok(plan) => plan,
+        Err(HealthPlanError::InvalidObservedAt(_)) => {
+            return problem_response(invalid_observed_at_problem());
+        }
+    };
+    let response_observed_at = plan.commit.check_in.observed_at.clone();
+    let response_check_in_id = plan.commit.check_in.id.clone();
+    let response_monitor_id = plan.commit.monitor_id.clone();
+    let response_state = plan.commit.state.clone();
+    let commit = match store.commit_monitor_check_in(plan.commit) {
+        Ok(commit) => commit,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    drop(store);
+
+    if let Some(transition) = commit.transition {
+        let _ = state
+            .event_sink
+            .enqueue_event(&transition.event, &transition.payload_json);
+        if let Some(event) = transition.incident_event {
+            let _ = state
+                .event_sink
+                .enqueue_event(&event.event, &event.payload_json);
+        }
+    }
+
+    json_status_response(
+        StatusCode::CREATED.as_u16(),
+        json!({
+            "monitor_id": response_monitor_id,
+            "check_in_id": response_check_in_id,
+            "state": response_state,
+            "observed_at": response_observed_at,
+            "sequence": commit.sequence,
+        }),
+    )
+}
+
 async fn query_errors(
     State(state): State<IngestState>,
     headers: HeaderMap,
@@ -554,6 +694,151 @@ enum QueryKind {
         service: Option<String>,
     },
     ErrorClasses,
+}
+
+struct ParsedCheckIn {
+    monitor_name: String,
+    observed_at: String,
+    input: MonitorCheckInInput,
+}
+
+fn parse_check_in(attrs: Map<String, Value>) -> Result<ParsedCheckIn, Box<ProblemDetails>> {
+    let mut errors: ValidationErrors = BTreeMap::new();
+    let monitor_name = required_string(&attrs, "monitor", &mut errors);
+    let status = parse_check_in_status(attrs.get("status"), &mut errors);
+
+    if !errors.is_empty() {
+        return Err(Box::new(check_in_validation_problem(errors)));
+    }
+
+    let Some(monitor_name) = monitor_name else {
+        return Err(Box::new(check_in_validation_problem(BTreeMap::new())));
+    };
+    let Some(status) = status else {
+        return Err(Box::new(check_in_validation_problem(BTreeMap::new())));
+    };
+    let observed_at = match attrs.get("observed_at") {
+        Some(Value::String(value)) => value.clone(),
+        Some(Value::Null) | None => current_rfc3339(),
+        Some(_) => return Err(Box::new(invalid_observed_at_problem())),
+    };
+
+    Ok(ParsedCheckIn {
+        monitor_name,
+        observed_at: observed_at.clone(),
+        input: MonitorCheckInInput {
+            id: canary_core::ids::CheckInId::generate().into_string(),
+            external_id: optional_string(attrs.get("check_in_id")),
+            status,
+            observed_at,
+            ttl_ms: positive_i64(attrs.get("ttl_ms")),
+            summary: optional_string(attrs.get("summary")),
+            context: encode_context(attrs.get("context")),
+        },
+    })
+}
+
+fn required_string(
+    attrs: &Map<String, Value>,
+    key: &str,
+    errors: &mut ValidationErrors,
+) -> Option<String> {
+    match attrs.get(key) {
+        Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
+        _ => {
+            errors.insert(
+                key.to_owned(),
+                vec!["must be a non-empty string".to_owned()],
+            );
+            None
+        }
+    }
+}
+
+fn parse_check_in_status(
+    value: Option<&Value>,
+    errors: &mut ValidationErrors,
+) -> Option<MonitorCheckInStatus> {
+    let status = match value {
+        Some(Value::String(value)) => match value.as_str() {
+            "alive" => Some(MonitorCheckInStatus::Alive),
+            "in_progress" => Some(MonitorCheckInStatus::InProgress),
+            "ok" => Some(MonitorCheckInStatus::Ok),
+            "error" => Some(MonitorCheckInStatus::Error),
+            _ => None,
+        },
+        _ => None,
+    };
+
+    if status.is_none() {
+        errors.insert(
+            "status".to_owned(),
+            vec!["must be one of: alive, in_progress, ok, error".to_owned()],
+        );
+    }
+
+    status
+}
+
+fn optional_string(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn positive_i64(value: Option<&Value>) -> Option<i64> {
+    match value {
+        Some(Value::Number(number)) => number.as_i64().filter(|value| *value > 0),
+        Some(Value::String(value)) => value.parse::<i64>().ok().filter(|value| *value > 0),
+        _ => None,
+    }
+}
+
+fn encode_context(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::Object(_)) => value.and_then(|value| serde_json::to_string(value).ok()),
+        _ => None,
+    }
+}
+
+fn monitor_snapshot(
+    snapshot: canary_store::MonitorCheckInSnapshot,
+) -> Result<MonitorSnapshot, String> {
+    Ok(MonitorSnapshot {
+        id: snapshot.id,
+        name: snapshot.name,
+        service: snapshot.service,
+        mode: monitor_mode(&snapshot.mode)?,
+        expected_every_ms: snapshot.expected_every_ms,
+        grace_ms: snapshot.grace_ms,
+        state: health_state(&snapshot.state)?,
+    })
+}
+
+fn monitor_mode(value: &str) -> Result<MonitorMode, String> {
+    match value {
+        "schedule" => Ok(MonitorMode::Schedule),
+        "ttl" => Ok(MonitorMode::Ttl),
+        _ => Err(format!("unknown monitor mode: {value}")),
+    }
+}
+
+fn health_state(value: &str) -> Result<canary_core::health::state_machine::HealthState, String> {
+    match value {
+        "unknown" => Ok(canary_core::health::state_machine::HealthState::Unknown),
+        "up" => Ok(canary_core::health::state_machine::HealthState::Up),
+        "degraded" => Ok(canary_core::health::state_machine::HealthState::Degraded),
+        "down" => Ok(canary_core::health::state_machine::HealthState::Down),
+        "paused" => Ok(canary_core::health::state_machine::HealthState::Paused),
+        "flapping" => Ok(canary_core::health::state_machine::HealthState::Flapping),
+        _ => Err(format!("unknown health state: {value}")),
+    }
+}
+
+fn current_unix_millis() -> i64 {
+    let nanos = time::OffsetDateTime::now_utc().unix_timestamp_nanos();
+    i64::try_from(nanos / 1_000_000).unwrap_or(i64::MAX)
 }
 
 async fn list_incidents(
@@ -742,6 +1027,33 @@ fn validation_problem(errors: ValidationErrors) -> ProblemDetails {
     .with_extra("errors", json!(errors))
 }
 
+fn check_in_validation_problem(errors: ValidationErrors) -> ProblemDetails {
+    ProblemDetails::new(
+        422,
+        ProblemCode::ValidationError,
+        "Invalid check-in payload.",
+        None,
+    )
+    .with_extra("errors", json!(errors))
+}
+
+fn invalid_observed_at_problem() -> ProblemDetails {
+    ProblemDetails::new(
+        422,
+        ProblemCode::ValidationError,
+        "Invalid observed_at timestamp.",
+        None,
+    )
+    .with_extra(
+        "errors",
+        json!({"observed_at": ["must be an ISO8601 timestamp"]}),
+    )
+}
+
+fn not_found_problem(detail: impl Into<String>) -> ProblemDetails {
+    ProblemDetails::new(404, ProblemCode::NotFound, detail, None)
+}
+
 fn payload_too_large_problem(detail: impl Into<String>) -> ProblemDetails {
     http_payload_too_large_problem(detail, None)
 }
@@ -835,8 +1147,8 @@ mod tests {
     };
     use canary_http::public::{APPLICATION_JSON, OPENAPI_JSON};
     use canary_store::{
-        API_KEY_PREFIX_LEN, ApiKeyInsert, WebhookDeliveryJobInsert, WebhookDeliveryJobState,
-        WebhookDeliveryStatus, WebhookSubscriptionInsert,
+        API_KEY_PREFIX_LEN, ApiKeyInsert, MonitorInsert, WebhookDeliveryJobInsert,
+        WebhookDeliveryJobState, WebhookDeliveryStatus, WebhookSubscriptionInsert,
     };
     use canary_workers::webhooks::{CircuitDecision, TransportResult, WebhookJob, WebhookRequest};
     use serde_json::{Value, json};
@@ -1854,6 +2166,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn monitor_check_in_accepts_ingest_scope_and_returns_phoenix_body()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state_with_monitor("desktop-active-timer")?;
+        let response = ingest_router(state)
+            .oneshot(check_in_request(
+                INGEST_KEY,
+                r#"{"monitor":"desktop-active-timer","status":"alive","observed_at":"2026-05-28T20:00:00Z","ttl_ms":120000}"#,
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["monitor_id"], "MON-desktop-active-timer");
+        assert_eq!(body["state"], "up");
+        assert_eq!(body["observed_at"], "2026-05-28T20:00:00Z");
+        assert_eq!(body["sequence"], 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn monitor_check_in_enqueues_transition_webhook() -> Result<(), Box<dyn Error>> {
+        let scheduler = Arc::new(RecordingScheduler::default());
+        let state = test_ingest_state_with_monitor_webhook(
+            "desktop-active-timer",
+            scheduler.clone(),
+            "health_check.recovered",
+        )?;
+
+        let response = ingest_router(state.clone())
+            .oneshot(check_in_request(
+                INGEST_KEY,
+                r#"{"monitor":"desktop-active-timer","status":"alive","observed_at":"2026-05-28T20:00:00Z"}"#,
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let jobs = scheduler
+            .jobs
+            .lock()
+            .map_err(|_| "scheduler lock poisoned")?;
+        assert_eq!(jobs.len(), 1);
+        let job = jobs.first().ok_or("missing scheduled webhook job")?;
+        assert_eq!(job.webhook_id, "WHK-monitor");
+        assert_eq!(job.event, "health_check.recovered");
+        assert_eq!(job.payload["monitor"]["name"], "desktop-active-timer");
+        assert_eq!(job.payload["state"], "up");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn monitor_check_in_returns_404_for_unknown_monitor() -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let response = ingest_router(state)
+            .oneshot(check_in_request(
+                INGEST_KEY,
+                r#"{"monitor":"missing","status":"alive"}"#,
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["code"], "not_found");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn monitor_check_in_reports_payload_validation_errors() -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state_with_monitor("desktop-active-timer")?;
+        let response = ingest_router(state)
+            .oneshot(check_in_request(
+                INGEST_KEY,
+                r#"{"monitor":"desktop-active-timer"}"#,
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "validation_error");
+        assert_eq!(
+            body["errors"]["status"],
+            json!(["must be one of: alive, in_progress, ok, error"])
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn monitor_check_in_reports_invalid_observed_at() -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state_with_monitor("desktop-active-timer")?;
+        let response = ingest_router(state)
+            .oneshot(check_in_request(
+                INGEST_KEY,
+                r#"{"monitor":"desktop-active-timer","status":"alive","observed_at":"not-a-time"}"#,
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["detail"], "Invalid observed_at timestamp.");
+        assert_eq!(
+            body["errors"]["observed_at"],
+            json!(["must be an ISO8601 timestamp"])
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn error_query_accepts_read_scope_and_returns_service_groups()
     -> Result<(), Box<dyn Error>> {
         let state = test_ingest_state()?;
@@ -2260,6 +2687,43 @@ mod tests {
         test_ingest_state_with_sink(Arc::new(NoopIngestEffectSink))
     }
 
+    fn test_ingest_state_with_monitor(name: &str) -> Result<IngestState, Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        {
+            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            seed_monitor(&mut store, name)?;
+        }
+        Ok(state)
+    }
+
+    fn test_ingest_state_with_monitor_webhook(
+        name: &str,
+        scheduler: Arc<dyn WebhookScheduler>,
+        event: &str,
+    ) -> Result<IngestState, Box<dyn Error>> {
+        let mut store = Store::open_in_memory()?;
+        store.migrate()?;
+
+        seed_api_key(&mut store, "KEY-admin", ADMIN_KEY, "admin", None)?;
+        seed_api_key(&mut store, "KEY-ingest", INGEST_KEY, "ingest-only", None)?;
+        seed_api_key(&mut store, "KEY-read", READ_KEY, "read-only", None)?;
+        seed_monitor(&mut store, name)?;
+        store.insert_webhook_subscription(WebhookSubscriptionInsert {
+            id: "WHK-monitor".to_owned(),
+            url: "https://example.test/monitor".to_owned(),
+            events: vec![event.to_owned()],
+            secret: "test-webhook-secret".to_owned(),
+            active: true,
+            created_at: "2026-05-28T20:00:00Z".to_owned(),
+        })?;
+
+        Ok(IngestState::new_with_webhook_scheduler(
+            store,
+            IngestConfig::default(),
+            scheduler,
+        ))
+    }
+
     fn test_ingest_state_with_sink(
         effect_sink: Arc<dyn IngestEffectSink>,
     ) -> Result<IngestState, Box<dyn Error>> {
@@ -2346,6 +2810,13 @@ mod tests {
             .body(Body::from(body))?)
     }
 
+    fn check_in_request(token: &str, body: &'static str) -> Result<Request<Body>, Box<dyn Error>> {
+        Ok(Request::post("/api/v1/check-ins")
+            .header("authorization", format!("Bearer {token}"))
+            .header(CONTENT_TYPE, APPLICATION_JSON)
+            .body(Body::from(body))?)
+    }
+
     fn read_request(token: &str, path: &str) -> Result<Request<Body>, Box<dyn Error>> {
         Ok(Request::get(path)
             .header("authorization", format!("Bearer {token}"))
@@ -2372,6 +2843,19 @@ mod tests {
             created_at: "2026-05-28T20:00:00Z".to_owned(),
             revoked_at: revoked_at.map(str::to_owned),
             scope: scope.to_owned(),
+        })?;
+        Ok(())
+    }
+
+    fn seed_monitor(store: &mut Store, name: &str) -> Result<(), Box<dyn Error>> {
+        store.insert_monitor(MonitorInsert {
+            id: format!("MON-{name}"),
+            name: name.to_owned(),
+            service: name.to_owned(),
+            mode: "ttl".to_owned(),
+            expected_every_ms: 90_000,
+            grace_ms: 5_000,
+            created_at: "2026-05-28T20:00:00Z".to_owned(),
         })?;
         Ok(())
     }
