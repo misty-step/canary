@@ -99,11 +99,11 @@ pub use tls_scan::{
     TlsExpiryScanLifecycle, TlsExpiryScanLifecycleConfig, TlsExpiryScanLifecycleReport,
     TlsExpiryScanLifecycleWorker, TlsExpiryScanRuntimeError, run_tls_expiry_scan_once,
 };
-use webhooks::NoopWebhookCooldown;
 pub use webhooks::{
-    HttpWebhookTransport, StoreWebhookScheduler, WebhookCircuit, WebhookCooldown,
-    WebhookDeliveryDrain, WebhookDeliveryDrainReport, WebhookDeliveryDrainWorker,
-    WebhookDeliveryRuntime, WebhookEnqueueEffectSink, WebhookScheduler, WebhookTransport,
+    HttpWebhookTransport, InMemoryWebhookCircuit, InMemoryWebhookCooldown, StoreWebhookScheduler,
+    WebhookCircuit, WebhookCooldown, WebhookDeliveryDrain, WebhookDeliveryDrainReport,
+    WebhookDeliveryDrainWorker, WebhookDeliveryRuntime, WebhookEnqueueEffectSink, WebhookScheduler,
+    WebhookTransport,
 };
 
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
@@ -224,10 +224,12 @@ impl CanaryServer {
         let store = Arc::new(Mutex::new(store));
 
         let scheduler = Arc::new(StoreWebhookScheduler::new(store.clone()));
+        let webhook_cooldown = Arc::new(InMemoryWebhookCooldown::default());
+        let webhook_circuit = Arc::new(InMemoryWebhookCircuit::default());
         let webhook_sink = Arc::new(WebhookEnqueueEffectSink::new(
             store.clone(),
             scheduler,
-            Arc::new(NoopWebhookCooldown),
+            webhook_cooldown,
         ));
         let effect_sink = Arc::new(RuntimeIngestEffectSink::new(
             store.clone(),
@@ -244,7 +246,7 @@ impl CanaryServer {
         );
 
         let transport = Arc::new(build_http_webhook_transport().map_err(ServerBootError::Http)?);
-        let runtime = WebhookDeliveryRuntime::new_without_circuit(store.clone(), transport);
+        let runtime = WebhookDeliveryRuntime::new(store.clone(), transport, webhook_circuit);
         let drain = WebhookDeliveryDrain::new(store, runtime, config.webhook_drain_max_jobs);
         let webhook_worker =
             WebhookDeliveryDrainWorker::spawn(drain, config.webhook_drain_interval)
@@ -666,7 +668,7 @@ impl IngestState {
         let webhook_sink = Arc::new(WebhookEnqueueEffectSink::new(
             store.clone(),
             scheduler,
-            Arc::new(NoopWebhookCooldown),
+            Arc::new(InMemoryWebhookCooldown::default()),
         ));
         Self {
             store,

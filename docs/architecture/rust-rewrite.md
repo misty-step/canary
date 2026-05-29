@@ -735,6 +735,21 @@ the Rust server accepts production traffic:
     lock the production invariants: shutdown does not wait for a full backlog
     of sequential candidates, advisory fanout failures remain non-fatal, and
     repeated monitor-overdue lifecycle failures are visible to operators.
+67. The Rust server boot path now wires real process-local webhook flood
+    controls instead of leaving the typed cooldown and circuit-breaker
+    boundaries as no-ops. `InMemoryWebhookCooldown` preserves the Phoenix
+    five-minute suppression contract for duplicate event identities after a
+    scheduler accepts a job, and `InMemoryWebhookCircuit` preserves the Phoenix
+    ten-consecutive-failure threshold plus five-minute probe interval for
+    failing subscriptions. Both adapters remain explicit runtime state in
+    `canary-server`; the pure delivery planner still receives only
+    `CircuitDecision` and cooldown predicates. The focused tests
+    `webhooks::tests::in_memory_cooldown_suppresses_until_ttl_expires`,
+    `webhooks::tests::in_memory_circuit_opens_probes_and_resets_on_success`,
+    and
+    `webhooks::tests::in_memory_circuit_failed_probe_reopens_for_another_probe_interval`
+    lock the production invariant that Rust webhook delivery cannot flood
+    responders in exception loops or hammer an endpoint whose circuit is open.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -763,5 +778,6 @@ Phoenix behavior until the replacement is complete:
 ## Next Slices
 
 1. Continue converging the Rust replacement around small, typed contracts:
-   review the next Phoenix parity surface with the same bias used here, keeping
-   lifecycle differences explicit unless duplicated invariants hide real bugs.
+   move Problem Details factory functions from `canary-server` into
+   `canary-http` so RFC 9457 wire translation is owned beside the
+   `ProblemDetails` type, while preserving every existing route-level behavior.

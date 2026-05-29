@@ -1,11 +1,12 @@
 use std::{
+    collections::HashMap,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration as StdDuration,
+    time::{Duration as StdDuration, Instant},
 };
 
 use canary_ingest::IngestEffect;
@@ -134,15 +135,142 @@ pub trait WebhookCircuit: Send + Sync + 'static {
     fn record_failure(&self, webhook_id: &str);
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct NoopWebhookCooldown;
+/// In-process cooldown state for webhook enqueue suppression.
+///
+/// Phoenix stores this in ETS. The Rust server keeps the same process-local
+/// contract explicitly here: cooldown state is advisory, monotonic, and lost on
+/// restart.
+#[derive(Debug)]
+pub struct InMemoryWebhookCooldown {
+    ttl: StdDuration,
+    marked_at: Mutex<HashMap<String, Instant>>,
+}
 
-impl WebhookCooldown for NoopWebhookCooldown {
-    fn in_cooldown(&self, _key: &str) -> bool {
-        false
+impl InMemoryWebhookCooldown {
+    const DEFAULT_TTL: StdDuration = StdDuration::from_secs(5 * 60);
+
+    /// Build the Phoenix-compatible five-minute webhook cooldown.
+    pub fn phoenix_default() -> Self {
+        Self::with_ttl(Self::DEFAULT_TTL)
     }
 
-    fn mark(&self, _key: &str) {}
+    /// Build cooldown state with an explicit TTL for tests.
+    pub fn with_ttl(ttl: StdDuration) -> Self {
+        Self {
+            ttl,
+            marked_at: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for InMemoryWebhookCooldown {
+    fn default() -> Self {
+        Self::phoenix_default()
+    }
+}
+
+impl WebhookCooldown for InMemoryWebhookCooldown {
+    fn in_cooldown(&self, key: &str) -> bool {
+        let Ok(marked_at) = self.marked_at.lock() else {
+            return false;
+        };
+        marked_at
+            .get(key)
+            .is_some_and(|marked_at| marked_at.elapsed() < self.ttl)
+    }
+
+    fn mark(&self, key: &str) {
+        let Ok(mut marked_at) = self.marked_at.lock() else {
+            return;
+        };
+        marked_at.insert(key.to_owned(), Instant::now());
+    }
+}
+
+/// In-process per-webhook delivery circuit breaker.
+///
+/// Phoenix opens a circuit after ten consecutive delivery failures and allows a
+/// probe after five minutes. This adapter keeps that policy out of the delivery
+/// planner while making the runtime state explicit and testable.
+#[derive(Debug)]
+pub struct InMemoryWebhookCircuit {
+    failure_threshold: u32,
+    probe_interval: StdDuration,
+    states: Mutex<HashMap<String, WebhookCircuitState>>,
+}
+
+#[derive(Debug, Clone)]
+struct WebhookCircuitState {
+    failures: u32,
+    last_failure_at: Instant,
+}
+
+impl InMemoryWebhookCircuit {
+    const DEFAULT_FAILURE_THRESHOLD: u32 = 10;
+    const DEFAULT_PROBE_INTERVAL: StdDuration = StdDuration::from_secs(5 * 60);
+
+    /// Build the Phoenix-compatible webhook circuit breaker.
+    pub fn phoenix_default() -> Self {
+        Self::with_policy(
+            Self::DEFAULT_FAILURE_THRESHOLD,
+            Self::DEFAULT_PROBE_INTERVAL,
+        )
+    }
+
+    /// Build circuit state with an explicit threshold and probe interval for tests.
+    pub fn with_policy(failure_threshold: u32, probe_interval: StdDuration) -> Self {
+        Self {
+            failure_threshold,
+            probe_interval,
+            states: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for InMemoryWebhookCircuit {
+    fn default() -> Self {
+        Self::phoenix_default()
+    }
+}
+
+impl WebhookCircuit for InMemoryWebhookCircuit {
+    fn decision(&self, webhook_id: &str) -> CircuitDecision {
+        let Ok(states) = self.states.lock() else {
+            return CircuitDecision::Closed;
+        };
+        let Some(state) = states.get(webhook_id) else {
+            return CircuitDecision::Closed;
+        };
+        if state.failures < self.failure_threshold {
+            return CircuitDecision::Closed;
+        }
+        if state.last_failure_at.elapsed() >= self.probe_interval {
+            CircuitDecision::Probe
+        } else {
+            CircuitDecision::Open
+        }
+    }
+
+    fn record_success(&self, webhook_id: &str) {
+        let Ok(mut states) = self.states.lock() else {
+            return;
+        };
+        states.remove(webhook_id);
+    }
+
+    fn record_failure(&self, webhook_id: &str) {
+        let Ok(mut states) = self.states.lock() else {
+            return;
+        };
+        let state = states
+            .entry(webhook_id.to_owned())
+            .or_insert_with(|| WebhookCircuitState {
+                failures: 0,
+                last_failure_at: Instant::now(),
+            });
+        state.failures = state.failures.saturating_add(1);
+        state.last_failure_at = Instant::now();
+    }
 }
 
 #[derive(Debug, Default)]
@@ -725,4 +853,53 @@ fn current_rfc3339() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{thread, time::Duration as StdDuration};
+
+    use super::*;
+
+    #[test]
+    fn in_memory_cooldown_suppresses_until_ttl_expires() {
+        let cooldown = InMemoryWebhookCooldown::with_ttl(StdDuration::from_millis(20));
+
+        assert!(!cooldown.in_cooldown("WHK-a:error.new_class:grp-a"));
+        cooldown.mark("WHK-a:error.new_class:grp-a");
+        assert!(cooldown.in_cooldown("WHK-a:error.new_class:grp-a"));
+        assert!(!cooldown.in_cooldown("WHK-a:error.new_class:grp-b"));
+
+        thread::sleep(StdDuration::from_millis(25));
+        assert!(!cooldown.in_cooldown("WHK-a:error.new_class:grp-a"));
+    }
+
+    #[test]
+    fn in_memory_circuit_opens_probes_and_resets_on_success() {
+        let circuit = InMemoryWebhookCircuit::with_policy(2, StdDuration::from_millis(20));
+
+        assert_eq!(circuit.decision("WHK-a"), CircuitDecision::Closed);
+        circuit.record_failure("WHK-a");
+        assert_eq!(circuit.decision("WHK-a"), CircuitDecision::Closed);
+        circuit.record_failure("WHK-a");
+        assert_eq!(circuit.decision("WHK-a"), CircuitDecision::Open);
+
+        thread::sleep(StdDuration::from_millis(25));
+        assert_eq!(circuit.decision("WHK-a"), CircuitDecision::Probe);
+
+        circuit.record_success("WHK-a");
+        assert_eq!(circuit.decision("WHK-a"), CircuitDecision::Closed);
+    }
+
+    #[test]
+    fn in_memory_circuit_failed_probe_reopens_for_another_probe_interval() {
+        let circuit = InMemoryWebhookCircuit::with_policy(1, StdDuration::from_millis(20));
+
+        circuit.record_failure("WHK-a");
+        thread::sleep(StdDuration::from_millis(25));
+        assert_eq!(circuit.decision("WHK-a"), CircuitDecision::Probe);
+
+        circuit.record_failure("WHK-a");
+        assert_eq!(circuit.decision("WHK-a"), CircuitDecision::Open);
+    }
 }
