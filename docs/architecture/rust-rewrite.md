@@ -702,17 +702,25 @@ the Rust server accepts production traffic:
     `lifecycle_caps_concurrent_due_probe_fanout` lock the two important
     properties: a fast target commits while an unrelated slow target is still
     blocked, and fanout cannot silently become unbounded thread creation.
-65. Target-probe shutdown no longer waits for a blocked probe transport. Normal
-    lifecycle passes still wait for launched probes to finish, which preserves
-    completion-driven reports and prevents duplicate launches on later ticks.
-    The worker path now calls `run_due_until` with the shutdown flag; once
-    shutdown is requested, the coordinator stops waiting for outstanding probe
-    completions and exits the worker thread. Detached probe threads may finish
-    and commit through the same store mutex, but shutdown is no longer hostage
-    to a hung socket. The tests
-    `lifecycle_worker_does_not_duplicate_long_running_probe_before_completion`
-    and `lifecycle_worker_shutdown_does_not_wait_for_blocked_probe_transport`
-    lock both halves of that contract.
+65. `TargetProbeLifecycle` now reports target probes asynchronously across
+    lifecycle ticks. A tick drains completed probe results, launches new due
+    probes up to the global `MAX_CONCURRENT_TARGET_PROBES` cap, and returns
+    without waiting for slow targets. The lifecycle owns explicit `in_flight`
+    state so one target cannot be launched twice while a previous probe is
+    still running, and completion-driven schedule advancement happens only
+    after the probe thread reports back. Shutdown still exits the coordinator
+    without waiting on blocked transports; detached probe threads may finish and
+    commit through the same store mutex, but no worker tick is held hostage to a
+    hung socket. The report counters now distinguish launches from completions
+    (`launched`, `completed`, `in_flight`, and `dropped_untracked`), which makes
+    the async contract visible to tests and future agents. The tests
+    `lifecycle_reports_completion_on_subsequent_tick`,
+    `lifecycle_discards_completion_for_untracked_target`,
+    `lifecycle_worker_does_not_duplicate_long_running_probe_before_completion`,
+    `lifecycle_worker_shutdown_does_not_wait_for_blocked_probe_transport`, and
+    `lifecycle_caps_concurrent_due_probe_fanout` lock the production invariants:
+    no duplicate in-flight target probes, bounded global fanout, ignored stale
+    completions for removed targets, and bounded worker shutdown.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -740,10 +748,9 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Decide whether target-probe reporting should become fully asynchronous.
-   The current contract keeps normal pass reports completion-driven and only
-   detaches outstanding probe threads during shutdown. A fuller design would
-   add target-scoped in-flight tracking plus a completion channel across
-   lifecycle ticks, letting the worker keep ticking while long probes continue
-   in the background. Do that only if a production behavior needs it; keep the
-   adapter target-probe-specific and preserve the single-writer store mutex.
+1. Audit the remaining background lifecycle adapters for the same explicit
+   bounded-shutdown contract now used by webhooks, retention, monitor overdue,
+   TLS scan, and target probes. Prefer deleting bespoke differences over
+   introducing a generic worker framework; only extract shared code if a third
+   independently verified lifecycle invariant becomes duplicated enough to hide
+   bugs.

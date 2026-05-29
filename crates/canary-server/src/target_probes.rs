@@ -6,7 +6,7 @@
 //! store commit, and post-commit webhook fanout.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::Read,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs},
     panic::{AssertUnwindSafe, catch_unwind},
@@ -240,6 +240,10 @@ pub struct TargetProbeLifecycleReport {
     pub loaded: usize,
     /// Due targets selected for execution.
     pub due: usize,
+    /// New probe threads launched during this lifecycle pass.
+    pub launched: usize,
+    /// Probe completions drained during this lifecycle pass.
+    pub completed: usize,
     /// Probes that completed and committed an observation.
     pub probed: usize,
     /// Probes skipped because the target was concurrently deactivated or deleted.
@@ -248,6 +252,10 @@ pub struct TargetProbeLifecycleReport {
     pub failed: usize,
     /// Advisory health-transition webhook enqueue failures.
     pub event_fanout_failed: usize,
+    /// Probe threads still in flight after this lifecycle pass.
+    pub in_flight: usize,
+    /// Completions ignored for targets removed or paused before their probe returned.
+    pub dropped_untracked: usize,
 }
 
 /// Runtime control message for active target probe scheduling.
@@ -289,21 +297,35 @@ pub struct TargetProbeLifecycle {
     store: Arc<Mutex<Store>>,
     runtime: Arc<TargetProbeRuntime>,
     schedules: BTreeMap<String, ScheduledTarget>,
+    in_flight: BTreeSet<String>,
+    drop_completion_for: BTreeSet<String>,
+    completion_sender: Sender<TargetProbeCompletion>,
+    completion_receiver: Receiver<TargetProbeCompletion>,
     commands: Option<Receiver<TargetProbeLifecycleCommand>>,
 }
+
+type TargetProbeCompletion = (
+    String,
+    thread::Result<Result<TargetProbeOutcome, TargetProbeRuntimeError>>,
+);
 
 impl TargetProbeLifecycle {
     /// Build a lifecycle adapter from the shared store and probe runtime.
     pub fn new(store: Arc<Mutex<Store>>, runtime: TargetProbeRuntime) -> Self {
+        let (completion_sender, completion_receiver) = mpsc::channel();
         Self {
             store,
             runtime: Arc::new(runtime),
             schedules: BTreeMap::new(),
+            in_flight: BTreeSet::new(),
+            drop_completion_for: BTreeSet::new(),
+            completion_sender,
+            completion_receiver,
             commands: None,
         }
     }
 
-    /// Load active targets, execute due probes with bounded isolation, and update next due times.
+    /// Launch due probes and drain completed probe results without waiting on slow targets.
     pub fn run_due(&mut self, now_millis: i64) -> Result<TargetProbeLifecycleReport, String> {
         self.run_due_until(now_millis, || false)
     }
@@ -320,68 +342,83 @@ impl TargetProbeLifecycle {
         self.reconcile(active, now_millis);
         self.drain_control_commands(now_millis);
 
+        let mut report = TargetProbeLifecycleReport {
+            loaded: self.schedules.len(),
+            ..TargetProbeLifecycleReport::default()
+        };
+        self.drain_completions(&mut report, now_millis);
+
         let due_targets = self
             .schedules
             .iter()
-            .filter(|(_, schedule)| !schedule.paused && schedule.next_due_millis <= now_millis)
+            .filter(|(target_id, schedule)| {
+                !schedule.paused
+                    && schedule.next_due_millis <= now_millis
+                    && !self.in_flight.contains(*target_id)
+            })
             .map(|(target_id, _)| target_id.clone())
             .collect::<Vec<_>>();
 
-        let mut report = TargetProbeLifecycleReport {
-            loaded: self.schedules.len(),
-            due: due_targets.len(),
-            ..TargetProbeLifecycleReport::default()
-        };
+        report.due = due_targets.len();
+        let capacity = MAX_CONCURRENT_TARGET_PROBES.saturating_sub(self.in_flight.len());
+        if !should_stop() {
+            for target_id in due_targets.into_iter().take(capacity) {
+                self.launch_probe(&mut report, target_id, now_millis);
+            }
+        }
 
-        for batch in due_targets.chunks(MAX_CONCURRENT_TARGET_PROBES) {
-            let (completion_sender, completion_receiver) = mpsc::channel();
-            let mut pending = 0_usize;
-            for target_id in batch {
-                let runtime = Arc::clone(&self.runtime);
-                let target_id = target_id.clone();
-                let thread_target_id = target_id.clone();
-                let completion_target_id = target_id.clone();
-                let sender = completion_sender.clone();
-                let handle = thread::Builder::new()
-                    .name("canary-target-probe".to_owned())
-                    .spawn(move || {
-                        let result =
-                            catch_unwind(AssertUnwindSafe(|| runtime.run_once(&thread_target_id)));
-                        let _ = sender.send((completion_target_id, result));
-                    });
-                if handle.is_ok() {
-                    pending += 1;
-                } else {
+        report.in_flight = self.in_flight.len();
+        Ok(report)
+    }
+
+    fn drain_completions(&mut self, report: &mut TargetProbeLifecycleReport, now_millis: i64) {
+        while let Ok((target_id, result)) = self.completion_receiver.try_recv() {
+            report.completed += 1;
+            self.in_flight.remove(&target_id);
+            let should_drop_completion = self.drop_completion_for.remove(&target_id);
+            let target_is_tracked = self
+                .schedules
+                .get(&target_id)
+                .is_some_and(|schedule| !schedule.paused);
+            if should_drop_completion || !target_is_tracked {
+                report.dropped_untracked += 1;
+                self.runtime.forget_transition_history(&target_id);
+                continue;
+            }
+
+            match result {
+                Ok(result) => self.record_probe_result(report, &target_id, result, now_millis),
+                Err(_) => {
                     report.failed += 1;
                     self.advance_target_schedule(&target_id, now_millis);
                 }
             }
-            drop(completion_sender);
-
-            while pending > 0 {
-                if should_stop() {
-                    return Ok(report);
-                }
-                match completion_receiver.recv_timeout(StdDuration::from_millis(10)) {
-                    Ok((target_id, Ok(result))) => {
-                        self.record_probe_result(&mut report, &target_id, result, now_millis);
-                        pending -= 1;
-                    }
-                    Ok((target_id, Err(_))) => {
-                        report.failed += 1;
-                        self.advance_target_schedule(&target_id, now_millis);
-                        pending -= 1;
-                    }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        report.failed += pending;
-                        break;
-                    }
-                }
-            }
         }
+    }
 
-        Ok(report)
+    fn launch_probe(
+        &mut self,
+        report: &mut TargetProbeLifecycleReport,
+        target_id: String,
+        now_millis: i64,
+    ) {
+        let runtime = Arc::clone(&self.runtime);
+        let thread_target_id = target_id.clone();
+        let completion_target_id = target_id.clone();
+        let sender = self.completion_sender.clone();
+        let handle = thread::Builder::new()
+            .name("canary-target-probe".to_owned())
+            .spawn(move || {
+                let result = catch_unwind(AssertUnwindSafe(|| runtime.run_once(&thread_target_id)));
+                let _ = sender.send((completion_target_id, result));
+            });
+        if handle.is_ok() {
+            report.launched += 1;
+            self.in_flight.insert(target_id);
+        } else {
+            report.failed += 1;
+            self.advance_target_schedule(&target_id, now_millis);
+        }
     }
 
     fn record_probe_result(
@@ -439,6 +476,11 @@ impl TargetProbeLifecycle {
                 },
             );
         }
+        for target_id in self.schedules.keys() {
+            if self.in_flight.contains(target_id) {
+                self.drop_completion_for.insert(target_id.clone());
+            }
+        }
         self.schedules = next;
     }
 
@@ -474,11 +516,17 @@ impl TargetProbeLifecycle {
             }
             TargetProbeLifecycleCommand::Untrack { target_id } => {
                 self.schedules.remove(&target_id);
+                if self.in_flight.contains(&target_id) {
+                    self.drop_completion_for.insert(target_id.clone());
+                }
                 self.runtime.forget_transition_history(&target_id);
             }
             TargetProbeLifecycleCommand::Pause { target_id } => {
                 if let Some(schedule) = self.schedules.get_mut(&target_id) {
                     schedule.paused = true;
+                }
+                if self.in_flight.contains(&target_id) {
+                    self.drop_completion_for.insert(target_id.clone());
                 }
                 self.runtime.forget_transition_history(&target_id);
             }
@@ -1997,28 +2045,26 @@ mod tests {
         let mut lifecycle = TargetProbeLifecycle::new(store, runtime);
 
         let first = lifecycle.run_due(1_000)?;
-        let second = lifecycle.run_due(1_000)?;
 
         assert_eq!(
             first,
             TargetProbeLifecycleReport {
                 loaded: 1,
                 due: 1,
-                probed: 1,
-                skipped_missing: 0,
-                failed: 0,
-                event_fanout_failed: 0,
+                launched: 1,
+                in_flight: 1,
+                ..TargetProbeLifecycleReport::default()
             }
         );
+        let second = drain_until_completed(&mut lifecycle, 1_000, 1)?;
         assert_eq!(
             second,
             TargetProbeLifecycleReport {
                 loaded: 1,
                 due: 0,
-                probed: 0,
-                skipped_missing: 0,
-                failed: 0,
-                event_fanout_failed: 0,
+                completed: 1,
+                probed: 1,
+                ..TargetProbeLifecycleReport::default()
             }
         );
         assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
@@ -2068,7 +2114,9 @@ mod tests {
         );
         let mut lifecycle = TargetProbeLifecycle::new(store.clone(), runtime);
 
-        let handle = thread::spawn(move || lifecycle.run_due(1_000));
+        let report = lifecycle.run_due(1_000)?;
+        assert_eq!(report.launched, 2);
+        assert_eq!(report.in_flight, 2);
         slow_started_rx.recv_timeout(StdDuration::from_secs(1))?;
         fast_done_rx.recv_timeout(StdDuration::from_secs(1))?;
         let started = Instant::now();
@@ -2093,20 +2141,22 @@ mod tests {
             thread::sleep(StdDuration::from_millis(10));
         }
 
+        let blocked = lifecycle.run_due(1_001)?;
+        assert_eq!(blocked.completed, 1);
+        assert_eq!(blocked.probed, 1);
+        assert_eq!(blocked.launched, 0);
+        assert_eq!(blocked.in_flight, 1);
         release_slow_tx.send(())?;
-        let report = handle
-            .join()
-            .map_err(|_| "target lifecycle test thread panicked")??;
+        let report = drain_until_completed(&mut lifecycle, 1_000, 1)?;
 
         assert_eq!(
             report,
             TargetProbeLifecycleReport {
                 loaded: 2,
-                due: 2,
-                probed: 2,
-                skipped_missing: 0,
-                failed: 0,
-                event_fanout_failed: 0,
+                due: 0,
+                completed: 1,
+                probed: 1,
+                ..TargetProbeLifecycleReport::default()
             }
         );
         assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
@@ -2151,7 +2201,9 @@ mod tests {
         );
         let mut lifecycle = TargetProbeLifecycle::new(store, runtime);
 
-        let handle = thread::spawn(move || lifecycle.run_due(1_000));
+        let report = lifecycle.run_due(1_000)?;
+        assert_eq!(report.launched, MAX_CONCURRENT_TARGET_PROBES);
+        assert_eq!(report.in_flight, MAX_CONCURRENT_TARGET_PROBES);
         let started = Instant::now();
         while transport.peak() < MAX_CONCURRENT_TARGET_PROBES {
             if started.elapsed() > StdDuration::from_secs(1) {
@@ -2164,15 +2216,21 @@ mod tests {
             thread::sleep(StdDuration::from_millis(10));
         }
         assert_eq!(transport.peak(), MAX_CONCURRENT_TARGET_PROBES);
+        let saturated = lifecycle.run_due(1_001)?;
+        assert_eq!(saturated.launched, 0);
+        assert_eq!(saturated.in_flight, MAX_CONCURRENT_TARGET_PROBES);
 
         transport.release()?;
-        let report = handle
-            .join()
-            .map_err(|_| "target lifecycle test thread panicked")??;
+        let report = drain_until_completed(&mut lifecycle, 1_000, MAX_CONCURRENT_TARGET_PROBES)?;
 
         assert_eq!(report.loaded, 10);
-        assert_eq!(report.due, 10);
-        assert_eq!(report.probed, 10);
+        assert_eq!(report.due, 2);
+        assert_eq!(report.completed, MAX_CONCURRENT_TARGET_PROBES);
+        assert_eq!(report.probed, MAX_CONCURRENT_TARGET_PROBES);
+        assert_eq!(report.launched, 2);
+        let final_report = drain_until_completed(&mut lifecycle, 1_000, 2)?;
+        assert_eq!(final_report.probed, 2);
+        assert_eq!(final_report.in_flight, 0);
         assert_eq!(transport.peak(), MAX_CONCURRENT_TARGET_PROBES);
         Ok(())
     }
@@ -2291,6 +2349,94 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_reports_completion_on_subsequent_tick() -> Result<(), Box<dyn Error>> {
+        let store = seeded_store("http://127.0.0.1/slow", "unknown")?;
+        let (slow_started_tx, slow_started_rx) = std::sync::mpsc::channel();
+        let (fast_done_tx, _fast_done_rx) = std::sync::mpsc::channel();
+        let (release_slow_tx, release_slow_rx) = std::sync::mpsc::channel();
+        let transport = Arc::new(BlockingTransport::new(
+            slow_started_tx,
+            fast_done_tx,
+            release_slow_rx,
+        ));
+        let sink = Arc::new(RecordingSink::default());
+        let runtime = TargetProbeRuntime::new(
+            store.clone(),
+            HealthEventFanout::new_without_failure_sink(sink),
+            transport,
+            TargetProbeOptions {
+                allow_private_targets: true,
+                region: None,
+            },
+        );
+        let mut lifecycle = TargetProbeLifecycle::new(store, runtime);
+
+        let launched = lifecycle.run_due(1_000)?;
+        assert_eq!(launched.launched, 1);
+        assert_eq!(launched.completed, 0);
+        assert_eq!(launched.in_flight, 1);
+        slow_started_rx.recv_timeout(StdDuration::from_secs(1))?;
+
+        let blocked = lifecycle.run_due(1_001)?;
+        assert_eq!(blocked.launched, 0);
+        assert_eq!(blocked.completed, 0);
+        assert_eq!(blocked.in_flight, 1);
+
+        release_slow_tx.send(())?;
+        let completed = drain_until_completed(&mut lifecycle, 1_001, 1)?;
+        assert_eq!(completed.completed, 1);
+        assert_eq!(completed.probed, 1);
+        assert_eq!(completed.in_flight, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_discards_completion_for_untracked_target() -> Result<(), Box<dyn Error>> {
+        let store = seeded_store("http://127.0.0.1/slow", "unknown")?;
+        let (slow_started_tx, slow_started_rx) = std::sync::mpsc::channel();
+        let (fast_done_tx, _fast_done_rx) = std::sync::mpsc::channel();
+        let (release_slow_tx, release_slow_rx) = std::sync::mpsc::channel();
+        let transport = Arc::new(BlockingTransport::new(
+            slow_started_tx,
+            fast_done_tx,
+            release_slow_rx,
+        ));
+        let sink = Arc::new(RecordingSink::default());
+        let runtime = TargetProbeRuntime::new(
+            store.clone(),
+            HealthEventFanout::new_without_failure_sink(sink),
+            transport,
+            TargetProbeOptions {
+                allow_private_targets: true,
+                region: None,
+            },
+        );
+        let mut lifecycle = TargetProbeLifecycle::new(store, runtime);
+
+        assert_eq!(lifecycle.run_due(1_000)?.launched, 1);
+        slow_started_rx.recv_timeout(StdDuration::from_secs(1))?;
+        {
+            let mut store = lifecycle.store.lock().map_err(|_| "store lock poisoned")?;
+            store.update_target_active("TGT-api", false)?;
+        }
+        lifecycle.apply_control_command(
+            TargetProbeLifecycleCommand::Untrack {
+                target_id: "TGT-api".to_owned(),
+            },
+            1_001,
+        );
+        release_slow_tx.send(())?;
+        let completed = drain_until_completed(&mut lifecycle, 1_001, 1)?;
+
+        assert_eq!(completed.completed, 1);
+        assert_eq!(completed.probed, 0);
+        assert_eq!(completed.dropped_untracked, 1);
+        assert_eq!(completed.in_flight, 0);
+        assert!(!lifecycle.schedules.contains_key("TGT-api"));
+        Ok(())
+    }
+
+    #[test]
     fn lifecycle_reloads_interval_changes_without_duplicate_due_runs() -> Result<(), Box<dyn Error>>
     {
         let store = seeded_store("http://127.0.0.1/health", "unknown")?;
@@ -2308,10 +2454,11 @@ mod tests {
         let mut lifecycle = TargetProbeLifecycle::new(store, runtime);
 
         let first = lifecycle.run_due(1_000)?;
-        let second = lifecycle.run_due(1_001)?;
+        let second = drain_until_completed(&mut lifecycle, 1_001, 1)?;
 
-        assert_eq!(first.probed, 1);
+        assert_eq!(first.launched, 1);
         assert_eq!(second.due, 0);
+        assert_eq!(second.probed, 1);
         assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
         Ok(())
     }
@@ -2336,7 +2483,8 @@ mod tests {
         );
         let mut lifecycle = TargetProbeLifecycle::new(store, runtime);
 
-        assert_eq!(lifecycle.run_due(1_000)?.probed, 1);
+        assert_eq!(lifecycle.run_due(1_000)?.launched, 1);
+        assert_eq!(drain_until_completed(&mut lifecycle, 1_000, 1)?.probed, 1);
         lifecycle.apply_control_command(
             TargetProbeLifecycleCommand::Pause {
                 target_id: "TGT-api".to_owned(),
@@ -2352,9 +2500,11 @@ mod tests {
             1_000_000,
         );
         let resumed = lifecycle.run_due(1_000_000)?;
+        let resumed_completion = drain_until_completed(&mut lifecycle, 1_000_000, 1)?;
 
         assert_eq!(paused.due, 0);
-        assert_eq!(resumed.probed, 1);
+        assert_eq!(resumed.launched, 1);
+        assert_eq!(resumed_completion.probed, 1);
         assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
         Ok(())
     }
@@ -2376,6 +2526,7 @@ mod tests {
         let mut lifecycle = TargetProbeLifecycle::new(store, runtime);
 
         lifecycle.run_due(1_000)?;
+        drain_until_completed(&mut lifecycle, 1_000, 1)?;
         lifecycle.apply_control_command(
             TargetProbeLifecycleCommand::Reconfigure {
                 target_id: "TGT-api".to_owned(),
@@ -2487,6 +2638,27 @@ mod tests {
             status_code,
             body: body.to_owned(),
             tls_expires_at: None,
+        }
+    }
+
+    fn drain_until_completed(
+        lifecycle: &mut TargetProbeLifecycle,
+        now_millis: i64,
+        expected_completed: usize,
+    ) -> Result<TargetProbeLifecycleReport, Box<dyn Error>> {
+        let started = Instant::now();
+        loop {
+            let report = lifecycle.run_due(now_millis)?;
+            if report.completed >= expected_completed {
+                return Ok(report);
+            }
+            if started.elapsed() > StdDuration::from_secs(1) {
+                return Err(format!(
+                    "timed out waiting for {expected_completed} target probe completions"
+                )
+                .into());
+            }
+            thread::sleep(StdDuration::from_millis(10));
         }
     }
 
