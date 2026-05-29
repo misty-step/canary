@@ -570,6 +570,19 @@ the Rust server accepts production traffic:
     `canary.ping` remain valid webhook subscription events but are rejected by
     timeline filtering because Phoenix exposes only business-event replay
     filters there.
+54. Rust now implements the Phoenix webhook delivery ledger page:
+    `GET /api/v1/webhook-deliveries`. The core crate owns the response DTO,
+    explicit nullable fields, delivery cursor shape, and 50/200 page-size
+    constants. The store owns the keyset query over `webhook_deliveries`:
+    optional webhook id, event, and status filters; newest-first
+    `(created_at DESC, delivery_id DESC)` ordering; same-timestamp tie-breaker
+    continuity; `limit + 1` pagination; cursor decoding; and the
+    Phoenix-compatible `completed_at` derivation for terminal statuses. The
+    server owns only read-scope auth, `after` precedence over `cursor`, array
+    query rejection for string filters, and RFC 9457 projection for invalid
+    limit, cursor, or status inputs. This keeps delivery diagnostics available
+    to agents without moving webhook delivery or retry policy into the HTTP
+    layer.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed

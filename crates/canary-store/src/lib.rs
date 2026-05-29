@@ -40,8 +40,10 @@ pub use query::{
     TimelineQueryError, TimelineQueryOptions, TimelineQueryResult,
 };
 pub use webhook_deliveries::{
-    WebhookDeliveryInsert, WebhookDeliveryListOptions, WebhookDeliveryRow, WebhookDeliveryStatus,
-    WebhookSubscription, WebhookSubscriptionInsert,
+    WebhookDeliveryInsert, WebhookDeliveryListOptions, WebhookDeliveryPageError,
+    WebhookDeliveryPageOptions, WebhookDeliveryPageResult, WebhookDeliveryRow,
+    WebhookDeliveryStatus, WebhookSubscription, WebhookSubscriptionInsert,
+    statuses as webhook_delivery_statuses,
 };
 
 /// Result type returned by the store boundary.
@@ -423,6 +425,14 @@ impl Store {
         options: WebhookDeliveryListOptions,
     ) -> Result<Vec<WebhookDeliveryRow>> {
         webhook_deliveries::list(&self.connection, options)
+    }
+
+    /// Page through webhook delivery ledger rows for the public read API.
+    pub fn webhook_delivery_page(
+        &self,
+        options: WebhookDeliveryPageOptions,
+    ) -> WebhookDeliveryPageResult<canary_core::query::WebhookDeliveriesResponse> {
+        webhook_deliveries::page(&self.connection, options)
     }
 
     /// Return active webhook subscriptions for one event.
@@ -807,6 +817,120 @@ mod tests {
         assert_eq!(rows[0].delivery_id, "DLV-123456789abc");
         assert_eq!(rows[0].reason.as_deref(), Some("cooldown"));
         assert_eq!(rows[0].attempt_count, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_page_filters_paginates_and_rejects_invalid_inputs()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        for (delivery_id, webhook_id, event, now) in [
+            (
+                "DLV-a",
+                "WHK-alpha",
+                "error.new_class",
+                "2026-05-28T20:00:00Z",
+            ),
+            (
+                "DLV-c",
+                "WHK-beta",
+                "incident.updated",
+                "2026-05-28T20:02:00Z",
+            ),
+            (
+                "DLV-b",
+                "WHK-alpha",
+                "error.new_class",
+                "2026-05-28T20:01:00Z",
+            ),
+            (
+                "DLV-d",
+                "WHK-alpha",
+                "error.new_class",
+                "2026-05-28T20:01:00Z",
+            ),
+        ] {
+            store.create_suppressed_webhook_delivery(
+                WebhookDeliveryInsert {
+                    delivery_id: delivery_id.to_owned(),
+                    webhook_id: webhook_id.to_owned(),
+                    event: event.to_owned(),
+                    now: now.to_owned(),
+                },
+                "cooldown",
+            )?;
+        }
+
+        let first = store.webhook_delivery_page(WebhookDeliveryPageOptions {
+            status: Some("suppressed".to_owned()),
+            limit: Some("2".to_owned()),
+            ..Default::default()
+        })?;
+        assert_eq!(first.returned_count, 2);
+        assert_eq!(first.deliveries[0].delivery_id, "DLV-c");
+        assert_eq!(first.deliveries[1].delivery_id, "DLV-d");
+        assert_eq!(
+            first.deliveries[0].completed_at.as_deref(),
+            Some("2026-05-28T20:02:00Z")
+        );
+        let cursor = first.cursor.ok_or("expected next cursor")?;
+
+        let second = store.webhook_delivery_page(WebhookDeliveryPageOptions {
+            status: Some("suppressed".to_owned()),
+            limit: Some("1".to_owned()),
+            cursor: Some(cursor),
+            ..Default::default()
+        })?;
+        assert_eq!(second.returned_count, 1);
+        assert_eq!(second.deliveries[0].delivery_id, "DLV-b");
+        let cursor = second.cursor.ok_or("expected same-timestamp cursor")?;
+
+        let third = store.webhook_delivery_page(WebhookDeliveryPageOptions {
+            status: Some("suppressed".to_owned()),
+            limit: Some("2".to_owned()),
+            cursor: Some(cursor),
+            ..Default::default()
+        })?;
+        assert_eq!(third.returned_count, 1);
+        assert_eq!(third.deliveries[0].delivery_id, "DLV-a");
+        assert_eq!(third.cursor, None);
+
+        let filtered = store.webhook_delivery_page(WebhookDeliveryPageOptions {
+            webhook_id: Some("WHK-alpha".to_owned()),
+            event: Some("error.new_class".to_owned()),
+            status: Some("suppressed".to_owned()),
+            ..Default::default()
+        })?;
+        assert_eq!(filtered.returned_count, 3);
+        assert!(
+            filtered
+                .deliveries
+                .iter()
+                .all(|delivery| delivery.webhook_id == "WHK-alpha")
+        );
+
+        assert!(matches!(
+            store.webhook_delivery_page(WebhookDeliveryPageOptions {
+                limit: Some("0".to_owned()),
+                ..Default::default()
+            }),
+            Err(WebhookDeliveryPageError::InvalidLimit)
+        ));
+        assert!(matches!(
+            store.webhook_delivery_page(WebhookDeliveryPageOptions {
+                cursor: Some("bogus".to_owned()),
+                ..Default::default()
+            }),
+            Err(WebhookDeliveryPageError::InvalidCursor)
+        ));
+        assert!(matches!(
+            store.webhook_delivery_page(WebhookDeliveryPageOptions {
+                status: Some("supressed".to_owned()),
+                ..Default::default()
+            }),
+            Err(WebhookDeliveryPageError::InvalidStatus)
+        ));
 
         Ok(())
     }

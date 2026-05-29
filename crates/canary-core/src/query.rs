@@ -17,6 +17,12 @@ pub const DEFAULT_TIMELINE_LIMIT: usize = 50;
 /// Maximum number of timeline events accepted by Phoenix.
 pub const MAX_TIMELINE_LIMIT: usize = 200;
 
+/// Default number of webhook delivery ledger rows returned by Phoenix.
+pub const DEFAULT_WEBHOOK_DELIVERY_LIMIT: usize = 50;
+
+/// Maximum number of webhook delivery ledger rows accepted by Phoenix.
+pub const MAX_WEBHOOK_DELIVERY_LIMIT: usize = 200;
+
 /// User-facing validation detail for invalid query windows.
 pub const INVALID_WINDOW_DETAIL: &str = "Invalid window. Allowed: 1h, 6h, 24h, 7d, 30d";
 
@@ -112,6 +118,15 @@ pub struct TimelineCursor {
     pub id: String,
 }
 
+/// Structured cursor used by Phoenix for webhook delivery ledger pagination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookDeliveryCursor {
+    /// Last row timestamp from the previous page.
+    pub created_at: String,
+    /// Last row delivery id from the previous page.
+    pub delivery_id: String,
+}
+
 /// Decode current structured cursors and legacy base64 group-hash cursors.
 pub fn decode_cursor(cursor: &str) -> Option<QueryCursor> {
     if let Ok(json) = BASE64_URL_SAFE_NO_PAD.decode(cursor)
@@ -148,6 +163,25 @@ pub fn decode_timeline_cursor(cursor: &str) -> Option<TimelineCursor> {
 
 /// Encode a Phoenix timeline cursor.
 pub fn encode_timeline_cursor(cursor: &TimelineCursor) -> Option<String> {
+    let json = serde_json::to_vec(cursor).ok()?;
+    Some(BASE64_URL_SAFE_NO_PAD.encode(json))
+}
+
+/// Decode a Phoenix webhook delivery cursor.
+pub fn decode_webhook_delivery_cursor(cursor: &str) -> Option<WebhookDeliveryCursor> {
+    let decoded = BASE64_URL_SAFE_NO_PAD.decode(cursor).ok()?;
+    let cursor = serde_json::from_slice::<WebhookDeliveryCursor>(&decoded).ok()?;
+    if cursor.created_at.is_empty()
+        || cursor.delivery_id.is_empty()
+        || OffsetDateTime::parse(&cursor.created_at, &Rfc3339).is_err()
+    {
+        return None;
+    }
+    Some(cursor)
+}
+
+/// Encode a Phoenix webhook delivery cursor.
+pub fn encode_webhook_delivery_cursor(cursor: &WebhookDeliveryCursor) -> Option<String> {
     let json = serde_json::to_vec(cursor).ok()?;
     Some(BASE64_URL_SAFE_NO_PAD.encode(json))
 }
@@ -582,6 +616,48 @@ pub struct TimelineResponse {
     pub cursor: Option<String>,
 }
 
+/// Delivery item returned by `GET /api/v1/webhook-deliveries`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WebhookDelivery {
+    /// Stable delivery id.
+    pub delivery_id: String,
+    /// Webhook subscription id.
+    pub webhook_id: String,
+    /// Event name.
+    pub event: String,
+    /// Current delivery status.
+    pub status: String,
+    /// Number of HTTP attempts.
+    pub attempt_count: i64,
+    /// Suppression or discard reason.
+    pub reason: Option<String>,
+    /// First attempt timestamp.
+    pub first_attempt_at: Option<String>,
+    /// Last attempt timestamp.
+    pub last_attempt_at: Option<String>,
+    /// Success timestamp.
+    pub delivered_at: Option<String>,
+    /// Permanent-discard timestamp.
+    pub discarded_at: Option<String>,
+    /// Completion timestamp for terminal statuses.
+    pub completed_at: Option<String>,
+    /// Creation timestamp.
+    pub created_at: String,
+    /// Last update timestamp.
+    pub updated_at: String,
+}
+
+/// Response for `GET /api/v1/webhook-deliveries`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WebhookDeliveriesResponse {
+    /// Count of returned rows.
+    pub returned_count: usize,
+    /// Next-page cursor.
+    pub cursor: Option<String>,
+    /// Delivery page.
+    pub deliveries: Vec<WebhookDelivery>,
+}
+
 /// Build a Phoenix-compatible service query response.
 pub fn errors_by_service_response(
     service: String,
@@ -754,6 +830,18 @@ pub fn timeline_response(
         service,
         events,
         cursor,
+    }
+}
+
+/// Build a Phoenix-compatible webhook delivery page response.
+pub fn webhook_deliveries_response(
+    deliveries: Vec<WebhookDelivery>,
+    cursor: Option<String>,
+) -> WebhookDeliveriesResponse {
+    WebhookDeliveriesResponse {
+        returned_count: deliveries.len(),
+        cursor,
+        deliveries,
     }
 }
 
@@ -1061,6 +1149,50 @@ mod tests {
         let malformed = BASE64_URL_SAFE_NO_PAD.encode(r#"{"created_at":1,"id":2}"#);
         assert_eq!(decode_timeline_cursor(&malformed), None);
         Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_cursor_round_trip_matches_phoenix_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cursor = WebhookDeliveryCursor {
+            created_at: "2026-05-28T20:59:50Z".to_owned(),
+            delivery_id: "DLV-b".to_owned(),
+        };
+        let Some(encoded) = encode_webhook_delivery_cursor(&cursor) else {
+            return Err("webhook delivery cursor should encode".into());
+        };
+
+        assert_eq!(decode_webhook_delivery_cursor(&encoded), Some(cursor));
+        assert_eq!(decode_webhook_delivery_cursor("bogus"), None);
+
+        let malformed = BASE64_URL_SAFE_NO_PAD.encode(r#"{"created_at":1,"delivery_id":2}"#);
+        assert_eq!(decode_webhook_delivery_cursor(&malformed), None);
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_deliveries_response_counts_returned_rows() {
+        let response = webhook_deliveries_response(
+            vec![WebhookDelivery {
+                delivery_id: "DLV-a".to_owned(),
+                webhook_id: "WHK-a".to_owned(),
+                event: "error.new_class".to_owned(),
+                status: "suppressed".to_owned(),
+                attempt_count: 0,
+                reason: Some("cooldown".to_owned()),
+                first_attempt_at: None,
+                last_attempt_at: None,
+                delivered_at: None,
+                discarded_at: None,
+                completed_at: Some("2026-05-28T20:59:50Z".to_owned()),
+                created_at: "2026-05-28T20:59:50Z".to_owned(),
+                updated_at: "2026-05-28T20:59:50Z".to_owned(),
+            }],
+            Some("cursor".to_owned()),
+        );
+
+        assert_eq!(response.returned_count, 1);
+        assert_eq!(response.cursor.as_deref(), Some("cursor"));
     }
 
     #[test]

@@ -1,8 +1,33 @@
 //! Webhook delivery ledger persistence.
 
+use canary_core::query::{
+    DEFAULT_WEBHOOK_DELIVERY_LIMIT, MAX_WEBHOOK_DELIVERY_LIMIT, WebhookDeliveriesResponse,
+    WebhookDelivery, WebhookDeliveryCursor, decode_webhook_delivery_cursor,
+    encode_webhook_delivery_cursor, webhook_deliveries_response,
+};
 use rusqlite::{Connection, params};
 
 use crate::Result;
+
+/// Result type returned by webhook delivery read models.
+pub type WebhookDeliveryPageResult<T> = std::result::Result<T, WebhookDeliveryPageError>;
+
+/// Webhook delivery page validation or storage failure.
+#[derive(Debug, thiserror::Error)]
+pub enum WebhookDeliveryPageError {
+    /// Limit is not a positive integer up to the Phoenix maximum.
+    #[error("invalid webhook delivery limit")]
+    InvalidLimit,
+    /// Cursor is not a valid Phoenix webhook delivery cursor.
+    #[error("invalid webhook delivery cursor")]
+    InvalidCursor,
+    /// Status is not one of the Phoenix ledger statuses.
+    #[error("invalid webhook delivery status")]
+    InvalidStatus,
+    /// SQLite rejected the read.
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+}
 
 /// Delivery status values accepted by the Phoenix schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +65,29 @@ impl WebhookDeliveryStatus {
             _ => Self::Pending,
         }
     }
+
+    /// Parse a user-supplied Phoenix status filter.
+    pub fn parse_filter(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(Self::Pending),
+            "retrying" => Some(Self::Retrying),
+            "delivered" => Some(Self::Delivered),
+            "discarded" => Some(Self::Discarded),
+            "suppressed" => Some(Self::Suppressed),
+            _ => None,
+        }
+    }
+}
+
+/// Return Phoenix's accepted webhook delivery statuses in wire order.
+pub const fn statuses() -> &'static [&'static str] {
+    &[
+        "pending",
+        "retrying",
+        "delivered",
+        "discarded",
+        "suppressed",
+    ]
 }
 
 /// Ledger fields required to create a pending or suppressed delivery.
@@ -97,6 +145,21 @@ pub struct WebhookDeliveryListOptions {
     pub status: Option<WebhookDeliveryStatus>,
     /// Maximum rows to return.
     pub limit: Option<u32>,
+}
+
+/// Optional filters for the public webhook delivery page route.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WebhookDeliveryPageOptions {
+    /// Optional webhook id filter.
+    pub webhook_id: Option<String>,
+    /// Optional event filter.
+    pub event: Option<String>,
+    /// Optional status filter.
+    pub status: Option<String>,
+    /// Maximum rows to return.
+    pub limit: Option<String>,
+    /// Pagination cursor.
+    pub cursor: Option<String>,
 }
 
 /// Active webhook subscription.
@@ -307,6 +370,63 @@ pub(crate) fn list(
         .map_err(Into::into)
 }
 
+pub(crate) fn page(
+    connection: &Connection,
+    options: WebhookDeliveryPageOptions,
+) -> WebhookDeliveryPageResult<WebhookDeliveriesResponse> {
+    let limit = parse_page_limit(options.limit.as_deref())?;
+    let cursor = parse_page_cursor(options.cursor.as_deref())?;
+    let status = parse_page_status(options.status.as_deref())?;
+
+    let mut sql = String::from(
+        "SELECT delivery_id, webhook_id, event, status, attempt_count, reason,
+                first_attempt_at, last_attempt_at, delivered_at, discarded_at,
+                created_at, updated_at
+         FROM webhook_deliveries WHERE 1 = 1",
+    );
+    let mut filters = Vec::new();
+
+    if let Some(webhook_id) = options.webhook_id.filter(|value| !value.is_empty()) {
+        sql.push_str(" AND webhook_id = ?");
+        filters.push(webhook_id);
+    }
+    if let Some(event) = options.event.filter(|value| !value.is_empty()) {
+        sql.push_str(" AND event = ?");
+        filters.push(event);
+    }
+    if let Some(status) = status {
+        sql.push_str(" AND status = ?");
+        filters.push(status.as_str().to_owned());
+    }
+    if let Some(cursor) = cursor {
+        sql.push_str(" AND (created_at < ? OR (created_at = ? AND delivery_id < ?))");
+        filters.push(cursor.created_at.clone());
+        filters.push(cursor.created_at);
+        filters.push(cursor.delivery_id);
+    }
+
+    sql.push_str(" ORDER BY created_at DESC, delivery_id DESC LIMIT ?");
+    filters.push((limit + 1).to_string());
+
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(rusqlite::params_from_iter(filters), row)?;
+    let mut rows = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    let cursor = if rows.len() > limit {
+        rows.truncate(limit);
+        rows.last().and_then(|last| {
+            encode_webhook_delivery_cursor(&WebhookDeliveryCursor {
+                created_at: last.created_at.clone(),
+                delivery_id: last.delivery_id.clone(),
+            })
+        })
+    } else {
+        None
+    };
+    let deliveries = rows.into_iter().map(format_delivery).collect();
+
+    Ok(webhook_deliveries_response(deliveries, cursor))
+}
+
 pub(crate) fn active_subscriptions_for_event(
     connection: &Connection,
     event: &str,
@@ -372,4 +492,71 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WebhookDeliveryRow> {
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
     })
+}
+
+fn parse_page_limit(limit: Option<&str>) -> WebhookDeliveryPageResult<usize> {
+    match limit {
+        None | Some("") => Ok(DEFAULT_WEBHOOK_DELIVERY_LIMIT),
+        Some(limit) => match limit.parse::<usize>() {
+            Ok(limit) if (1..=MAX_WEBHOOK_DELIVERY_LIMIT).contains(&limit) => Ok(limit),
+            _ => Err(WebhookDeliveryPageError::InvalidLimit),
+        },
+    }
+}
+
+fn parse_page_cursor(
+    cursor: Option<&str>,
+) -> WebhookDeliveryPageResult<Option<WebhookDeliveryCursor>> {
+    match cursor {
+        None | Some("") => Ok(None),
+        Some(cursor) => decode_webhook_delivery_cursor(cursor)
+            .map(Some)
+            .ok_or(WebhookDeliveryPageError::InvalidCursor),
+    }
+}
+
+fn parse_page_status(
+    status: Option<&str>,
+) -> WebhookDeliveryPageResult<Option<WebhookDeliveryStatus>> {
+    match status {
+        None | Some("") => Ok(None),
+        Some(status) => WebhookDeliveryStatus::parse_filter(status)
+            .map(Some)
+            .ok_or(WebhookDeliveryPageError::InvalidStatus),
+    }
+}
+
+fn format_delivery(row: WebhookDeliveryRow) -> WebhookDelivery {
+    let completed_at = row
+        .delivered_at
+        .clone()
+        .or_else(|| row.discarded_at.clone())
+        .or_else(|| {
+            if matches!(
+                row.status,
+                WebhookDeliveryStatus::Suppressed
+                    | WebhookDeliveryStatus::Discarded
+                    | WebhookDeliveryStatus::Delivered
+            ) {
+                Some(row.updated_at.clone())
+            } else {
+                None
+            }
+        });
+
+    WebhookDelivery {
+        delivery_id: row.delivery_id,
+        webhook_id: row.webhook_id,
+        event: row.event,
+        status: row.status.as_str().to_owned(),
+        attempt_count: row.attempt_count,
+        reason: row.reason,
+        first_attempt_at: row.first_attempt_at,
+        last_attempt_at: row.last_attempt_at,
+        delivered_at: row.delivered_at,
+        discarded_at: row.discarded_at,
+        completed_at,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
 }

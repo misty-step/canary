@@ -17,7 +17,7 @@ use std::{
 use axum::{
     Router,
     body::{Body, Bytes},
-    extract::{Path, Query, State},
+    extract::{Path, Query, RawQuery, State},
     http::{
         HeaderMap, HeaderValue, Response, StatusCode,
         header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderName},
@@ -46,6 +46,7 @@ use canary_store::{
     WebhookSubscriptionInsert,
 };
 use canary_store::{QueryError, ServiceQueryOptions, TimelineQueryError, TimelineQueryOptions};
+use canary_store::{WebhookDeliveryPageError, WebhookDeliveryPageOptions};
 use canary_workers::health::{
     HealthPlanError, MonitorCheckInInput, MonitorCheckInStatus, MonitorMode, MonitorSnapshot,
     ObservationContext, plan_monitor_check_in,
@@ -482,6 +483,7 @@ pub fn ingest_router(state: IngestState) -> Router {
         .route("/api/v1/check-ins", post(create_check_in))
         .route("/api/v1/query", get(query_errors))
         .route("/api/v1/timeline", get(timeline))
+        .route("/api/v1/webhook-deliveries", get(webhook_deliveries))
         .route("/api/v1/status", get(status))
         .route("/api/v1/health-status", get(health_status))
         .route("/api/v1/targets/{id}/checks", get(target_checks))
@@ -1534,6 +1536,50 @@ async fn timeline(
     }
 }
 
+async fn webhook_deliveries(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    Query(params): Query<WebhookDeliveryParams>,
+) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+        return problem_response(*problem);
+    }
+
+    if query_param_is_array(raw_query.as_deref(), "webhook_id") {
+        return problem_response(invalid_string_param_problem("webhook_id"));
+    }
+    if query_param_is_array(raw_query.as_deref(), "event") {
+        return problem_response(invalid_string_param_problem("event"));
+    }
+    if query_param_is_array(raw_query.as_deref(), "status") {
+        return problem_response(invalid_string_param_problem("status"));
+    }
+
+    let cursor = params.after.or(params.cursor);
+    let options = WebhookDeliveryPageOptions {
+        webhook_id: params.webhook_id,
+        event: params.event,
+        status: params.status,
+        limit: params.limit,
+        cursor,
+    };
+    let store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+
+    match store.webhook_delivery_page(options) {
+        Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
+        Err(WebhookDeliveryPageError::InvalidLimit) => problem_response(invalid_limit_problem()),
+        Err(WebhookDeliveryPageError::InvalidCursor) => problem_response(invalid_cursor_problem()),
+        Err(WebhookDeliveryPageError::InvalidStatus) => {
+            problem_response(invalid_webhook_delivery_status_problem())
+        }
+        Err(WebhookDeliveryPageError::Sqlite(_)) => problem_response(internal_problem()),
+    }
+}
+
 async fn health_status(State(state): State<IngestState>, headers: HeaderMap) -> Response<Body> {
     if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
         return problem_response(*problem);
@@ -1658,6 +1704,16 @@ struct TimelineParams {
     cursor: Option<String>,
     after: Option<String>,
     event_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct WebhookDeliveryParams {
+    webhook_id: Option<String>,
+    event: Option<String>,
+    status: Option<String>,
+    limit: Option<String>,
+    cursor: Option<String>,
+    after: Option<String>,
 }
 
 struct ParsedCheckIn {
@@ -3123,6 +3179,57 @@ fn invalid_event_type_problem(invalid: &[String]) -> ProblemDetails {
     )
 }
 
+fn invalid_webhook_delivery_status_problem() -> ProblemDetails {
+    let allowed = canary_store::webhook_delivery_statuses().join(", ");
+    ProblemDetails::new(
+        422,
+        ProblemCode::ValidationError,
+        format!("Invalid status. Allowed: {allowed}"),
+        None,
+    )
+    .with_extra(
+        "errors",
+        json!({"status": [format!("must be one of: {allowed}")]}),
+    )
+}
+
+fn invalid_string_param_problem(param: &str) -> ProblemDetails {
+    let mut errors: ValidationErrors = BTreeMap::new();
+    errors.insert(param.to_owned(), vec!["must be a string".to_owned()]);
+
+    ProblemDetails::new(
+        422,
+        ProblemCode::ValidationError,
+        format!("Invalid {param} parameter. Must be a string."),
+        None,
+    )
+    .with_extra("errors", json!(errors))
+}
+
+fn query_param_is_array(raw_query: Option<&str>, param: &str) -> bool {
+    let Some(raw_query) = raw_query else {
+        return false;
+    };
+    let bracket = format!("{param}[]");
+    let encoded_bracket = format!("{param}%5B%5D");
+    let mut seen = 0;
+
+    for pair in raw_query.split('&') {
+        let key = pair.split_once('=').map_or(pair, |(key, _)| key);
+        if key == param {
+            seen += 1;
+            if seen > 1 {
+                return true;
+            }
+        }
+        if key == bracket || key.eq_ignore_ascii_case(&encoded_bracket) {
+            return true;
+        }
+    }
+
+    false
+}
+
 fn target_checks_window_problem() -> ProblemDetails {
     ProblemDetails::new(422, ProblemCode::ValidationError, "Invalid window.", None)
 }
@@ -3204,8 +3311,8 @@ mod tests {
     use canary_http::public::{APPLICATION_JSON, OPENAPI_JSON};
     use canary_store::{
         API_KEY_PREFIX_LEN, ApiKeyInsert, MonitorInsert, TargetCheckObservation, TargetProbeCommit,
-        WebhookDeliveryJobInsert, WebhookDeliveryJobState, WebhookDeliveryStatus,
-        WebhookSubscriptionInsert,
+        WebhookDeliveryInsert, WebhookDeliveryJobInsert, WebhookDeliveryJobState,
+        WebhookDeliveryStatus, WebhookSubscriptionInsert,
     };
     use canary_workers::webhooks::{CircuitDecision, TransportResult, WebhookJob, WebhookRequest};
     use serde_json::{Value, json};
@@ -5718,6 +5825,213 @@ mod tests {
 
         let unauthorized = ingest_router(test_ingest_state()?)
             .oneshot(Request::get("/api/v1/timeline").body(Body::empty())?)
+            .await?;
+        let unauthorized_status = unauthorized.status();
+        let unauthorized_body = json_body(unauthorized).await?;
+
+        assert_eq!(unauthorized_status, StatusCode::UNAUTHORIZED);
+        assert_eq!(unauthorized_body["code"], "invalid_api_key");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn webhook_deliveries_accept_read_scope_filters_and_paginate()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        {
+            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            store.create_pending_webhook_delivery(WebhookDeliveryInsert {
+                delivery_id: "DLV-old".to_owned(),
+                webhook_id: "WHK-alpha".to_owned(),
+                event: "error.new_class".to_owned(),
+                now: "2026-04-02T10:00:00Z".to_owned(),
+            })?;
+            store.mark_webhook_delivery_attempt("DLV-old", "2026-04-02T10:00:01Z")?;
+            store.mark_webhook_delivery_delivered("DLV-old", "2026-04-02T10:00:02Z")?;
+            store.create_suppressed_webhook_delivery(
+                WebhookDeliveryInsert {
+                    delivery_id: "DLV-suppressed".to_owned(),
+                    webhook_id: "WHK-alpha".to_owned(),
+                    event: "error.new_class".to_owned(),
+                    now: "2026-04-02T10:05:00Z".to_owned(),
+                },
+                "cooldown",
+            )?;
+            store.create_suppressed_webhook_delivery(
+                WebhookDeliveryInsert {
+                    delivery_id: "DLV-other".to_owned(),
+                    webhook_id: "WHK-beta".to_owned(),
+                    event: "incident.updated".to_owned(),
+                    now: "2026-04-02T10:10:00Z".to_owned(),
+                },
+                "cooldown",
+            )?;
+            store.create_pending_webhook_delivery(WebhookDeliveryInsert {
+                delivery_id: "DLV-pending".to_owned(),
+                webhook_id: "WHK-pending".to_owned(),
+                event: "error.new_class".to_owned(),
+                now: "2026-04-02T10:15:00Z".to_owned(),
+            })?;
+        }
+        let router = ingest_router(state);
+
+        let filtered = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/webhook-deliveries?webhook_id=WHK-alpha&limit=2",
+            )?)
+            .await?;
+        let filtered_status = filtered.status();
+        let filtered_body = json_body(filtered).await?;
+
+        assert_eq!(filtered_status, StatusCode::OK);
+        assert_eq!(filtered_body["returned_count"], 2);
+        assert_eq!(
+            filtered_body["deliveries"]
+                .as_array()
+                .ok_or("deliveries should be array")?
+                .iter()
+                .map(|delivery| delivery["delivery_id"].as_str().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec!["DLV-suppressed", "DLV-old"]
+        );
+        assert_eq!(filtered_body["cursor"], Value::Null);
+        assert_eq!(filtered_body["deliveries"][0]["status"], "suppressed");
+        assert_eq!(filtered_body["deliveries"][0]["reason"], "cooldown");
+        assert_eq!(
+            filtered_body["deliveries"][0]["completed_at"],
+            "2026-04-02T10:05:00Z"
+        );
+        assert_eq!(filtered_body["deliveries"][1]["status"], "delivered");
+        assert_eq!(
+            filtered_body["deliveries"][1]["delivered_at"],
+            "2026-04-02T10:00:02Z"
+        );
+        assert_eq!(
+            filtered_body["deliveries"][1]["completed_at"],
+            "2026-04-02T10:00:02Z"
+        );
+
+        let pending = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/webhook-deliveries?webhook_id=WHK-pending",
+            )?)
+            .await?;
+        let pending_body = json_body(pending).await?;
+        let pending_delivery = &pending_body["deliveries"][0];
+        assert_eq!(pending_delivery["delivery_id"], "DLV-pending");
+        for field in [
+            "reason",
+            "first_attempt_at",
+            "last_attempt_at",
+            "delivered_at",
+            "discarded_at",
+            "completed_at",
+        ] {
+            assert_eq!(pending_delivery[field], Value::Null);
+        }
+
+        let first_page = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/webhook-deliveries?status=suppressed&limit=1",
+            )?)
+            .await?;
+        let first_body = json_body(first_page).await?;
+        assert_eq!(first_body["returned_count"], 1);
+        assert_eq!(first_body["deliveries"][0]["delivery_id"], "DLV-other");
+        let cursor = first_body["cursor"].as_str().ok_or("missing cursor")?;
+
+        let second_page = router
+            .oneshot(read_request(
+                READ_KEY,
+                &format!(
+                    "/api/v1/webhook-deliveries?status=suppressed&limit=1&after={cursor}&cursor=bogus"
+                ),
+            )?)
+            .await?;
+        let second_status = second_page.status();
+        let second_body = json_body(second_page).await?;
+
+        assert_eq!(second_status, StatusCode::OK);
+        assert_eq!(
+            second_body["deliveries"][0]["delivery_id"],
+            "DLV-suppressed"
+        );
+        assert_eq!(second_body["cursor"], Value::Null);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn webhook_deliveries_reject_invalid_params_and_wrong_scope() -> Result<(), Box<dyn Error>>
+    {
+        let cases = [
+            (
+                read_request(INGEST_KEY, "/api/v1/webhook-deliveries")?,
+                StatusCode::FORBIDDEN,
+                "insufficient_scope",
+                "detail",
+                "API key scope `ingest-only` cannot access this read endpoint. Use an `admin` or `read-only` key.",
+            ),
+            (
+                read_request(READ_KEY, "/api/v1/webhook-deliveries?limit=0")?,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_error",
+                "limit",
+                "must be a positive integer no greater than 200",
+            ),
+            (
+                read_request(READ_KEY, "/api/v1/webhook-deliveries?cursor=bogus")?,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_error",
+                "cursor",
+                "must be a valid pagination cursor",
+            ),
+            (
+                read_request(READ_KEY, "/api/v1/webhook-deliveries?status=supressed")?,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_error",
+                "status",
+                "must be one of: pending, retrying, delivered, discarded, suppressed",
+            ),
+            (
+                read_request(
+                    READ_KEY,
+                    "/api/v1/webhook-deliveries?status%5B%5D=suppressed",
+                )?,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_error",
+                "status",
+                "must be a string",
+            ),
+        ];
+
+        for (request, expected_status, expected_code, field, expected_fragment) in cases {
+            let response = ingest_router(test_ingest_state()?).oneshot(request).await?;
+            let status = response.status();
+            let body = json_body(response).await?;
+
+            assert_eq!(status, expected_status);
+            assert_eq!(body["code"], expected_code);
+            if field == "detail" {
+                assert_eq!(body["detail"], expected_fragment);
+            } else {
+                assert!(
+                    body["errors"][field][0]
+                        .as_str()
+                        .is_some_and(|error| error.contains(expected_fragment))
+                );
+            }
+        }
+
+        let unauthorized = ingest_router(test_ingest_state()?)
+            .oneshot(Request::get("/api/v1/webhook-deliveries").body(Body::empty())?)
             .await?;
         let unauthorized_status = unauthorized.status();
         let unauthorized_body = json_body(unauthorized).await?;
