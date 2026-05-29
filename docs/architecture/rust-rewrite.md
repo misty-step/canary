@@ -246,6 +246,18 @@ the Rust server accepts production traffic:
     non-HTTP monitor payloads remain distinct variants of one health signal
     concept; callers do not sequence `target_state`/`monitor_state`, timeline,
     and incident writes themselves.
+28. `canary-store::commit_target_probe` and
+    `canary-store::commit_monitor_check_in`: observed health input now has its
+    own deep store boundary before runtime wiring. A target probe always inserts
+    its `target_checks` row and updates `target_state`; a monitor check-in
+    always inserts its `monitor_check_ins` row and updates `monitor_state`.
+    Transition metadata is optional. When present, the same transaction also
+    appends the deterministic `health_check.*` service event and correlates the
+    health signal into incidents; when absent, the observation updates counters,
+    timestamps, deadlines, and last-success/failure fields without bumping the
+    transition sequence or writing timeline/incident rows. This matches the
+    Phoenix distinction between "every probe/check-in is persisted" and "only
+    state changes emit transition products."
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -273,9 +285,10 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Wire Rust target probes and monitor check-ins to `commit_health_transition`,
-   including target-check and monitor-check-in row persistence around the
-   already-atomic transition boundary.
+1. Add the Rust health runtime consumers for `commit_target_probe` and
+   `commit_monitor_check_in`: target probe execution with SSRF/status/body/TLS
+   result mapping, plus monitor check-in and overdue evaluation adapters that
+   feed the pure state machine and the atomic observation boundary.
 2. Add a populated Phoenix fixture once health and annotation writes are ported
    so Rust read models are checked against Phoenix-inserted production-shaped
    rows, not only an empty migrated schema.

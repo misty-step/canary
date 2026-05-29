@@ -19,7 +19,9 @@ mod webhook_deliveries;
 
 pub use api_keys::{API_KEY_PREFIX_LEN, ApiKeyInsert, VerifiedApiKey};
 pub use health::{
-    HealthTransition, HealthTransitionCommit, MonitorHealthTransition, TargetHealthTransition,
+    HealthTransitionCommit, MonitorCheckInCommit, MonitorCheckInCommitResult,
+    MonitorCheckInObservation, MonitorTransitionEvent, TargetCheckObservation, TargetProbeCommit,
+    TargetProbeCommitResult, TargetTransitionEvent,
 };
 pub use incidents::{IncidentCorrelation, IncidentCorrelationEvent};
 pub use ingest::{
@@ -93,12 +95,20 @@ impl Store {
         incidents::correlate(&mut self.connection, correlation)
     }
 
-    /// Persist a health transition and correlate the health signal atomically.
-    pub fn commit_health_transition(
+    /// Persist one target probe, including state and optional transition effects.
+    pub fn commit_target_probe(
         &mut self,
-        transition: HealthTransition,
-    ) -> Result<HealthTransitionCommit> {
-        health::commit(&mut self.connection, transition)
+        probe: TargetProbeCommit,
+    ) -> Result<TargetProbeCommitResult> {
+        health::commit_target_probe(&mut self.connection, probe)
+    }
+
+    /// Persist one monitor check-in, including state and optional transition effects.
+    pub fn commit_monitor_check_in(
+        &mut self,
+        check_in: MonitorCheckInCommit,
+    ) -> Result<MonitorCheckInCommitResult> {
+        health::commit_monitor_check_in(&mut self.connection, check_in)
     }
 
     /// Insert one API-key row whose raw secret has already been bcrypt-hashed.
@@ -1605,23 +1615,34 @@ mod tests {
     fn target_health_transition_updates_state_timeline_and_incident_in_one_commit()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut store = migrated_store()?;
-        let transition = TargetHealthTransition {
-            target_id: "TGT-api".to_owned(),
-            name: "API".to_owned(),
-            service: "api".to_owned(),
-            url: "https://api.example.com/health".to_owned(),
-            previous_state: "up".to_owned(),
-            state: "down".to_owned(),
-            consecutive_failures: 3,
-            consecutive_successes: 0,
-            check_succeeded: false,
-            now: "2026-05-28T20:00:00Z".to_owned(),
-            event_id: EventId::from_str("EVT-healthdown12")?,
-            incident_id: IncidentId::from_str("INC-healthdown12")?,
-            incident_event_id: EventId::from_str("EVT-incidentdwn1")?,
-        };
-
-        let commit = store.commit_health_transition(HealthTransition::Target(transition))?;
+        let commit = store
+            .commit_target_probe(TargetProbeCommit {
+                target_id: "TGT-api".to_owned(),
+                state: "down".to_owned(),
+                consecutive_failures: 3,
+                consecutive_successes: 0,
+                check_succeeded: false,
+                check: TargetCheckObservation {
+                    status_code: Some(503),
+                    latency_ms: Some(187),
+                    result: "error".to_owned(),
+                    tls_expires_at: None,
+                    error_detail: Some("expected 200, got 503".to_owned()),
+                    region: Some("iad".to_owned()),
+                },
+                now: "2026-05-28T20:00:00Z".to_owned(),
+                transition: Some(TargetTransitionEvent {
+                    name: "API".to_owned(),
+                    service: "api".to_owned(),
+                    url: "https://api.example.com/health".to_owned(),
+                    previous_state: "up".to_owned(),
+                    event_id: EventId::from_str("EVT-healthdown12")?,
+                    incident_id: IncidentId::from_str("INC-healthdown12")?,
+                    incident_event_id: EventId::from_str("EVT-incidentdwn1")?,
+                }),
+            })?
+            .transition
+            .ok_or("target probe should emit transition")?;
 
         assert_eq!(commit.event, "health_check.down");
         assert_eq!(
@@ -1679,6 +1700,29 @@ mod tests {
         );
         assert_eq!(
             store.connection.query_row(
+                "SELECT status_code, latency_ms, result, error_detail, region
+                 FROM target_checks WHERE target_id = 'TGT-api'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )?,
+            (
+                Some(503),
+                Some(187),
+                "error".to_owned(),
+                Some("expected 200, got 503".to_owned()),
+                Some("iad".to_owned())
+            )
+        );
+        assert_eq!(
+            store.connection.query_row(
                 "SELECT incident_id, signal_type, resolved_at
                  FROM incident_signals WHERE signal_ref = 'TGT-api'",
                 [],
@@ -1704,38 +1748,60 @@ mod tests {
     fn target_recovery_transition_resolves_the_health_incident_atomically()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut store = migrated_store()?;
-        store.commit_health_transition(HealthTransition::Target(TargetHealthTransition {
+        store.commit_target_probe(TargetProbeCommit {
             target_id: "TGT-api".to_owned(),
-            name: "API".to_owned(),
-            service: "api".to_owned(),
-            url: "https://api.example.com/health".to_owned(),
-            previous_state: "up".to_owned(),
             state: "down".to_owned(),
             consecutive_failures: 3,
             consecutive_successes: 0,
             check_succeeded: false,
+            check: TargetCheckObservation {
+                status_code: None,
+                latency_ms: Some(0),
+                result: "connection_error".to_owned(),
+                tls_expires_at: None,
+                error_detail: Some("connection refused".to_owned()),
+                region: None,
+            },
             now: "2026-05-28T20:00:00Z".to_owned(),
-            event_id: EventId::from_str("EVT-healthdown12")?,
-            incident_id: IncidentId::from_str("INC-healthdown12")?,
-            incident_event_id: EventId::from_str("EVT-incidentdwn1")?,
-        }))?;
-
-        let recovery =
-            store.commit_health_transition(HealthTransition::Target(TargetHealthTransition {
-                target_id: "TGT-api".to_owned(),
+            transition: Some(TargetTransitionEvent {
                 name: "API".to_owned(),
                 service: "api".to_owned(),
                 url: "https://api.example.com/health".to_owned(),
-                previous_state: "down".to_owned(),
+                previous_state: "up".to_owned(),
+                event_id: EventId::from_str("EVT-healthdown12")?,
+                incident_id: IncidentId::from_str("INC-healthdown12")?,
+                incident_event_id: EventId::from_str("EVT-incidentdwn1")?,
+            }),
+        })?;
+
+        let recovery = store
+            .commit_target_probe(TargetProbeCommit {
+                target_id: "TGT-api".to_owned(),
                 state: "up".to_owned(),
                 consecutive_failures: 0,
                 consecutive_successes: 1,
                 check_succeeded: true,
+                check: TargetCheckObservation {
+                    status_code: Some(200),
+                    latency_ms: Some(31),
+                    result: "ok".to_owned(),
+                    tls_expires_at: Some("2026-08-28T00:00:00Z".to_owned()),
+                    error_detail: None,
+                    region: Some("iad".to_owned()),
+                },
                 now: "2026-05-28T20:01:00Z".to_owned(),
-                event_id: EventId::from_str("EVT-healthup0000")?,
-                incident_id: IncidentId::from_str("INC-unused000001")?,
-                incident_event_id: EventId::from_str("EVT-incidentup01")?,
-            }))?;
+                transition: Some(TargetTransitionEvent {
+                    name: "API".to_owned(),
+                    service: "api".to_owned(),
+                    url: "https://api.example.com/health".to_owned(),
+                    previous_state: "down".to_owned(),
+                    event_id: EventId::from_str("EVT-healthup0000")?,
+                    incident_id: IncidentId::from_str("INC-unused000001")?,
+                    incident_event_id: EventId::from_str("EVT-incidentup01")?,
+                }),
+            })?
+            .transition
+            .ok_or("target probe should emit recovery transition")?;
 
         assert_eq!(recovery.event, "health_check.recovered");
         assert_eq!(
@@ -1774,6 +1840,83 @@ mod tests {
                 Some("2026-05-28T20:01:00Z".to_owned())
             )
         );
+        assert_eq!(row_count(&store.connection, "target_checks")?, 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn target_probe_without_transition_persists_check_and_state_without_timeline()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+
+        let commit = store.commit_target_probe(TargetProbeCommit {
+            target_id: "TGT-api".to_owned(),
+            state: "up".to_owned(),
+            consecutive_failures: 0,
+            consecutive_successes: 2,
+            check_succeeded: true,
+            check: TargetCheckObservation {
+                status_code: Some(200),
+                latency_ms: Some(22),
+                result: "success".to_owned(),
+                tls_expires_at: None,
+                error_detail: None,
+                region: Some("iad".to_owned()),
+            },
+            now: "2026-05-28T20:03:00Z".to_owned(),
+            transition: None,
+        })?;
+
+        assert!(commit.transition.is_none());
+        assert_eq!(row_count(&store.connection, "service_events")?, 0);
+        assert_eq!(row_count(&store.connection, "incident_signals")?, 0);
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT state, consecutive_successes, sequence, last_checked_at, last_success_at, last_transition_at
+                 FROM target_state WHERE target_id = 'TGT-api'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                },
+            )?,
+            (
+                "up".to_owned(),
+                2,
+                0,
+                "2026-05-28T20:03:00Z".to_owned(),
+                Some("2026-05-28T20:03:00Z".to_owned()),
+                None
+            )
+        );
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT result, status_code, latency_ms, region
+                 FROM target_checks WHERE target_id = 'TGT-api'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )?,
+            (
+                "success".to_owned(),
+                Some(200),
+                Some(22),
+                Some("iad".to_owned())
+            )
+        );
 
         Ok(())
     }
@@ -1788,24 +1931,37 @@ mod tests {
             [],
         )?;
 
-        let commit =
-            store.commit_health_transition(HealthTransition::Monitor(MonitorHealthTransition {
+        let commit = store
+            .commit_monitor_check_in(MonitorCheckInCommit {
                 monitor_id: "MON-worker".to_owned(),
-                name: "Worker heartbeat".to_owned(),
-                service: "worker".to_owned(),
-                mode: "ttl".to_owned(),
-                expected_every_ms: 60_000,
-                grace_ms: 5_000,
-                previous_state: "unknown".to_owned(),
                 state: "degraded".to_owned(),
                 last_check_in_at: Some("2026-05-28T20:00:00Z".to_owned()),
                 last_check_in_status: Some("alive".to_owned()),
                 deadline_at: Some("2026-05-28T20:01:05Z".to_owned()),
+                check_in: MonitorCheckInObservation {
+                    id: "CHK-workeralive0".to_owned(),
+                    external_id: Some("deploy-42".to_owned()),
+                    status: "alive".to_owned(),
+                    observed_at: "2026-05-28T20:00:00Z".to_owned(),
+                    ttl_ms: Some(60_000),
+                    summary: Some("worker heartbeat".to_owned()),
+                    context: Some(r#"{"release":"2026.05.28"}"#.to_owned()),
+                },
                 now: "2026-05-28T20:02:00Z".to_owned(),
-                event_id: EventId::from_str("EVT-mondegraded0")?,
-                incident_id: IncidentId::from_str("INC-mondegraded0")?,
-                incident_event_id: EventId::from_str("EVT-monincident0")?,
-            }))?;
+                transition: Some(MonitorTransitionEvent {
+                    name: "Worker heartbeat".to_owned(),
+                    service: "worker".to_owned(),
+                    mode: "ttl".to_owned(),
+                    expected_every_ms: 60_000,
+                    grace_ms: 5_000,
+                    previous_state: "unknown".to_owned(),
+                    event_id: EventId::from_str("EVT-mondegraded0")?,
+                    incident_id: IncidentId::from_str("INC-mondegraded0")?,
+                    incident_event_id: EventId::from_str("EVT-monincident0")?,
+                }),
+            })?
+            .transition
+            .ok_or("monitor check-in should emit transition")?;
 
         assert_eq!(commit.event, "health_check.degraded");
         assert_eq!(
@@ -1842,11 +1998,116 @@ mod tests {
         );
         assert_eq!(
             store.connection.query_row(
+                "SELECT external_id, status, observed_at, ttl_ms, summary, context
+                 FROM monitor_check_ins WHERE id = 'CHK-workeralive0'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                },
+            )?,
+            (
+                Some("deploy-42".to_owned()),
+                "alive".to_owned(),
+                "2026-05-28T20:00:00Z".to_owned(),
+                Some(60_000),
+                Some("worker heartbeat".to_owned()),
+                Some(r#"{"release":"2026.05.28"}"#.to_owned())
+            )
+        );
+        assert_eq!(
+            store.connection.query_row(
                 "SELECT service, state FROM incidents WHERE id = 'INC-mondegraded0'",
                 [],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )?,
             ("worker".to_owned(), "investigating".to_owned())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn monitor_check_in_without_transition_persists_check_in_and_state_without_timeline()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        store.connection.execute(
+            "INSERT INTO monitors (id, name, service, mode, expected_every_ms, grace_ms, created_at)
+             VALUES ('MON-worker', 'Worker heartbeat', 'worker', 'ttl', 60000, 5000, '2026-05-28T19:00:00Z')",
+            [],
+        )?;
+
+        let commit = store.commit_monitor_check_in(MonitorCheckInCommit {
+            monitor_id: "MON-worker".to_owned(),
+            state: "up".to_owned(),
+            last_check_in_at: Some("2026-05-28T20:04:00Z".to_owned()),
+            last_check_in_status: Some("alive".to_owned()),
+            deadline_at: Some("2026-05-28T20:05:05Z".to_owned()),
+            check_in: MonitorCheckInObservation {
+                id: "CHK-workeralive1".to_owned(),
+                external_id: Some("deploy-43".to_owned()),
+                status: "alive".to_owned(),
+                observed_at: "2026-05-28T20:04:00Z".to_owned(),
+                ttl_ms: Some(60_000),
+                summary: None,
+                context: None,
+            },
+            now: "2026-05-28T20:04:00Z".to_owned(),
+            transition: None,
+        })?;
+
+        assert!(commit.transition.is_none());
+        assert_eq!(row_count(&store.connection, "service_events")?, 0);
+        assert_eq!(row_count(&store.connection, "incident_signals")?, 0);
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT state, sequence, last_check_in_status, deadline_at, last_transition_at
+                 FROM monitor_state WHERE monitor_id = 'MON-worker'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )?,
+            (
+                "up".to_owned(),
+                0,
+                Some("alive".to_owned()),
+                Some("2026-05-28T20:05:05Z".to_owned()),
+                None
+            )
+        );
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT external_id, status, observed_at, ttl_ms
+                 FROM monitor_check_ins WHERE id = 'CHK-workeralive1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                },
+            )?,
+            (
+                Some("deploy-43".to_owned()),
+                "alive".to_owned(),
+                "2026-05-28T20:04:00Z".to_owned(),
+                Some(60_000)
+            )
         );
 
         Ok(())
