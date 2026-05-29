@@ -3,7 +3,15 @@
 //! This crate adapts the stable wire contracts from `canary-http` to concrete
 //! HTTP responses. Domain decisions and body shapes stay out of the router.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    error::Error,
+    fmt,
+    future::Future,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration as StdDuration,
+};
 
 use axum::{
     Router,
@@ -46,6 +54,152 @@ pub use webhooks::{
 
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 const PROBLEM_CONTENT_TYPE: &str = "application/problem+json; charset=utf-8";
+const DEFAULT_WEBHOOK_DRAIN_INTERVAL: StdDuration = StdDuration::from_secs(5);
+const DEFAULT_WEBHOOK_DRAIN_MAX_JOBS: u32 = 25;
+
+/// Runtime configuration for the top-level Canary server process.
+#[derive(Debug, Clone)]
+pub struct ServerConfig {
+    /// SQLite database path opened by the single-writer store.
+    pub database_path: PathBuf,
+    /// Ingest-domain limits and defaults.
+    pub ingest: IngestConfig,
+    /// Interval for the dedicated webhook delivery drain thread.
+    pub webhook_drain_interval: StdDuration,
+    /// Maximum scheduled webhook jobs claimed by one drain pass.
+    pub webhook_drain_max_jobs: u32,
+}
+
+impl ServerConfig {
+    /// Build a server configuration from an explicit SQLite database path.
+    pub fn new(database_path: impl Into<PathBuf>) -> Self {
+        Self {
+            database_path: database_path.into(),
+            ingest: IngestConfig::default(),
+            webhook_drain_interval: DEFAULT_WEBHOOK_DRAIN_INTERVAL,
+            webhook_drain_max_jobs: DEFAULT_WEBHOOK_DRAIN_MAX_JOBS,
+        }
+    }
+}
+
+/// Fully wired Canary server runtime.
+pub struct CanaryServer {
+    router: Router,
+    webhook_worker: WebhookDeliveryDrainWorker,
+}
+
+impl CanaryServer {
+    /// Open storage, run migrations, wire HTTP routes, and start webhook draining.
+    pub fn boot(config: ServerConfig) -> Result<Self, ServerBootError> {
+        if config.webhook_drain_max_jobs == 0 {
+            return Err(ServerBootError::InvalidConfig(
+                "webhook drain max jobs must be greater than zero".to_owned(),
+            ));
+        }
+
+        let mut store = Store::open(&config.database_path).map_err(ServerBootError::Store)?;
+        store.migrate().map_err(ServerBootError::Store)?;
+        let store = Arc::new(Mutex::new(store));
+
+        let scheduler = Arc::new(StoreWebhookScheduler::new(store.clone()));
+        let effect_sink = Arc::new(WebhookEnqueueEffectSink::new(
+            store.clone(),
+            scheduler,
+            Arc::new(NoopWebhookCooldown),
+        ));
+        let ingest_state =
+            IngestState::new_with_shared_effect_sink(store.clone(), config.ingest, effect_sink);
+
+        let transport = Arc::new(build_http_webhook_transport().map_err(ServerBootError::Http)?);
+        let runtime = WebhookDeliveryRuntime::new_without_circuit(store.clone(), transport);
+        let drain = WebhookDeliveryDrain::new(store, runtime, config.webhook_drain_max_jobs);
+        let webhook_worker =
+            WebhookDeliveryDrainWorker::spawn(drain, config.webhook_drain_interval)
+                .map_err(ServerBootError::WebhookWorker)?;
+        let router = public_router(PublicReadiness::ready()).merge(ingest_router(ingest_state));
+
+        Ok(Self {
+            router,
+            webhook_worker,
+        })
+    }
+
+    /// Return a clone of the composed public and authenticated router.
+    pub fn router(&self) -> Router {
+        self.router.clone()
+    }
+
+    /// Serve the composed router until `shutdown` resolves, then stop the worker.
+    pub async fn serve(
+        self,
+        listener: tokio::net::TcpListener,
+        shutdown: impl Future<Output = ()> + Send + 'static,
+    ) -> Result<(), ServerRunError> {
+        let router = self.router.clone();
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown)
+            .await
+            .map_err(ServerRunError::Listen)?;
+        self.webhook_worker
+            .join()
+            .map_err(ServerRunError::WebhookWorker)
+    }
+}
+
+/// Failure while booting the Canary server runtime.
+#[derive(Debug)]
+pub enum ServerBootError {
+    /// Configuration is internally inconsistent.
+    InvalidConfig(String),
+    /// SQLite store open or migration failed.
+    Store(canary_store::StoreError),
+    /// HTTP webhook client initialization failed.
+    Http(String),
+    /// Webhook drain worker failed to start.
+    WebhookWorker(String),
+}
+
+impl fmt::Display for ServerBootError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidConfig(error) => formatter.write_str(error),
+            Self::Store(error) => write!(formatter, "store boot failed: {error}"),
+            Self::Http(error) => formatter.write_str(error),
+            Self::WebhookWorker(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl Error for ServerBootError {}
+
+/// Failure while serving the Canary server runtime.
+#[derive(Debug)]
+pub enum ServerRunError {
+    /// The Axum listener failed while serving requests.
+    Listen(std::io::Error),
+    /// The webhook worker did not shut down cleanly.
+    WebhookWorker(String),
+}
+
+impl fmt::Display for ServerRunError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Listen(error) => write!(formatter, "server listen failed: {error}"),
+            Self::WebhookWorker(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl Error for ServerRunError {}
+
+fn build_http_webhook_transport() -> Result<HttpWebhookTransport, String> {
+    thread::Builder::new()
+        .name("canary-webhook-transport-init".to_owned())
+        .spawn(HttpWebhookTransport::try_new)
+        .map_err(|error| format!("failed to spawn webhook transport initializer: {error}"))?
+        .join()
+        .map_err(|_| "webhook transport initializer panicked".to_owned())?
+}
 
 /// Snapshot of dependency readiness for the public readiness endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,8 +286,17 @@ impl IngestState {
         config: IngestConfig,
         effect_sink: Arc<dyn IngestEffectSink>,
     ) -> Self {
+        Self::new_with_shared_effect_sink(Arc::new(Mutex::new(store)), config, effect_sink)
+    }
+
+    /// Build ingest state from a shared single-writer store and explicit effect sink.
+    pub fn new_with_shared_effect_sink(
+        store: Arc<Mutex<Store>>,
+        config: IngestConfig,
+        effect_sink: Arc<dyn IngestEffectSink>,
+    ) -> Self {
         Self {
-            store: Arc::new(Mutex::new(store)),
+            store,
             config,
             effect_sink,
         }
@@ -568,11 +731,14 @@ struct QueryParams {
 #[cfg(test)]
 mod tests {
     use std::error::Error;
+    use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::path::{Path, PathBuf};
+    use std::process;
     use std::sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     };
     use std::thread::{self, JoinHandle, ThreadId};
     use std::time::{Duration as StdDuration, Instant};
@@ -596,6 +762,7 @@ mod tests {
     const INGEST_KEY: &str = "sk_live_ingest_secret";
     const READ_KEY: &str = "sk_live_read_secret";
     const REVOKED_KEY: &str = "sk_live_revoked_secret";
+    static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[tokio::test]
     async fn healthz_adapts_the_public_contract() -> Result<(), Box<dyn Error>> {
@@ -652,6 +819,81 @@ mod tests {
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(body["status"], "not_ready");
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canary_server_boots_public_and_authenticated_routes() -> Result<(), Box<dyn Error>> {
+        let path = temp_db_path("routes");
+        let config = ServerConfig {
+            webhook_drain_interval: StdDuration::from_secs(60),
+            ..ServerConfig::new(path.clone())
+        };
+        let server = CanaryServer::boot(config)?;
+
+        let health = server
+            .router()
+            .oneshot(Request::get("/healthz").body(Body::empty())?)
+            .await?;
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let query = server
+            .router()
+            .oneshot(read_request(READ_KEY, "/api/v1/query?service=test-svc")?)
+            .await?;
+        assert_eq!(
+            query.status(),
+            StatusCode::UNAUTHORIZED,
+            "boot should not seed implicit API keys"
+        );
+
+        drop_server(server).await?;
+        fs::remove_file(path)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canary_server_boot_wires_ingest_to_webhook_delivery() -> Result<(), Box<dyn Error>> {
+        let path = temp_db_path("webhooks");
+        let (url, http_server) = spawn_webhook_server(204, &[])?;
+        {
+            let mut store = Store::open(&path)?;
+            store.migrate()?;
+            seed_api_key(&mut store, "KEY-ingest", INGEST_KEY, "ingest-only", None)?;
+            store.insert_webhook_subscription(WebhookSubscriptionInsert {
+                id: "WHK-boot".to_owned(),
+                url,
+                events: vec!["error.new_class".to_owned()],
+                secret: "test-webhook-secret".to_owned(),
+                active: true,
+                created_at: "2026-05-28T20:00:00Z".to_owned(),
+            })?;
+        }
+
+        let config = ServerConfig {
+            webhook_drain_interval: StdDuration::from_millis(10),
+            ..ServerConfig::new(path.clone())
+        };
+        let server = CanaryServer::boot(config)?;
+        let response = server
+            .router()
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        wait_for_delivered_webhook(&path)?;
+        let captured = join_http_server(http_server)?;
+        assert!(captured.head.starts_with("POST /hook HTTP/1.1"));
+        assert_eq!(
+            header_value(&captured.head, "x-event").as_deref(),
+            Some("error.new_class")
+        );
+        assert!(captured.body.contains(r#""service":"test-svc""#));
+
+        drop_server(server).await?;
+        fs::remove_file(path)?;
 
         Ok(())
     }
@@ -1896,6 +2138,35 @@ mod tests {
             IngestConfig::default(),
             scheduler,
         ))
+    }
+
+    fn temp_db_path(name: &str) -> PathBuf {
+        let id = TEMP_DB_COUNTER.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!("canary-server-{name}-{}-{id}.db", process::id()))
+    }
+
+    fn wait_for_delivered_webhook(path: &Path) -> Result<(), Box<dyn Error>> {
+        let deadline = Instant::now() + StdDuration::from_secs(3);
+        loop {
+            let store = Store::open(path)?;
+            let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
+                status: Some(WebhookDeliveryStatus::Delivered),
+                limit: Some(1),
+                ..Default::default()
+            })?;
+            if !rows.is_empty() {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err("timed out waiting for delivered webhook".into());
+            }
+            thread::sleep(StdDuration::from_millis(20));
+        }
+    }
+
+    async fn drop_server(server: CanaryServer) -> Result<(), Box<dyn Error>> {
+        tokio::task::spawn_blocking(move || drop(server)).await?;
+        Ok(())
     }
 
     fn error_request(token: &str, body: &'static str) -> Result<Request<Body>, Box<dyn Error>> {

@@ -208,6 +208,13 @@ the Rust server accepts production traffic:
     delivery. This keeps the blocking `HttpWebhookTransport` path outside Axum
     request tasks while preserving the existing bounded drain and avoiding a
     generic scheduler or job framework.
+24. `canary-server::CanaryServer`: the Rust service now has a top-level
+    bootstrap surface that opens and migrates the configured SQLite database,
+    shares the single-writer store across authenticated routes, webhook enqueue,
+    and the scheduled delivery drain, exposes one composed Axum router, and
+    provides a graceful serve boundary. Blocking webhook transport
+    initialization stays on an OS thread so the bootstrap is safe to call from
+    async tests without turning Canary into a runtime framework.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -235,11 +242,7 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Add a top-level server bootstrap that opens the configured SQLite store,
-   wires `StoreWebhookScheduler`, `HttpWebhookTransport`, and
-   `WebhookDeliveryDrainWorker`, and serves the public plus authenticated Axum
-   routers with graceful shutdown.
-2. Add a concrete incident-correlation effect sink once the Rust incident write
+1. Add a concrete incident-correlation effect sink once the Rust incident write
    path exists, keeping correlation failures isolated from ingest success.
-3. Add compatibility checks against a migrated Phoenix fixture database before
+2. Add compatibility checks against a migrated Phoenix fixture database before
    any production traffic moves to the Rust server.
