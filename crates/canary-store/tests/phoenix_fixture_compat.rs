@@ -20,6 +20,7 @@ use canary_store::{
 use rusqlite::{Connection, OpenFlags, params};
 
 const PHOENIX_FIXTURE: &str = "tests/fixtures/phoenix_schema.db";
+const POPULATED_PHOENIX_FIXTURE: &str = "tests/fixtures/phoenix_read_models.db";
 const RUST_SCHEMA_VERSION: u32 = 2026042200;
 
 const PHOENIX_MIGRATIONS: &[&str] = &[
@@ -307,8 +308,68 @@ fn webhook_delivery_queries_keep_order_on_a_phoenix_fixture() -> Result<(), Box<
     Ok(())
 }
 
+#[test]
+fn rust_query_read_models_read_populated_phoenix_rows() -> Result<(), Box<dyn Error>> {
+    let (dir, path) = copy_populated_fixture("read-models")?;
+    let store = Store::open(&path)?;
+
+    let error = store
+        .error_detail("ERR-readmodel0001")?
+        .ok_or("missing Phoenix fixture error detail")?;
+    assert_eq!(error.service, "ramp-api");
+    assert_eq!(error.group_hash, "grp-readmodel-runtime");
+    assert_eq!(
+        error.context.as_ref().and_then(|ctx| ctx.get("tenant")),
+        Some(&serde_json::json!("alpha"))
+    );
+    assert_eq!(error.group.as_ref().map(|group| group.total_count), Some(3));
+    assert_eq!(error.incident_ids, vec!["INC-readmodel0001"]);
+
+    let detail = store
+        .incident_detail("INC-readmodel0001")?
+        .ok_or("missing Phoenix fixture incident detail")?;
+    assert_eq!(detail.incident.service, "ramp-api");
+    assert_eq!(detail.annotations.len(), 1);
+    assert_eq!(detail.annotations[0].action, "acknowledged");
+    assert_eq!(detail.recent_timeline_events.len(), 1);
+    assert_eq!(detail.recent_timeline_events[0].event, "incident.opened");
+
+    let target = detail
+        .signals
+        .iter()
+        .find(|signal| signal.target_id.as_deref() == Some("TGT-readmodel-api"))
+        .ok_or("missing target health signal")?;
+    assert_eq!(target.target_name.as_deref(), Some("Ramp API"));
+    assert_eq!(target.current_state.as_deref(), Some("down"));
+    assert_eq!(target.consecutive_failures, Some(4));
+    assert_eq!(target.annotation_count, 1);
+
+    let monitor = detail
+        .signals
+        .iter()
+        .find(|signal| signal.monitor_id.as_deref() == Some("MON-readmodel-cron"))
+        .ok_or("missing monitor health signal")?;
+    assert_eq!(monitor.monitor_name.as_deref(), Some("Ramp nightly import"));
+    assert_eq!(monitor.current_state.as_deref(), Some("degraded"));
+
+    let group = detail
+        .signals
+        .iter()
+        .find(|signal| signal.group_hash.as_deref() == Some("grp-readmodel-runtime"))
+        .ok_or("missing error-group signal")?;
+    assert_eq!(group.error_class.as_deref(), Some("RuntimeError"));
+    assert_eq!(group.annotation_count, 1);
+
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
 fn fixture_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(PHOENIX_FIXTURE)
+}
+
+fn populated_fixture_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(POPULATED_PHOENIX_FIXTURE)
 }
 
 fn open_fixture_read_only() -> Result<Connection, Box<dyn Error>> {
@@ -319,14 +380,22 @@ fn open_fixture_read_only() -> Result<Connection, Box<dyn Error>> {
 }
 
 fn copy_fixture(name: &str) -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
+    copy_fixture_from(name, fixture_path())
+}
+
+fn copy_populated_fixture(name: &str) -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
+    copy_fixture_from(name, populated_fixture_path())
+}
+
+fn copy_fixture_from(name: &str, source: PathBuf) -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let dir = std::env::temp_dir().join(format!(
         "canary-phoenix-fixture-{name}-{}-{nonce}",
         std::process::id()
     ));
     fs::create_dir_all(&dir)?;
-    let path = dir.join("phoenix_schema.db");
-    fs::copy(fixture_path(), &path)?;
+    let path = dir.join("phoenix_fixture.db");
+    fs::copy(source, &path)?;
     Ok((dir, path))
 }
 

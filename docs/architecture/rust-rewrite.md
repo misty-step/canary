@@ -428,6 +428,18 @@ the Rust server accepts production traffic:
     failed lifecycle pass. This keeps the Rust rewrite stricter where types own
     behavior, but tolerant at the persisted-data boundary that Phoenix already
     treated as best-effort.
+41. `bin/regenerate-phoenix-fixture` now emits both an empty Phoenix-migrated
+    schema fixture and a populated Phoenix/Ecto read-model fixture. The
+    populated fixture is seeded through Phoenix schemas and changesets with
+    production-shaped errors, error groups, target state, monitor state,
+    incident signals, annotations, and timeline events. Rust opens that
+    Phoenix-created SQLite file directly and proves `Store::error_detail` and
+    `Store::incident_detail` can read the joined graph: error-group metadata,
+    incident backreferences, incident annotations, recent timeline events,
+    target health signals, monitor health signals, and per-subject annotation
+    counts. This is intentionally not a claim about now-relative windows or
+    list pagination; those need deterministic-clock coverage instead of static
+    future timestamps.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -455,6 +467,9 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Add a populated Phoenix fixture once health and annotation writes are ported
-   so Rust read models are checked against Phoenix-inserted production-shaped
-   rows, not only an empty migrated schema.
+1. Broaden Phoenix read-model parity with deterministic-clock coverage for
+   now-relative queries such as `errors_by_*`, active incidents, health status,
+   and paginated list ordering.
+2. Continue the remaining Rust HTTP/admin/API surface from the live OpenAPI and
+   Phoenix router contracts, keeping each slice behind a typed store or worker
+   boundary rather than a generic CRUD layer.
