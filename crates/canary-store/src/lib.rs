@@ -9,6 +9,7 @@ use std::path::Path;
 use rusqlite::Connection;
 
 mod api_keys;
+mod incidents;
 mod ingest;
 mod oban_jobs;
 mod query;
@@ -16,6 +17,7 @@ mod schema;
 mod webhook_deliveries;
 
 pub use api_keys::{API_KEY_PREFIX_LEN, ApiKeyInsert, VerifiedApiKey};
+pub use incidents::{IncidentCorrelation, IncidentCorrelationEvent};
 pub use ingest::{
     ErrorIngest, ErrorIngestCommit, ErrorIngestIds, ErrorIngestPayload, ErrorServiceEvent,
 };
@@ -77,6 +79,14 @@ impl Store {
     /// Commit one validated error ingest transaction.
     pub fn commit_error_ingest(&mut self, ingest: ErrorIngest) -> Result<ErrorIngestCommit> {
         ingest::commit(&mut self.connection, ingest)
+    }
+
+    /// Correlate one post-commit signal into Canary's incident graph.
+    pub fn correlate_incident(
+        &mut self,
+        correlation: IncidentCorrelation,
+    ) -> Result<Option<IncidentCorrelationEvent>> {
+        incidents::correlate(&mut self.connection, correlation)
     }
 
     /// Insert one API-key row whose raw secret has already been bcrypt-hashed.
@@ -257,7 +267,7 @@ mod tests {
     use std::str::FromStr;
 
     use canary_core::{
-        ids::{ErrorId, EventId},
+        ids::{ErrorId, EventId, IncidentId},
         ingest::classification::{Category, Classification, Component, Persistence},
     };
     use rusqlite::params;
@@ -740,6 +750,194 @@ mod tests {
         assert!(subscription.subscribes_to("error.new_class"));
         assert!(store.webhook_subscription("WHK-missing")?.is_none());
 
+        Ok(())
+    }
+
+    #[test]
+    fn correlate_incident_opens_error_group_incident_and_records_timeline() -> Result<()> {
+        let mut store = migrated_store()?;
+        store.commit_error_ingest(error_ingest(
+            "ERR-123456789abc",
+            "EVT-123456789abc",
+            "group-incident-a",
+            "2026-05-28T20:00:00Z",
+        ))?;
+
+        let event = store
+            .correlate_incident(incident_correlation(
+                "INC-123456789abc",
+                "EVT-abcdefghijkl",
+                "error_group",
+                "group-incident-a",
+                "cadence",
+                "2026-05-28T20:00:05Z",
+            ))?
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+        assert_eq!(event.event, "incident.opened");
+        assert_eq!(event.id, "EVT-abcdefghijkl");
+        let payload: Value =
+            serde_json::from_str(&event.payload_json).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        assert_eq!(payload["event"], "incident.opened");
+        assert_eq!(payload["incident"]["id"], "INC-123456789abc");
+        assert_eq!(
+            payload["incident"]["signals"][0]["signal_ref"],
+            "group-incident-a"
+        );
+
+        let incident = incident_row(&store, "INC-123456789abc")?;
+        assert_eq!(
+            incident,
+            (
+                "cadence".to_owned(),
+                "investigating".to_owned(),
+                "medium".to_owned(),
+                None
+            )
+        );
+        assert_eq!(
+            signal_count(
+                &store,
+                "INC-123456789abc",
+                "error_group",
+                "group-incident-a"
+            )?,
+            1
+        );
+        assert_eq!(
+            service_event_count(&store.connection, "INC-123456789abc", "incident.opened")?,
+            1
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn correlate_incident_updates_existing_incident_and_escalates_after_three_signals() -> Result<()>
+    {
+        let mut store = migrated_store()?;
+        for (index, group_hash) in ["group-signal-a", "group-signal-b", "group-signal-c"]
+            .iter()
+            .enumerate()
+        {
+            store.commit_error_ingest(error_ingest(
+                &format!("ERR-signal{index}abc"),
+                &format!("EVT-signal{index}abc"),
+                group_hash,
+                "2026-05-28T20:00:00Z",
+            ))?;
+        }
+
+        assert_eq!(
+            store
+                .correlate_incident(incident_correlation(
+                    "INC-abcdefghijkl",
+                    "EVT-incident001",
+                    "error_group",
+                    "group-signal-a",
+                    "cadence",
+                    "2026-05-28T20:00:01Z",
+                ))?
+                .map(|event| event.event),
+            Some("incident.opened".to_owned())
+        );
+        assert_eq!(
+            store
+                .correlate_incident(incident_correlation(
+                    "INC-unused0000",
+                    "EVT-incident002",
+                    "error_group",
+                    "group-signal-b",
+                    "cadence",
+                    "2026-05-28T20:00:02Z",
+                ))?
+                .map(|event| event.event),
+            Some("incident.updated".to_owned())
+        );
+        assert_eq!(
+            store
+                .correlate_incident(incident_correlation(
+                    "INC-unused0001",
+                    "EVT-incident003",
+                    "error_group",
+                    "group-signal-c",
+                    "cadence",
+                    "2026-05-28T20:00:03Z",
+                ))?
+                .map(|event| event.event),
+            Some("incident.updated".to_owned())
+        );
+
+        let incident = incident_row(&store, "INC-abcdefghijkl")?;
+        assert_eq!(incident.2, "high");
+        assert_eq!(active_signal_count(&store, "INC-abcdefghijkl")?, 3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn correlate_incident_resolves_when_attached_error_group_is_no_longer_active() -> Result<()> {
+        let mut store = migrated_store()?;
+        store.commit_error_ingest(error_ingest(
+            "ERR-123456789abc",
+            "EVT-123456789abc",
+            "group-resolve",
+            "2026-05-28T20:00:00Z",
+        ))?;
+        store.correlate_incident(incident_correlation(
+            "INC-resolve00000",
+            "EVT-resolve001",
+            "error_group",
+            "group-resolve",
+            "cadence",
+            "2026-05-28T20:00:01Z",
+        ))?;
+        store.connection.execute(
+            "UPDATE error_groups SET status = 'resolved' WHERE group_hash = 'group-resolve'",
+            [],
+        )?;
+
+        let event = store
+            .correlate_incident(incident_correlation(
+                "INC-unused0002",
+                "EVT-resolve002",
+                "error_group",
+                "group-resolve",
+                "cadence",
+                "2026-05-28T20:00:02Z",
+            ))?
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+        assert_eq!(event.event, "incident.resolved");
+        let incident = incident_row(&store, "INC-resolve00000")?;
+        assert_eq!(incident.1, "resolved");
+        assert_eq!(incident.3.as_deref(), Some("2026-05-28T20:00:02Z"));
+        assert_eq!(active_signal_count(&store, "INC-resolve00000")?, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn correlate_incident_ignores_inactive_signal_without_open_incident() -> Result<()> {
+        let mut store = migrated_store()?;
+        store.commit_error_ingest(error_ingest(
+            "ERR-123456789abc",
+            "EVT-123456789abc",
+            "group-stale",
+            "2026-05-28T20:00:00Z",
+        ))?;
+
+        let event = store.correlate_incident(incident_correlation(
+            "INC-stale00000",
+            "EVT-stale00000",
+            "error_group",
+            "group-stale",
+            "cadence",
+            "2026-05-28T20:10:00Z",
+        ))?;
+
+        assert_eq!(event, None);
+        assert_eq!(row_count(&store.connection, "incidents")?, 0);
         Ok(())
     }
 
@@ -1580,6 +1778,68 @@ mod tests {
                 created_at: created_at.to_owned(),
             },
         }
+    }
+
+    fn incident_correlation(
+        incident_id: &str,
+        event_id: &str,
+        signal_type: &str,
+        signal_ref: &str,
+        service: &str,
+        now: &str,
+    ) -> IncidentCorrelation {
+        IncidentCorrelation {
+            signal_type: signal_type.to_owned(),
+            signal_ref: signal_ref.to_owned(),
+            service: service.to_owned(),
+            incident_id: IncidentId::from_str(incident_id)
+                .unwrap_or_else(|_| IncidentId::generate()),
+            event_id: EventId::from_str(event_id).unwrap_or_else(|_| EventId::generate()),
+            now: now.to_owned(),
+        }
+    }
+
+    fn incident_row(
+        store: &Store,
+        incident_id: &str,
+    ) -> Result<(String, String, String, Option<String>)> {
+        store
+            .connection
+            .query_row(
+                "SELECT service, state, severity, resolved_at FROM incidents WHERE id = ?1",
+                [incident_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(Into::into)
+    }
+
+    fn signal_count(
+        store: &Store,
+        incident_id: &str,
+        signal_type: &str,
+        signal_ref: &str,
+    ) -> Result<i64> {
+        store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM incident_signals
+                 WHERE incident_id = ?1 AND signal_type = ?2 AND signal_ref = ?3",
+                params![incident_id, signal_type, signal_ref],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    fn active_signal_count(store: &Store, incident_id: &str) -> Result<i64> {
+        store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM incident_signals
+                 WHERE incident_id = ?1 AND resolved_at IS NULL",
+                [incident_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     fn row_count(connection: &Connection, table: &str) -> Result<i64> {

@@ -548,7 +548,8 @@ impl IngestEffectSink for WebhookEnqueueEffectSink {
 }
 
 impl WebhookEnqueueEffectSink {
-    fn enqueue_event(&self, event: &str, payload_json: &str) -> Result<(), String> {
+    /// Enqueue one already-recorded service event for matching webhook subscribers.
+    pub fn enqueue_event(&self, event: &str, payload_json: &str) -> Result<(), String> {
         let payload = serde_json::from_str(payload_json)
             .map_err(|error| format!("invalid webhook payload: {error}"))?;
         let now = current_rfc3339();

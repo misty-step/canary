@@ -38,7 +38,7 @@ use canary_ingest::{
     IngestConfig, IngestContext, IngestEffect, IngestError, ValidationErrors,
     ingest as ingest_error,
 };
-use canary_store::{IncidentListOptions, Store};
+use canary_store::{IncidentCorrelation, IncidentListOptions, Store};
 use canary_store::{QueryError, ServiceQueryOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -102,11 +102,12 @@ impl CanaryServer {
         let store = Arc::new(Mutex::new(store));
 
         let scheduler = Arc::new(StoreWebhookScheduler::new(store.clone()));
-        let effect_sink = Arc::new(WebhookEnqueueEffectSink::new(
+        let webhook_sink = Arc::new(WebhookEnqueueEffectSink::new(
             store.clone(),
             scheduler,
             Arc::new(NoopWebhookCooldown),
         ));
+        let effect_sink = Arc::new(RuntimeIngestEffectSink::new(store.clone(), webhook_sink));
         let ingest_state =
             IngestState::new_with_shared_effect_sink(store.clone(), config.ingest, effect_sink);
 
@@ -199,6 +200,91 @@ fn build_http_webhook_transport() -> Result<HttpWebhookTransport, String> {
         .map_err(|error| format!("failed to spawn webhook transport initializer: {error}"))?
         .join()
         .map_err(|_| "webhook transport initializer panicked".to_owned())?
+}
+
+/// Runtime sink for ingest post-commit effects.
+pub struct RuntimeIngestEffectSink {
+    store: Arc<Mutex<Store>>,
+    webhook_sink: Arc<WebhookEnqueueEffectSink>,
+}
+
+impl RuntimeIngestEffectSink {
+    /// Build the runtime effect sink from explicit persistence and webhook boundaries.
+    pub fn new(store: Arc<Mutex<Store>>, webhook_sink: Arc<WebhookEnqueueEffectSink>) -> Self {
+        Self {
+            store,
+            webhook_sink,
+        }
+    }
+}
+
+impl IngestEffectSink for RuntimeIngestEffectSink {
+    fn handle(&self, effects: &[IngestEffect]) -> Result<(), String> {
+        let mut errors = Vec::new();
+        for effect in effects {
+            let result = match effect {
+                IngestEffect::BroadcastNewError { .. } => Ok(()),
+                IngestEffect::CorrelateIncident {
+                    signal_type,
+                    signal_ref,
+                    service,
+                } => self.correlate_incident(signal_type, signal_ref, service),
+                IngestEffect::EnqueueWebhook {
+                    event,
+                    payload_json,
+                } => self.webhook_sink.enqueue_event(event, payload_json),
+            };
+
+            if let Err(error) = result {
+                errors.push(error);
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+}
+
+impl RuntimeIngestEffectSink {
+    fn correlate_incident(
+        &self,
+        signal_type: &str,
+        signal_ref: &str,
+        service: &str,
+    ) -> Result<(), String> {
+        let event = {
+            let mut store = self
+                .store
+                .lock()
+                .map_err(|_| "store lock poisoned".to_owned())?;
+            store
+                .correlate_incident(IncidentCorrelation {
+                    signal_type: signal_type.to_owned(),
+                    signal_ref: signal_ref.to_owned(),
+                    service: service.to_owned(),
+                    incident_id: canary_core::ids::IncidentId::generate(),
+                    event_id: canary_core::ids::EventId::generate(),
+                    now: current_rfc3339(),
+                })
+                .map_err(|error| error.to_string())?
+        };
+
+        if let Some(event) = event {
+            self.webhook_sink
+                .enqueue_event(&event.event, &event.payload_json)?;
+        }
+
+        Ok(())
+    }
+}
+
+fn current_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
 }
 
 /// Snapshot of dependency readiness for the public readiness endpoint.
@@ -891,6 +977,90 @@ mod tests {
             Some("error.new_class")
         );
         assert!(captured.body.contains(r#""service":"test-svc""#));
+
+        drop_server(server).await?;
+        fs::remove_file(path)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canary_server_boot_wires_ingest_to_incident_correlation() -> Result<(), Box<dyn Error>>
+    {
+        let path = temp_db_path("incidents");
+        {
+            let mut store = Store::open(&path)?;
+            store.migrate()?;
+            seed_api_key(&mut store, "KEY-ingest", INGEST_KEY, "ingest-only", None)?;
+            seed_api_key(&mut store, "KEY-read", READ_KEY, "read-only", None)?;
+        }
+
+        let config = ServerConfig {
+            webhook_drain_interval: StdDuration::from_secs(60),
+            ..ServerConfig::new(path.clone())
+        };
+        let server = CanaryServer::boot(config)?;
+        let response = server
+            .router()
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let incidents = server
+            .router()
+            .oneshot(read_request(READ_KEY, "/api/v1/incidents")?)
+            .await?;
+        assert_eq!(incidents.status(), StatusCode::OK);
+        let body = json_body(incidents).await?;
+        assert_eq!(body["incidents"][0]["service"], "test-svc");
+        assert_eq!(body["incidents"][0]["signal_count"], 1);
+        assert_eq!(
+            body["incidents"][0]["signals"][0]["signal_type"],
+            "error_group"
+        );
+
+        drop_server(server).await?;
+        fs::remove_file(path)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canary_server_boot_enqueues_incident_webhook_events() -> Result<(), Box<dyn Error>> {
+        let path = temp_db_path("incident-webhooks");
+        let (url, http_server) = spawn_webhook_server(204, &[])?;
+        {
+            let mut store = Store::open(&path)?;
+            store.migrate()?;
+            seed_api_key(&mut store, "KEY-ingest", INGEST_KEY, "ingest-only", None)?;
+            store.insert_webhook_subscription(WebhookSubscriptionInsert {
+                id: "WHK-incident".to_owned(),
+                url,
+                events: vec!["incident.opened".to_owned()],
+                secret: "test-webhook-secret".to_owned(),
+                active: true,
+                created_at: "2026-05-28T20:00:00Z".to_owned(),
+            })?;
+        }
+
+        let config = ServerConfig {
+            webhook_drain_interval: StdDuration::from_millis(10),
+            ..ServerConfig::new(path.clone())
+        };
+        let server = CanaryServer::boot(config)?;
+        let response = server
+            .router()
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        wait_for_delivered_webhook(&path)?;
+        let captured = join_http_server(http_server)?;
+        assert_eq!(
+            header_value(&captured.head, "x-event").as_deref(),
+            Some("incident.opened")
+        );
+        assert!(captured.body.contains(r#""event":"incident.opened""#));
 
         drop_server(server).await?;
         fs::remove_file(path)?;

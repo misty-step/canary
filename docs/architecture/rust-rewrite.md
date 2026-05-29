@@ -215,6 +215,16 @@ the Rust server accepts production traffic:
     provides a graceful serve boundary. Blocking webhook transport
     initialization stays on an OS thread so the bootstrap is safe to call from
     async tests without turning Canary into a runtime framework.
+25. `canary-store::correlate_incident` and
+    `canary-server::RuntimeIngestEffectSink`: the Rust ingest path now turns
+    `CorrelateIncident` effects into incident rows, signal attachments, timeline
+    service events, and `incident.opened` webhook enqueue requests. Store owns
+    the whole correlation transaction: signal activity checks, first-open,
+    update, deterministic resolution, severity escalation, and event payload
+    construction. Server owns only effect adaptation, generated ids, current
+    time, and best-effort webhook enqueue. This keeps correlation behind one
+    deep persistence method instead of spreading incident rules through Axum
+    handlers or worker glue.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -242,7 +252,8 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Add a concrete incident-correlation effect sink once the Rust incident write
-   path exists, keeping correlation failures isolated from ingest success.
-2. Add compatibility checks against a migrated Phoenix fixture database before
+1. Add compatibility checks against a migrated Phoenix fixture database before
    any production traffic moves to the Rust server.
+2. Port health-transition writes into the Rust store so incident correlation can
+   attach both error groups and non-HTTP health signals through the same
+   transaction boundary.
