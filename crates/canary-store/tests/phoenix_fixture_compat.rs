@@ -445,6 +445,124 @@ fn rust_now_relative_queries_read_populated_phoenix_rows_at_fixed_time()
     Ok(())
 }
 
+#[test]
+fn rust_fixed_clock_queries_keep_phoenix_pagination_and_incident_boundary()
+-> Result<(), Box<dyn Error>> {
+    let (dir, path) = copy_populated_fixture("read-model-boundaries")?;
+    insert_paged_error_groups(&path, "2026-05-28T20:00:00Z")?;
+    let store = Store::open(&path)?;
+    let as_of = OffsetDateTime::parse("2026-05-28T20:02:00Z", &Rfc3339)?;
+
+    let first_page =
+        store.errors_by_service_at("ramp-api", "24h", ServiceQueryOptions::default(), as_of)?;
+    assert_eq!(first_page.groups.len(), 50);
+    assert!(first_page.cursor.is_some());
+    assert_eq!(first_page.groups[0].group_hash, "grp-page-001");
+    assert_eq!(first_page.groups[49].group_hash, "grp-page-050");
+
+    let second_page = store.errors_by_service_at(
+        "ramp-api",
+        "24h",
+        ServiceQueryOptions {
+            cursor: first_page.cursor,
+            ..ServiceQueryOptions::default()
+        },
+        as_of,
+    )?;
+    assert_eq!(
+        second_page
+            .groups
+            .iter()
+            .map(|group| group.group_hash.as_str())
+            .collect::<Vec<_>>(),
+        vec!["grp-page-051", "grp-readmodel-runtime"]
+    );
+    assert_eq!(second_page.cursor, None);
+
+    let inclusive_boundary = OffsetDateTime::parse("2026-05-28T20:04:00Z", &Rfc3339)?;
+    let inclusive =
+        store.active_incidents_at(IncidentListOptions::default(), inclusive_boundary)?;
+    assert_eq!(inclusive.incidents.len(), 1);
+    assert_eq!(inclusive.incidents[0].signal_count, 3);
+    assert_eq!(inclusive.incidents[0].severity, "high");
+
+    let after_boundary = OffsetDateTime::parse("2026-05-28T20:04:01Z", &Rfc3339)?;
+    let aged = store.active_incidents_at(IncidentListOptions::default(), after_boundary)?;
+    assert_eq!(aged.incidents.len(), 1);
+    assert_eq!(aged.incidents[0].signal_count, 3);
+    assert_eq!(aged.incidents[0].severity, "medium");
+
+    let error_group_expired = OffsetDateTime::parse("2026-05-28T20:05:01Z", &Rfc3339)?;
+    let health_only =
+        store.active_incidents_at(IncidentListOptions::default(), error_group_expired)?;
+    assert_eq!(health_only.incidents.len(), 1);
+    assert_eq!(health_only.incidents[0].signal_count, 2);
+    assert_eq!(
+        health_only.incidents[0]
+            .signals
+            .iter()
+            .map(|signal| signal.signal_ref.as_str())
+            .collect::<Vec<_>>(),
+        vec!["TGT-readmodel-api", "MON-readmodel-cron"]
+    );
+
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn rust_health_read_models_read_populated_phoenix_rows() -> Result<(), Box<dyn Error>> {
+    let (dir, path) = copy_populated_fixture("health-read-models")?;
+    let mut store = Store::open(&path)?;
+
+    let targets = store.list_targets()?;
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].id, "TGT-readmodel-api");
+    assert_eq!(targets[0].name, "Ramp API");
+    assert_eq!(targets[0].service, "ramp-api");
+    assert_eq!(targets[0].method, "GET");
+    assert_eq!(targets[0].interval_ms, 60_000);
+    assert_eq!(targets[0].timeout_ms, 10_000);
+    assert_eq!(targets[0].expected_status, "200");
+    assert!(targets[0].active);
+
+    let schedules = store.active_target_probe_schedules()?;
+    assert_eq!(schedules.len(), 1);
+    assert_eq!(schedules[0].target_id, "TGT-readmodel-api");
+    assert_eq!(schedules[0].interval_ms, 60_000);
+
+    let target_snapshot = store
+        .target_probe_snapshot_by_id("TGT-readmodel-api")?
+        .ok_or("missing target probe snapshot")?;
+    assert_eq!(target_snapshot.name, "Ramp API");
+    assert_eq!(target_snapshot.service, "ramp-api");
+    assert_eq!(target_snapshot.state, "down");
+    assert_eq!(target_snapshot.consecutive_failures, 4);
+    assert_eq!(target_snapshot.expected_status, "200");
+
+    let monitor_snapshot = store
+        .monitor_check_in_snapshot_by_name("Ramp nightly import")?
+        .ok_or("missing monitor check-in snapshot")?;
+    assert_eq!(monitor_snapshot.id, "MON-readmodel-cron");
+    assert_eq!(monitor_snapshot.service, "ramp-api");
+    assert_eq!(monitor_snapshot.mode, "ttl");
+    assert_eq!(monitor_snapshot.expected_every_ms, 60_000);
+    assert_eq!(monitor_snapshot.grace_ms, 5_000);
+    assert_eq!(monitor_snapshot.state, "degraded");
+
+    let overdue = store.monitor_overdue_candidates()?;
+    assert_eq!(overdue.len(), 1);
+    assert_eq!(overdue[0].id, "MON-readmodel-cron");
+    assert_eq!(overdue[0].last_check_in_status.as_deref(), Some("alive"));
+    assert_eq!(
+        overdue[0].deadline_at.as_deref(),
+        Some("2026-05-28T20:00:00Z")
+    );
+
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
 fn fixture_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(PHOENIX_FIXTURE)
 }
@@ -632,4 +750,27 @@ fn error_ingest(
             created_at: created_at.to_owned(),
         },
     })
+}
+
+fn insert_paged_error_groups(path: &Path, last_seen_at: &str) -> Result<(), Box<dyn Error>> {
+    let connection = Connection::open(path)?;
+
+    for index in 1..=51 {
+        connection.execute(
+            "INSERT INTO error_groups (
+                group_hash, service, error_class, severity, first_seen_at, last_seen_at,
+                message_template, last_error_id, total_count, status
+             ) VALUES (?1, 'ramp-api', ?2, 'error', ?3, ?3, ?4, ?5, ?6, 'active')",
+            params![
+                format!("grp-page-{index:03}"),
+                format!("PageError{index:03}"),
+                last_seen_at,
+                format!("paged sample {index}"),
+                format!("ERR-page-{index:03}"),
+                200 - index,
+            ],
+        )?;
+    }
+
+    Ok(())
 }

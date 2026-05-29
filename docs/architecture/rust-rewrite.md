@@ -451,6 +451,17 @@ the Rust server accepts production traffic:
     empty-after-window summary. This is a store-level test seam only: no HTTP
     `at` parameter, no process-wide clock service, and no change to
     clock-independent detail read models.
+43. The populated Phoenix read-model fixture now locks the next edge cases for
+    those deterministic store reads. Rust pages more than fifty Phoenix-shaped
+    `ramp-api` error groups with the same total-count/group-hash cursor order,
+    proves the incident active window is inclusive at exactly 300 seconds,
+    distinguishes the error-group activity clock from severity's signal
+    attachment clock, and confirms that health signals continue to hold the
+    incident open after the error group ages out. The same fixture also drives
+    existing health read-model boundaries (`list_targets`,
+    `active_target_probe_schedules`, `target_probe_snapshot_by_id`,
+    `monitor_check_in_snapshot_by_name`, and `monitor_overdue_candidates`)
+    without adding a new health query abstraction.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -478,9 +489,10 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Broaden Phoenix read-model parity with deterministic-clock coverage for
-   paginated list ordering, exact 300-second incident boundary behavior, and
-   health status/read-model lists.
+1. Broaden Phoenix read-model parity around cursor mutation under concurrent
+   ingest and exact health-state activity semantics such as paused targets and
+   monitors. Keep this at the store/query boundary unless the live Phoenix
+   router contract requires a route.
 2. Continue the remaining Rust HTTP/admin/API surface from the live OpenAPI and
    Phoenix router contracts, keeping each slice behind a typed store or worker
    boundary rather than a generic CRUD layer.
