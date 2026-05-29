@@ -680,6 +680,19 @@ the Rust server accepts production traffic:
     partial-day expired timestamps that integer whole-day math could otherwise
     round to zero, do not emit expiring warnings; this is a deliberate
     correctness guard before cutover.
+63. The intentional incident-severity divergence is now documented and covered
+    against the Phoenix read-model fixture. Phoenix computes incident list
+    severity from active signal `attached_at` recency, so three still-failing
+    health-transition signals can age from `high` to `medium` after five
+    minutes even while their target or monitor state remains non-`up`. Rust
+    keeps error-group signals recency-based but treats health-transition
+    signals as stateful once the active-signal lookup has proved the target or
+    monitor is still failing. The fixture test
+    `rust_fixed_clock_queries_keep_phoenix_pagination_and_incident_boundary`
+    now locks both sides of the cutover note: two stale active health signals
+    stay `medium`, while three stale active health signals remain `high`. This
+    is a correctness improvement for agents reading incidents, not an
+    accidental silent wire drift.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -707,9 +720,11 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Add a Phoenix-observed compatibility note for the intentional severity
-   divergence above before cutover: this is a Rust correctness improvement over
-   the current Phoenix read model, not a silent wire-shape change.
-2. Continue remaining Phoenix background behavior behind typed store or worker
-   boundaries, keeping each runtime adapter bespoke rather than introducing a
-   generic scheduler.
+1. Add target-probe concurrency and socket-hang isolation without losing the
+   single-writer store boundary. The current Rust `TargetProbeLifecycle`
+   executes due probes sequentially on `canary-target-probes`; Phoenix's BEAM
+   supervision isolates slow target HTTP requests from unrelated targets. The
+   next slice should first add a starvation test with one slow due target and
+   one fast due target, then introduce a bounded worker/task pool or equivalent
+   adapter so one blocked transport cannot delay every other probe. Keep the
+   runtime adapter bespoke; do not introduce a generic scheduler.

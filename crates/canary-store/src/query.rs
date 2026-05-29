@@ -1407,6 +1407,7 @@ fn incident_severity(signals: &[ActiveIncidentSignal], now: OffsetDateTime) -> S
 }
 
 fn signal_counts_for_severity(signal: &ActiveIncidentSignal, now: OffsetDateTime) -> bool {
+    // Intentional divergence: health-transition signals are active state, not attached_at recency.
     signal.signal_type == "health_transition" || within_incident_window(&signal.attached_at, now)
 }
 

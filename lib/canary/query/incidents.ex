@@ -201,6 +201,8 @@ defmodule Canary.Query.Incidents do
   defp signal_active_for_report?(%IncidentSignal{}, _now, _signal_lookups), do: false
 
   defp incident_severity(signals, now) do
+    # Phoenix windows every active signal by attachment time; Rust intentionally
+    # keeps active health-transition signals severity-relevant until recovery.
     recent_count =
       Enum.count(signals, fn signal ->
         within_incident_window?(signal.attached_at, now)

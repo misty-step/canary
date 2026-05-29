@@ -268,6 +268,7 @@ fn desired_severity(active_signals: &[&SignalRow], now: &str) -> String {
 }
 
 fn signal_counts_for_severity(signal: &SignalRow, now: &str) -> bool {
+    // Intentional divergence: health-transition signals are active state, not attached_at recency.
     signal.signal_type == "health_transition" || within_active_window(&signal.attached_at, now)
 }
 

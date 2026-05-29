@@ -1631,6 +1631,62 @@ mod tests {
     }
 
     #[test]
+    fn correlate_incident_keeps_stale_active_health_signals_severity_relevant() -> Result<()> {
+        let mut store = migrated_store()?;
+        for index in 1..=3 {
+            let target_id = format!("TGT-health-stale-{index}");
+            store.insert_target(TargetInsert {
+                id: target_id.clone(),
+                url: format!("https://api-{index}.example.com"),
+                name: format!("API {index}"),
+                service: "api".to_owned(),
+                method: "GET".to_owned(),
+                headers: None,
+                interval_ms: 60_000,
+                timeout_ms: 10_000,
+                expected_status: "200".to_owned(),
+                body_contains: None,
+                degraded_after: 1,
+                down_after: 3,
+                up_after: 1,
+                active: true,
+                created_at: "2026-05-28T19:00:00Z".to_owned(),
+            })?;
+            store.connection.execute(
+                "INSERT INTO target_state (target_id, state) VALUES (?1, 'down')",
+                [target_id.as_str()],
+            )?;
+            store.correlate_incident(incident_correlation(
+                &format!("INC-healthsev{index}"),
+                &format!("EVT-healthsev{index}"),
+                "health_transition",
+                &target_id,
+                "api",
+                "2026-05-28T20:00:00Z",
+            ))?;
+        }
+
+        store.correlate_incident(incident_correlation(
+            "INC-unusedstale",
+            "EVT-healthstale",
+            "health_transition",
+            "TGT-health-stale-1",
+            "api",
+            "2026-05-28T20:10:00Z",
+        ))?;
+
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT state, severity FROM incidents WHERE service = 'api'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?,
+            ("investigating".to_owned(), "high".to_owned())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn api_keys_table_preserves_phoenix_hash_storage_shape() -> Result<()> {
         let store = migrated_store()?;
         let columns = columns(&store.connection, "api_keys")?;

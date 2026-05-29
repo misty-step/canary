@@ -497,6 +497,7 @@ fn rust_fixed_clock_queries_keep_phoenix_pagination_and_incident_boundary()
         store.active_incidents_at(IncidentListOptions::default(), error_group_expired)?;
     assert_eq!(health_only.incidents.len(), 1);
     assert_eq!(health_only.incidents[0].signal_count, 2);
+    assert_eq!(health_only.incidents[0].severity, "medium");
     assert_eq!(
         health_only.incidents[0]
             .signals
@@ -504,6 +505,28 @@ fn rust_fixed_clock_queries_keep_phoenix_pagination_and_incident_boundary()
             .map(|signal| signal.signal_ref.as_str())
             .collect::<Vec<_>>(),
         vec!["TGT-readmodel-api", "MON-readmodel-cron"]
+    );
+
+    insert_stale_active_health_signal(&path)?;
+    let stale_health_only =
+        store.active_incidents_at(IncidentListOptions::default(), error_group_expired)?;
+    assert_eq!(stale_health_only.incidents.len(), 1);
+    assert_eq!(stale_health_only.incidents[0].signal_count, 3);
+    assert_eq!(
+        stale_health_only.incidents[0].severity, "high",
+        "active health-transition signals are stateful in Rust severity even after attached_at ages out"
+    );
+    assert_eq!(
+        stale_health_only.incidents[0]
+            .signals
+            .iter()
+            .map(|signal| signal.signal_ref.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "TGT-readmodel-api",
+            "TGT-readmodel-worker",
+            "MON-readmodel-cron",
+        ]
     );
 
     fs::remove_dir_all(dir)?;
@@ -772,5 +795,36 @@ fn insert_paged_error_groups(path: &Path, last_seen_at: &str) -> Result<(), Box<
         )?;
     }
 
+    Ok(())
+}
+
+fn insert_stale_active_health_signal(path: &Path) -> Result<(), Box<dyn Error>> {
+    let connection = Connection::open(path)?;
+    connection.execute(
+        "INSERT INTO targets (id, url, name, service, created_at)
+         VALUES (
+            'TGT-readmodel-worker',
+            'https://worker.example.test/health',
+            'Worker',
+            'ramp-api',
+            '2026-05-28T19:00:00Z'
+         )",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO target_state (target_id, state)
+         VALUES ('TGT-readmodel-worker', 'down')",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO incident_signals (incident_id, signal_type, signal_ref, attached_at)
+         VALUES (
+            'INC-readmodel0001',
+            'health_transition',
+            'TGT-readmodel-worker',
+            '2026-05-28T20:00:00Z'
+         )",
+        [],
+    )?;
     Ok(())
 }
