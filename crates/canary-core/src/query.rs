@@ -23,6 +23,12 @@ pub const DEFAULT_WEBHOOK_DELIVERY_LIMIT: usize = 50;
 /// Maximum number of webhook delivery ledger rows accepted by Phoenix.
 pub const MAX_WEBHOOK_DELIVERY_LIMIT: usize = 200;
 
+/// Default number of annotations returned by Phoenix.
+pub const DEFAULT_ANNOTATION_LIMIT: usize = 50;
+
+/// Maximum number of annotations accepted by Phoenix.
+pub const MAX_ANNOTATION_LIMIT: usize = 50;
+
 /// User-facing validation detail for invalid query windows.
 pub const INVALID_WINDOW_DETAIL: &str = "Invalid window. Allowed: 1h, 6h, 24h, 7d, 30d";
 
@@ -127,6 +133,15 @@ pub struct WebhookDeliveryCursor {
     pub delivery_id: String,
 }
 
+/// Structured cursor used by Phoenix for annotation pagination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnnotationCursor {
+    /// Last row timestamp from the previous page.
+    pub created_at: String,
+    /// Last row id from the previous page.
+    pub id: String,
+}
+
 /// Decode current structured cursors and legacy base64 group-hash cursors.
 pub fn decode_cursor(cursor: &str) -> Option<QueryCursor> {
     if let Ok(json) = BASE64_URL_SAFE_NO_PAD.decode(cursor)
@@ -182,6 +197,22 @@ pub fn decode_webhook_delivery_cursor(cursor: &str) -> Option<WebhookDeliveryCur
 
 /// Encode a Phoenix webhook delivery cursor.
 pub fn encode_webhook_delivery_cursor(cursor: &WebhookDeliveryCursor) -> Option<String> {
+    let json = serde_json::to_vec(cursor).ok()?;
+    Some(BASE64_URL_SAFE_NO_PAD.encode(json))
+}
+
+/// Decode a Phoenix annotation cursor.
+pub fn decode_annotation_cursor(cursor: &str) -> Option<AnnotationCursor> {
+    let decoded = BASE64_URL_SAFE_NO_PAD.decode(cursor).ok()?;
+    let cursor = serde_json::from_slice::<AnnotationCursor>(&decoded).ok()?;
+    if cursor.created_at.is_empty() || cursor.id.is_empty() {
+        return None;
+    }
+    Some(cursor)
+}
+
+/// Encode a Phoenix annotation cursor.
+pub fn encode_annotation_cursor(cursor: &AnnotationCursor) -> Option<String> {
     let json = serde_json::to_vec(cursor).ok()?;
     Some(BASE64_URL_SAFE_NO_PAD.encode(json))
 }
@@ -658,6 +689,50 @@ pub struct WebhookDeliveriesResponse {
     pub deliveries: Vec<WebhookDelivery>,
 }
 
+/// Annotation subject types accepted by the public API.
+pub const ANNOTATION_SUBJECT_TYPES: [&str; 4] = ["incident", "error_group", "target", "monitor"];
+
+/// Annotation item returned by public annotation routes.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Annotation {
+    /// Stable annotation id.
+    pub id: String,
+    /// Canonical subject type.
+    pub subject_type: String,
+    /// Canonical subject id.
+    pub subject_id: String,
+    /// Legacy incident id field for incident annotations.
+    pub incident_id: Option<String>,
+    /// Legacy group hash field for error-group annotations.
+    pub group_hash: Option<String>,
+    /// Agent that wrote the annotation.
+    pub agent: String,
+    /// Opaque consumer-authored action label.
+    pub action: String,
+    /// Decoded metadata or original malformed string.
+    pub metadata: Option<Value>,
+    /// Creation timestamp.
+    pub created_at: String,
+}
+
+/// Response for legacy annotation list routes.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AnnotationListResponse {
+    /// Matching annotations.
+    pub annotations: Vec<Annotation>,
+}
+
+/// Response for `GET /api/v1/annotations`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AnnotationPageResponse {
+    /// Deterministic summary.
+    pub summary: String,
+    /// Matching annotations.
+    pub annotations: Vec<Annotation>,
+    /// Next-page cursor.
+    pub cursor: Option<String>,
+}
+
 /// Build a Phoenix-compatible service query response.
 pub fn errors_by_service_response(
     service: String,
@@ -842,6 +917,54 @@ pub fn webhook_deliveries_response(
         returned_count: deliveries.len(),
         cursor,
         deliveries,
+    }
+}
+
+/// Build a Phoenix-compatible annotation list response.
+pub fn annotation_list_response(annotations: Vec<Annotation>) -> AnnotationListResponse {
+    AnnotationListResponse { annotations }
+}
+
+/// Build a Phoenix-compatible annotation page response.
+pub fn annotation_page_response(
+    subject_type: &str,
+    subject_id: &str,
+    total_count: u64,
+    latest: Option<(&str, &str)>,
+    annotations: Vec<Annotation>,
+    cursor: Option<String>,
+) -> AnnotationPageResponse {
+    AnnotationPageResponse {
+        summary: annotation_page_summary(subject_type, subject_id, total_count, latest),
+        annotations,
+        cursor,
+    }
+}
+
+fn annotation_page_summary(
+    subject_type: &str,
+    subject_id: &str,
+    total_count: u64,
+    latest: Option<(&str, &str)>,
+) -> String {
+    let label = format!(
+        "{total_count} {}",
+        pluralize(total_count, "annotation", "annotations")
+    );
+    let subject = format!("{subject_type} {}", truncate_subject_id(subject_id));
+    match latest {
+        Some((agent, created_at)) => {
+            format!("{label} on {subject}; latest from {agent} at {created_at}.")
+        }
+        None => format!("{label} on {subject}."),
+    }
+}
+
+fn truncate_subject_id(subject_id: &str) -> String {
+    if subject_id.len() > 16 {
+        format!("{}…", &subject_id[..12])
+    } else {
+        subject_id.to_owned()
     }
 }
 
@@ -1193,6 +1316,47 @@ mod tests {
 
         assert_eq!(response.returned_count, 1);
         assert_eq!(response.cursor.as_deref(), Some("cursor"));
+    }
+
+    #[test]
+    fn annotation_cursor_and_page_response_match_phoenix_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cursor = AnnotationCursor {
+            created_at: "2026-05-28T20:59:50Z".to_owned(),
+            id: "ANN-b".to_owned(),
+        };
+        let Some(encoded) = encode_annotation_cursor(&cursor) else {
+            return Err("annotation cursor should encode".into());
+        };
+        assert_eq!(decode_annotation_cursor(&encoded), Some(cursor));
+        assert_eq!(decode_annotation_cursor("bogus"), None);
+
+        let response = annotation_page_response(
+            "target",
+            "TGT-api",
+            2,
+            Some(("beta", "2026-05-28T20:59:50Z")),
+            vec![Annotation {
+                id: "ANN-b".to_owned(),
+                subject_type: "target".to_owned(),
+                subject_id: "TGT-api".to_owned(),
+                incident_id: None,
+                group_hash: None,
+                agent: "beta".to_owned(),
+                action: "ack".to_owned(),
+                metadata: Some(serde_json::json!({"ticket": "OPS-1"})),
+                created_at: "2026-05-28T20:59:50Z".to_owned(),
+            }],
+            Some("cursor".to_owned()),
+        );
+
+        assert_eq!(response.annotations.len(), 1);
+        assert_eq!(response.cursor.as_deref(), Some("cursor"));
+        assert!(response.summary.contains("2 annotations"));
+        assert!(response.summary.contains("target"));
+        assert!(response.summary.contains("beta"));
+        assert!(response.summary.contains("2026-05-28T20:59:50Z"));
+        Ok(())
     }
 
     #[test]

@@ -583,6 +583,22 @@ the Rust server accepts production traffic:
     limit, cursor, or status inputs. This keeps delivery diagnostics available
     to agents without moving webhook delivery or retry policy into the HTTP
     layer.
+55. Rust now implements the Phoenix annotation coordination surface:
+    `GET/POST /api/v1/annotations`,
+    `GET/POST /api/v1/incidents/:incident_id/annotations`, and
+    `GET/POST /api/v1/groups/:group_hash/annotations`. The core crate owns
+    the public annotation DTO, legacy list envelope, unified page envelope,
+    cursor codec, 50-row limit constants, subject-type set, and exact Phoenix
+    summary template including subject-id truncation and latest timestamp. The
+    store owns subject existence checks across incidents, error groups,
+    targets, and monitors; metadata storage/decoding; legacy `incident_id` and
+    `group_hash` backfill; newest-first keyset pagination; total-count summary
+    inputs; and typed validation errors. The server owns read/admin scope
+    separation, legacy path synthesis, unified subject validation, RFC 9457
+    projection, and best-effort `annotation.added` webhook fanout through the
+    existing enqueue effect boundary. Annotation actions and metadata stay
+    opaque by design; Canary stores coordination facts and wakes consumers, but
+    does not interpret responder policy.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed

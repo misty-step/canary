@@ -40,10 +40,10 @@ use canary_ingest::{
     ingest as ingest_error,
 };
 use canary_store::{
-    ApiKeyInsert, ApiKeyRecord, ErrorSummaryItem, HealthMonitorStatus, HealthTargetStatus,
-    IncidentCorrelation, IncidentListOptions, MonitorInsert, MonitorRecord, Store, StoreError,
-    TargetCheckRead, TargetConflict, TargetInsert, TargetRecord, WebhookSubscription,
-    WebhookSubscriptionInsert,
+    AnnotationError, AnnotationInsert, AnnotationPageOptions, ApiKeyInsert, ApiKeyRecord,
+    ErrorSummaryItem, HealthMonitorStatus, HealthTargetStatus, IncidentCorrelation,
+    IncidentListOptions, MonitorInsert, MonitorRecord, Store, StoreError, TargetCheckRead,
+    TargetConflict, TargetInsert, TargetRecord, WebhookSubscription, WebhookSubscriptionInsert,
 };
 use canary_store::{QueryError, ServiceQueryOptions, TimelineQueryError, TimelineQueryOptions};
 use canary_store::{WebhookDeliveryPageError, WebhookDeliveryPageOptions};
@@ -489,6 +489,18 @@ pub fn ingest_router(state: IngestState) -> Router {
         .route("/api/v1/targets/{id}/checks", get(target_checks))
         .route("/api/v1/incidents", get(list_incidents))
         .route("/api/v1/incidents/{id}", get(show_incident))
+        .route(
+            "/api/v1/incidents/{incident_id}/annotations",
+            get(list_incident_annotations).post(create_incident_annotation),
+        )
+        .route(
+            "/api/v1/groups/{group_hash}/annotations",
+            get(list_group_annotations).post(create_group_annotation),
+        )
+        .route(
+            "/api/v1/annotations",
+            get(list_annotations).post(create_annotation),
+        )
         .route("/api/v1/errors/{id}", get(show_error))
         .route("/api/v1/monitors", get(list_monitors).post(create_monitor))
         .route("/api/v1/monitors/{id}", delete(delete_monitor))
@@ -1680,6 +1692,237 @@ async fn target_checks(
     )
 }
 
+async fn list_incident_annotations(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Path(incident_id): Path<String>,
+) -> Response<Body> {
+    list_annotations_for_subject(
+        state,
+        headers,
+        "incident",
+        incident_id,
+        "Incident not found.",
+    )
+}
+
+async fn create_incident_annotation(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Path(incident_id): Path<String>,
+    body: Bytes,
+) -> Response<Body> {
+    create_annotation_for_subject(
+        state,
+        headers,
+        body,
+        "incident",
+        incident_id,
+        "Incident not found.",
+    )
+}
+
+async fn list_group_annotations(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Path(group_hash): Path<String>,
+) -> Response<Body> {
+    list_annotations_for_subject(
+        state,
+        headers,
+        "error_group",
+        group_hash,
+        "Error group not found.",
+    )
+}
+
+async fn create_group_annotation(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Path(group_hash): Path<String>,
+    body: Bytes,
+) -> Response<Body> {
+    create_annotation_for_subject(
+        state,
+        headers,
+        body,
+        "error_group",
+        group_hash,
+        "Error group not found.",
+    )
+}
+
+async fn list_annotations(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Query(params): Query<AnnotationPageParams>,
+) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+        return problem_response(*problem);
+    }
+    let Some(subject_type) = params.subject_type.filter(|value| !value.is_empty()) else {
+        return problem_response(annotation_missing_subject_problem("subject_type"));
+    };
+    let Some(subject_id) = params.subject_id.filter(|value| !value.is_empty()) else {
+        return problem_response(annotation_missing_subject_problem("subject_id"));
+    };
+
+    let store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    match store.annotation_page(AnnotationPageOptions {
+        subject_type,
+        subject_id,
+        limit: params.limit,
+        cursor: params.cursor,
+    }) {
+        Ok(response) => json_status_response(StatusCode::OK.as_u16(), response),
+        Err(AnnotationError::NotFound) => problem_response(not_found_problem("Subject not found.")),
+        Err(AnnotationError::InvalidSubjectType) => {
+            problem_response(invalid_annotation_subject_type_problem())
+        }
+        Err(AnnotationError::InvalidLimit) => problem_response(invalid_annotation_limit_problem()),
+        Err(AnnotationError::InvalidCursor) => {
+            problem_response(annotation_invalid_cursor_problem())
+        }
+        Err(AnnotationError::Sqlite(_)) => problem_response(internal_problem()),
+    }
+}
+
+async fn create_annotation(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+        return problem_response(*problem);
+    }
+    if let Err(problem) = check_content_length(&headers) {
+        return problem_response(*problem);
+    }
+    if body.len() as u64 > MAX_JSON_BODY_BYTES {
+        return problem_response(payload_too_large_problem(
+            "Request body exceeds 100KB limit.",
+        ));
+    }
+    let attrs = match decode_json_object(&body, None) {
+        Ok(attrs) => attrs,
+        Err(problem) => return problem_response(*problem),
+    };
+    let request = match parse_annotation_create(attrs, None) {
+        Ok(request) => request,
+        Err(problem) => return problem_response(*problem),
+    };
+
+    create_annotation_request(state, request, "Subject not found.")
+}
+
+fn list_annotations_for_subject(
+    state: IngestState,
+    headers: HeaderMap,
+    subject_type: &'static str,
+    subject_id: String,
+    not_found_detail: &'static str,
+) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+        return problem_response(*problem);
+    }
+    let store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    match store.annotations(subject_type, &subject_id) {
+        Ok(response) => json_status_response(StatusCode::OK.as_u16(), response),
+        Err(AnnotationError::NotFound) => problem_response(not_found_problem(not_found_detail)),
+        Err(AnnotationError::InvalidSubjectType) => {
+            problem_response(invalid_annotation_subject_type_problem())
+        }
+        Err(AnnotationError::InvalidLimit | AnnotationError::InvalidCursor) => {
+            problem_response(internal_problem())
+        }
+        Err(AnnotationError::Sqlite(_)) => problem_response(internal_problem()),
+    }
+}
+
+fn create_annotation_for_subject(
+    state: IngestState,
+    headers: HeaderMap,
+    body: Bytes,
+    subject_type: &'static str,
+    subject_id: String,
+    not_found_detail: &'static str,
+) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+        return problem_response(*problem);
+    }
+    if let Err(problem) = check_content_length(&headers) {
+        return problem_response(*problem);
+    }
+    if body.len() as u64 > MAX_JSON_BODY_BYTES {
+        return problem_response(payload_too_large_problem(
+            "Request body exceeds 100KB limit.",
+        ));
+    }
+    let attrs = match decode_json_object(&body, None) {
+        Ok(attrs) => attrs,
+        Err(problem) => return problem_response(*problem),
+    };
+    let request = match parse_annotation_create(attrs, Some((subject_type, subject_id))) {
+        Ok(request) => request,
+        Err(problem) => return problem_response(*problem),
+    };
+
+    create_annotation_request(state, request, not_found_detail)
+}
+
+fn create_annotation_request(
+    state: IngestState,
+    request: AnnotationCreate,
+    not_found_detail: &'static str,
+) -> Response<Body> {
+    let annotation = {
+        let mut store = match state.store.lock() {
+            Ok(store) => store,
+            Err(_) => return problem_response(internal_problem()),
+        };
+        match store.create_annotation(AnnotationInsert {
+            id: canary_core::ids::AnnotationId::generate().into_string(),
+            subject_type: request.subject_type,
+            subject_id: request.subject_id,
+            agent: request.agent,
+            action: request.action,
+            metadata: request.metadata,
+            created_at: current_rfc3339(),
+        }) {
+            Ok(annotation) => annotation,
+            Err(AnnotationError::NotFound) => {
+                return problem_response(not_found_problem(not_found_detail));
+            }
+            Err(AnnotationError::InvalidSubjectType) => {
+                return problem_response(invalid_annotation_subject_type_problem());
+            }
+            Err(AnnotationError::InvalidLimit | AnnotationError::InvalidCursor) => {
+                return problem_response(internal_problem());
+            }
+            Err(AnnotationError::Sqlite(_)) => return problem_response(internal_problem()),
+        }
+    };
+
+    let timestamp = annotation.created_at.clone();
+    let payload = json!({
+        "event": "annotation.added",
+        "annotation": annotation,
+        "timestamp": timestamp,
+    });
+    let _ = state.effect_sink.handle(&[IngestEffect::EnqueueWebhook {
+        event: "annotation.added".to_owned(),
+        payload_json: payload.to_string(),
+    }]);
+
+    json_status_response(StatusCode::CREATED.as_u16(), annotation)
+}
+
 enum QueryKind {
     Service {
         service: String,
@@ -1716,6 +1959,14 @@ struct WebhookDeliveryParams {
     after: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct AnnotationPageParams {
+    subject_type: Option<String>,
+    subject_id: Option<String>,
+    limit: Option<String>,
+    cursor: Option<String>,
+}
+
 struct ParsedCheckIn {
     monitor_name: String,
     observed_at: String,
@@ -1732,6 +1983,14 @@ struct ServiceOnboardingCreate {
     url: String,
     environment: String,
     interval_ms: Option<i64>,
+}
+
+struct AnnotationCreate {
+    subject_type: String,
+    subject_id: String,
+    agent: String,
+    action: String,
+    metadata: Option<Value>,
 }
 
 fn api_key_response(key: ApiKeyRecord) -> Value {
@@ -2183,6 +2442,95 @@ fn window_label(window: &str) -> &'static str {
         "7d" => "7 days",
         "30d" => "30 days",
         _ => "requested window",
+    }
+}
+
+fn parse_annotation_create(
+    attrs: Map<String, Value>,
+    fixed_subject: Option<(&'static str, String)>,
+) -> Result<AnnotationCreate, Box<ProblemDetails>> {
+    let required_fields = if fixed_subject.is_some() {
+        &["agent", "action"][..]
+    } else {
+        &["subject_type", "subject_id", "agent", "action"][..]
+    };
+    if annotation_has_invalid_required_type(&attrs, required_fields) {
+        return Err(Box::new(invalid_annotation_problem()));
+    }
+
+    let mut errors: ValidationErrors = BTreeMap::new();
+    let unified_route = fixed_subject.is_none();
+    let (subject_type, subject_id) = match fixed_subject {
+        Some((subject_type, subject_id)) => (subject_type.to_owned(), subject_id),
+        None => {
+            let subject_type = required_annotation_string(&attrs, "subject_type", &mut errors);
+            let subject_id = required_annotation_string(&attrs, "subject_id", &mut errors);
+            (
+                subject_type.unwrap_or_default(),
+                subject_id.unwrap_or_default(),
+            )
+        }
+    };
+    let agent = required_annotation_string(&attrs, "agent", &mut errors);
+    let action = required_annotation_string(&attrs, "action", &mut errors);
+    let metadata = attrs.get("metadata").cloned();
+
+    if !errors.is_empty() {
+        return Err(Box::new(annotation_missing_fields_problem(errors)));
+    }
+    if unified_route
+        && !canary_store::annotation_subject_types()
+            .iter()
+            .any(|allowed| *allowed == subject_type)
+    {
+        let mut errors = BTreeMap::new();
+        errors.insert(
+            "subject_type".to_owned(),
+            vec!["must be one of incident, error_group, target, monitor".to_owned()],
+        );
+        return Err(Box::new(
+            ProblemDetails::new(
+                422,
+                ProblemCode::ValidationError,
+                "Unknown subject_type.",
+                None,
+            )
+            .with_extra("errors", json!(errors)),
+        ));
+    }
+
+    Ok(AnnotationCreate {
+        subject_type,
+        subject_id,
+        agent: agent.unwrap_or_default(),
+        action: action.unwrap_or_default(),
+        metadata,
+    })
+}
+
+fn annotation_has_invalid_required_type(attrs: &Map<String, Value>, fields: &[&str]) -> bool {
+    fields.iter().any(|field| {
+        attrs
+            .get(*field)
+            .is_some_and(|value| !value.is_string() && !value.is_null())
+    })
+}
+
+fn required_annotation_string(
+    attrs: &Map<String, Value>,
+    field: &str,
+    errors: &mut ValidationErrors,
+) -> Option<String> {
+    match attrs.get(field) {
+        Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
+        Some(Value::String(_)) | None | Some(Value::Null) => {
+            errors.insert(field.to_owned(), vec!["is required".to_owned()]);
+            None
+        }
+        Some(_) => {
+            errors.insert(field.to_owned(), vec!["must be a string".to_owned()]);
+            None
+        }
     }
 }
 
@@ -3160,6 +3508,57 @@ fn invalid_cursor_problem() -> ProblemDetails {
         "errors",
         json!({"cursor": ["must be a valid pagination cursor"]}),
     )
+}
+
+fn annotation_missing_fields_problem(errors: ValidationErrors) -> ProblemDetails {
+    ProblemDetails::new(
+        422,
+        ProblemCode::ValidationError,
+        "Missing required fields.",
+        None,
+    )
+    .with_extra("errors", json!(errors))
+}
+
+fn invalid_annotation_problem() -> ProblemDetails {
+    ProblemDetails::new(
+        422,
+        ProblemCode::ValidationError,
+        "Invalid annotation.",
+        None,
+    )
+}
+
+fn annotation_missing_subject_problem(field: &str) -> ProblemDetails {
+    let mut errors: ValidationErrors = BTreeMap::new();
+    errors.insert(field.to_owned(), vec!["is required".to_owned()]);
+    ProblemDetails::new(422, ProblemCode::ValidationError, "Missing subject.", None)
+        .with_extra("errors", json!(errors))
+}
+
+fn invalid_annotation_subject_type_problem() -> ProblemDetails {
+    ProblemDetails::new(
+        422,
+        ProblemCode::ValidationError,
+        "Unknown subject_type.",
+        None,
+    )
+    .with_extra(
+        "errors",
+        json!({"subject_type": ["must be one of incident, error_group, target, monitor"]}),
+    )
+}
+
+fn invalid_annotation_limit_problem() -> ProblemDetails {
+    ProblemDetails::new(422, ProblemCode::ValidationError, "Invalid limit.", None).with_extra(
+        "errors",
+        json!({"limit": ["must be an integer between 1 and 50"]}),
+    )
+}
+
+fn annotation_invalid_cursor_problem() -> ProblemDetails {
+    ProblemDetails::new(422, ProblemCode::ValidationError, "Invalid cursor.", None)
+        .with_extra("errors", json!({"cursor": ["is invalid"]}))
 }
 
 fn invalid_event_type_problem(invalid: &[String]) -> ProblemDetails {
@@ -6281,6 +6680,278 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn annotations_create_list_paginate_and_emit_webhook_effect() -> Result<(), Box<dyn Error>>
+    {
+        let sink = Arc::new(RecordingFailingSink::default());
+        let state = test_ingest_state_with_sink(sink.clone())?;
+        {
+            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            seed_target(&mut store, "api")?;
+        }
+        let router = ingest_router(state);
+
+        let alpha = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/annotations",
+                ADMIN_KEY,
+                r#"{"subject_type":"target","subject_id":"TGT-api","agent":"alpha","action":"paged","metadata":{"ticket":"OPS-1"}}"#,
+            )?)
+            .await?;
+        let alpha_status = alpha.status();
+        let alpha_body = json_body(alpha).await?;
+        assert_eq!(alpha_status, StatusCode::CREATED);
+        assert!(
+            alpha_body["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("ANN-"))
+        );
+        assert_eq!(alpha_body["subject_type"], "target");
+        assert_eq!(alpha_body["subject_id"], "TGT-api");
+        assert_eq!(alpha_body["incident_id"], Value::Null);
+        assert_eq!(alpha_body["group_hash"], Value::Null);
+        assert_eq!(alpha_body["metadata"]["ticket"], "OPS-1");
+
+        thread::sleep(StdDuration::from_millis(2));
+        let beta = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/annotations",
+                ADMIN_KEY,
+                r#"{"subject_type":"target","subject_id":"TGT-api","agent":"beta","action":"silenced"}"#,
+            )?)
+            .await?;
+        let beta_status = beta.status();
+        let beta_body = json_body(beta).await?;
+        assert_eq!(beta_status, StatusCode::CREATED);
+        assert_eq!(beta_body["metadata"], Value::Null);
+
+        {
+            let effects = sink.effects.lock().map_err(|_| "effect lock poisoned")?;
+            assert_eq!(effects.len(), 2);
+            match &effects[0] {
+                IngestEffect::EnqueueWebhook {
+                    event,
+                    payload_json,
+                } => {
+                    assert_eq!(event, "annotation.added");
+                    let payload: Value = serde_json::from_str(payload_json)?;
+                    assert_eq!(
+                        payload,
+                        json!({
+                            "event": "annotation.added",
+                            "annotation": {
+                                "id": alpha_body["id"],
+                                "subject_type": "target",
+                                "subject_id": "TGT-api",
+                                "incident_id": null,
+                                "group_hash": null,
+                                "agent": "alpha",
+                                "action": "paged",
+                                "metadata": {"ticket": "OPS-1"},
+                                "created_at": alpha_body["created_at"],
+                            },
+                            "timestamp": alpha_body["created_at"],
+                        })
+                    );
+                }
+                other => return Err(format!("unexpected effect: {other:?}").into()),
+            }
+        }
+
+        let page1 = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/annotations?subject_type=target&subject_id=TGT-api&limit=1",
+            )?)
+            .await?;
+        let page1_body = json_body(page1).await?;
+        assert_eq!(page1_body["annotations"].as_array().map(Vec::len), Some(1));
+        assert_eq!(page1_body["annotations"][0]["agent"], "beta");
+        assert!(
+            page1_body["summary"]
+                .as_str()
+                .is_some_and(|s| s.contains("2 annotations"))
+        );
+        let cursor = page1_body["cursor"]
+            .as_str()
+            .ok_or("missing annotation cursor")?;
+
+        let page2 = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                &format!(
+                    "/api/v1/annotations?subject_type=target&subject_id=TGT-api&limit=1&cursor={cursor}"
+                ),
+            )?)
+            .await?;
+        let page2_body = json_body(page2).await?;
+        assert_eq!(page2_body["annotations"].as_array().map(Vec::len), Some(1));
+        assert_eq!(page2_body["annotations"][0]["agent"], "alpha");
+        assert_eq!(page2_body["cursor"], Value::Null);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_annotation_routes_and_errors_follow_phoenix_contract()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let router = ingest_router(state.clone());
+        let created_error = router
+            .clone()
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+        let body = json_body(created_error).await?;
+        let group_hash = body["group_hash"]
+            .as_str()
+            .ok_or("missing group hash")?
+            .to_owned();
+        let incident_id = {
+            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            let id = canary_core::ids::IncidentId::generate().into_string();
+            store.correlate_incident(IncidentCorrelation {
+                signal_type: "error_group".to_owned(),
+                signal_ref: group_hash,
+                service: "test-svc".to_owned(),
+                incident_id: id.parse()?,
+                event_id: canary_core::ids::EventId::generate(),
+                now: "2026-05-28T20:00:00Z".to_owned(),
+            })?;
+            id
+        };
+
+        let created = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/incidents/{incident_id}/annotations"),
+                ADMIN_KEY,
+                r#"{"agent":"triage-bot","action":"acknowledged"}"#,
+            )?)
+            .await?;
+        let created_status = created.status();
+        let created_body = json_body(created).await?;
+        assert_eq!(created_status, StatusCode::CREATED);
+        assert_eq!(created_body["incident_id"], incident_id);
+        assert_eq!(created_body["group_hash"], Value::Null);
+        assert_eq!(created_body["subject_type"], "incident");
+        assert_eq!(created_body["subject_id"], incident_id);
+
+        let listed = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                &format!("/api/v1/incidents/{incident_id}/annotations"),
+            )?)
+            .await?;
+        let listed_body = json_body(listed).await?;
+        assert_eq!(listed_body["annotations"].as_array().map(Vec::len), Some(1));
+        assert_eq!(listed_body["annotations"][0]["agent"], "triage-bot");
+
+        let forbidden_legacy = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/incidents/{incident_id}/annotations"),
+                READ_KEY,
+                r#"{"agent":"bot","action":"ack"}"#,
+            )?)
+            .await?;
+        assert_eq!(forbidden_legacy.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            json_body(forbidden_legacy).await?["code"],
+            "insufficient_scope"
+        );
+
+        let missing_field = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/annotations",
+                ADMIN_KEY,
+                r#"{"subject_type":"target","subject_id":"TGT-api","action":"ack"}"#,
+            )?)
+            .await?;
+        let missing_status = missing_field.status();
+        let missing_body = json_body(missing_field).await?;
+        assert_eq!(missing_status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(missing_body["errors"]["agent"], json!(["is required"]));
+
+        let invalid_type = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/annotations",
+                ADMIN_KEY,
+                r#"{"subject_type":"incident","subject_id":"INC-x","agent":123,"action":"ack"}"#,
+            )?)
+            .await?;
+        let invalid_type_body = json_body(invalid_type).await?;
+        assert_eq!(invalid_type_body["code"], "validation_error");
+        assert_eq!(invalid_type_body["detail"], "Invalid annotation.");
+        assert!(invalid_type_body.get("errors").is_none());
+
+        let bad_subject = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/annotations?subject_type=spaceship&subject_id=X-1",
+            )?)
+            .await?;
+        assert_eq!(bad_subject.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(bad_subject).await?["errors"]["subject_type"],
+            json!(["must be one of incident, error_group, target, monitor"])
+        );
+
+        let forbidden = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/annotations",
+                READ_KEY,
+                r#"{"subject_type":"incident","subject_id":"INC-x","agent":"bot","action":"ack"}"#,
+            )?)
+            .await?;
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+        assert_eq!(json_body(forbidden).await?["code"], "insufficient_scope");
+
+        let invalid_cursor = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                &format!("/api/v1/annotations?subject_type=incident&subject_id={incident_id}&cursor=bogus"),
+            )?)
+            .await?;
+        assert_eq!(invalid_cursor.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(invalid_cursor).await?["errors"]["cursor"],
+            json!(["is invalid"])
+        );
+
+        let invalid_limit = router
+            .oneshot(read_request(
+                READ_KEY,
+                &format!(
+                    "/api/v1/annotations?subject_type=incident&subject_id={incident_id}&limit=51"
+                ),
+            )?)
+            .await?;
+        assert_eq!(invalid_limit.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(invalid_limit).await?["errors"]["limit"],
+            json!(["must be an integer between 1 and 50"])
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn incidents_accept_read_scope_and_return_empty_summary() -> Result<(), Box<dyn Error>> {
         let response = ingest_router(test_ingest_state()?)
             .oneshot(read_request(READ_KEY, "/api/v1/incidents")?)
@@ -6745,6 +7416,27 @@ mod tests {
             mode: "ttl".to_owned(),
             expected_every_ms: 90_000,
             grace_ms: 5_000,
+            created_at: "2026-05-28T20:00:00Z".to_owned(),
+        })?;
+        Ok(())
+    }
+
+    fn seed_target(store: &mut Store, service: &str) -> Result<(), Box<dyn Error>> {
+        store.insert_target(TargetInsert {
+            id: format!("TGT-{service}"),
+            url: format!("https://example.com/{service}/health"),
+            name: service.to_owned(),
+            service: service.to_owned(),
+            method: "GET".to_owned(),
+            headers: None,
+            interval_ms: 60_000,
+            timeout_ms: 10_000,
+            expected_status: "200".to_owned(),
+            body_contains: None,
+            degraded_after: 1,
+            down_after: 3,
+            up_after: 1,
+            active: true,
             created_at: "2026-05-28T20:00:00Z".to_owned(),
         })?;
         Ok(())

@@ -8,6 +8,7 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
+mod annotations;
 mod api_keys;
 mod health;
 mod incidents;
@@ -17,6 +18,10 @@ mod query;
 mod schema;
 mod webhook_deliveries;
 
+pub use annotations::{
+    AnnotationError, AnnotationInsert, AnnotationPageOptions, AnnotationResult,
+    AnnotationSubjectType, subject_types as annotation_subject_types,
+};
 pub use api_keys::{API_KEY_PREFIX_LEN, ApiKeyInsert, ApiKeyRecord, VerifiedApiKey};
 pub use health::{
     ActiveTargetProbeSchedule, HealthCheckSummary, HealthMonitorStatus, HealthTargetStatus,
@@ -380,6 +385,31 @@ impl Store {
         error_id: &str,
     ) -> QueryResult<Option<canary_core::query::ErrorDetail>> {
         query::error_detail(&self.connection, error_id)
+    }
+
+    /// Create one annotation after verifying the target subject exists.
+    pub fn create_annotation(
+        &mut self,
+        insert: AnnotationInsert,
+    ) -> AnnotationResult<canary_core::query::Annotation> {
+        annotations::create(&self.connection, insert)
+    }
+
+    /// List annotations for legacy incident and error-group routes.
+    pub fn annotations(
+        &self,
+        subject_type: &str,
+        subject_id: &str,
+    ) -> AnnotationResult<canary_core::query::AnnotationListResponse> {
+        annotations::list(&self.connection, subject_type, subject_id)
+    }
+
+    /// Page annotations for the unified read route.
+    pub fn annotation_page(
+        &self,
+        options: AnnotationPageOptions,
+    ) -> AnnotationResult<canary_core::query::AnnotationPageResponse> {
+        annotations::page(&self.connection, options)
     }
 
     /// Insert a pending webhook delivery ledger row.
@@ -930,6 +960,137 @@ mod tests {
                 ..Default::default()
             }),
             Err(WebhookDeliveryPageError::InvalidStatus)
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn annotation_page_creates_lists_paginates_and_rejects_invalid_inputs()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        store.insert_target(TargetInsert {
+            id: "TGT-api".to_owned(),
+            url: "https://api.example.com/health".to_owned(),
+            name: "api".to_owned(),
+            service: "api".to_owned(),
+            method: "GET".to_owned(),
+            headers: None,
+            interval_ms: 60_000,
+            timeout_ms: 10_000,
+            expected_status: "200".to_owned(),
+            body_contains: None,
+            degraded_after: 1,
+            down_after: 3,
+            up_after: 1,
+            active: true,
+            created_at: "2026-05-28T19:00:00Z".to_owned(),
+        })?;
+
+        for (id, agent, created_at) in [
+            ("ANN-a", "alpha", "2026-05-28T20:00:00Z"),
+            ("ANN-b", "beta", "2026-05-28T20:00:01Z"),
+            ("ANN-c", "gamma", "2026-05-28T20:00:01Z"),
+        ] {
+            store.create_annotation(AnnotationInsert {
+                id: id.to_owned(),
+                subject_type: "target".to_owned(),
+                subject_id: "TGT-api".to_owned(),
+                agent: agent.to_owned(),
+                action: "acknowledged".to_owned(),
+                metadata: Some(json!({"agent": agent})),
+                created_at: created_at.to_owned(),
+            })?;
+        }
+
+        let first = store.annotation_page(AnnotationPageOptions {
+            subject_type: "target".to_owned(),
+            subject_id: "TGT-api".to_owned(),
+            limit: Some("2".to_owned()),
+            cursor: None,
+        })?;
+        assert_eq!(
+            first
+                .annotations
+                .iter()
+                .map(|annotation| annotation.agent.as_str())
+                .collect::<Vec<_>>(),
+            ["gamma", "beta"]
+        );
+        assert!(first.summary.contains("3 annotations"));
+        assert!(
+            first
+                .summary
+                .contains("latest from gamma at 2026-05-28T20:00:01Z")
+        );
+        let cursor = first.cursor.ok_or("expected annotation cursor")?;
+
+        let second = store.annotation_page(AnnotationPageOptions {
+            subject_type: "target".to_owned(),
+            subject_id: "TGT-api".to_owned(),
+            limit: Some("2".to_owned()),
+            cursor: Some(cursor),
+        })?;
+        assert_eq!(second.annotations.len(), 1);
+        assert_eq!(second.annotations[0].agent, "alpha");
+        assert_eq!(second.cursor, None);
+        assert!(
+            second
+                .summary
+                .contains("latest from gamma at 2026-05-28T20:00:01Z")
+        );
+
+        let legacy = store.annotations("target", "TGT-api")?;
+        assert_eq!(legacy.annotations.len(), 3);
+        assert_eq!(
+            legacy.annotations[0].metadata,
+            Some(json!({"agent": "gamma"}))
+        );
+
+        assert!(matches!(
+            store.annotation_page(AnnotationPageOptions {
+                subject_type: "target".to_owned(),
+                subject_id: "TGT-api".to_owned(),
+                limit: Some("0".to_owned()),
+                cursor: None,
+            }),
+            Err(AnnotationError::InvalidLimit)
+        ));
+        assert!(matches!(
+            store.annotation_page(AnnotationPageOptions {
+                subject_type: "target".to_owned(),
+                subject_id: "TGT-api".to_owned(),
+                limit: Some("51".to_owned()),
+                cursor: None,
+            }),
+            Err(AnnotationError::InvalidLimit)
+        ));
+        assert!(matches!(
+            store.annotation_page(AnnotationPageOptions {
+                subject_type: "target".to_owned(),
+                subject_id: "TGT-api".to_owned(),
+                limit: None,
+                cursor: Some("bogus".to_owned()),
+            }),
+            Err(AnnotationError::InvalidCursor)
+        ));
+        assert!(matches!(
+            store.annotation_page(AnnotationPageOptions {
+                subject_type: "spaceship".to_owned(),
+                subject_id: "X-1".to_owned(),
+                limit: None,
+                cursor: None,
+            }),
+            Err(AnnotationError::InvalidSubjectType)
+        ));
+        assert!(matches!(
+            store.annotation_page(AnnotationPageOptions {
+                subject_type: "target".to_owned(),
+                subject_id: "TGT-missing".to_owned(),
+                limit: None,
+                cursor: None,
+            }),
+            Err(AnnotationError::NotFound)
         ));
 
         Ok(())
