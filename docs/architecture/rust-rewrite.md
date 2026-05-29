@@ -396,6 +396,18 @@ the Rust server accepts production traffic:
     because delivery ids are created by the enqueue sink and may not exist when
     enqueue itself fails. This gives agents a compile-time boundary to reuse
     instead of reintroducing `let _ = enqueue_event(...)` fanout paths.
+38. Rust target admin routes now drive the same typed lifecycle boundary as the
+    target probe worker. `GET/POST /api/v1/targets`, `DELETE
+    /api/v1/targets/:id`, and `POST /api/v1/targets/:id/{pause,resume}` enforce
+    admin scope in Axum, persist through named `canary-store` target commands,
+    and best-effort emit `TargetProbeLifecycleCommand::{Track,Untrack,Pause,Resume}` through
+    a cloneable `TargetProbeLifecycleController`. The SQLite row remains the
+    source of truth because each lifecycle pass reconciles active schedules from
+    storage. Create uses the probe module's
+    URL, method, header, DNS, and SSRF validation before writing. Pause/resume
+    update the `targets.active` flag and existing `target_state` row in one
+    store operation, preserving Phoenix's public response while avoiding a
+    separate admin scheduler, SQL triggers, or route-local lifecycle state.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -423,9 +435,9 @@ Phoenix behavior until the replacement is complete:
 
 ## Next Slices
 
-1. Wire Rust admin target create/delete/pause/resume/update commits into
-   `TargetProbeLifecycleCommand`, keeping the typed lifecycle boundary as the
-   only runtime hot-update mechanism.
+1. Add the remaining Rust target-admin parity not covered by the current
+   OpenAPI surface: update/reconfigure semantics for target interval changes,
+   with `Reconfigure` emitted only when runtime cadence changes.
 2. Broaden monitor overdue parity fixtures around malformed persisted rows,
    TTL-vs-expected escalation, and transaction rollback evidence for
    transition/correlation failures.

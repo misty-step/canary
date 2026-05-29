@@ -438,9 +438,15 @@ impl TargetProbeLifecycle {
 
 /// Dedicated OS-thread runner for target probe lifecycle passes.
 pub struct TargetProbeLifecycleWorker {
+    controller: TargetProbeLifecycleController,
+    handle: Option<JoinHandle<()>>,
+}
+
+/// Cloneable control handle for target probe lifecycle hot updates.
+#[derive(Clone)]
+pub struct TargetProbeLifecycleController {
     control: Arc<LifecycleControl>,
     command_sender: Sender<TargetProbeLifecycleCommand>,
-    handle: Option<JoinHandle<()>>,
 }
 
 impl TargetProbeLifecycleWorker {
@@ -465,34 +471,37 @@ impl TargetProbeLifecycleWorker {
             .map_err(|error| format!("failed to spawn target probe worker: {error}"))?;
 
         Ok(Self {
-            control,
-            command_sender,
+            controller: TargetProbeLifecycleController {
+                control,
+                command_sender,
+            },
             handle: Some(handle),
         })
     }
 
+    /// Return a cloneable control handle for HTTP admin routes.
+    pub fn controller(&self) -> TargetProbeLifecycleController {
+        self.controller.clone()
+    }
+
     /// Send one target-scoped lifecycle control command to the worker.
     pub fn control_target(&self, command: TargetProbeLifecycleCommand) -> Result<(), String> {
-        self.command_sender
-            .send(command)
-            .map_err(|_| "target probe lifecycle worker is stopped".to_owned())?;
-        self.control.condvar.notify_all();
-        Ok(())
+        self.controller.control_target(command)
     }
 
     /// Pause future lifecycle passes without stopping the worker.
     pub fn pause(&self) {
-        self.control.pause();
+        self.controller.control.pause();
     }
 
     /// Resume lifecycle passes and wake the worker promptly.
     pub fn resume(&self) {
-        self.control.resume();
+        self.controller.control.resume();
     }
 
     /// Request shutdown without waiting for an in-flight probe to finish.
     pub fn stop(&self) {
-        self.control.stop();
+        self.controller.control.stop();
     }
 
     /// Request shutdown and wait for the worker thread to exit.
@@ -512,11 +521,42 @@ impl TargetProbeLifecycleWorker {
     }
 }
 
+impl TargetProbeLifecycleController {
+    /// Send one target-scoped lifecycle control command to the worker.
+    pub fn control_target(&self, command: TargetProbeLifecycleCommand) -> Result<(), String> {
+        self.command_sender
+            .send(command)
+            .map_err(|_| "target probe lifecycle worker is stopped".to_owned())?;
+        self.control.condvar.notify_all();
+        Ok(())
+    }
+}
+
 impl Drop for TargetProbeLifecycleWorker {
     fn drop(&mut self) {
         self.stop();
         let _ = self.join_handle();
     }
+}
+
+/// Validate one admin-supplied target definition against the probe boundary.
+pub fn validate_target_configuration(
+    url: &str,
+    method: &str,
+    headers: Option<&str>,
+    allow_private_targets: bool,
+) -> Result<(), String> {
+    let url = validate_url(url)?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| "missing URL host".to_owned())?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| format!("missing port for target URL scheme {}", url.scheme()))?;
+    validate_method(method)?;
+    parse_headers(headers)?;
+    resolve_and_validate(host, port, allow_private_targets)?;
+    Ok(())
 }
 
 /// Execute and persist exactly one target probe.

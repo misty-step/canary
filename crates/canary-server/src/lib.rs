@@ -22,6 +22,7 @@ use axum::{
         HeaderMap, HeaderValue, Response, StatusCode,
         header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderName},
     },
+    routing::delete,
     routing::{get, post},
 };
 use canary_http::public::{
@@ -39,7 +40,7 @@ use canary_ingest::{
     IngestConfig, IngestContext, IngestEffect, IngestError, ValidationErrors,
     ingest as ingest_error,
 };
-use canary_store::{IncidentCorrelation, IncidentListOptions, Store};
+use canary_store::{IncidentCorrelation, IncidentListOptions, Store, TargetInsert, TargetRecord};
 use canary_store::{QueryError, ServiceQueryOptions};
 use canary_workers::health::{
     HealthPlanError, MonitorCheckInInput, MonitorCheckInStatus, MonitorMode, MonitorSnapshot,
@@ -65,8 +66,9 @@ pub use monitor_overdue::{
 pub use target_probes::{
     ProbeHttpResponse, ProbeRequest, ProbeTransport, ProbeTransportError, ReqwestProbeTransport,
     TargetProbeLifecycle, TargetProbeLifecycleCommand, TargetProbeLifecycleConfig,
-    TargetProbeLifecycleReport, TargetProbeLifecycleWorker, TargetProbeOptions, TargetProbeOutcome,
-    TargetProbeRuntime, TargetProbeRuntimeError, run_target_probe_once,
+    TargetProbeLifecycleController, TargetProbeLifecycleReport, TargetProbeLifecycleWorker,
+    TargetProbeOptions, TargetProbeOutcome, TargetProbeRuntime, TargetProbeRuntimeError,
+    run_target_probe_once, validate_target_configuration,
 };
 use webhooks::NoopWebhookCooldown;
 pub use webhooks::{
@@ -174,6 +176,7 @@ impl CanaryServer {
         let webhook_worker =
             WebhookDeliveryDrainWorker::spawn(drain, config.webhook_drain_interval)
                 .map_err(ServerBootError::WebhookWorker)?;
+        let allow_private_targets = config.target_probe_options.allow_private_targets;
         let target_transport: Arc<dyn ProbeTransport> = Arc::new(ReqwestProbeTransport);
         let target_runtime = TargetProbeRuntime::new(
             ingest_state.store.clone(),
@@ -198,6 +201,9 @@ impl CanaryServer {
             },
         )
         .map_err(ServerBootError::MonitorOverdueWorker)?;
+        let ingest_state = ingest_state
+            .with_target_control(Arc::new(target_probe_worker.controller()))
+            .with_allow_private_targets(allow_private_targets);
         let router = public_router(PublicReadiness::ready()).merge(ingest_router(ingest_state));
 
         Ok(Self {
@@ -455,6 +461,10 @@ pub fn ingest_router(state: IngestState) -> Router {
         .route("/api/v1/incidents", get(list_incidents))
         .route("/api/v1/incidents/{id}", get(show_incident))
         .route("/api/v1/errors/{id}", get(show_error))
+        .route("/api/v1/targets", get(list_targets).post(create_target))
+        .route("/api/v1/targets/{id}", delete(delete_target))
+        .route("/api/v1/targets/{id}/pause", post(pause_target))
+        .route("/api/v1/targets/{id}/resume", post(resume_target))
         .with_state(state)
 }
 
@@ -465,6 +475,8 @@ pub struct IngestState {
     config: IngestConfig,
     effect_sink: Arc<dyn IngestEffectSink>,
     health_fanout: HealthEventFanout,
+    target_control: Arc<dyn TargetControlSink>,
+    allow_private_targets: bool,
 }
 
 impl IngestState {
@@ -494,6 +506,8 @@ impl IngestState {
             config,
             effect_sink: webhook_sink.clone(),
             health_fanout: HealthEventFanout::new_without_failure_sink(webhook_sink),
+            target_control: Arc::new(NoopTargetControlSink),
+            allow_private_targets: false,
         }
     }
 
@@ -517,6 +531,8 @@ impl IngestState {
             config,
             effect_sink,
             health_fanout: HealthEventFanout::new_without_failure_sink(Arc::new(NoopEventSink)),
+            target_control: Arc::new(NoopTargetControlSink),
+            allow_private_targets: false,
         }
     }
 
@@ -532,6 +548,8 @@ impl IngestState {
             config,
             effect_sink,
             health_fanout: HealthEventFanout::new_without_failure_sink(event_sink),
+            target_control: Arc::new(NoopTargetControlSink),
+            allow_private_targets: false,
         }
     }
 
@@ -547,7 +565,21 @@ impl IngestState {
             config,
             effect_sink,
             health_fanout,
+            target_control: Arc::new(NoopTargetControlSink),
+            allow_private_targets: false,
         }
+    }
+
+    /// Attach the target probe lifecycle control boundary used by admin routes.
+    pub fn with_target_control(mut self, target_control: Arc<dyn TargetControlSink>) -> Self {
+        self.target_control = target_control;
+        self
+    }
+
+    /// Allow admin target creation to accept private/non-global probe hosts.
+    pub fn with_allow_private_targets(mut self, allow_private_targets: bool) -> Self {
+        self.allow_private_targets = allow_private_targets;
+        self
     }
 }
 
@@ -563,6 +595,27 @@ struct NoopIngestEffectSink;
 impl IngestEffectSink for NoopIngestEffectSink {
     fn handle(&self, _effects: &[IngestEffect]) -> Result<(), String> {
         Ok(())
+    }
+}
+
+/// Narrow control boundary from admin target writes to the probe lifecycle.
+pub trait TargetControlSink: Send + Sync + 'static {
+    /// Apply one target-scoped lifecycle command.
+    fn control_target(&self, command: TargetProbeLifecycleCommand) -> Result<(), String>;
+}
+
+#[derive(Debug, Default)]
+struct NoopTargetControlSink;
+
+impl TargetControlSink for NoopTargetControlSink {
+    fn control_target(&self, _command: TargetProbeLifecycleCommand) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+impl TargetControlSink for TargetProbeLifecycleController {
+    fn control_target(&self, command: TargetProbeLifecycleCommand) -> Result<(), String> {
+        TargetProbeLifecycleController::control_target(self, command)
     }
 }
 
@@ -725,6 +778,157 @@ async fn create_check_in(
     )
 }
 
+async fn list_targets(State(state): State<IngestState>, headers: HeaderMap) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+        return problem_response(*problem);
+    }
+
+    let store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+
+    match store.list_targets() {
+        Ok(targets) => json_status_response(
+            StatusCode::OK.as_u16(),
+            json!({"targets": targets.into_iter().map(target_response).collect::<Vec<_>>()}),
+        ),
+        Err(_) => problem_response(internal_problem()),
+    }
+}
+
+async fn create_target(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    if let Err(problem) = check_content_length(&headers) {
+        return problem_response(*problem);
+    }
+
+    if body.len() as u64 > MAX_JSON_BODY_BYTES {
+        return problem_response(payload_too_large_problem(
+            "Request body exceeds 100KB limit.",
+        ));
+    }
+
+    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+        return problem_response(*problem);
+    }
+
+    let attrs = match decode_json_object(&body, None) {
+        Ok(attrs) => attrs,
+        Err(problem) => return problem_response(*problem),
+    };
+    let target = match parse_target_create(attrs, state.allow_private_targets) {
+        Ok(target) => target,
+        Err(problem) => return problem_response(*problem),
+    };
+    let command = TargetProbeLifecycleCommand::Track {
+        target_id: target.id.clone(),
+        interval_ms: target.interval_ms,
+    };
+    let response_body = target_insert_response(&target);
+
+    let mut store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    if store.insert_target(target).is_err() {
+        return problem_response(internal_problem());
+    }
+    drop(store);
+
+    let _control_result = state.target_control.control_target(command);
+
+    json_status_response(StatusCode::CREATED.as_u16(), response_body)
+}
+
+async fn delete_target(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+        return problem_response(*problem);
+    }
+
+    let mut store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    match store.delete_target(&id) {
+        Ok(true) => {}
+        Ok(false) => return problem_response(not_found_problem("Target not found.")),
+        Err(_) => return problem_response(internal_problem()),
+    }
+    drop(store);
+
+    let _control_result = state
+        .target_control
+        .control_target(TargetProbeLifecycleCommand::Untrack { target_id: id });
+
+    response(
+        StatusCode::NO_CONTENT.as_u16(),
+        "text/plain; charset=utf-8",
+        Body::empty(),
+    )
+}
+
+async fn pause_target(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response<Body> {
+    set_target_active(state, headers, id, false).await
+}
+
+async fn resume_target(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response<Body> {
+    set_target_active(state, headers, id, true).await
+}
+
+async fn set_target_active(
+    state: IngestState,
+    headers: HeaderMap,
+    id: String,
+    active: bool,
+) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
+        return problem_response(*problem);
+    }
+
+    let mut store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    match store.update_target_active(&id, active) {
+        Ok(true) => {}
+        Ok(false) => return problem_response(not_found_problem("Target not found.")),
+        Err(_) => return problem_response(internal_problem()),
+    }
+    drop(store);
+
+    let command = if active {
+        TargetProbeLifecycleCommand::Resume {
+            target_id: id.clone(),
+        }
+    } else {
+        TargetProbeLifecycleCommand::Pause {
+            target_id: id.clone(),
+        }
+    };
+    let _control_result = state.target_control.control_target(command);
+
+    json_status_response(
+        StatusCode::OK.as_u16(),
+        json!({"status": if active { "resumed" } else { "paused" }}),
+    )
+}
+
 async fn query_errors(
     State(state): State<IngestState>,
     headers: HeaderMap,
@@ -805,6 +1009,179 @@ struct ParsedCheckIn {
     monitor_name: String,
     observed_at: String,
     input: MonitorCheckInInput,
+}
+
+fn target_response(target: TargetRecord) -> Value {
+    json!({
+        "id": target.id,
+        "name": target.name,
+        "service": target.service,
+        "url": target.url,
+        "method": target.method,
+        "interval_ms": target.interval_ms,
+        "timeout_ms": target.timeout_ms,
+        "expected_status": target.expected_status,
+        "active": target.active,
+        "created_at": target.created_at,
+    })
+}
+
+fn target_insert_response(target: &TargetInsert) -> Value {
+    json!({
+        "id": target.id,
+        "name": target.name,
+        "service": target.service,
+        "url": target.url,
+        "method": target.method,
+        "interval_ms": target.interval_ms,
+        "timeout_ms": target.timeout_ms,
+        "expected_status": target.expected_status,
+        "active": target.active,
+        "created_at": target.created_at,
+    })
+}
+
+fn parse_target_create(
+    attrs: Map<String, Value>,
+    configured_allow_private: bool,
+) -> Result<TargetInsert, Box<ProblemDetails>> {
+    let mut errors: ValidationErrors = BTreeMap::new();
+    let name = required_string(&attrs, "name", &mut errors);
+    let url = required_string(&attrs, "url", &mut errors);
+    let method = optional_string(attrs.get("method")).unwrap_or_else(|| "GET".to_owned());
+    if !matches!(method.as_str(), "GET" | "HEAD") {
+        errors.insert(
+            "method".to_owned(),
+            vec!["must be one of: GET, HEAD".to_owned()],
+        );
+    }
+    let headers = encode_target_headers(attrs.get("headers"), &mut errors);
+
+    let interval_ms = optional_positive_i64(&attrs, "interval_ms", 60_000, &mut errors);
+    let timeout_ms = optional_positive_i64(&attrs, "timeout_ms", 10_000, &mut errors);
+    let degraded_after = optional_positive_u32(&attrs, "degraded_after", 1, &mut errors);
+    let down_after = optional_positive_u32(&attrs, "down_after", 3, &mut errors);
+    let up_after = optional_positive_u32(&attrs, "up_after", 1, &mut errors);
+
+    if !errors.is_empty() {
+        return Err(Box::new(target_validation_problem(errors)));
+    }
+
+    let Some(name) = name else {
+        return Err(Box::new(target_validation_problem(BTreeMap::new())));
+    };
+    let Some(url) = url else {
+        return Err(Box::new(target_validation_problem(BTreeMap::new())));
+    };
+    let service = optional_string(attrs.get("service")).unwrap_or_else(|| name.clone());
+    let allow_private = configured_allow_private || optional_bool(attrs.get("allow_private"));
+    if let Err(reason) =
+        validate_target_configuration(&url, &method, headers.as_deref(), allow_private)
+    {
+        return Err(Box::new(ProblemDetails::new(
+            422,
+            ProblemCode::ValidationError,
+            format!("Invalid URL: {reason}"),
+            None,
+        )));
+    }
+
+    Ok(TargetInsert {
+        id: canary_core::ids::TargetId::generate().into_string(),
+        url,
+        name,
+        service,
+        method,
+        headers,
+        interval_ms,
+        timeout_ms,
+        expected_status: optional_string(attrs.get("expected_status"))
+            .unwrap_or_else(|| "200".to_owned()),
+        body_contains: optional_string(attrs.get("body_contains")),
+        degraded_after,
+        down_after,
+        up_after,
+        active: true,
+        created_at: current_rfc3339(),
+    })
+}
+
+fn encode_target_headers(value: Option<&Value>, errors: &mut ValidationErrors) -> Option<String> {
+    match value {
+        Some(Value::Object(object)) => {
+            for (name, value) in object {
+                if !value.is_string() {
+                    errors.insert(
+                        format!("headers.{name}"),
+                        vec!["must be a string".to_owned()],
+                    );
+                }
+            }
+            if errors.keys().any(|key| key.starts_with("headers.")) {
+                None
+            } else {
+                serde_json::to_string(object).ok()
+            }
+        }
+        Some(Value::Null) | None => None,
+        Some(_) => {
+            errors.insert(
+                "headers".to_owned(),
+                vec!["must be an object of string values".to_owned()],
+            );
+            None
+        }
+    }
+}
+
+fn optional_positive_i64(
+    attrs: &Map<String, Value>,
+    key: &str,
+    default: i64,
+    errors: &mut ValidationErrors,
+) -> i64 {
+    match attrs.get(key) {
+        Some(Value::Number(number)) => match number.as_i64().filter(|value| *value > 0) {
+            Some(value) => value,
+            None => {
+                errors.insert(key.to_owned(), vec!["must be greater than 0".to_owned()]);
+                default
+            }
+        },
+        Some(Value::Null) | None => default,
+        Some(_) => {
+            errors.insert(key.to_owned(), vec!["must be an integer".to_owned()]);
+            default
+        }
+    }
+}
+
+fn optional_positive_u32(
+    attrs: &Map<String, Value>,
+    key: &str,
+    default: u32,
+    errors: &mut ValidationErrors,
+) -> u32 {
+    match attrs.get(key) {
+        Some(Value::Number(number)) => match number.as_u64().and_then(|value| {
+            if value > 0 {
+                u32::try_from(value).ok()
+            } else {
+                None
+            }
+        }) {
+            Some(value) => value,
+            None => {
+                errors.insert(key.to_owned(), vec!["must be greater than 0".to_owned()]);
+                default
+            }
+        },
+        Some(Value::Null) | None => default,
+        Some(_) => {
+            errors.insert(key.to_owned(), vec!["must be an integer".to_owned()]);
+            default
+        }
+    }
 }
 
 fn parse_check_in(attrs: Map<String, Value>) -> Result<ParsedCheckIn, Box<ProblemDetails>> {
@@ -890,6 +1267,10 @@ fn optional_string(value: Option<&Value>) -> Option<String> {
         Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
         _ => None,
     }
+}
+
+fn optional_bool(value: Option<&Value>) -> bool {
+    matches!(value, Some(Value::Bool(true)))
 }
 
 fn positive_i64(value: Option<&Value>) -> Option<i64> {
@@ -1137,6 +1518,16 @@ fn check_in_validation_problem(errors: ValidationErrors) -> ProblemDetails {
         422,
         ProblemCode::ValidationError,
         "Invalid check-in payload.",
+        None,
+    )
+    .with_extra("errors", json!(errors))
+}
+
+fn target_validation_problem(errors: ValidationErrors) -> ProblemDetails {
+    ProblemDetails::new(
+        422,
+        ProblemCode::ValidationError,
+        "Invalid target configuration.",
         None,
     )
     .with_extra("errors", json!(errors))
@@ -2422,6 +2813,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_target_mutations_emit_lifecycle_commands() -> Result<(), Box<dyn Error>> {
+        let recorder = Arc::new(RecordingTargetControl::default());
+        let state = test_ingest_state()?
+            .with_target_control(recorder.clone())
+            .with_allow_private_targets(true);
+        let router = ingest_router(state);
+
+        let create_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/targets",
+                ADMIN_KEY,
+                r#"{
+                    "url":"http://127.0.0.1:9/health",
+                    "name":"Local API",
+                    "service":"local-api",
+                    "interval_ms":2500,
+                    "timeout_ms":1000,
+                    "allow_private":true
+                }"#,
+            )?)
+            .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let created = json_body(create_response).await?;
+        let target_id = created["id"]
+            .as_str()
+            .ok_or("missing target id")?
+            .to_owned();
+        assert_eq!(created["service"], "local-api");
+        assert_eq!(created["active"], true);
+
+        let list_response = router
+            .clone()
+            .oneshot(read_request(ADMIN_KEY, "/api/v1/targets")?)
+            .await?;
+        let list_body = json_body(list_response).await?;
+        assert!(
+            list_body["targets"]
+                .as_array()
+                .ok_or("targets should be an array")?
+                .iter()
+                .any(|target| target["id"] == target_id)
+        );
+
+        let pause_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/targets/{target_id}/pause"),
+                ADMIN_KEY,
+                "{}",
+            )?)
+            .await?;
+        assert_eq!(pause_response.status(), StatusCode::OK);
+        assert_eq!(json_body(pause_response).await?["status"], "paused");
+
+        let resume_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/targets/{target_id}/resume"),
+                ADMIN_KEY,
+                "{}",
+            )?)
+            .await?;
+        assert_eq!(resume_response.status(), StatusCode::OK);
+        assert_eq!(json_body(resume_response).await?["status"], "resumed");
+
+        let delete_response = router
+            .clone()
+            .oneshot(
+                Request::delete(format!("/api/v1/targets/{target_id}"))
+                    .header("authorization", format!("Bearer {ADMIN_KEY}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+        assert_eq!(
+            recorder.commands(),
+            vec![
+                TargetProbeLifecycleCommand::Track {
+                    target_id: target_id.clone(),
+                    interval_ms: 2500,
+                },
+                TargetProbeLifecycleCommand::Pause {
+                    target_id: target_id.clone(),
+                },
+                TargetProbeLifecycleCommand::Resume {
+                    target_id: target_id.clone(),
+                },
+                TargetProbeLifecycleCommand::Untrack { target_id },
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admin_target_create_rejects_ingest_scope_without_writing_or_commanding()
+    -> Result<(), Box<dyn Error>> {
+        let recorder = Arc::new(RecordingTargetControl::default());
+        let state = test_ingest_state()?
+            .with_target_control(recorder.clone())
+            .with_allow_private_targets(true);
+        let router = ingest_router(state);
+
+        let response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/targets",
+                INGEST_KEY,
+                r#"{"url":"http://127.0.0.1:9/health","name":"Local API","allow_private":true}"#,
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(recorder.commands().is_empty());
+        let list = router
+            .oneshot(read_request(ADMIN_KEY, "/api/v1/targets")?)
+            .await?;
+        assert_eq!(json_body(list).await?["targets"], json!([]));
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn error_query_accepts_read_scope_and_returns_service_groups()
     -> Result<(), Box<dyn Error>> {
         let state = test_ingest_state()?;
@@ -2964,6 +3484,20 @@ mod tests {
             .body(Body::empty())?)
     }
 
+    fn json_request(
+        method: &'static str,
+        path: &str,
+        token: &str,
+        body: &str,
+    ) -> Result<Request<Body>, Box<dyn Error>> {
+        Ok(Request::builder()
+            .method(method)
+            .uri(path)
+            .header("authorization", format!("Bearer {token}"))
+            .header(CONTENT_TYPE, APPLICATION_JSON)
+            .body(Body::from(body.to_owned()))?)
+    }
+
     fn error_count(state: &IngestState) -> Result<u64, Box<dyn Error>> {
         let store = state.store.lock().map_err(|_| "store lock poisoned")?;
         Ok(store.error_count()?)
@@ -3314,6 +3848,30 @@ mod tests {
     impl EventSink for FailingEventSink {
         fn enqueue_event(&self, event: &str, _payload_json: &str) -> Result<(), String> {
             Err(format!("simulated enqueue failure for {event}"))
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingTargetControl {
+        commands: StdMutex<Vec<TargetProbeLifecycleCommand>>,
+    }
+
+    impl RecordingTargetControl {
+        fn commands(&self) -> Vec<TargetProbeLifecycleCommand> {
+            match self.commands.lock() {
+                Ok(commands) => commands.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
+        }
+    }
+
+    impl TargetControlSink for RecordingTargetControl {
+        fn control_target(&self, command: TargetProbeLifecycleCommand) -> Result<(), String> {
+            match self.commands.lock() {
+                Ok(mut commands) => commands.push(command),
+                Err(poisoned) => poisoned.into_inner().push(command),
+            }
+            Ok(())
         }
     }
 

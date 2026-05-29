@@ -23,7 +23,7 @@ pub use health::{
     MonitorCheckInCommitResult, MonitorCheckInObservation, MonitorCheckInSnapshot, MonitorInsert,
     MonitorOverdueCandidate, MonitorOverdueCommit, MonitorOverdueCommitResult,
     MonitorTransitionEvent, TargetCheckObservation, TargetInsert, TargetProbeCommit,
-    TargetProbeCommitResult, TargetProbeSnapshot, TargetTransitionEvent,
+    TargetProbeCommitResult, TargetProbeSnapshot, TargetRecord, TargetTransitionEvent,
 };
 pub use incidents::{IncidentCorrelation, IncidentCorrelationEvent};
 pub use ingest::{
@@ -110,9 +110,19 @@ impl Store {
         health::insert_target(&self.connection, target)
     }
 
+    /// Return admin-visible target rows ordered by display name.
+    pub fn list_targets(&self) -> Result<Vec<TargetRecord>> {
+        health::list_targets(&self.connection)
+    }
+
+    /// Delete one target row.
+    pub fn delete_target(&mut self, target_id: &str) -> Result<bool> {
+        health::delete_target(&mut self.connection, target_id)
+    }
+
     /// Update one target's active flag.
     pub fn update_target_active(&mut self, target_id: &str, active: bool) -> Result<bool> {
-        health::update_target_active(&self.connection, target_id, active)
+        health::update_target_active(&mut self.connection, target_id, active)
     }
 
     /// Return one active target configuration and state snapshot by id.
@@ -1797,6 +1807,71 @@ mod tests {
                 },
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn admin_target_list_active_update_and_delete_are_persistent() -> Result<()> {
+        let mut store = migrated_store()?;
+        store.insert_target(TargetInsert {
+            id: "TGT-admin".to_owned(),
+            url: "https://admin.example.test/health".to_owned(),
+            name: "Admin API".to_owned(),
+            service: "".to_owned(),
+            method: "HEAD".to_owned(),
+            headers: None,
+            interval_ms: 15_000,
+            timeout_ms: 2_500,
+            expected_status: "204".to_owned(),
+            body_contains: None,
+            degraded_after: 1,
+            down_after: 2,
+            up_after: 1,
+            active: true,
+            created_at: "2026-05-28T19:00:00Z".to_owned(),
+        })?;
+        store.connection.execute(
+            "INSERT INTO target_state (target_id, state) VALUES ('TGT-admin', 'up')",
+            [],
+        )?;
+
+        let targets = store.list_targets()?;
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].service, "Admin API");
+        assert_eq!(targets[0].method, "HEAD");
+        assert!(targets[0].active);
+
+        assert!(store.update_target_active("TGT-admin", false)?);
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT active FROM targets WHERE id = 'TGT-admin'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            0
+        );
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT state FROM target_state WHERE target_id = 'TGT-admin'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?,
+            "paused"
+        );
+
+        assert!(store.update_target_active("TGT-admin", true)?);
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT state FROM target_state WHERE target_id = 'TGT-admin'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?,
+            "unknown"
+        );
+        assert!(store.delete_target("TGT-admin")?);
+        assert!(store.list_targets()?.is_empty());
+        assert!(!store.delete_target("TGT-admin")?);
+
         Ok(())
     }
 

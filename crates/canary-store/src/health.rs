@@ -107,6 +107,31 @@ pub struct TargetInsert {
     pub created_at: String,
 }
 
+/// HTTP target row returned by admin target APIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetRecord {
+    /// Target id.
+    pub id: String,
+    /// Probe URL.
+    pub url: String,
+    /// Target display name.
+    pub name: String,
+    /// Service name resolved with Phoenix's target service fallback.
+    pub service: String,
+    /// HTTP method.
+    pub method: String,
+    /// Probe interval in milliseconds.
+    pub interval_ms: i64,
+    /// Probe timeout in milliseconds.
+    pub timeout_ms: i64,
+    /// Expected HTTP status expression.
+    pub expected_status: String,
+    /// Active flag.
+    pub active: bool,
+    /// Creation timestamp.
+    pub created_at: String,
+}
+
 /// Target configuration and state needed to execute and plan one probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetProbeSnapshot {
@@ -565,15 +590,62 @@ pub(crate) fn insert_target(connection: &rusqlite::Connection, target: TargetIns
     Ok(())
 }
 
+pub(crate) fn list_targets(connection: &rusqlite::Connection) -> Result<Vec<TargetRecord>> {
+    let mut statement = connection.prepare(
+        "SELECT
+            id, url, name, COALESCE(NULLIF(service, ''), name),
+            COALESCE(method, 'GET'), COALESCE(interval_ms, 60000),
+            COALESCE(timeout_ms, 10000), COALESCE(expected_status, '200'),
+            COALESCE(active, 1), created_at
+         FROM targets
+         ORDER BY name",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(TargetRecord {
+            id: row.get(0)?,
+            url: row.get(1)?,
+            name: row.get(2)?,
+            service: row.get(3)?,
+            method: row.get(4)?,
+            interval_ms: row.get(5)?,
+            timeout_ms: row.get(6)?,
+            expected_status: row.get(7)?,
+            active: row.get::<_, i64>(8)? == 1,
+            created_at: row.get(9)?,
+        })
+    })?;
+    let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub(crate) fn delete_target(
+    connection: &mut rusqlite::Connection,
+    target_id: &str,
+) -> Result<bool> {
+    let transaction = connection.transaction()?;
+    let changed = transaction.execute("DELETE FROM targets WHERE id = ?1", [target_id])?;
+    transaction.commit()?;
+    Ok(changed > 0)
+}
+
 pub(crate) fn update_target_active(
-    connection: &rusqlite::Connection,
+    connection: &mut rusqlite::Connection,
     target_id: &str,
     active: bool,
 ) -> Result<bool> {
-    let changed = connection.execute(
+    let transaction = connection.transaction()?;
+    let changed = transaction.execute(
         "UPDATE targets SET active = ?2 WHERE id = ?1",
         rusqlite::params![target_id, if active { 1 } else { 0 }],
     )?;
+    if changed > 0 {
+        let state = if active { "unknown" } else { "paused" };
+        transaction.execute(
+            "UPDATE target_state SET state = ?2 WHERE target_id = ?1",
+            rusqlite::params![target_id, state],
+        )?;
+    }
+    transaction.commit()?;
     Ok(changed > 0)
 }
 
