@@ -5,8 +5,10 @@
 //! append the deterministic timeline event, and correlate the health signal
 //! into the incident graph in one SQLite transaction.
 
+use std::collections::BTreeMap;
+
 use canary_core::ids::{EventId, IncidentId};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, params, params_from_iter};
 use serde_json::json;
 
 use crate::{
@@ -316,6 +318,75 @@ pub struct TargetCheckObservation {
     pub error_detail: Option<String>,
     /// Probe region.
     pub region: Option<String>,
+}
+
+/// Compact target-check row returned by health-status read models.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthCheckSummary {
+    /// Probe timestamp.
+    pub checked_at: String,
+    /// Phoenix-compatible probe result.
+    pub result: String,
+    /// HTTP status code returned by the target, when available.
+    pub status_code: Option<i64>,
+    /// Probe latency in milliseconds, when measured.
+    pub latency_ms: Option<i64>,
+}
+
+/// HTTP target row returned by health-status read models.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthTargetStatus {
+    /// Target id.
+    pub id: String,
+    /// Target display name.
+    pub name: String,
+    /// Service name resolved with Phoenix's target service fallback.
+    pub service: String,
+    /// Probe URL.
+    pub url: String,
+    /// Current target state.
+    pub state: String,
+    /// Current consecutive failure counter.
+    pub consecutive_failures: u32,
+    /// Last probe timestamp.
+    pub last_checked_at: Option<String>,
+    /// Last successful probe timestamp.
+    pub last_success_at: Option<String>,
+    /// Latency from the newest recent check.
+    pub latency_ms: Option<i64>,
+    /// TLS expiration from the newest recent check that reported one.
+    pub tls_expires_at: Option<String>,
+    /// Five newest target checks, newest first.
+    pub recent_checks: Vec<HealthCheckSummary>,
+}
+
+/// Non-HTTP monitor row returned by health-status read models.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthMonitorStatus {
+    /// Monitor id.
+    pub id: String,
+    /// Monitor display name.
+    pub name: String,
+    /// Service name resolved with Phoenix's monitor service fallback.
+    pub service: String,
+    /// Monitor mode, `schedule` or `ttl`.
+    pub mode: String,
+    /// Expected interval in milliseconds.
+    pub expected_every_ms: i64,
+    /// Grace period in milliseconds.
+    pub grace_ms: i64,
+    /// Current monitor state.
+    pub state: String,
+    /// Last check-in status.
+    pub last_check_in_status: Option<String>,
+    /// Last check-in timestamp.
+    pub last_check_in_at: Option<String>,
+    /// Last successful check-in timestamp.
+    pub last_success_at: Option<String>,
+    /// Last failed check-in timestamp.
+    pub last_failure_at: Option<String>,
+    /// Current monitor deadline timestamp.
+    pub deadline_at: Option<String>,
 }
 
 /// One observed non-HTTP monitor check-in.
@@ -663,6 +734,39 @@ pub(crate) fn list_monitors(connection: &rusqlite::Connection) -> Result<Vec<Mon
     Ok(rows)
 }
 
+pub(crate) fn health_monitors(
+    connection: &rusqlite::Connection,
+) -> Result<Vec<HealthMonitorStatus>> {
+    let mut statement = connection.prepare(
+        "SELECT
+            m.id, m.name, COALESCE(NULLIF(m.service, ''), m.name), m.mode,
+            m.expected_every_ms, COALESCE(m.grace_ms, 0),
+            COALESCE(s.state, 'unknown'), s.last_check_in_status,
+            s.last_check_in_at, s.last_success_at, s.last_failure_at, s.deadline_at
+         FROM monitors AS m
+         LEFT JOIN monitor_state AS s ON s.monitor_id = m.id
+         ORDER BY m.name",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(HealthMonitorStatus {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            service: row.get(2)?,
+            mode: row.get(3)?,
+            expected_every_ms: row.get(4)?,
+            grace_ms: row.get(5)?,
+            state: row.get(6)?,
+            last_check_in_status: row.get(7)?,
+            last_check_in_at: row.get(8)?,
+            last_success_at: row.get(9)?,
+            last_failure_at: row.get(10)?,
+            deadline_at: row.get(11)?,
+        })
+    })?;
+    let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 pub(crate) fn delete_monitor(
     connection: &mut rusqlite::Connection,
     monitor_id: &str,
@@ -746,6 +850,59 @@ pub(crate) fn list_targets(connection: &rusqlite::Connection) -> Result<Vec<Targ
     })?;
     let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+pub(crate) fn health_targets(connection: &rusqlite::Connection) -> Result<Vec<HealthTargetStatus>> {
+    let mut statement = connection.prepare(
+        "SELECT
+            t.id, t.name, COALESCE(NULLIF(t.service, ''), t.name), t.url,
+            COALESCE(s.state, 'unknown'), COALESCE(s.consecutive_failures, 0),
+            s.last_checked_at, s.last_success_at
+         FROM targets AS t
+         LEFT JOIN target_state AS s ON s.target_id = t.id
+         ORDER BY t.name",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(HealthTargetStatus {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            service: row.get(2)?,
+            url: row.get(3)?,
+            state: row.get(4)?,
+            consecutive_failures: row.get(5)?,
+            last_checked_at: row.get(6)?,
+            last_success_at: row.get(7)?,
+            latency_ms: None,
+            tls_expires_at: None,
+            recent_checks: Vec::new(),
+        })
+    })?;
+    let mut targets = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let target_ids = targets
+        .iter()
+        .map(|target| target.id.clone())
+        .collect::<Vec<_>>();
+    let recent = recent_checks_by_target(connection, &target_ids)?;
+
+    for target in &mut targets {
+        if let Some(rows) = recent.get(&target.id) {
+            target.latency_ms = rows.first().and_then(|row| row.latency_ms);
+            target.tls_expires_at = rows
+                .iter()
+                .find_map(|row| row.tls_expires_at.as_ref().cloned());
+            target.recent_checks = rows
+                .iter()
+                .map(|row| HealthCheckSummary {
+                    checked_at: row.checked_at.clone(),
+                    result: row.result.clone(),
+                    status_code: row.status_code,
+                    latency_ms: row.latency_ms,
+                })
+                .collect();
+        }
+    }
+
+    Ok(targets)
 }
 
 pub(crate) fn delete_target(
@@ -1324,6 +1481,61 @@ fn insert_target_check(
         ],
     )?;
     Ok(())
+}
+
+struct RecentTargetCheckRow {
+    target_id: String,
+    checked_at: String,
+    result: String,
+    status_code: Option<i64>,
+    latency_ms: Option<i64>,
+    tls_expires_at: Option<String>,
+}
+
+fn recent_checks_by_target(
+    connection: &rusqlite::Connection,
+    target_ids: &[String],
+) -> Result<BTreeMap<String, Vec<RecentTargetCheckRow>>> {
+    if target_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let placeholders = std::iter::repeat_n("?", target_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT target_id, checked_at, result, status_code, latency_ms, tls_expires_at
+         FROM (
+            SELECT
+                target_id, checked_at, result, status_code, latency_ms, tls_expires_at,
+                ROW_NUMBER() OVER (PARTITION BY target_id ORDER BY checked_at DESC) AS rn
+            FROM target_checks
+            WHERE target_id IN ({placeholders})
+         )
+         WHERE rn <= 5
+         ORDER BY target_id, rn"
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(target_ids.iter()), |row| {
+        Ok(RecentTargetCheckRow {
+            target_id: row.get(0)?,
+            checked_at: row.get(1)?,
+            result: row.get(2)?,
+            status_code: row.get(3)?,
+            latency_ms: row.get(4)?,
+            tls_expires_at: row.get(5)?,
+        })
+    })?;
+
+    let mut by_target = BTreeMap::<String, Vec<RecentTargetCheckRow>>::new();
+    for row in rows {
+        let row = row?;
+        by_target
+            .entry(row.target_id.clone())
+            .or_default()
+            .push(row);
+    }
+    Ok(by_target)
 }
 
 fn insert_monitor_check_in(

@@ -38,6 +38,17 @@ pub struct IncidentListOptions {
     pub without_annotation: Option<String>,
 }
 
+/// Error-summary row returned by combined service status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrorSummaryItem {
+    /// Service name.
+    pub service: String,
+    /// Total active errors for the window.
+    pub total_count: i64,
+    /// Number of active error groups for the service.
+    pub unique_classes: i64,
+}
+
 /// Query read-model failure.
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {
@@ -156,6 +167,38 @@ pub(crate) fn errors_by_class_at(
         total_errors,
         total_error_classes,
     ))
+}
+
+pub(crate) fn error_summary(
+    connection: &Connection,
+    window: &str,
+) -> QueryResult<Vec<ErrorSummaryItem>> {
+    error_summary_at(connection, window, OffsetDateTime::now_utc())
+}
+
+pub(crate) fn error_summary_at(
+    connection: &Connection,
+    window: &str,
+    now: OffsetDateTime,
+) -> QueryResult<Vec<ErrorSummaryItem>> {
+    let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
+    let cutoff = window.cutoff_at(now);
+    let mut statement = connection.prepare(
+        "SELECT service, SUM(total_count), COUNT(group_hash)
+         FROM error_groups
+         WHERE last_seen_at >= ?1 AND status = 'active'
+         GROUP BY service
+         ORDER BY SUM(total_count) DESC",
+    )?;
+    let rows = statement.query_map([cutoff], |row| {
+        Ok(ErrorSummaryItem {
+            service: row.get(0)?,
+            total_count: row.get(1)?,
+            unique_classes: row.get(2)?,
+        })
+    })?;
+    let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 pub(crate) fn error_detail(

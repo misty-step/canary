@@ -40,9 +40,9 @@ use canary_ingest::{
     ingest as ingest_error,
 };
 use canary_store::{
-    ApiKeyInsert, ApiKeyRecord, IncidentCorrelation, IncidentListOptions, MonitorInsert,
-    MonitorRecord, Store, StoreError, TargetConflict, TargetInsert, TargetRecord,
-    WebhookSubscription, WebhookSubscriptionInsert,
+    ApiKeyInsert, ApiKeyRecord, ErrorSummaryItem, HealthMonitorStatus, HealthTargetStatus,
+    IncidentCorrelation, IncidentListOptions, MonitorInsert, MonitorRecord, Store, StoreError,
+    TargetConflict, TargetInsert, TargetRecord, WebhookSubscription, WebhookSubscriptionInsert,
 };
 use canary_store::{QueryError, ServiceQueryOptions};
 use canary_workers::health::{
@@ -480,6 +480,8 @@ pub fn ingest_router(state: IngestState) -> Router {
         .route("/api/v1/errors", post(create_error))
         .route("/api/v1/check-ins", post(create_check_in))
         .route("/api/v1/query", get(query_errors))
+        .route("/api/v1/status", get(status))
+        .route("/api/v1/health-status", get(health_status))
         .route("/api/v1/incidents", get(list_incidents))
         .route("/api/v1/incidents/{id}", get(show_incident))
         .route("/api/v1/errors/{id}", get(show_error))
@@ -1495,6 +1497,75 @@ async fn query_errors(
     }
 }
 
+async fn health_status(State(state): State<IngestState>, headers: HeaderMap) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+        return problem_response(*problem);
+    }
+
+    let store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    let targets = match store.health_targets() {
+        Ok(targets) => targets,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    let monitors = match store.health_monitors() {
+        Ok(monitors) => monitors,
+        Err(_) => return problem_response(internal_problem()),
+    };
+
+    json_status_response(
+        StatusCode::OK.as_u16(),
+        json!({
+            "summary": health_status_summary(&targets, &monitors),
+            "targets": targets.iter().map(health_target_response).collect::<Vec<_>>(),
+            "monitors": monitors.iter().map(health_monitor_response).collect::<Vec<_>>(),
+        }),
+    )
+}
+
+async fn status(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Query(params): Query<StatusParams>,
+) -> Response<Body> {
+    if let Err(problem) = require_scope(&state, &headers, Permission::Read) {
+        return problem_response(*problem);
+    }
+
+    let window = params.window.as_deref().unwrap_or("1h");
+    let store = match state.store.lock() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    let targets = match store.health_targets() {
+        Ok(targets) => targets,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    let monitors = match store.health_monitors() {
+        Ok(monitors) => monitors,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    let error_summary = match store.error_summary(window) {
+        Ok(summary) => summary,
+        Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
+        Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
+    };
+    let overall = combined_overall(&targets, &monitors, &error_summary);
+
+    json_status_response(
+        StatusCode::OK.as_u16(),
+        json!({
+            "overall": overall,
+            "summary": combined_status_summary(&overall, &targets, &monitors, &error_summary, window),
+            "targets": targets.iter().map(status_target_response).collect::<Vec<_>>(),
+            "monitors": monitors.iter().map(status_monitor_response).collect::<Vec<_>>(),
+            "error_summary": error_summary.iter().map(error_summary_response).collect::<Vec<_>>(),
+        }),
+    )
+}
+
 enum QueryKind {
     Service {
         service: String,
@@ -1504,6 +1575,11 @@ enum QueryKind {
         service: Option<String>,
     },
     ErrorClasses,
+}
+
+#[derive(Deserialize)]
+struct StatusParams {
+    window: Option<String>,
 }
 
 struct ParsedCheckIn {
@@ -1569,6 +1645,76 @@ fn monitor_insert_response(monitor: &MonitorInsert) -> Value {
         "expected_every_ms": monitor.expected_every_ms,
         "grace_ms": monitor.grace_ms,
         "created_at": monitor.created_at,
+    })
+}
+
+fn health_target_response(target: &HealthTargetStatus) -> Value {
+    json!({
+        "id": target.id,
+        "name": target.name,
+        "service": target.service,
+        "url": target.url,
+        "state": target.state,
+        "consecutive_failures": target.consecutive_failures,
+        "last_checked_at": target.last_checked_at,
+        "last_success_at": target.last_success_at,
+        "latency_ms": target.latency_ms,
+        "tls_expires_at": target.tls_expires_at,
+        "recent_checks": target.recent_checks.iter().map(|check| json!({
+            "checked_at": check.checked_at,
+            "result": check.result,
+            "status_code": check.status_code,
+            "latency_ms": check.latency_ms,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn health_monitor_response(monitor: &HealthMonitorStatus) -> Value {
+    json!({
+        "id": monitor.id,
+        "name": monitor.name,
+        "service": monitor.service,
+        "mode": monitor.mode,
+        "expected_every_ms": monitor.expected_every_ms,
+        "grace_ms": monitor.grace_ms,
+        "state": monitor.state,
+        "last_check_in_status": monitor.last_check_in_status,
+        "last_check_in_at": monitor.last_check_in_at,
+        "last_success_at": monitor.last_success_at,
+        "last_failure_at": monitor.last_failure_at,
+        "deadline_at": monitor.deadline_at,
+    })
+}
+
+fn status_target_response(target: &HealthTargetStatus) -> Value {
+    json!({
+        "id": target.id,
+        "name": target.name,
+        "url": target.url,
+        "state": target.state,
+        "consecutive_failures": target.consecutive_failures,
+        "last_checked_at": target.last_checked_at,
+    })
+}
+
+fn status_monitor_response(monitor: &HealthMonitorStatus) -> Value {
+    json!({
+        "id": monitor.id,
+        "name": monitor.name,
+        "service": monitor.service,
+        "mode": monitor.mode,
+        "state": monitor.state,
+        "last_check_in_status": monitor.last_check_in_status,
+        "last_check_in_at": monitor.last_check_in_at,
+        "deadline_at": monitor.deadline_at,
+    })
+}
+
+fn error_summary_response(item: &ErrorSummaryItem) -> Value {
+    json!({
+        "service": item.service,
+        "total_count": item.total_count,
+        "unique_classes": item.unique_classes,
     })
 }
 
@@ -1749,6 +1895,150 @@ fn encode_form_value(value: &str) -> String {
             }
         })
         .collect()
+}
+
+fn health_status_summary(
+    targets: &[HealthTargetStatus],
+    monitors: &[HealthMonitorStatus],
+) -> String {
+    let mut states = BTreeMap::<&str, Vec<&str>>::new();
+    for target in targets {
+        states
+            .entry(target.state.as_str())
+            .or_default()
+            .push(target.name.as_str());
+    }
+    for monitor in monitors {
+        states
+            .entry(monitor.state.as_str())
+            .or_default()
+            .push(monitor.name.as_str());
+    }
+
+    summarize_health(targets.len() + monitors.len(), &states, "health surfaces")
+}
+
+fn combined_overall(
+    targets: &[HealthTargetStatus],
+    monitors: &[HealthMonitorStatus],
+    error_summary: &[ErrorSummaryItem],
+) -> String {
+    if targets.is_empty() && monitors.is_empty() && error_summary.is_empty() {
+        return "empty".to_owned();
+    }
+    if targets.is_empty() && monitors.is_empty() {
+        return "warning".to_owned();
+    }
+
+    let has_down = targets.iter().any(|target| target.state == "down")
+        || monitors.iter().any(|monitor| monitor.state == "down");
+    let has_non_up = targets.iter().any(|target| target.state != "up")
+        || monitors.iter().any(|monitor| monitor.state != "up");
+
+    if has_down {
+        "unhealthy".to_owned()
+    } else if has_non_up {
+        "degraded".to_owned()
+    } else if !error_summary.is_empty() {
+        "warning".to_owned()
+    } else {
+        "healthy".to_owned()
+    }
+}
+
+fn combined_status_summary(
+    overall: &str,
+    targets: &[HealthTargetStatus],
+    monitors: &[HealthMonitorStatus],
+    error_summary: &[ErrorSummaryItem],
+    window: &str,
+) -> String {
+    let surface_count = targets.len() + monitors.len();
+    if overall == "empty" {
+        return "No services configured.".to_owned();
+    }
+    if overall == "healthy" {
+        return format!(
+            "All {surface_count} health surfaces healthy. No errors in the last {}.",
+            window_label(window)
+        );
+    }
+
+    let mut states = BTreeMap::<&str, Vec<&str>>::new();
+    for target in targets {
+        states
+            .entry(target.state.as_str())
+            .or_default()
+            .push(target.name.as_str());
+    }
+    for monitor in monitors {
+        states
+            .entry(monitor.state.as_str())
+            .or_default()
+            .push(monitor.name.as_str());
+    }
+    let total_errors = error_summary
+        .iter()
+        .map(|item| item.total_count)
+        .sum::<i64>();
+
+    let mut summary = format!("{surface_count} health surfaces monitored.");
+    if let Some(part) = describe_status_state_group(states.get("down"), "down") {
+        summary.push_str(&part);
+    }
+    if let Some(part) = describe_status_state_group(states.get("degraded"), "degraded") {
+        summary.push_str(&part);
+    }
+    if total_errors > 0 {
+        let service_count = error_summary.len();
+        let service_word = if service_count == 1 {
+            "service"
+        } else {
+            "services"
+        };
+        summary.push_str(&format!(
+            " {total_errors} errors across {service_count} {service_word} in the last {}.",
+            window_label(window)
+        ));
+    }
+
+    summary
+}
+
+fn summarize_health(total: usize, states: &BTreeMap<&str, Vec<&str>>, label: &str) -> String {
+    let up = states.get("up").map_or(0, Vec::len);
+    let mut parts = vec![format!("{total} {label} monitored. {up} up")];
+    if let Some(part) = describe_health_state_group(states.get("degraded"), "degraded") {
+        parts.push(part);
+    }
+    if let Some(part) = describe_health_state_group(states.get("down"), "down") {
+        parts.push(part);
+    }
+
+    format!("{}.", parts.join(", "))
+}
+
+fn describe_health_state_group(names: Option<&Vec<&str>>, label: &str) -> Option<String> {
+    let names = names?;
+    if names.is_empty() {
+        return None;
+    }
+    Some(format!("{} {label} ({})", names.len(), names.join(", ")))
+}
+
+fn describe_status_state_group(names: Option<&Vec<&str>>, label: &str) -> Option<String> {
+    describe_health_state_group(names, label).map(|part| format!(" {part}."))
+}
+
+fn window_label(window: &str) -> &'static str {
+    match window {
+        "1h" => "hour",
+        "6h" => "6 hours",
+        "24h" => "24 hours",
+        "7d" => "7 days",
+        "30d" => "30 days",
+        _ => "requested window",
+    }
 }
 
 fn parse_webhook_create(
@@ -5159,6 +5449,125 @@ mod tests {
             assert_eq!(status, expected_status);
             assert_eq!(body["code"], expected_code);
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn health_status_accepts_read_scope_and_returns_surfaces() -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?.with_allow_private_targets(true);
+        {
+            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            seed_monitor(&mut store, "desktop-active-timer")?;
+        }
+        let router = ingest_router(state);
+
+        let target_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/targets",
+                ADMIN_KEY,
+                r#"{
+                    "url":"http://127.0.0.1:9/health",
+                    "name":"Local API",
+                    "service":"local-api",
+                    "allow_private":true
+                }"#,
+            )?)
+            .await?;
+        assert_eq!(target_response.status(), StatusCode::CREATED);
+
+        let response = router
+            .oneshot(read_request(READ_KEY, "/api/v1/health-status")?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["summary"], "2 health surfaces monitored. 0 up.");
+        assert_eq!(body["targets"][0]["name"], "Local API");
+        assert_eq!(body["targets"][0]["service"], "local-api");
+        assert_eq!(body["targets"][0]["state"], "unknown");
+        assert_eq!(body["targets"][0]["recent_checks"], json!([]));
+        assert_eq!(body["monitors"][0]["name"], "desktop-active-timer");
+        assert_eq!(body["monitors"][0]["state"], "unknown");
+        assert!(body["monitors"][0].get("grace_ms").is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn status_defaults_to_empty_without_surfaces_or_errors() -> Result<(), Box<dyn Error>> {
+        let response = ingest_router(test_ingest_state()?)
+            .oneshot(read_request(READ_KEY, "/api/v1/status")?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["overall"], "empty");
+        assert_eq!(body["summary"], "No services configured.");
+        assert_eq!(body["targets"], json!([]));
+        assert_eq!(body["monitors"], json!([]));
+        assert_eq!(body["error_summary"], json!([]));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn status_combines_error_summary_with_default_window() -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let router = ingest_router(state);
+
+        let ingest = router
+            .clone()
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+        assert_eq!(ingest.status(), StatusCode::CREATED);
+
+        let response = router
+            .oneshot(read_request(READ_KEY, "/api/v1/status")?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["overall"], "warning");
+        assert_eq!(
+            body["summary"],
+            "0 health surfaces monitored. 1 errors across 1 service in the last hour."
+        );
+        assert_eq!(body["error_summary"][0]["service"], "test-svc");
+        assert_eq!(body["error_summary"][0]["total_count"], 1);
+        assert_eq!(body["error_summary"][0]["unique_classes"], 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn status_rejects_invalid_window_and_missing_auth() -> Result<(), Box<dyn Error>> {
+        let invalid = ingest_router(test_ingest_state()?)
+            .oneshot(read_request(READ_KEY, "/api/v1/status?window=99h")?)
+            .await?;
+        let invalid_status = invalid.status();
+        let invalid_body = json_body(invalid).await?;
+
+        assert_eq!(invalid_status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(invalid_body["code"], "validation_error");
+        assert_eq!(
+            invalid_body["errors"]["window"],
+            json!(["must be one of: 1h, 6h, 24h, 7d, 30d"])
+        );
+
+        let unauthorized = ingest_router(test_ingest_state()?)
+            .oneshot(Request::get("/api/v1/status").body(Body::empty())?)
+            .await?;
+        let unauthorized_status = unauthorized.status();
+        let unauthorized_body = json_body(unauthorized).await?;
+
+        assert_eq!(unauthorized_status, StatusCode::UNAUTHORIZED);
+        assert_eq!(unauthorized_body["code"], "invalid_api_key");
 
         Ok(())
     }

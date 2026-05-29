@@ -536,6 +536,17 @@ the Rust server accepts production traffic:
     optional positive interval, SSRF-aware URL validation, duplicate service
     and URL validation errors, one-time raw key disclosure, and no lifecycle
     command when auth or validation fails.
+51. Rust now implements the Phoenix read-only status surfaces:
+    `GET /api/v1/status` and `GET /api/v1/health-status`. The store owns the
+    health target/monitor read models and the active error summary; the router
+    owns only read-scope auth, query-window defaults, and OpenAPI response
+    projection. Target recent checks are fetched with a bounded window-function
+    query (`ROW_NUMBER() <= 5`) instead of loading unbounded history, matching
+    the Phoenix read-model footgun guard. `/health-status` returns the full
+    health target and monitor shapes, while `/status` deliberately trims those
+    rows and adds Phoenix-compatible `overall`, deterministic summary text, and
+    `error_summary`. Invalid windows reuse the shared RFC 9457 validation
+    problem constants.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed

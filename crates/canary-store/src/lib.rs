@@ -19,12 +19,12 @@ mod webhook_deliveries;
 
 pub use api_keys::{API_KEY_PREFIX_LEN, ApiKeyInsert, ApiKeyRecord, VerifiedApiKey};
 pub use health::{
-    ActiveTargetProbeSchedule, HealthTransitionCommit, MonitorCheckInCommit,
-    MonitorCheckInCommitResult, MonitorCheckInObservation, MonitorCheckInSnapshot, MonitorInsert,
-    MonitorOverdueCandidate, MonitorOverdueCommit, MonitorOverdueCommitResult, MonitorRecord,
-    MonitorTransitionEvent, TargetCheckObservation, TargetConflict, TargetInsert,
-    TargetIntervalUpdate, TargetProbeCommit, TargetProbeCommitResult, TargetProbeSnapshot,
-    TargetRecord, TargetTransitionEvent,
+    ActiveTargetProbeSchedule, HealthCheckSummary, HealthMonitorStatus, HealthTargetStatus,
+    HealthTransitionCommit, MonitorCheckInCommit, MonitorCheckInCommitResult,
+    MonitorCheckInObservation, MonitorCheckInSnapshot, MonitorInsert, MonitorOverdueCandidate,
+    MonitorOverdueCommit, MonitorOverdueCommitResult, MonitorRecord, MonitorTransitionEvent,
+    TargetCheckObservation, TargetConflict, TargetInsert, TargetIntervalUpdate, TargetProbeCommit,
+    TargetProbeCommitResult, TargetProbeSnapshot, TargetRecord, TargetTransitionEvent,
 };
 pub use incidents::{IncidentCorrelation, IncidentCorrelationEvent};
 pub use ingest::{
@@ -34,7 +34,9 @@ pub use oban_jobs::{
     WebhookDeliveryJobCompletion, WebhookDeliveryJobInsert, WebhookDeliveryJobRow,
     WebhookDeliveryJobState,
 };
-pub use query::{IncidentListOptions, QueryError, QueryResult, ServiceQueryOptions};
+pub use query::{
+    ErrorSummaryItem, IncidentListOptions, QueryError, QueryResult, ServiceQueryOptions,
+};
 pub use webhook_deliveries::{
     WebhookDeliveryInsert, WebhookDeliveryListOptions, WebhookDeliveryRow, WebhookDeliveryStatus,
     WebhookSubscription, WebhookSubscriptionInsert,
@@ -136,6 +138,11 @@ impl Store {
         health::list_targets(&self.connection)
     }
 
+    /// Return read-model target rows for health-status endpoints.
+    pub fn health_targets(&self) -> Result<Vec<HealthTargetStatus>> {
+        health::health_targets(&self.connection)
+    }
+
     /// Delete one target row.
     pub fn delete_target(&mut self, target_id: &str) -> Result<bool> {
         health::delete_target(&mut self.connection, target_id)
@@ -201,6 +208,11 @@ impl Store {
     /// Return admin-visible monitor rows ordered by name.
     pub fn list_monitors(&self) -> Result<Vec<MonitorRecord>> {
         health::list_monitors(&self.connection)
+    }
+
+    /// Return read-model monitor rows for health-status endpoints.
+    pub fn health_monitors(&self) -> Result<Vec<HealthMonitorStatus>> {
+        health::health_monitors(&self.connection)
     }
 
     /// Delete one non-HTTP monitor row.
@@ -299,6 +311,11 @@ impl Store {
     /// Query recent error counts grouped by error class.
     pub fn errors_by_class(&self, window: &str) -> QueryResult<canary_core::query::ErrorsByClass> {
         query::errors_by_class(&self.connection, window)
+    }
+
+    /// Query active error counts grouped by service for combined status.
+    pub fn error_summary(&self, window: &str) -> QueryResult<Vec<ErrorSummaryItem>> {
+        query::error_summary(&self.connection, window)
     }
 
     /// Query recent error counts grouped by error class at a deterministic evaluation time.
@@ -1556,6 +1573,138 @@ mod tests {
             result.summary,
             "156 errors across 52 error classes in the last 24h. Most frequent: Err001 (3 occurrences). Response truncated to top 50 classes."
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn health_targets_batch_recent_checks_and_default_missing_state()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        store.insert_target(TargetInsert {
+            id: "TGT-api".to_owned(),
+            url: "https://api.example.test/health".to_owned(),
+            name: "API".to_owned(),
+            service: "api".to_owned(),
+            method: "GET".to_owned(),
+            headers: None,
+            interval_ms: 60_000,
+            timeout_ms: 10_000,
+            expected_status: "200".to_owned(),
+            body_contains: None,
+            degraded_after: 2,
+            down_after: 3,
+            up_after: 1,
+            active: true,
+            created_at: "2026-05-28T20:00:00Z".to_owned(),
+        })?;
+        store.insert_target(TargetInsert {
+            id: "TGT-worker".to_owned(),
+            url: "https://worker.example.test/health".to_owned(),
+            name: "Worker".to_owned(),
+            service: "".to_owned(),
+            method: "GET".to_owned(),
+            headers: None,
+            interval_ms: 60_000,
+            timeout_ms: 10_000,
+            expected_status: "200".to_owned(),
+            body_contains: None,
+            degraded_after: 2,
+            down_after: 3,
+            up_after: 1,
+            active: true,
+            created_at: "2026-05-28T20:00:00Z".to_owned(),
+        })?;
+        store.connection.execute(
+            "INSERT INTO target_state (
+                target_id, state, consecutive_failures, last_checked_at, last_success_at
+             ) VALUES ('TGT-api', 'down', 3, '2026-05-28T20:05:00Z', '2026-05-28T19:55:00Z')",
+            [],
+        )?;
+        for minute in 0..6 {
+            store.connection.execute(
+                "INSERT INTO target_checks (
+                    target_id, checked_at, status_code, latency_ms, result, tls_expires_at
+                 ) VALUES ('TGT-api', ?1, 500, ?2, 'error', ?3)",
+                params![
+                    format!("2026-05-28T20:0{minute}:00Z"),
+                    100 + minute,
+                    if minute == 5 {
+                        Some("2026-09-01T00:00:00Z")
+                    } else {
+                        None
+                    },
+                ],
+            )?;
+        }
+
+        let targets = store.health_targets()?;
+
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].id, "TGT-api");
+        assert_eq!(targets[0].state, "down");
+        assert_eq!(targets[0].consecutive_failures, 3);
+        assert_eq!(targets[0].latency_ms, Some(105));
+        assert_eq!(
+            targets[0].tls_expires_at.as_deref(),
+            Some("2026-09-01T00:00:00Z")
+        );
+        assert_eq!(targets[0].recent_checks.len(), 5);
+        assert_eq!(
+            targets[0].recent_checks[0].checked_at,
+            "2026-05-28T20:05:00Z"
+        );
+        assert_eq!(targets[1].id, "TGT-worker");
+        assert_eq!(targets[1].service, "Worker");
+        assert_eq!(targets[1].state, "unknown");
+        assert_eq!(targets[1].recent_checks, Vec::<HealthCheckSummary>::new());
+
+        Ok(())
+    }
+
+    #[test]
+    fn error_summary_counts_active_groups_inside_window()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let store = migrated_store()?;
+        for (hash, service, last_seen_at, count, status) in [
+            ("group-a", "api", "2026-05-28T20:00:00Z", 7, "active"),
+            ("group-b", "api", "2026-05-28T19:00:00Z", 5, "active"),
+            ("group-c", "worker", "2026-05-28T20:30:00Z", 11, "active"),
+            ("group-old", "api", "2026-05-27T20:00:00Z", 99, "active"),
+            (
+                "group-resolved",
+                "api",
+                "2026-05-28T20:00:00Z",
+                99,
+                "resolved",
+            ),
+        ] {
+            store.connection.execute(
+                "INSERT INTO error_groups (
+                    group_hash, service, error_class, severity, first_seen_at, last_seen_at,
+                    last_error_id, total_count, status
+                 ) VALUES (?1, ?2, 'RuntimeError', 'error', ?3, ?3, ?4, ?5, ?6)",
+                params![
+                    hash,
+                    service,
+                    last_seen_at,
+                    format!("ERR-{hash}"),
+                    count,
+                    status
+                ],
+            )?;
+        }
+        let now = OffsetDateTime::parse("2026-05-28T21:00:00Z", &Rfc3339)?;
+
+        let summary = query::error_summary_at(&store.connection, "6h", now)?;
+
+        assert_eq!(summary.len(), 2);
+        assert_eq!(summary[0].service, "api");
+        assert_eq!(summary[0].total_count, 12);
+        assert_eq!(summary[0].unique_classes, 2);
+        assert_eq!(summary[1].service, "worker");
+        assert_eq!(summary[1].total_count, 11);
+        assert_eq!(summary[1].unique_classes, 1);
 
         Ok(())
     }
