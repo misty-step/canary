@@ -764,6 +764,24 @@ the Rust server accepts production traffic:
     `problem_details::tests::query_and_annotation_problem_factories_preserve_wire_shape`,
     and `problem_details::tests::operational_problem_factories_preserve_status_codes`
     lock the response bodies that agents and SDKs depend on.
+69. Public routes and annotation routes are now separate Axum adapters under
+    `canary-server::public_routes` and `canary-server::annotations`. This keeps
+    `canary-server/src/lib.rs` as the process and route-registration boundary
+    instead of the owner of every handler. Public route bodies still come from
+    `canary-http::public`; annotation routing still uses the shared server auth,
+    rate-limit, response, and post-commit effect boundaries. The annotation
+    module owns the subject-specific path adapters, unified annotation query,
+    validation parsing, and best-effort `annotation.added` webhook enqueue
+    translation. Route strings remain in `ingest_router`, so path drift is easy
+    to review. The focused tests
+    `healthz_adapts_the_public_contract`,
+    `readyz_returns_ready_when_all_dependencies_are_ok`,
+    `readyz_returns_503_when_any_dependency_fails`,
+    `openapi_serves_the_checked_in_document_unchanged`,
+    `public_router_does_not_mount_private_routes`,
+    `annotations_create_list_paginate_and_emit_webhook_effect`, and
+    `legacy_annotation_routes_and_errors_follow_phoenix_contract` lock the
+    unauthenticated and annotation wire contracts after the split.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -793,5 +811,5 @@ Phoenix behavior until the replacement is complete:
 
 1. Continue converging the Rust replacement around small, typed contracts:
    split the remaining Axum route helpers in `canary-server/src/lib.rs` by
-   route family so ingest, health, admin, query, annotations, and reporting can
-   be reviewed as independent adapters without changing wire behavior.
+   route family so ingest, health, admin, query, and reporting can be reviewed
+   as independent adapters without changing wire behavior.
