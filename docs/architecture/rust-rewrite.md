@@ -750,6 +750,20 @@ the Rust server accepts production traffic:
     `webhooks::tests::in_memory_circuit_failed_probe_reopens_for_another_probe_interval`
     lock the production invariant that Rust webhook delivery cannot flood
     responders in exception loops or hammer an endpoint whose circuit is open.
+68. RFC 9457 Problem Details construction now belongs to `canary-http` instead
+    of the Axum server. The server still chooses route-specific detail strings
+    and domain inputs, but shared wire decisions live beside the
+    `ProblemDetails` type: status codes, stable `code` strings, problem type
+    slugs, `request_id` nullability, and the canonical `errors` object shape.
+    This is intentionally not an `IntoProblem` trait or a server-error enum;
+    callers pass the few facts that vary, and the contract crate owns the JSON
+    shape. Store-specific knowledge such as `TargetConflict` remains in
+    `canary-server`, which converts it to a plain validation error map before
+    crossing into the HTTP contract. The focused tests
+    `problem_details::tests::validation_factories_preserve_phoenix_details_and_errors`,
+    `problem_details::tests::query_and_annotation_problem_factories_preserve_wire_shape`,
+    and `problem_details::tests::operational_problem_factories_preserve_status_codes`
+    lock the response bodies that agents and SDKs depend on.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -778,6 +792,6 @@ Phoenix behavior until the replacement is complete:
 ## Next Slices
 
 1. Continue converging the Rust replacement around small, typed contracts:
-   move Problem Details factory functions from `canary-server` into
-   `canary-http` so RFC 9457 wire translation is owned beside the
-   `ProblemDetails` type, while preserving every existing route-level behavior.
+   split the remaining Axum route helpers in `canary-server/src/lib.rs` by
+   route family so ingest, health, admin, query, annotations, and reporting can
+   be reviewed as independent adapters without changing wire behavior.

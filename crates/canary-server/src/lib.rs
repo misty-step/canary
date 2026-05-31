@@ -35,12 +35,19 @@ use canary_http::{
         ApiKeyScope, BearerToken, Permission, extract_bearer, insufficient_scope_problem,
         invalid_api_key_problem, missing_authorization_problem,
     },
-    problem_details::{ProblemCode, ProblemDetails},
-    rate_limit::{RateLimitKind, rate_limited_problem},
-    request::{
-        MAX_JSON_BODY_BYTES, decode_json_object,
-        payload_too_large_problem as http_payload_too_large_problem,
+    problem_details::{
+        ProblemDetails, annotation_invalid_cursor_problem, annotation_missing_subject_problem,
+        internal_problem, invalid_annotation_limit_problem, invalid_annotation_problem,
+        invalid_annotation_subject_type_problem, invalid_cursor_problem,
+        invalid_event_type_problem, invalid_limit_problem, invalid_observed_at_problem,
+        invalid_report_cursor_problem, invalid_report_limit_problem, invalid_string_param_problem,
+        invalid_target_url_problem, invalid_webhook_delivery_status_problem,
+        invalid_window_problem, missing_query_problem, not_found_problem,
+        payload_too_large_problem, target_checks_window_problem, validation_detail_problem,
+        validation_problem, webhook_delivery_failed_problem,
     },
+    rate_limit::{RateLimitKind, rate_limited_problem},
+    request::{MAX_JSON_BODY_BYTES, decode_json_object},
 };
 use canary_ingest::{
     IngestConfig, IngestContext, IngestEffect, IngestError, ValidationErrors,
@@ -851,14 +858,7 @@ async fn create_error(
 
     let mut store = match state.store.lock() {
         Ok(store) => store,
-        Err(_) => {
-            return problem_response(ProblemDetails::new(
-                500,
-                ProblemCode::InternalError,
-                "An unexpected error occurred.",
-                None,
-            ));
-        }
+        Err(_) => return problem_response(internal_problem()),
     };
 
     let result = ingest_error(&mut store, &attrs, &state.config, IngestContext::now());
@@ -876,16 +876,14 @@ async fn create_error(
                 }),
             )
         }
-        Err(IngestError::Validation(errors)) => problem_response(validation_problem(errors)),
+        Err(IngestError::Validation(errors)) => problem_response(validation_problem(
+            "Request body has invalid fields.",
+            errors,
+        )),
         Err(IngestError::PayloadTooLarge(detail)) => {
             problem_response(payload_too_large_problem(detail))
         }
-        Err(IngestError::Store(_)) => problem_response(ProblemDetails::new(
-            500,
-            ProblemCode::InternalError,
-            "An unexpected error occurred.",
-            None,
-        )),
+        Err(IngestError::Store(_)) => problem_response(internal_problem()),
     }
 }
 
@@ -1045,10 +1043,10 @@ async fn create_monitor(
     };
     match store.create_monitor(monitor) {
         Ok(true) => json_status_response(StatusCode::CREATED.as_u16(), response_body),
-        Ok(false) => problem_response(monitor_validation_problem(BTreeMap::from([(
-            "name".to_owned(),
-            vec!["has already been taken".to_owned()],
-        )]))),
+        Ok(false) => problem_response(validation_problem(
+            "Invalid monitor configuration.",
+            BTreeMap::from([("name".to_owned(), vec!["has already been taken".to_owned()])]),
+        )),
         Err(_) => problem_response(internal_problem()),
     }
 }
@@ -1689,9 +1687,9 @@ async fn timeline(
         Err(TimelineQueryError::InvalidWindow) => problem_response(invalid_window_problem()),
         Err(TimelineQueryError::InvalidLimit) => problem_response(invalid_limit_problem()),
         Err(TimelineQueryError::InvalidCursor) => problem_response(invalid_cursor_problem()),
-        Err(TimelineQueryError::InvalidEventType(invalid)) => {
-            problem_response(invalid_event_type_problem(&invalid))
-        }
+        Err(TimelineQueryError::InvalidEventType(invalid)) => problem_response(
+            invalid_event_type_problem(&invalid, canary_core::webhook_events::business()),
+        ),
         Err(TimelineQueryError::Sqlite(_)) => problem_response(internal_problem()),
     }
 }
@@ -1733,9 +1731,9 @@ async fn webhook_deliveries(
         Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
         Err(WebhookDeliveryPageError::InvalidLimit) => problem_response(invalid_limit_problem()),
         Err(WebhookDeliveryPageError::InvalidCursor) => problem_response(invalid_cursor_problem()),
-        Err(WebhookDeliveryPageError::InvalidStatus) => {
-            problem_response(invalid_webhook_delivery_status_problem())
-        }
+        Err(WebhookDeliveryPageError::InvalidStatus) => problem_response(
+            invalid_webhook_delivery_status_problem(canary_store::webhook_delivery_statuses()),
+        ),
         Err(WebhookDeliveryPageError::Sqlite(_)) => problem_response(internal_problem()),
     }
 }
@@ -2768,7 +2766,7 @@ fn parse_annotation_create(
         return Err(Box::new(invalid_annotation_problem()));
     }
 
-    let mut errors: ValidationErrors = BTreeMap::new();
+    let mut errors: ValidationErrors = ValidationErrors::new();
     let unified_route = fixed_subject.is_none();
     let (subject_type, subject_id) = match fixed_subject {
         Some((subject_type, subject_id)) => (subject_type.to_owned(), subject_id),
@@ -2786,27 +2784,22 @@ fn parse_annotation_create(
     let metadata = attrs.get("metadata").cloned();
 
     if !errors.is_empty() {
-        return Err(Box::new(annotation_missing_fields_problem(errors)));
+        return Err(Box::new(validation_problem(
+            "Missing required fields.",
+            errors,
+        )));
     }
     if unified_route
         && !canary_store::annotation_subject_types()
             .iter()
             .any(|allowed| *allowed == subject_type)
     {
-        let mut errors = BTreeMap::new();
+        let mut errors = ValidationErrors::new();
         errors.insert(
             "subject_type".to_owned(),
             vec!["must be one of incident, error_group, target, monitor".to_owned()],
         );
-        return Err(Box::new(
-            ProblemDetails::new(
-                422,
-                ProblemCode::ValidationError,
-                "Unknown subject_type.",
-                None,
-            )
-            .with_extra("errors", json!(errors)),
-        ));
+        return Err(Box::new(invalid_annotation_subject_type_problem()));
     }
 
     Ok(AnnotationCreate {
@@ -2847,23 +2840,23 @@ fn required_annotation_string(
 fn parse_webhook_create(
     attrs: Map<String, Value>,
 ) -> Result<WebhookSubscriptionInsert, Box<ProblemDetails>> {
-    let mut errors: ValidationErrors = BTreeMap::new();
+    let mut errors: ValidationErrors = ValidationErrors::new();
     let url = required_string(&attrs, "url", &mut errors);
     let events = required_string_array(&attrs, "events", &mut errors);
 
     if !errors.is_empty() {
-        return Err(Box::new(webhook_validation_problem(
+        return Err(Box::new(validation_detail_problem(
             "Invalid webhook configuration.",
         )));
     }
 
     let Some(url) = url else {
-        return Err(Box::new(webhook_validation_problem(
+        return Err(Box::new(validation_detail_problem(
             "Invalid webhook configuration.",
         )));
     };
     let Some(events) = events else {
-        return Err(Box::new(webhook_validation_problem(
+        return Err(Box::new(validation_detail_problem(
             "Invalid webhook configuration.",
         )));
     };
@@ -2874,7 +2867,7 @@ fn parse_webhook_create(
         .cloned()
         .collect::<Vec<_>>();
     if !invalid.is_empty() {
-        return Err(Box::new(webhook_validation_problem(format!(
+        return Err(Box::new(validation_detail_problem(format!(
             "Invalid event types: {}",
             invalid.join(", ")
         ))));
@@ -2891,7 +2884,7 @@ fn parse_webhook_create(
 }
 
 fn parse_api_key_create(attrs: Map<String, Value>) -> Result<ApiKeyCreate, Box<ProblemDetails>> {
-    let mut errors: ValidationErrors = BTreeMap::new();
+    let mut errors: ValidationErrors = ValidationErrors::new();
     for field in attrs.keys() {
         if !matches!(field.as_str(), "name" | "scope") {
             errors.insert(field.clone(), vec!["is not permitted".to_owned()]);
@@ -2926,7 +2919,10 @@ fn parse_api_key_create(attrs: Map<String, Value>) -> Result<ApiKeyCreate, Box<P
     if errors.is_empty() {
         Ok(ApiKeyCreate { name, scope })
     } else {
-        Err(Box::new(api_key_validation_problem(errors)))
+        Err(Box::new(validation_problem(
+            "Invalid API key request.",
+            errors,
+        )))
     }
 }
 
@@ -2934,7 +2930,7 @@ fn parse_service_onboarding_create(
     attrs: Map<String, Value>,
     configured_allow_private: bool,
 ) -> Result<ServiceOnboardingCreate, Box<ProblemDetails>> {
-    let mut errors: ValidationErrors = BTreeMap::new();
+    let mut errors: ValidationErrors = ValidationErrors::new();
     let service = required_trimmed_string(&attrs, "service", &mut errors);
     let url = required_trimmed_string(&attrs, "url", &mut errors);
     let environment = optional_trimmed_string(attrs.get("environment"))
@@ -2953,23 +2949,29 @@ fn parse_service_onboarding_create(
     };
 
     if !errors.is_empty() {
-        return Err(Box::new(service_onboarding_validation_problem(errors)));
+        return Err(Box::new(validation_problem(
+            "Invalid service onboarding request.",
+            errors,
+        )));
     }
 
     let Some(service) = service else {
-        return Err(Box::new(service_onboarding_validation_problem(
-            BTreeMap::new(),
+        return Err(Box::new(validation_problem(
+            "Invalid service onboarding request.",
+            ValidationErrors::new(),
         )));
     };
     let Some(url) = url else {
-        return Err(Box::new(service_onboarding_validation_problem(
-            BTreeMap::new(),
+        return Err(Box::new(validation_problem(
+            "Invalid service onboarding request.",
+            ValidationErrors::new(),
         )));
     };
     if let Err(reason) =
         validate_target_configuration(&url, "GET", None, configured_allow_private || allow_private)
     {
-        return Err(Box::new(service_onboarding_validation_problem(
+        return Err(Box::new(validation_problem(
+            "Invalid service onboarding request.",
             BTreeMap::from([("url".to_owned(), vec![service_onboarding_url_error(reason)])]),
         )));
     }
@@ -3079,7 +3081,7 @@ fn service_onboarding_url_error(reason: String) -> String {
 }
 
 fn parse_monitor_create(attrs: Map<String, Value>) -> Result<MonitorInsert, Box<ProblemDetails>> {
-    let mut errors: ValidationErrors = BTreeMap::new();
+    let mut errors: ValidationErrors = ValidationErrors::new();
     let name = required_string(&attrs, "name", &mut errors);
     let mode = required_string(&attrs, "mode", &mut errors);
     if let Some(mode) = mode.as_deref()
@@ -3100,14 +3102,23 @@ fn parse_monitor_create(attrs: Map<String, Value>) -> Result<MonitorInsert, Box<
     let grace_ms = optional_non_negative_i64(&attrs, "grace_ms", 0, &mut errors);
 
     if !errors.is_empty() {
-        return Err(Box::new(monitor_validation_problem(errors)));
+        return Err(Box::new(validation_problem(
+            "Invalid monitor configuration.",
+            errors,
+        )));
     }
 
     let Some(name) = name else {
-        return Err(Box::new(monitor_validation_problem(BTreeMap::new())));
+        return Err(Box::new(validation_problem(
+            "Invalid monitor configuration.",
+            ValidationErrors::new(),
+        )));
     };
     let Some(mode) = mode else {
-        return Err(Box::new(monitor_validation_problem(BTreeMap::new())));
+        return Err(Box::new(validation_problem(
+            "Invalid monitor configuration.",
+            ValidationErrors::new(),
+        )));
     };
 
     Ok(MonitorInsert {
@@ -3125,7 +3136,7 @@ fn parse_target_create(
     attrs: Map<String, Value>,
     configured_allow_private: bool,
 ) -> Result<TargetInsert, Box<ProblemDetails>> {
-    let mut errors: ValidationErrors = BTreeMap::new();
+    let mut errors: ValidationErrors = ValidationErrors::new();
     let name = required_string(&attrs, "name", &mut errors);
     let url = required_string(&attrs, "url", &mut errors);
     let method = optional_string(attrs.get("method")).unwrap_or_else(|| "GET".to_owned());
@@ -3144,26 +3155,30 @@ fn parse_target_create(
     let up_after = optional_positive_u32(&attrs, "up_after", 1, &mut errors);
 
     if !errors.is_empty() {
-        return Err(Box::new(target_validation_problem(errors)));
+        return Err(Box::new(validation_problem(
+            "Invalid target configuration.",
+            errors,
+        )));
     }
 
     let Some(name) = name else {
-        return Err(Box::new(target_validation_problem(BTreeMap::new())));
+        return Err(Box::new(validation_problem(
+            "Invalid target configuration.",
+            ValidationErrors::new(),
+        )));
     };
     let Some(url) = url else {
-        return Err(Box::new(target_validation_problem(BTreeMap::new())));
+        return Err(Box::new(validation_problem(
+            "Invalid target configuration.",
+            ValidationErrors::new(),
+        )));
     };
     let service = optional_string(attrs.get("service")).unwrap_or_else(|| name.clone());
     let allow_private = configured_allow_private || optional_bool(attrs.get("allow_private"));
     if let Err(reason) =
         validate_target_configuration(&url, &method, headers.as_deref(), allow_private)
     {
-        return Err(Box::new(ProblemDetails::new(
-            422,
-            ProblemCode::ValidationError,
-            format!("Invalid URL: {reason}"),
-            None,
-        )));
+        return Err(Box::new(invalid_target_url_problem(reason)));
     }
 
     Ok(TargetInsert {
@@ -3187,13 +3202,16 @@ fn parse_target_create(
 }
 
 fn parse_target_interval_update(attrs: &Map<String, Value>) -> Result<i64, Box<ProblemDetails>> {
-    let mut errors: ValidationErrors = BTreeMap::new();
+    let mut errors: ValidationErrors = ValidationErrors::new();
     if attrs.is_empty() {
         errors.insert(
             "interval_ms".to_owned(),
             vec!["is required for target interval updates".to_owned()],
         );
-        return Err(Box::new(target_validation_problem(errors)));
+        return Err(Box::new(validation_problem(
+            "Invalid target configuration.",
+            errors,
+        )));
     }
 
     for key in attrs.keys() {
@@ -3216,7 +3234,10 @@ fn parse_target_interval_update(attrs: &Map<String, Value>) -> Result<i64, Box<P
     if errors.is_empty() {
         Ok(interval_ms)
     } else {
-        Err(Box::new(target_validation_problem(errors)))
+        Err(Box::new(validation_problem(
+            "Invalid target configuration.",
+            errors,
+        )))
     }
 }
 
@@ -3324,19 +3345,28 @@ fn optional_positive_u32(
 }
 
 fn parse_check_in(attrs: Map<String, Value>) -> Result<ParsedCheckIn, Box<ProblemDetails>> {
-    let mut errors: ValidationErrors = BTreeMap::new();
+    let mut errors: ValidationErrors = ValidationErrors::new();
     let monitor_name = required_string(&attrs, "monitor", &mut errors);
     let status = parse_check_in_status(attrs.get("status"), &mut errors);
 
     if !errors.is_empty() {
-        return Err(Box::new(check_in_validation_problem(errors)));
+        return Err(Box::new(validation_problem(
+            "Invalid check-in payload.",
+            errors,
+        )));
     }
 
     let Some(monitor_name) = monitor_name else {
-        return Err(Box::new(check_in_validation_problem(BTreeMap::new())));
+        return Err(Box::new(validation_problem(
+            "Invalid check-in payload.",
+            ValidationErrors::new(),
+        )));
     };
     let Some(status) = status else {
-        return Err(Box::new(check_in_validation_problem(BTreeMap::new())));
+        return Err(Box::new(validation_problem(
+            "Invalid check-in payload.",
+            ValidationErrors::new(),
+        )));
     };
     let observed_at = match attrs.get("observed_at") {
         Some(Value::String(value)) => value.clone(),
@@ -3518,15 +3548,6 @@ async fn list_incidents(
     }
 }
 
-fn missing_query_problem() -> ProblemDetails {
-    ProblemDetails::new(
-        422,
-        ProblemCode::ValidationError,
-        "Provide 'service', 'error_class', or 'group_by=error_class' parameter.",
-        None,
-    )
-}
-
 async fn show_error(
     State(state): State<IngestState>,
     headers: HeaderMap,
@@ -3543,12 +3564,7 @@ async fn show_error(
 
     match store.error_detail(&id) {
         Ok(Some(result)) => json_status_response(StatusCode::OK.as_u16(), result),
-        Ok(None) => problem_response(ProblemDetails::new(
-            404,
-            ProblemCode::NotFound,
-            format!("Error {id} not found."),
-            None,
-        )),
+        Ok(None) => problem_response(not_found_problem(format!("Error {id} not found."))),
         Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
         Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
     }
@@ -3570,12 +3586,7 @@ async fn show_incident(
 
     match store.incident_detail(&id) {
         Ok(Some(result)) => json_status_response(StatusCode::OK.as_u16(), result),
-        Ok(None) => problem_response(ProblemDetails::new(
-            404,
-            ProblemCode::NotFound,
-            format!("Incident {id} not found."),
-            None,
-        )),
+        Ok(None) => problem_response(not_found_problem(format!("Incident {id} not found."))),
         Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
         Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
     }
@@ -3618,22 +3629,13 @@ fn require_scope(
         BearerToken::Missing => return Err(Box::new(missing_authorization_problem(None))),
     };
 
-    let store = state.store.lock().map_err(|_| {
-        Box::new(ProblemDetails::new(
-            500,
-            ProblemCode::InternalError,
-            "An unexpected error occurred.",
-            None,
-        ))
-    })?;
-    let Some(key) = store.verify_api_key(token).map_err(|_| {
-        Box::new(ProblemDetails::new(
-            500,
-            ProblemCode::InternalError,
-            "An unexpected error occurred.",
-            None,
-        ))
-    })?
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| Box::new(internal_problem()))?;
+    let Some(key) = store
+        .verify_api_key(token)
+        .map_err(|_| Box::new(internal_problem()))?
     else {
         account_auth_fail(state, headers);
         return Err(Box::new(invalid_api_key_problem(None)));
@@ -3723,14 +3725,10 @@ fn enforce_rate_limit(
     kind: RateLimitKind,
     identity: &str,
 ) -> Result<(), Box<ProblemDetails>> {
-    let mut limiter = state.rate_limiter.lock().map_err(|_| {
-        Box::new(ProblemDetails::new(
-            500,
-            ProblemCode::InternalError,
-            "An unexpected error occurred.",
-            None,
-        ))
-    })?;
+    let mut limiter = state
+        .rate_limiter
+        .lock()
+        .map_err(|_| Box::new(internal_problem()))?;
 
     match limiter.check(kind, identity) {
         RateLimitDecision::Allowed => Ok(()),
@@ -3796,81 +3794,8 @@ fn problem_response(problem: ProblemDetails) -> Response<Body> {
     }
 }
 
-fn validation_problem(errors: ValidationErrors) -> ProblemDetails {
-    ProblemDetails::new(
-        422,
-        ProblemCode::ValidationError,
-        "Request body has invalid fields.",
-        None,
-    )
-    .with_extra("errors", json!(errors))
-}
-
-fn check_in_validation_problem(errors: ValidationErrors) -> ProblemDetails {
-    ProblemDetails::new(
-        422,
-        ProblemCode::ValidationError,
-        "Invalid check-in payload.",
-        None,
-    )
-    .with_extra("errors", json!(errors))
-}
-
-fn monitor_validation_problem(errors: ValidationErrors) -> ProblemDetails {
-    ProblemDetails::new(
-        422,
-        ProblemCode::ValidationError,
-        "Invalid monitor configuration.",
-        None,
-    )
-    .with_extra("errors", json!(errors))
-}
-
-fn api_key_validation_problem(errors: ValidationErrors) -> ProblemDetails {
-    ProblemDetails::new(
-        422,
-        ProblemCode::ValidationError,
-        "Invalid API key request.",
-        None,
-    )
-    .with_extra("errors", json!(errors))
-}
-
-fn webhook_validation_problem(detail: impl Into<String>) -> ProblemDetails {
-    ProblemDetails::new(422, ProblemCode::ValidationError, detail, None)
-}
-
-fn webhook_delivery_failed_problem(reason: impl Into<String>) -> ProblemDetails {
-    ProblemDetails::new(
-        502,
-        ProblemCode::Other("webhook_delivery_failed".to_owned()),
-        format!("Webhook test delivery failed: {}", reason.into()),
-        None,
-    )
-}
-
-fn target_validation_problem(errors: ValidationErrors) -> ProblemDetails {
-    ProblemDetails::new(
-        422,
-        ProblemCode::ValidationError,
-        "Invalid target configuration.",
-        None,
-    )
-    .with_extra("errors", json!(errors))
-}
-
-fn service_onboarding_validation_problem(errors: ValidationErrors) -> ProblemDetails {
-    ProblemDetails::new(
-        422,
-        ProblemCode::ValidationError,
-        "Invalid service onboarding request.",
-        None,
-    )
-    .with_extra("errors", json!(errors))
-}
-
 fn service_onboarding_conflict_problem(conflict: TargetConflict) -> ProblemDetails {
-    let mut errors: ValidationErrors = BTreeMap::new();
+    let mut errors: ValidationErrors = ValidationErrors::new();
     if conflict.service {
         errors.insert(
             "service".to_owned(),
@@ -3881,173 +3806,7 @@ fn service_onboarding_conflict_problem(conflict: TargetConflict) -> ProblemDetai
         errors.insert("url".to_owned(), vec!["is already monitored".to_owned()]);
     }
 
-    service_onboarding_validation_problem(errors)
-}
-
-fn invalid_observed_at_problem() -> ProblemDetails {
-    ProblemDetails::new(
-        422,
-        ProblemCode::ValidationError,
-        "Invalid observed_at timestamp.",
-        None,
-    )
-    .with_extra(
-        "errors",
-        json!({"observed_at": ["must be an ISO8601 timestamp"]}),
-    )
-}
-
-fn not_found_problem(detail: impl Into<String>) -> ProblemDetails {
-    ProblemDetails::new(404, ProblemCode::NotFound, detail, None)
-}
-
-fn payload_too_large_problem(detail: impl Into<String>) -> ProblemDetails {
-    http_payload_too_large_problem(detail, None)
-}
-
-fn invalid_window_problem() -> ProblemDetails {
-    ProblemDetails::new(
-        422,
-        ProblemCode::ValidationError,
-        canary_core::query::INVALID_WINDOW_DETAIL,
-        None,
-    )
-    .with_extra(
-        "errors",
-        json!({"window": [canary_core::query::INVALID_WINDOW_FIELD_ERROR]}),
-    )
-}
-
-fn invalid_limit_problem() -> ProblemDetails {
-    ProblemDetails::new(
-        422,
-        ProblemCode::ValidationError,
-        "Invalid limit. Expected a positive integer up to 200.",
-        None,
-    )
-    .with_extra(
-        "errors",
-        json!({"limit": ["must be a positive integer no greater than 200"]}),
-    )
-}
-
-fn invalid_cursor_problem() -> ProblemDetails {
-    ProblemDetails::new(422, ProblemCode::ValidationError, "Invalid cursor.", None).with_extra(
-        "errors",
-        json!({"cursor": ["must be a valid pagination cursor"]}),
-    )
-}
-
-fn annotation_missing_fields_problem(errors: ValidationErrors) -> ProblemDetails {
-    ProblemDetails::new(
-        422,
-        ProblemCode::ValidationError,
-        "Missing required fields.",
-        None,
-    )
-    .with_extra("errors", json!(errors))
-}
-
-fn invalid_annotation_problem() -> ProblemDetails {
-    ProblemDetails::new(
-        422,
-        ProblemCode::ValidationError,
-        "Invalid annotation.",
-        None,
-    )
-}
-
-fn annotation_missing_subject_problem(field: &str) -> ProblemDetails {
-    let mut errors: ValidationErrors = BTreeMap::new();
-    errors.insert(field.to_owned(), vec!["is required".to_owned()]);
-    ProblemDetails::new(422, ProblemCode::ValidationError, "Missing subject.", None)
-        .with_extra("errors", json!(errors))
-}
-
-fn invalid_annotation_subject_type_problem() -> ProblemDetails {
-    ProblemDetails::new(
-        422,
-        ProblemCode::ValidationError,
-        "Unknown subject_type.",
-        None,
-    )
-    .with_extra(
-        "errors",
-        json!({"subject_type": ["must be one of incident, error_group, target, monitor"]}),
-    )
-}
-
-fn invalid_annotation_limit_problem() -> ProblemDetails {
-    ProblemDetails::new(422, ProblemCode::ValidationError, "Invalid limit.", None).with_extra(
-        "errors",
-        json!({"limit": ["must be an integer between 1 and 50"]}),
-    )
-}
-
-fn annotation_invalid_cursor_problem() -> ProblemDetails {
-    ProblemDetails::new(422, ProblemCode::ValidationError, "Invalid cursor.", None)
-        .with_extra("errors", json!({"cursor": ["is invalid"]}))
-}
-
-fn invalid_event_type_problem(invalid: &[String]) -> ProblemDetails {
-    let allowed = canary_core::webhook_events::business().join(", ");
-    ProblemDetails::new(
-        422,
-        ProblemCode::ValidationError,
-        format!(
-            "Invalid event_type: {}. Allowed: {allowed}",
-            invalid.join(", ")
-        ),
-        None,
-    )
-    .with_extra(
-        "errors",
-        json!({"event_type": [format!("must be one or more of: {allowed}")]}),
-    )
-}
-
-fn invalid_webhook_delivery_status_problem() -> ProblemDetails {
-    let allowed = canary_store::webhook_delivery_statuses().join(", ");
-    ProblemDetails::new(
-        422,
-        ProblemCode::ValidationError,
-        format!("Invalid status. Allowed: {allowed}"),
-        None,
-    )
-    .with_extra(
-        "errors",
-        json!({"status": [format!("must be one of: {allowed}")]}),
-    )
-}
-
-fn invalid_string_param_problem(param: &str) -> ProblemDetails {
-    let mut errors: ValidationErrors = BTreeMap::new();
-    errors.insert(param.to_owned(), vec!["must be a string".to_owned()]);
-
-    ProblemDetails::new(
-        422,
-        ProblemCode::ValidationError,
-        format!("Invalid {param} parameter. Must be a string."),
-        None,
-    )
-    .with_extra("errors", json!(errors))
-}
-
-fn invalid_report_limit_problem() -> ProblemDetails {
-    ProblemDetails::new(
-        422,
-        ProblemCode::ValidationError,
-        "Invalid limit. Expected a positive integer.",
-        None,
-    )
-    .with_extra("errors", json!({"limit": ["must be a positive integer"]}))
-}
-
-fn invalid_report_cursor_problem() -> ProblemDetails {
-    ProblemDetails::new(422, ProblemCode::ValidationError, "Invalid cursor.", None).with_extra(
-        "errors",
-        json!({"cursor": ["must be a valid pagination cursor"]}),
-    )
+    validation_problem("Invalid service onboarding request.", errors)
 }
 
 fn parse_report_limit(limit: Option<&str>) -> Result<Option<usize>, Box<ProblemDetails>> {
@@ -4270,19 +4029,6 @@ fn query_param_is_array(raw_query: Option<&str>, param: &str) -> bool {
     }
 
     false
-}
-
-fn target_checks_window_problem() -> ProblemDetails {
-    ProblemDetails::new(422, ProblemCode::ValidationError, "Invalid window.", None)
-}
-
-fn internal_problem() -> ProblemDetails {
-    ProblemDetails::new(
-        500,
-        ProblemCode::InternalError,
-        "An unexpected error occurred.",
-        None,
-    )
 }
 
 fn text_response(contract: PublicResponse<&'static str>) -> Response<Body> {

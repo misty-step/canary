@@ -1841,8 +1841,10 @@ mod tests {
             "group-query-a",
             "2026-05-28T20:00:00Z",
         ))?;
+        let now = OffsetDateTime::parse("2026-05-28T21:00:00Z", &Rfc3339)?;
 
-        let result = store.errors_by_service("cadence", "24h", ServiceQueryOptions::default())?;
+        let result =
+            store.errors_by_service_at("cadence", "24h", ServiceQueryOptions::default(), now)?;
 
         assert_eq!(result.service, "cadence");
         assert_eq!(result.window, "24h");
@@ -1883,19 +1885,21 @@ mod tests {
                 ],
             )?;
         }
+        let as_of = OffsetDateTime::parse("2026-05-28T21:00:00Z", &Rfc3339)?;
 
         let first_page =
-            store.errors_by_service("svc-page", "24h", ServiceQueryOptions::default())?;
+            store.errors_by_service_at("svc-page", "24h", ServiceQueryOptions::default(), as_of)?;
         assert_eq!(first_page.groups.len(), 50);
         assert!(first_page.cursor.is_some());
 
-        let second_page = store.errors_by_service(
+        let second_page = store.errors_by_service_at(
             "svc-page",
             "24h",
             ServiceQueryOptions {
                 cursor: first_page.cursor,
                 ..ServiceQueryOptions::default()
             },
+            as_of,
         )?;
 
         assert_eq!(
@@ -1932,9 +1936,10 @@ mod tests {
                 ],
             )?;
         }
+        let as_of = OffsetDateTime::parse("2026-05-28T21:00:00Z", &Rfc3339)?;
 
         let first_page =
-            store.errors_by_service("cadence", "24h", ServiceQueryOptions::default())?;
+            store.errors_by_service_at("cadence", "24h", ServiceQueryOptions::default(), as_of)?;
         assert_eq!(first_page.groups.len(), 50);
         assert_eq!(first_page.groups[0].group_hash, "group-001");
         assert_eq!(first_page.groups[49].group_hash, "group-050");
@@ -1946,18 +1951,19 @@ mod tests {
             "2026-05-28T20:01:00Z",
         ))?;
 
-        let second_page = store.errors_by_service(
+        let second_page = store.errors_by_service_at(
             "cadence",
             "24h",
             ServiceQueryOptions {
                 cursor: first_page.cursor,
                 ..ServiceQueryOptions::default()
             },
+            as_of,
         )?;
 
         assert_eq!(second_page.groups, Vec::new());
         let fresh_first_page =
-            store.errors_by_service("cadence", "24h", ServiceQueryOptions::default())?;
+            store.errors_by_service_at("cadence", "24h", ServiceQueryOptions::default(), as_of)?;
         assert_eq!(fresh_first_page.groups[0].group_hash, "group-051");
         assert_eq!(fresh_first_page.groups[0].total_count, 50);
 
@@ -1985,8 +1991,9 @@ mod tests {
                 ],
             )?;
         }
+        let as_of = OffsetDateTime::parse("2026-05-28T21:00:00Z", &Rfc3339)?;
 
-        let result = store.errors_by_class("24h")?;
+        let result = store.errors_by_class_at("24h", as_of)?;
 
         assert_eq!(result.window, "24h");
         assert_eq!(result.groups.len(), 50);
