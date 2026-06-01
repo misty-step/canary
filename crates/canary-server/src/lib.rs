@@ -55,6 +55,7 @@ mod annotations;
 mod health_fanout;
 mod health_routes;
 mod ingest_routes;
+mod metrics_routes;
 mod monitor_overdue;
 mod public_routes;
 mod query_routes;
@@ -83,6 +84,7 @@ pub use health_fanout::{
 };
 use health_routes::{health_status, status, target_checks};
 use ingest_routes::{create_check_in, create_error};
+use metrics_routes::metrics;
 pub use monitor_overdue::{
     MonitorOverdueLifecycle, MonitorOverdueLifecycleConfig, MonitorOverdueLifecycleReport,
     MonitorOverdueLifecycleWorker, MonitorOverdueOutcome, MonitorOverdueRuntime,
@@ -117,7 +119,6 @@ pub use webhooks::{
 
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 const PROBLEM_CONTENT_TYPE: &str = "application/problem+json; charset=utf-8";
-const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 const UNKNOWN_AUTH_FAIL_IDENTITY: &str = "unknown";
 
 fn default_webhook_transport() -> Arc<dyn WebhookTransport> {
@@ -788,26 +789,6 @@ impl TargetControlSink for NoopTargetControlSink {
 impl TargetControlSink for TargetProbeLifecycleController {
     fn control_target(&self, command: TargetProbeLifecycleCommand) -> Result<(), String> {
         TargetProbeLifecycleController::control_target(self, command)
-    }
-}
-
-async fn metrics(State(state): State<IngestState>, headers: HeaderMap) -> Response<Body> {
-    if let Err(problem) = require_query_limited_admin_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
-
-    let store = match state.store.lock() {
-        Ok(store) => store,
-        Err(_) => return problem_response(internal_problem()),
-    };
-
-    match store.metrics_snapshot() {
-        Ok(snapshot) => response(
-            StatusCode::OK.as_u16(),
-            PROMETHEUS_CONTENT_TYPE,
-            Body::from(canary_core::metrics::render_prometheus(&snapshot)),
-        ),
-        Err(_) => problem_response(internal_problem()),
     }
 }
 
@@ -5267,7 +5248,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers().get(CONTENT_TYPE),
-            Some(&HeaderValue::from_static(PROMETHEUS_CONTENT_TYPE))
+            Some(&HeaderValue::from_static(
+                metrics_routes::PROMETHEUS_CONTENT_TYPE
+            ))
         );
         let body = text_body(response).await?;
         assert!(body.contains("# HELP canary_webhook_queue_depth"));
@@ -5286,11 +5269,70 @@ mod tests {
             .oneshot(read_request(READ_KEY, "/metrics")?)
             .await?;
         let forbidden_status = forbidden.status();
+        assert_eq!(
+            forbidden.headers().get(CONTENT_TYPE),
+            Some(&HeaderValue::from_static(PROBLEM_CONTENT_TYPE))
+        );
+        let forbidden_body = json_body(forbidden).await?;
+        assert_eq!(forbidden_status, StatusCode::FORBIDDEN);
+        assert_eq!(forbidden_body["code"], "insufficient_scope");
+        assert_eq!(forbidden_body["status"], StatusCode::FORBIDDEN.as_u16());
+
+        let unauthorized = ingest_router(state)
+            .oneshot(Request::get("/metrics").body(Body::empty())?)
+            .await?;
+        let unauthorized_status = unauthorized.status();
+        assert_eq!(
+            unauthorized.headers().get(CONTENT_TYPE),
+            Some(&HeaderValue::from_static(PROBLEM_CONTENT_TYPE))
+        );
+        let unauthorized_body = json_body(unauthorized).await?;
+        assert_eq!(unauthorized_status, StatusCode::UNAUTHORIZED);
+        assert_eq!(unauthorized_body["code"], "invalid_api_key");
+        assert_eq!(
+            unauthorized_body["status"],
+            StatusCode::UNAUTHORIZED.as_u16()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn metrics_uses_query_rate_limit_after_admin_auth() -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let router = ingest_router(state);
+
+        for _ in 0..30 {
+            let response = router
+                .clone()
+                .oneshot(read_request(ADMIN_KEY, "/metrics")?)
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let response = router
+            .clone()
+            .oneshot(read_request(ADMIN_KEY, "/metrics")?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["code"], "rate_limited");
+        let retry_after = body["retry_after"]
+            .as_u64()
+            .ok_or("retry_after should be a number")?;
+        assert!((1..=60).contains(&retry_after));
+
+        let forbidden = router
+            .clone()
+            .oneshot(read_request(READ_KEY, "/metrics")?)
+            .await?;
+        let forbidden_status = forbidden.status();
         let forbidden_body = json_body(forbidden).await?;
         assert_eq!(forbidden_status, StatusCode::FORBIDDEN);
         assert_eq!(forbidden_body["code"], "insufficient_scope");
 
-        let unauthorized = ingest_router(state)
+        let unauthorized = router
             .oneshot(Request::get("/metrics").body(Body::empty())?)
             .await?;
         let unauthorized_status = unauthorized.status();

@@ -942,6 +942,19 @@ the Rust server accepts production traffic:
     no-write failures, body-size preflight, malformed JSON handling, validation
     mapping, unknown-monitor behavior, and successful check-in response shape
     after the split.
+79. Metrics scraping now lives in `canary-server::metrics_routes`. The module
+    owns `GET /metrics`, including admin-scope authorization, query-bucket rate
+    limiting, store snapshot loading, internal-error mapping, Prometheus
+    content type, and response conversion. `ingest_router` still owns the route
+    string. Metric exposition formatting remains in `canary-core::metrics`;
+    metric snapshot assembly remains in `canary-store`; and shared auth,
+    rate-limit, Problem Details, and response helpers stay centralized in the
+    server crate. The focused tests
+    `metrics_requires_admin_scope_and_returns_prometheus_snapshot` and
+    `metrics_uses_query_rate_limit_after_admin_auth` lock admin-only access,
+    Problem Details envelopes for auth failures, query-bucket limiting,
+    auth-before-limit ordering, content type, and representative Prometheus
+    series after the split.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -971,5 +984,5 @@ Phoenix behavior until the replacement is complete:
 
 1. Continue converging the Rust replacement around small, typed contracts:
    split the remaining Axum route helpers in `canary-server/src/lib.rs` by
-   route family, with metrics and service onboarding as the obvious remaining
-   route surfaces, without changing wire behavior.
+   route family, with service onboarding as the obvious remaining route
+   surface, without changing wire behavior.
