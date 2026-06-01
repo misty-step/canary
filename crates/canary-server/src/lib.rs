@@ -31,24 +31,17 @@ use canary_http::{
         invalid_api_key_problem, missing_authorization_problem,
     },
     problem_details::{
-        ProblemDetails, internal_problem, invalid_observed_at_problem, not_found_problem,
-        payload_too_large_problem, validation_problem,
+        ProblemDetails, internal_problem, payload_too_large_problem, validation_problem,
     },
     rate_limit::{RateLimitKind, rate_limited_problem},
     request::{MAX_JSON_BODY_BYTES, decode_json_object},
 };
-use canary_ingest::{
-    IngestConfig, IngestContext, IngestEffect, IngestError, ValidationErrors,
-    ingest as ingest_error,
-};
+use canary_ingest::{IngestConfig, IngestEffect, ValidationErrors};
 use canary_store::{
     ApiKeyInsert, IncidentCorrelation, Store, StoreError, TargetConflict, TargetInsert,
     VerifiedApiKey,
 };
-use canary_workers::health::{
-    HealthPlanError, MonitorCheckInInput, MonitorCheckInStatus, MonitorMode, MonitorSnapshot,
-    ObservationContext, plan_monitor_check_in,
-};
+use canary_workers::health::{MonitorMode, MonitorSnapshot};
 use canary_workers::retention::RetentionPolicy;
 use canary_workers::webhooks::{TransportResult, WebhookRequest};
 use serde::Serialize;
@@ -61,6 +54,7 @@ mod admin_webhooks;
 mod annotations;
 mod health_fanout;
 mod health_routes;
+mod ingest_routes;
 mod monitor_overdue;
 mod public_routes;
 mod query_routes;
@@ -88,6 +82,7 @@ pub use health_fanout::{
     EventFanoutReport, HealthEventFanout, HealthEventSource,
 };
 use health_routes::{health_status, status, target_checks};
+use ingest_routes::{create_check_in, create_error};
 pub use monitor_overdue::{
     MonitorOverdueLifecycle, MonitorOverdueLifecycleConfig, MonitorOverdueLifecycleReport,
     MonitorOverdueLifecycleWorker, MonitorOverdueOutcome, MonitorOverdueRuntime,
@@ -796,144 +791,6 @@ impl TargetControlSink for TargetProbeLifecycleController {
     }
 }
 
-async fn create_error(
-    State(state): State<IngestState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response<Body> {
-    if let Err(problem) = check_content_length(&headers) {
-        return problem_response(*problem);
-    }
-
-    if body.len() as u64 > MAX_JSON_BODY_BYTES {
-        return problem_response(payload_too_large_problem(
-            "Request body exceeds 100KB limit.",
-        ));
-    }
-
-    if let Err(problem) = require_ingest_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
-
-    let attrs = match decode_json_object(&body, None) {
-        Ok(attrs) => attrs,
-        Err(problem) => return problem_response(*problem),
-    };
-
-    let mut store = match state.store.lock() {
-        Ok(store) => store,
-        Err(_) => return problem_response(internal_problem()),
-    };
-
-    let result = ingest_error(&mut store, &attrs, &state.config, IngestContext::now());
-    drop(store);
-
-    match result {
-        Ok(accepted) => {
-            let _ = state.effect_sink.handle(&accepted.post_commit_effects);
-            json_status_response(
-                StatusCode::CREATED.as_u16(),
-                json!({
-                    "id": accepted.id,
-                    "group_hash": accepted.group_hash,
-                    "is_new_class": accepted.is_new_class
-                }),
-            )
-        }
-        Err(IngestError::Validation(errors)) => problem_response(validation_problem(
-            "Request body has invalid fields.",
-            errors,
-        )),
-        Err(IngestError::PayloadTooLarge(detail)) => {
-            problem_response(payload_too_large_problem(detail))
-        }
-        Err(IngestError::Store(_)) => problem_response(internal_problem()),
-    }
-}
-
-async fn create_check_in(
-    State(state): State<IngestState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response<Body> {
-    if let Err(problem) = check_content_length(&headers) {
-        return problem_response(*problem);
-    }
-
-    if body.len() as u64 > MAX_JSON_BODY_BYTES {
-        return problem_response(payload_too_large_problem(
-            "Request body exceeds 100KB limit.",
-        ));
-    }
-
-    if let Err(problem) = require_ingest_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
-
-    let attrs = match decode_json_object(&body, None) {
-        Ok(attrs) => attrs,
-        Err(problem) => return problem_response(*problem),
-    };
-    let check_in = match parse_check_in(attrs) {
-        Ok(check_in) => check_in,
-        Err(problem) => return problem_response(*problem),
-    };
-
-    let mut store = match state.store.lock() {
-        Ok(store) => store,
-        Err(_) => return problem_response(internal_problem()),
-    };
-
-    let snapshot = match store.monitor_check_in_snapshot_by_name(&check_in.monitor_name) {
-        Ok(Some(snapshot)) => snapshot,
-        Ok(None) => return problem_response(not_found_problem("Monitor not found.")),
-        Err(_) => return problem_response(internal_problem()),
-    };
-    let monitor = match monitor_snapshot(snapshot) {
-        Ok(monitor) => monitor,
-        Err(_) => return problem_response(internal_problem()),
-    };
-    let context = ObservationContext {
-        now: check_in.observed_at.clone(),
-        now_millis: current_unix_millis(),
-        event_id: canary_core::ids::EventId::generate(),
-        incident_id: canary_core::ids::IncidentId::generate(),
-        incident_event_id: canary_core::ids::EventId::generate(),
-    };
-    let plan = match plan_monitor_check_in(monitor, check_in.input, context) {
-        Ok(plan) => plan,
-        Err(HealthPlanError::InvalidObservedAt(_)) => {
-            return problem_response(invalid_observed_at_problem());
-        }
-    };
-    let response_observed_at = plan.commit.check_in.observed_at.clone();
-    let response_check_in_id = plan.commit.check_in.id.clone();
-    let response_monitor_id = plan.commit.monitor_id.clone();
-    let response_state = plan.commit.state.clone();
-    let commit = match store.commit_monitor_check_in(plan.commit) {
-        Ok(commit) => commit,
-        Err(_) => return problem_response(internal_problem()),
-    };
-    drop(store);
-
-    if let Some(transition) = commit.transition {
-        let _fanout_report = state
-            .health_fanout
-            .dispatch(HealthEventSource::MonitorCheckIn, &transition);
-    }
-
-    json_status_response(
-        StatusCode::CREATED.as_u16(),
-        json!({
-            "monitor_id": response_monitor_id,
-            "check_in_id": response_check_in_id,
-            "state": response_state,
-            "observed_at": response_observed_at,
-            "sequence": commit.sequence,
-        }),
-    )
-}
-
 async fn metrics(State(state): State<IngestState>, headers: HeaderMap) -> Response<Body> {
     if let Err(problem) = require_query_limited_admin_scope(&state, &headers) {
         return problem_response(*problem);
@@ -1028,12 +885,6 @@ async fn create_service_onboarding(
     let _control_result = state.target_control.control_target(command);
 
     json_status_response(StatusCode::CREATED.as_u16(), response_body)
-}
-
-struct ParsedCheckIn {
-    monitor_name: String,
-    observed_at: String,
-    input: MonitorCheckInInput,
 }
 
 struct ServiceOnboardingCreate {
@@ -1375,49 +1226,21 @@ fn optional_positive_u32(
     }
 }
 
-fn parse_check_in(attrs: Map<String, Value>) -> Result<ParsedCheckIn, Box<ProblemDetails>> {
-    let mut errors: ValidationErrors = ValidationErrors::new();
-    let monitor_name = required_string(&attrs, "monitor", &mut errors);
-    let status = parse_check_in_status(attrs.get("status"), &mut errors);
-
-    if !errors.is_empty() {
-        return Err(Box::new(validation_problem(
-            "Invalid check-in payload.",
-            errors,
-        )));
+fn required_string(
+    attrs: &Map<String, Value>,
+    key: &str,
+    errors: &mut ValidationErrors,
+) -> Option<String> {
+    match attrs.get(key) {
+        Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
+        _ => {
+            errors.insert(
+                key.to_owned(),
+                vec!["must be a non-empty string".to_owned()],
+            );
+            None
+        }
     }
-
-    let Some(monitor_name) = monitor_name else {
-        return Err(Box::new(validation_problem(
-            "Invalid check-in payload.",
-            ValidationErrors::new(),
-        )));
-    };
-    let Some(status) = status else {
-        return Err(Box::new(validation_problem(
-            "Invalid check-in payload.",
-            ValidationErrors::new(),
-        )));
-    };
-    let observed_at = match attrs.get("observed_at") {
-        Some(Value::String(value)) => value.clone(),
-        Some(Value::Null) | None => current_rfc3339(),
-        Some(_) => return Err(Box::new(invalid_observed_at_problem())),
-    };
-
-    Ok(ParsedCheckIn {
-        monitor_name,
-        observed_at: observed_at.clone(),
-        input: MonitorCheckInInput {
-            id: canary_core::ids::CheckInId::generate().into_string(),
-            external_id: optional_string(attrs.get("check_in_id")),
-            status,
-            observed_at,
-            ttl_ms: positive_i64(attrs.get("ttl_ms")),
-            summary: optional_string(attrs.get("summary")),
-            context: encode_context(attrs.get("context")),
-        },
-    })
 }
 
 fn required_string_array(
@@ -1455,48 +1278,6 @@ fn required_string_array(
     }
 }
 
-fn required_string(
-    attrs: &Map<String, Value>,
-    key: &str,
-    errors: &mut ValidationErrors,
-) -> Option<String> {
-    match attrs.get(key) {
-        Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
-        _ => {
-            errors.insert(
-                key.to_owned(),
-                vec!["must be a non-empty string".to_owned()],
-            );
-            None
-        }
-    }
-}
-
-fn parse_check_in_status(
-    value: Option<&Value>,
-    errors: &mut ValidationErrors,
-) -> Option<MonitorCheckInStatus> {
-    let status = match value {
-        Some(Value::String(value)) => match value.as_str() {
-            "alive" => Some(MonitorCheckInStatus::Alive),
-            "in_progress" => Some(MonitorCheckInStatus::InProgress),
-            "ok" => Some(MonitorCheckInStatus::Ok),
-            "error" => Some(MonitorCheckInStatus::Error),
-            _ => None,
-        },
-        _ => None,
-    };
-
-    if status.is_none() {
-        errors.insert(
-            "status".to_owned(),
-            vec!["must be one of: alive, in_progress, ok, error".to_owned()],
-        );
-    }
-
-    status
-}
-
 fn optional_string(value: Option<&Value>) -> Option<String> {
     match value {
         Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
@@ -1506,21 +1287,6 @@ fn optional_string(value: Option<&Value>) -> Option<String> {
 
 fn optional_bool(value: Option<&Value>) -> bool {
     matches!(value, Some(Value::Bool(true)))
-}
-
-fn positive_i64(value: Option<&Value>) -> Option<i64> {
-    match value {
-        Some(Value::Number(number)) => number.as_i64().filter(|value| *value > 0),
-        Some(Value::String(value)) => value.parse::<i64>().ok().filter(|value| *value > 0),
-        _ => None,
-    }
-}
-
-fn encode_context(value: Option<&Value>) -> Option<String> {
-    match value {
-        Some(Value::Object(_)) => value.and_then(|value| serde_json::to_string(value).ok()),
-        _ => None,
-    }
 }
 
 fn monitor_snapshot(
@@ -3080,6 +2846,166 @@ mod tests {
             body["errors"]["observed_at"],
             json!(["must be an ISO8601 timestamp"])
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn monitor_check_in_rejects_missing_invalid_revoked_and_wrong_scope_keys()
+    -> Result<(), Box<dyn Error>> {
+        let cases = [
+            (
+                Request::post("/api/v1/check-ins")
+                    .header(CONTENT_TYPE, APPLICATION_JSON)
+                    .body(Body::from(valid_check_in_body()))?,
+                StatusCode::UNAUTHORIZED,
+                "invalid_api_key",
+            ),
+            (
+                check_in_request("sk_live_unknown_secret", valid_check_in_body())?,
+                StatusCode::UNAUTHORIZED,
+                "invalid_api_key",
+            ),
+            (
+                check_in_request(READ_KEY, valid_check_in_body())?,
+                StatusCode::FORBIDDEN,
+                "insufficient_scope",
+            ),
+            (
+                check_in_request(REVOKED_KEY, valid_check_in_body())?,
+                StatusCode::UNAUTHORIZED,
+                "invalid_api_key",
+            ),
+        ];
+
+        for (request, expected_status, expected_code) in cases {
+            let response = ingest_router(test_ingest_state_with_monitor("desktop-active-timer")?)
+                .oneshot(request)
+                .await?;
+            let status = response.status();
+            let body = json_body(response).await?;
+
+            assert_eq!(status, expected_status);
+            assert_eq!(body["code"], expected_code);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn monitor_check_in_preflight_rejects_large_payload_without_writing()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state_with_monitor("desktop-active-timer")?;
+        let router = ingest_router(state);
+
+        let content_length_response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/check-ins")
+                    .header("authorization", format!("Bearer {INGEST_KEY}"))
+                    .header("content-length", "102401")
+                    .body(Body::from("{"))?,
+            )
+            .await?;
+        let status = content_length_response.status();
+        let body = json_body(content_length_response).await?;
+
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(body["code"], "payload_too_large");
+        assert_eq!(body["detail"], "Request body exceeds 100KB limit.");
+
+        let body_too_large = "x".repeat(102_401);
+        let body_length_response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/check-ins")
+                    .header("authorization", format!("Bearer {INGEST_KEY}"))
+                    .header(CONTENT_TYPE, APPLICATION_JSON)
+                    .body(Body::from(body_too_large))?,
+            )
+            .await?;
+        let status = body_length_response.status();
+        let body = json_body(body_length_response).await?;
+
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(body["code"], "payload_too_large");
+        assert_eq!(body["detail"], "Request body exceeds 100KB limit.");
+
+        let response = router
+            .oneshot(check_in_request(INGEST_KEY, valid_check_in_body())?)
+            .await?;
+        let body = json_body(response).await?;
+        assert_eq!(body["sequence"], 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn monitor_check_in_decode_order_rejects_malformed_json_after_auth()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state_with_monitor("desktop-active-timer")?;
+        let router = ingest_router(state);
+
+        let malformed = router
+            .clone()
+            .oneshot(check_in_request(INGEST_KEY, "{")?)
+            .await?;
+        let status = malformed.status();
+        let body = json_body(malformed).await?;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["code"], "invalid_request");
+
+        let unauthorized = router
+            .clone()
+            .oneshot(Request::post("/api/v1/check-ins").body(Body::from("{"))?)
+            .await?;
+        let status = unauthorized.status();
+        let body = json_body(unauthorized).await?;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "invalid_api_key");
+
+        let response = router
+            .oneshot(check_in_request(INGEST_KEY, valid_check_in_body())?)
+            .await?;
+        let body = json_body(response).await?;
+        assert_eq!(body["sequence"], 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn monitor_check_in_validation_failures_do_not_write() -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state_with_monitor("desktop-active-timer")?;
+        let router = ingest_router(state);
+
+        let missing_status = router
+            .clone()
+            .oneshot(check_in_request(
+                INGEST_KEY,
+                r#"{"monitor":"desktop-active-timer"}"#,
+            )?)
+            .await?;
+        assert_eq!(missing_status.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let invalid_observed_at = router
+            .clone()
+            .oneshot(check_in_request(
+                INGEST_KEY,
+                r#"{"monitor":"desktop-active-timer","status":"alive","observed_at":"not-a-time"}"#,
+            )?)
+            .await?;
+        assert_eq!(
+            invalid_observed_at.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        let response = router
+            .oneshot(check_in_request(INGEST_KEY, valid_check_in_body())?)
+            .await?;
+        let body = json_body(response).await?;
+        assert_eq!(body["sequence"], 1);
 
         Ok(())
     }
@@ -6614,6 +6540,10 @@ mod tests {
 
     fn valid_error_body() -> &'static str {
         r#"{"service":"test-svc","error_class":"RuntimeError","message":"something went wrong"}"#
+    }
+
+    fn valid_check_in_body() -> &'static str {
+        r#"{"monitor":"desktop-active-timer","status":"alive","observed_at":"2026-05-28T20:00:00Z","ttl_ms":120000}"#
     }
 
     fn runtime_store(active_webhook: bool) -> Result<Arc<Mutex<Store>>, Box<dyn Error>> {

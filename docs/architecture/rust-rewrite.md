@@ -35,11 +35,12 @@ crates/
 
 The first server crate now exists, but it is intentionally an adapter, not a
 new product layer. `canary-server` mounts public unauthenticated routes whose
-bodies are built by `canary-http::public`, plus the authenticated
-`POST /api/v1/errors` adapter that performs only HTTP-boundary work:
-content-length preflight, bearer/scope checks, JSON decoding, response status
-selection, and RFC 9457 translation. Validation, grouping, classification, and
-the database commit stay in `canary-ingest` and `canary-store`.
+bodies are built by `canary-http::public`, plus focused authenticated route
+adapters that perform only HTTP-boundary work: content-length preflight,
+bearer/scope checks, JSON decoding, response status selection, and RFC 9457
+translation. Validation, grouping, classification, monitor check-in planning,
+and database commits stay in `canary-ingest`, `canary-workers`, and
+`canary-store`.
 
 The crate boundaries should stay deep:
 
@@ -915,6 +916,32 @@ the Rust server accepts production traffic:
     behavior, pending/suppressed/delivered response fields, cursor precedence,
     invalid parameter mapping, scalar query validation, read auth, and missing
     auth behavior after the split.
+78. Ingest routes now live in `canary-server::ingest_routes`. The module owns
+    `POST /api/v1/errors` and `POST /api/v1/check-ins`, including
+    content-length preflight, raw body-size enforcement, ingest-scope
+    authorization, JSON object decoding, route-level Problem Details mapping,
+    error ingest response translation, monitor check-in parsing, check-in
+    planning, store commit, and best-effort post-commit effect/fanout handoff.
+    `ingest_router` still owns the route strings. Error validation, grouping,
+    classification, and persistence stay behind `canary-ingest`; monitor
+    transition planning stays behind `canary-workers::health`; persistence
+    stays in `canary-store`; and shared auth, rate-limit, response, and
+    preflight helpers stay centralized in the server crate. The focused tests
+    `error_ingest_rejects_missing_invalid_and_wrong_scope_keys`,
+    `content_length_preflight_rejects_large_payload_without_writing`,
+    `malformed_json_is_rejected_after_auth_without_writing`,
+    `unauthorized_request_is_rejected_before_json_decode_and_without_writing`,
+    `monitor_check_in_accepts_ingest_scope_and_returns_phoenix_body`,
+    `monitor_check_in_returns_404_for_unknown_monitor`,
+    `monitor_check_in_reports_payload_validation_errors`,
+    `monitor_check_in_reports_invalid_observed_at`,
+    `monitor_check_in_rejects_missing_invalid_revoked_and_wrong_scope_keys`,
+    `monitor_check_in_preflight_rejects_large_payload_without_writing`,
+    `monitor_check_in_decode_order_rejects_malformed_json_after_auth`, and
+    `monitor_check_in_validation_failures_do_not_write` lock auth ordering,
+    no-write failures, body-size preflight, malformed JSON handling, validation
+    mapping, unknown-monitor behavior, and successful check-in response shape
+    after the split.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -944,5 +971,5 @@ Phoenix behavior until the replacement is complete:
 
 1. Continue converging the Rust replacement around small, typed contracts:
    split the remaining Axum route helpers in `canary-server/src/lib.rs` by
-   route family so ingest can be reviewed as an independent adapter without
-   changing wire behavior.
+   route family, with metrics and service onboarding as the obvious remaining
+   route surfaces, without changing wire behavior.
