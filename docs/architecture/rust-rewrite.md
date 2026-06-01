@@ -839,6 +839,28 @@ the Rust server accepts production traffic:
     metadata-only list responses, raw-key create semantics, revocation,
     forbidden-scope behavior, and the neighboring onboarding transaction after
     the split.
+74. Authenticated health read routes now live in
+    `canary-server::health_routes`. The module owns
+    `GET /api/v1/health-status`, `GET /api/v1/status`, and
+    `GET /api/v1/targets/{id}/checks`, including read-scope enforcement,
+    health/status response projections, target-check response projection,
+    deterministic summary text, overall status derivation, and the
+    target-check invalid-window quirk. `ingest_router` still owns the route
+    strings. Public liveness/readiness probes stay in `public_routes`, target
+    mutation stays in `admin_targets`, probe execution stays in
+    `target_probes`, and reporting only reuses the health projection/summary
+    helpers because its report body deliberately embeds those health read
+    shapes. The focused tests
+    `health_status_accepts_read_scope_and_returns_surfaces`,
+    `status_defaults_to_empty_without_surfaces_or_errors`,
+    `status_combines_error_summary_with_default_window`,
+    `status_rejects_invalid_window_and_missing_auth`,
+    `health_read_routes_reject_ingest_scope`,
+    `target_checks_accepts_read_scope_and_returns_recent_checks`,
+    `target_checks_keeps_phoenix_error_and_empty_missing_target_behavior`, and
+    `public_router_does_not_mount_private_routes` lock the response bodies,
+    read-scope behavior, default windows, missing-target 200 response, and
+    public/private route boundary after the split.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -868,5 +890,5 @@ Phoenix behavior until the replacement is complete:
 
 1. Continue converging the Rust replacement around small, typed contracts:
    split the remaining Axum route helpers in `canary-server/src/lib.rs` by
-   route family so ingest, health, query, and reporting can be reviewed as
-   independent adapters without changing wire behavior.
+   route family so ingest, query, and reporting can be reviewed as independent
+   adapters without changing wire behavior.

@@ -38,8 +38,7 @@ use canary_http::{
         invalid_limit_problem, invalid_observed_at_problem, invalid_report_cursor_problem,
         invalid_report_limit_problem, invalid_string_param_problem,
         invalid_webhook_delivery_status_problem, invalid_window_problem, missing_query_problem,
-        not_found_problem, payload_too_large_problem, target_checks_window_problem,
-        validation_problem,
+        not_found_problem, payload_too_large_problem, validation_problem,
     },
     rate_limit::{RateLimitKind, rate_limited_problem},
     request::{MAX_JSON_BODY_BYTES, decode_json_object},
@@ -49,9 +48,8 @@ use canary_ingest::{
     ingest as ingest_error,
 };
 use canary_store::{
-    ApiKeyInsert, ErrorSummaryItem, HealthMonitorStatus, HealthTargetStatus, IncidentCorrelation,
-    IncidentListOptions, RecentTransition, SearchResult, Store, StoreError, TargetCheckRead,
-    TargetConflict, TargetInsert, VerifiedApiKey,
+    ApiKeyInsert, IncidentCorrelation, IncidentListOptions, RecentTransition, SearchResult, Store,
+    StoreError, TargetConflict, TargetInsert, VerifiedApiKey,
 };
 use canary_store::{QueryError, ServiceQueryOptions, TimelineQueryError, TimelineQueryOptions};
 use canary_store::{WebhookDeliveryPageError, WebhookDeliveryPageOptions};
@@ -70,6 +68,7 @@ mod admin_targets;
 mod admin_webhooks;
 mod annotations;
 mod health_fanout;
+mod health_routes;
 mod monitor_overdue;
 mod public_routes;
 mod rate_limit;
@@ -92,6 +91,10 @@ use annotations::{
 pub use health_fanout::{
     EnqueueFailure, EnqueueFailureKey, EnqueueFailureRecorder, EnqueueFailureSink,
     EventFanoutReport, HealthEventFanout, HealthEventSource,
+};
+use health_routes::{
+    combined_overall, combined_status_summary, health_monitor_response, health_status,
+    health_target_response, status, target_checks,
 };
 pub use monitor_overdue::{
     MonitorOverdueLifecycle, MonitorOverdueLifecycleConfig, MonitorOverdueLifecycleReport,
@@ -1175,75 +1178,6 @@ async fn webhook_deliveries(
     }
 }
 
-async fn health_status(State(state): State<IngestState>, headers: HeaderMap) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
-
-    let store = match state.store.lock() {
-        Ok(store) => store,
-        Err(_) => return problem_response(internal_problem()),
-    };
-    let targets = match store.health_targets() {
-        Ok(targets) => targets,
-        Err(_) => return problem_response(internal_problem()),
-    };
-    let monitors = match store.health_monitors() {
-        Ok(monitors) => monitors,
-        Err(_) => return problem_response(internal_problem()),
-    };
-
-    json_status_response(
-        StatusCode::OK.as_u16(),
-        json!({
-            "summary": health_status_summary(&targets, &monitors),
-            "targets": targets.iter().map(health_target_response).collect::<Vec<_>>(),
-            "monitors": monitors.iter().map(health_monitor_response).collect::<Vec<_>>(),
-        }),
-    )
-}
-
-async fn status(
-    State(state): State<IngestState>,
-    headers: HeaderMap,
-    Query(params): Query<StatusParams>,
-) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
-
-    let window = params.window.as_deref().unwrap_or("1h");
-    let store = match state.store.lock() {
-        Ok(store) => store,
-        Err(_) => return problem_response(internal_problem()),
-    };
-    let targets = match store.health_targets() {
-        Ok(targets) => targets,
-        Err(_) => return problem_response(internal_problem()),
-    };
-    let monitors = match store.health_monitors() {
-        Ok(monitors) => monitors,
-        Err(_) => return problem_response(internal_problem()),
-    };
-    let error_summary = match store.error_summary(window) {
-        Ok(summary) => summary,
-        Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
-        Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
-    };
-    let overall = combined_overall(&targets, &monitors, &error_summary);
-
-    json_status_response(
-        StatusCode::OK.as_u16(),
-        json!({
-            "overall": overall,
-            "summary": combined_status_summary(&overall, &targets, &monitors, &error_summary, window),
-            "targets": targets.iter().map(status_target_response).collect::<Vec<_>>(),
-            "monitors": monitors.iter().map(status_monitor_response).collect::<Vec<_>>(),
-            "error_summary": error_summary.iter().map(error_summary_response).collect::<Vec<_>>(),
-        }),
-    )
-}
-
 async fn report(
     State(state): State<IngestState>,
     headers: HeaderMap,
@@ -1356,37 +1290,6 @@ async fn report(
     }
 }
 
-async fn target_checks(
-    State(state): State<IngestState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Query(params): Query<StatusParams>,
-) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
-
-    let window = params.window.as_deref().unwrap_or("24h");
-    let store = match state.store.lock() {
-        Ok(store) => store,
-        Err(_) => return problem_response(internal_problem()),
-    };
-    let checks = match store.target_checks(&id, window) {
-        Ok(checks) => checks,
-        Err(QueryError::InvalidWindow) => return problem_response(target_checks_window_problem()),
-        Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
-    };
-
-    json_status_response(
-        StatusCode::OK.as_u16(),
-        json!({
-            "target_id": id,
-            "window": window,
-            "checks": checks.iter().map(target_check_response).collect::<Vec<_>>(),
-        }),
-    )
-}
-
 enum QueryKind {
     Service {
         service: String,
@@ -1396,11 +1299,6 @@ enum QueryKind {
         service: Option<String>,
     },
     ErrorClasses,
-}
-
-#[derive(Deserialize)]
-struct StatusParams {
-    window: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1442,44 +1340,6 @@ struct ServiceOnboardingCreate {
     url: String,
     environment: String,
     interval_ms: Option<i64>,
-}
-
-fn health_target_response(target: &HealthTargetStatus) -> Value {
-    json!({
-        "id": target.id,
-        "name": target.name,
-        "service": target.service,
-        "url": target.url,
-        "state": target.state,
-        "consecutive_failures": target.consecutive_failures,
-        "last_checked_at": target.last_checked_at,
-        "last_success_at": target.last_success_at,
-        "latency_ms": target.latency_ms,
-        "tls_expires_at": target.tls_expires_at,
-        "recent_checks": target.recent_checks.iter().map(|check| json!({
-            "checked_at": check.checked_at,
-            "result": check.result,
-            "status_code": check.status_code,
-            "latency_ms": check.latency_ms,
-        })).collect::<Vec<_>>(),
-    })
-}
-
-fn health_monitor_response(monitor: &HealthMonitorStatus) -> Value {
-    json!({
-        "id": monitor.id,
-        "name": monitor.name,
-        "service": monitor.service,
-        "mode": monitor.mode,
-        "expected_every_ms": monitor.expected_every_ms,
-        "grace_ms": monitor.grace_ms,
-        "state": monitor.state,
-        "last_check_in_status": monitor.last_check_in_status,
-        "last_check_in_at": monitor.last_check_in_at,
-        "last_success_at": monitor.last_success_at,
-        "last_failure_at": monitor.last_failure_at,
-        "deadline_at": monitor.deadline_at,
-    })
 }
 
 fn error_group_response(group: &ErrorGroupSummary) -> Value {
@@ -1524,38 +1384,6 @@ fn search_result_response(result: &SearchResult) -> Value {
     })
 }
 
-fn status_target_response(target: &HealthTargetStatus) -> Value {
-    json!({
-        "id": target.id,
-        "name": target.name,
-        "url": target.url,
-        "state": target.state,
-        "consecutive_failures": target.consecutive_failures,
-        "last_checked_at": target.last_checked_at,
-    })
-}
-
-fn status_monitor_response(monitor: &HealthMonitorStatus) -> Value {
-    json!({
-        "id": monitor.id,
-        "name": monitor.name,
-        "service": monitor.service,
-        "mode": monitor.mode,
-        "state": monitor.state,
-        "last_check_in_status": monitor.last_check_in_status,
-        "last_check_in_at": monitor.last_check_in_at,
-        "deadline_at": monitor.deadline_at,
-    })
-}
-
-fn error_summary_response(item: &ErrorSummaryItem) -> Value {
-    json!({
-        "service": item.service,
-        "total_count": item.total_count,
-        "unique_classes": item.unique_classes,
-    })
-}
-
 fn api_key_insert_response(key: &ApiKeyInsert, raw_key: &str) -> Value {
     json!({
         "id": key.id,
@@ -1565,17 +1393,6 @@ fn api_key_insert_response(key: &ApiKeyInsert, raw_key: &str) -> Value {
         "key_prefix": key.key_prefix,
         "created_at": key.created_at,
         "warning": "Store this key securely. It will not be shown again.",
-    })
-}
-
-fn target_check_response(check: &TargetCheckRead) -> Value {
-    json!({
-        "checked_at": check.checked_at,
-        "result": check.result,
-        "status_code": check.status_code,
-        "latency_ms": check.latency_ms,
-        "tls_expires_at": check.tls_expires_at,
-        "error_detail": check.error_detail,
     })
 }
 
@@ -1693,150 +1510,6 @@ fn encode_form_value(value: &str) -> String {
             }
         })
         .collect()
-}
-
-fn health_status_summary(
-    targets: &[HealthTargetStatus],
-    monitors: &[HealthMonitorStatus],
-) -> String {
-    let mut states = BTreeMap::<&str, Vec<&str>>::new();
-    for target in targets {
-        states
-            .entry(target.state.as_str())
-            .or_default()
-            .push(target.name.as_str());
-    }
-    for monitor in monitors {
-        states
-            .entry(monitor.state.as_str())
-            .or_default()
-            .push(monitor.name.as_str());
-    }
-
-    summarize_health(targets.len() + monitors.len(), &states, "health surfaces")
-}
-
-fn combined_overall(
-    targets: &[HealthTargetStatus],
-    monitors: &[HealthMonitorStatus],
-    error_summary: &[ErrorSummaryItem],
-) -> String {
-    if targets.is_empty() && monitors.is_empty() && error_summary.is_empty() {
-        return "empty".to_owned();
-    }
-    if targets.is_empty() && monitors.is_empty() {
-        return "warning".to_owned();
-    }
-
-    let has_down = targets.iter().any(|target| target.state == "down")
-        || monitors.iter().any(|monitor| monitor.state == "down");
-    let has_non_up = targets.iter().any(|target| target.state != "up")
-        || monitors.iter().any(|monitor| monitor.state != "up");
-
-    if has_down {
-        "unhealthy".to_owned()
-    } else if has_non_up {
-        "degraded".to_owned()
-    } else if !error_summary.is_empty() {
-        "warning".to_owned()
-    } else {
-        "healthy".to_owned()
-    }
-}
-
-fn combined_status_summary(
-    overall: &str,
-    targets: &[HealthTargetStatus],
-    monitors: &[HealthMonitorStatus],
-    error_summary: &[ErrorSummaryItem],
-    window: &str,
-) -> String {
-    let surface_count = targets.len() + monitors.len();
-    if overall == "empty" {
-        return "No services configured.".to_owned();
-    }
-    if overall == "healthy" {
-        return format!(
-            "All {surface_count} health surfaces healthy. No errors in the last {}.",
-            window_label(window)
-        );
-    }
-
-    let mut states = BTreeMap::<&str, Vec<&str>>::new();
-    for target in targets {
-        states
-            .entry(target.state.as_str())
-            .or_default()
-            .push(target.name.as_str());
-    }
-    for monitor in monitors {
-        states
-            .entry(monitor.state.as_str())
-            .or_default()
-            .push(monitor.name.as_str());
-    }
-    let total_errors = error_summary
-        .iter()
-        .map(|item| item.total_count)
-        .sum::<i64>();
-
-    let mut summary = format!("{surface_count} health surfaces monitored.");
-    if let Some(part) = describe_status_state_group(states.get("down"), "down") {
-        summary.push_str(&part);
-    }
-    if let Some(part) = describe_status_state_group(states.get("degraded"), "degraded") {
-        summary.push_str(&part);
-    }
-    if total_errors > 0 {
-        let service_count = error_summary.len();
-        let service_word = if service_count == 1 {
-            "service"
-        } else {
-            "services"
-        };
-        summary.push_str(&format!(
-            " {total_errors} errors across {service_count} {service_word} in the last {}.",
-            window_label(window)
-        ));
-    }
-
-    summary
-}
-
-fn summarize_health(total: usize, states: &BTreeMap<&str, Vec<&str>>, label: &str) -> String {
-    let up = states.get("up").map_or(0, Vec::len);
-    let mut parts = vec![format!("{total} {label} monitored. {up} up")];
-    if let Some(part) = describe_health_state_group(states.get("degraded"), "degraded") {
-        parts.push(part);
-    }
-    if let Some(part) = describe_health_state_group(states.get("down"), "down") {
-        parts.push(part);
-    }
-
-    format!("{}.", parts.join(", "))
-}
-
-fn describe_health_state_group(names: Option<&Vec<&str>>, label: &str) -> Option<String> {
-    let names = names?;
-    if names.is_empty() {
-        return None;
-    }
-    Some(format!("{} {label} ({})", names.len(), names.join(", ")))
-}
-
-fn describe_status_state_group(names: Option<&Vec<&str>>, label: &str) -> Option<String> {
-    describe_health_state_group(names, label).map(|part| format!(" {part}."))
-}
-
-fn window_label(window: &str) -> &'static str {
-    match window {
-        "1h" => "hour",
-        "6h" => "6 hours",
-        "24h" => "24 hours",
-        "7d" => "7 days",
-        "30d" => "30 days",
-        _ => "requested window",
-    }
 }
 
 fn parse_service_onboarding_create(
@@ -5894,6 +5567,34 @@ mod tests {
 
         assert_eq!(unauthorized_status, StatusCode::UNAUTHORIZED);
         assert_eq!(unauthorized_body["code"], "invalid_api_key");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn health_read_routes_reject_ingest_scope() -> Result<(), Box<dyn Error>> {
+        let router = ingest_router(test_ingest_state()?);
+
+        for path in [
+            "/api/v1/health-status",
+            "/api/v1/status",
+            "/api/v1/targets/TGT-any/checks",
+        ] {
+            let response = router
+                .clone()
+                .oneshot(read_request(INGEST_KEY, path)?)
+                .await?;
+            let status = response.status();
+            let body = json_body(response).await?;
+
+            assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+            assert_eq!(body["code"], "insufficient_scope", "{path}");
+            assert_eq!(
+                body["detail"],
+                "API key scope `ingest-only` cannot access this read endpoint. Use an `admin` or `read-only` key.",
+                "{path}"
+            );
+        }
 
         Ok(())
     }
