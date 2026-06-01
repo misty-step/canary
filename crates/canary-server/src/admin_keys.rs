@@ -21,8 +21,8 @@ use canary_store::{ApiKeyInsert, ApiKeyRecord};
 use serde_json::{Map, Value, json};
 
 use crate::{
-    IngestState, api_key_insert_response, check_content_length, current_rfc3339,
-    json_status_response, problem_response, require_scope,
+    IngestState, check_content_length, current_rfc3339, json_status_response, problem_response,
+    require_scope,
 };
 
 struct ApiKeyCreate {
@@ -141,6 +141,18 @@ fn api_key_response(key: ApiKeyRecord) -> Value {
         "active": key.revoked_at.is_none(),
         "created_at": key.created_at,
         "revoked_at": key.revoked_at,
+    })
+}
+
+fn api_key_insert_response(key: &ApiKeyInsert, raw_key: &str) -> Value {
+    json!({
+        "id": key.id,
+        "name": key.name,
+        "scope": key.scope,
+        "key": raw_key,
+        "key_prefix": key.key_prefix,
+        "created_at": key.created_at,
+        "warning": "Store this key securely. It will not be shown again.",
     })
 }
 

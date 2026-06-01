@@ -16,11 +16,10 @@ use std::{
 
 use axum::{
     Router,
-    body::{Body, Bytes},
-    extract::State,
+    body::Body,
     http::{
         HeaderMap, HeaderValue, Response, StatusCode,
-        header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderName},
+        header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderName},
     },
     routing::{delete, get, patch, post},
 };
@@ -30,22 +29,17 @@ use canary_http::{
         ApiKeyScope, BearerToken, Permission, extract_bearer, insufficient_scope_problem,
         invalid_api_key_problem, missing_authorization_problem,
     },
-    problem_details::{
-        ProblemDetails, internal_problem, payload_too_large_problem, validation_problem,
-    },
+    problem_details::{ProblemDetails, internal_problem, payload_too_large_problem},
     rate_limit::{RateLimitKind, rate_limited_problem},
-    request::{MAX_JSON_BODY_BYTES, decode_json_object},
+    request::MAX_JSON_BODY_BYTES,
 };
 use canary_ingest::{IngestConfig, IngestEffect, ValidationErrors};
-use canary_store::{
-    ApiKeyInsert, IncidentCorrelation, Store, StoreError, TargetConflict, TargetInsert,
-    VerifiedApiKey,
-};
+use canary_store::{IncidentCorrelation, Store, VerifiedApiKey};
 use canary_workers::health::{MonitorMode, MonitorSnapshot};
 use canary_workers::retention::RetentionPolicy;
 use canary_workers::webhooks::{TransportResult, WebhookRequest};
 use serde::Serialize;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 
 mod admin_keys;
 mod admin_monitors;
@@ -62,6 +56,7 @@ mod query_routes;
 mod rate_limit;
 mod report_routes;
 mod retention_prune;
+mod service_onboarding_routes;
 mod target_probes;
 mod tls_scan;
 mod webhook_delivery_routes;
@@ -70,8 +65,7 @@ mod webhooks;
 use admin_keys::{create_api_key, list_api_keys, revoke_api_key};
 use admin_monitors::{create_monitor, delete_monitor, list_monitors};
 use admin_targets::{
-    create_target, delete_target, list_targets, pause_target, resume_target,
-    target_insert_response, update_target_interval,
+    create_target, delete_target, list_targets, pause_target, resume_target, update_target_interval,
 };
 use admin_webhooks::{create_webhook, delete_webhook, list_webhooks, test_webhook};
 use annotations::{
@@ -98,6 +92,7 @@ pub use retention_prune::{
     RetentionPruneLifecycle, RetentionPruneLifecycleConfig, RetentionPruneLifecycleReport,
     RetentionPruneLifecycleWorker,
 };
+use service_onboarding_routes::create_service_onboarding;
 pub use target_probes::{
     ProbeHttpResponse, ProbeRequest, ProbeTransport, ProbeTransportError, ReqwestProbeTransport,
     TargetProbeLifecycle, TargetProbeLifecycleCommand, TargetProbeLifecycleConfig,
@@ -792,371 +787,6 @@ impl TargetControlSink for TargetProbeLifecycleController {
     }
 }
 
-async fn create_service_onboarding(
-    State(state): State<IngestState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response<Body> {
-    if let Err(problem) = check_content_length(&headers) {
-        return problem_response(*problem);
-    }
-
-    if body.len() as u64 > MAX_JSON_BODY_BYTES {
-        return problem_response(payload_too_large_problem(
-            "Request body exceeds 100KB limit.",
-        ));
-    }
-
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
-        return problem_response(*problem);
-    }
-
-    let attrs = match decode_json_object(&body, None) {
-        Ok(attrs) => attrs,
-        Err(problem) => return problem_response(*problem),
-    };
-    let request = match parse_service_onboarding_create(attrs, state.allow_private_targets) {
-        Ok(request) => request,
-        Err(problem) => return problem_response(*problem),
-    };
-
-    let raw_key = canary_core::secrets::api_key("live");
-    let key_hash = {
-        let raw_key = raw_key.clone();
-        match tokio::task::spawn_blocking(move || bcrypt::hash(raw_key, bcrypt::DEFAULT_COST)).await
-        {
-            Ok(Ok(hash)) => hash,
-            _ => return problem_response(internal_problem()),
-        }
-    };
-    let created_at = current_rfc3339();
-    let target = service_onboarding_target(&request, &created_at);
-    let api_key = ApiKeyInsert {
-        id: canary_core::ids::ApiKeyId::generate().into_string(),
-        name: format!("{}-ingest", request.service),
-        key_prefix: raw_key
-            .chars()
-            .take(canary_store::API_KEY_PREFIX_LEN)
-            .collect(),
-        key_hash,
-        created_at,
-        revoked_at: None,
-        scope: "ingest-only".to_owned(),
-    };
-    let response_body =
-        service_onboarding_response(&request, &target, &api_key, &raw_key, &base_url(&headers));
-    let command = TargetProbeLifecycleCommand::Track {
-        target_id: target.id.clone(),
-        interval_ms: target.interval_ms,
-    };
-
-    let mut store = match state.store.lock() {
-        Ok(store) => store,
-        Err(_) => return problem_response(internal_problem()),
-    };
-    match store.commit_service_onboarding_target_and_key(target, api_key) {
-        Ok(()) => {}
-        Err(StoreError::TargetConflict(conflict)) => {
-            return problem_response(service_onboarding_conflict_problem(conflict));
-        }
-        Err(_) => return problem_response(internal_problem()),
-    }
-    drop(store);
-
-    let _control_result = state.target_control.control_target(command);
-
-    json_status_response(StatusCode::CREATED.as_u16(), response_body)
-}
-
-struct ServiceOnboardingCreate {
-    service: String,
-    url: String,
-    environment: String,
-    interval_ms: Option<i64>,
-}
-
-fn api_key_insert_response(key: &ApiKeyInsert, raw_key: &str) -> Value {
-    json!({
-        "id": key.id,
-        "name": key.name,
-        "scope": key.scope,
-        "key": raw_key,
-        "key_prefix": key.key_prefix,
-        "created_at": key.created_at,
-        "warning": "Store this key securely. It will not be shown again.",
-    })
-}
-
-fn service_onboarding_response(
-    request: &ServiceOnboardingCreate,
-    target: &TargetInsert,
-    api_key: &ApiKeyInsert,
-    raw_key: &str,
-    base_url: &str,
-) -> Value {
-    json!({
-        "service": request.service,
-        "api_key": api_key_insert_response(api_key, raw_key),
-        "target": target_insert_response(target),
-        "links": {
-            "report": format!("{base_url}/api/v1/report?window=1h"),
-            "service_query": format!(
-                "{base_url}/api/v1/query?service={}&window=1h",
-                encode_form_value(&request.service)
-            ),
-        },
-        "snippets": {
-            "error_ingest_curl": error_ingest_curl(base_url, raw_key, request),
-            "report_curl": report_curl(base_url),
-            "service_query_curl": service_query_curl(base_url, &request.service),
-            "elixir_logger": elixir_logger_snippet(base_url, raw_key, request),
-            "typescript_init": typescript_init_snippet(base_url, raw_key, request),
-        },
-    })
-}
-
-fn error_ingest_curl(base_url: &str, raw_key: &str, request: &ServiceOnboardingCreate) -> String {
-    let payload = serde_json::to_string(&json!({
-        "service": request.service,
-        "environment": request.environment,
-        "error_class": "RuntimeError",
-        "message": "canary onboarding check",
-        "severity": "error",
-        "context": {
-            "source": "service-onboarding",
-        },
-    }))
-    .unwrap_or_else(|_| "{}".to_owned());
-
-    format!(
-        "curl -X POST {base_url}/api/v1/errors \\\n  -H \"Authorization: Bearer {raw_key}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d @- <<'JSON'\n{payload}\nJSON"
-    )
-}
-
-fn report_curl(base_url: &str) -> String {
-    format!(
-        "curl \"{base_url}/api/v1/report?window=1h\" \\\n  -H \"Authorization: Bearer $CANARY_READ_KEY\""
-    )
-}
-
-fn service_query_curl(base_url: &str, service: &str) -> String {
-    format!(
-        "curl \"{base_url}/api/v1/query?service={}&window=1h\" \\\n  -H \"Authorization: Bearer $CANARY_READ_KEY\"",
-        encode_form_value(service)
-    )
-}
-
-fn elixir_logger_snippet(
-    base_url: &str,
-    raw_key: &str,
-    request: &ServiceOnboardingCreate,
-) -> String {
-    format!(
-        "CanarySdk.attach(\n  endpoint: \"{base_url}\",\n  api_key: \"{raw_key}\",\n  service: \"{}\",\n  environment: \"{}\"\n)",
-        request.service, request.environment
-    )
-}
-
-fn typescript_init_snippet(
-    base_url: &str,
-    raw_key: &str,
-    request: &ServiceOnboardingCreate,
-) -> String {
-    format!(
-        "import {{ initCanary }} from \"@canary-obs/sdk\";\n\ninitCanary({{\n  endpoint: \"{base_url}\",\n  apiKey: \"{raw_key}\",\n  service: \"{}\",\n  environment: \"{}\"\n}});",
-        request.service, request.environment
-    )
-}
-
-fn base_url(headers: &HeaderMap) -> String {
-    let scheme = headers
-        .get(HeaderName::from_static("x-forwarded-proto"))
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| matches!(*value, "http" | "https"))
-        .unwrap_or("http");
-    let host = headers
-        .get(HOST)
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("localhost");
-
-    format!("{scheme}://{host}")
-}
-
-fn encode_form_value(value: &str) -> String {
-    value
-        .bytes()
-        .flat_map(|byte| match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                vec![byte as char]
-            }
-            b' ' => vec!['+'],
-            _ => {
-                const HEX: &[u8; 16] = b"0123456789ABCDEF";
-                vec![
-                    '%',
-                    HEX[(byte >> 4) as usize] as char,
-                    HEX[(byte & 0x0f) as usize] as char,
-                ]
-            }
-        })
-        .collect()
-}
-
-fn parse_service_onboarding_create(
-    attrs: Map<String, Value>,
-    configured_allow_private: bool,
-) -> Result<ServiceOnboardingCreate, Box<ProblemDetails>> {
-    let mut errors: ValidationErrors = ValidationErrors::new();
-    let service = required_trimmed_string(&attrs, "service", &mut errors);
-    let url = required_trimmed_string(&attrs, "url", &mut errors);
-    let environment = optional_trimmed_string(attrs.get("environment"))
-        .unwrap_or_else(|| "production".to_owned());
-    let interval_ms = optional_service_onboarding_interval(&attrs, &mut errors);
-    let allow_private = match attrs.get("allow_private") {
-        Some(Value::Bool(value)) => *value,
-        Some(Value::Null) | None => false,
-        Some(_) => {
-            errors.insert(
-                "allow_private".to_owned(),
-                vec!["must be a boolean".to_owned()],
-            );
-            false
-        }
-    };
-
-    if !errors.is_empty() {
-        return Err(Box::new(validation_problem(
-            "Invalid service onboarding request.",
-            errors,
-        )));
-    }
-
-    let Some(service) = service else {
-        return Err(Box::new(validation_problem(
-            "Invalid service onboarding request.",
-            ValidationErrors::new(),
-        )));
-    };
-    let Some(url) = url else {
-        return Err(Box::new(validation_problem(
-            "Invalid service onboarding request.",
-            ValidationErrors::new(),
-        )));
-    };
-    if let Err(reason) =
-        validate_target_configuration(&url, "GET", None, configured_allow_private || allow_private)
-    {
-        return Err(Box::new(validation_problem(
-            "Invalid service onboarding request.",
-            BTreeMap::from([("url".to_owned(), vec![service_onboarding_url_error(reason)])]),
-        )));
-    }
-
-    Ok(ServiceOnboardingCreate {
-        service,
-        url,
-        environment,
-        interval_ms,
-    })
-}
-
-fn service_onboarding_target(request: &ServiceOnboardingCreate, created_at: &str) -> TargetInsert {
-    TargetInsert {
-        id: canary_core::ids::TargetId::generate().into_string(),
-        url: request.url.clone(),
-        name: request.service.clone(),
-        service: request.service.clone(),
-        method: "GET".to_owned(),
-        headers: None,
-        interval_ms: request.interval_ms.unwrap_or(60_000),
-        timeout_ms: 10_000,
-        expected_status: "200".to_owned(),
-        body_contains: None,
-        degraded_after: 1,
-        down_after: 3,
-        up_after: 1,
-        active: true,
-        created_at: created_at.to_owned(),
-    }
-}
-
-fn optional_service_onboarding_interval(
-    attrs: &Map<String, Value>,
-    errors: &mut ValidationErrors,
-) -> Option<i64> {
-    match attrs.get("interval_ms") {
-        Some(Value::Number(number)) => match number.as_i64().filter(|value| *value > 0) {
-            Some(value) => Some(value),
-            None => {
-                errors.insert(
-                    "interval_ms".to_owned(),
-                    vec!["must be greater than 0".to_owned()],
-                );
-                None
-            }
-        },
-        Some(Value::Null) | None => None,
-        Some(_) => {
-            errors.insert(
-                "interval_ms".to_owned(),
-                vec!["must be an integer".to_owned()],
-            );
-            None
-        }
-    }
-}
-
-fn required_trimmed_string(
-    attrs: &Map<String, Value>,
-    key: &str,
-    errors: &mut ValidationErrors,
-) -> Option<String> {
-    match attrs.get(key) {
-        Some(Value::String(value)) => {
-            let value = value.trim();
-            if value.is_empty() {
-                errors.insert(key.to_owned(), vec!["can't be blank".to_owned()]);
-                None
-            } else {
-                Some(value.to_owned())
-            }
-        }
-        Some(_) => {
-            errors.insert(key.to_owned(), vec!["must be a string".to_owned()]);
-            None
-        }
-        None => {
-            errors.insert(key.to_owned(), vec!["can't be blank".to_owned()]);
-            None
-        }
-    }
-}
-
-fn optional_trimmed_string(value: Option<&Value>) -> Option<String> {
-    match value {
-        Some(Value::String(value)) => {
-            let value = value.trim();
-            if value.is_empty() {
-                None
-            } else {
-                Some(value.to_owned())
-            }
-        }
-        _ => None,
-    }
-}
-
-fn service_onboarding_url_error(reason: String) -> String {
-    if reason == "target URL scheme must be http or https" {
-        "scheme must be http or https".to_owned()
-    } else if let Some(rest) = reason.strip_prefix("invalid target URL: ") {
-        rest.to_owned()
-    } else {
-        reason
-    }
-}
-
 fn optional_positive_i64(
     attrs: &Map<String, Value>,
     key: &str,
@@ -1496,21 +1126,6 @@ fn problem_response(problem: ProblemDetails) -> Response<Body> {
     }
 }
 
-fn service_onboarding_conflict_problem(conflict: TargetConflict) -> ProblemDetails {
-    let mut errors: ValidationErrors = ValidationErrors::new();
-    if conflict.service {
-        errors.insert(
-            "service".to_owned(),
-            vec!["already has a health target".to_owned()],
-        );
-    }
-    if conflict.url {
-        errors.insert("url".to_owned(), vec!["is already monitored".to_owned()]);
-    }
-
-    validation_problem("Invalid service onboarding request.", errors)
-}
-
 fn query_param_is_array(raw_query: Option<&str>, param: &str) -> bool {
     let Some(raw_query) = raw_query else {
         return false;
@@ -1596,9 +1211,9 @@ mod tests {
     use canary_http::public::{APPLICATION_JSON, DependencyStatus, OPENAPI_JSON};
     use canary_store::{
         API_KEY_PREFIX_LEN, ApiKeyInsert, ErrorIngest, ErrorIngestIds, ErrorIngestPayload,
-        MonitorInsert, TargetCheckObservation, TargetProbeCommit, WebhookDeliveryInsert,
-        WebhookDeliveryJobInsert, WebhookDeliveryJobState, WebhookDeliveryStatus,
-        WebhookSubscriptionInsert,
+        MonitorInsert, TargetCheckObservation, TargetInsert, TargetProbeCommit,
+        WebhookDeliveryInsert, WebhookDeliveryJobInsert, WebhookDeliveryJobState,
+        WebhookDeliveryStatus, WebhookSubscriptionInsert,
     };
     use canary_workers::webhooks::{CircuitDecision, TransportResult, WebhookJob, WebhookRequest};
     use serde_json::{Value, json};
@@ -3186,6 +2801,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_onboarding_rejects_preflight_and_decode_failures_without_writes()
+    -> Result<(), Box<dyn Error>> {
+        let recorder = Arc::new(RecordingTargetControl::default());
+        let state = test_ingest_state()?.with_target_control(recorder.clone());
+        let router = ingest_router(state);
+
+        let oversized = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/service-onboarding")
+                    .header("authorization", format!("Bearer {ADMIN_KEY}"))
+                    .header("content-length", "102401")
+                    .body(Body::from("{"))?,
+            )
+            .await?;
+        assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(json_body(oversized).await?["code"], "payload_too_large");
+        assert!(recorder.commands().is_empty());
+        let targets = router
+            .clone()
+            .oneshot(read_request(ADMIN_KEY, "/api/v1/targets")?)
+            .await?;
+        assert_eq!(json_body(targets).await?["targets"], json!([]));
+
+        let malformed = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/service-onboarding")
+                    .header("authorization", format!("Bearer {ADMIN_KEY}"))
+                    .header(CONTENT_TYPE, APPLICATION_JSON)
+                    .body(Body::from("{"))?,
+            )
+            .await?;
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(malformed).await?["code"], "invalid_request");
+        assert!(recorder.commands().is_empty());
+
+        let unauthenticated = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/service-onboarding")
+                    .header(CONTENT_TYPE, APPLICATION_JSON)
+                    .body(Body::from("{"))?,
+            )
+            .await?;
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(json_body(unauthenticated).await?["code"], "invalid_api_key");
+        assert!(recorder.commands().is_empty());
+
+        let targets = router
+            .oneshot(read_request(ADMIN_KEY, "/api/v1/targets")?)
+            .await?;
+        assert_eq!(json_body(targets).await?["targets"], json!([]));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn service_onboarding_links_use_forwarded_proto_and_host_fallbacks()
+    -> Result<(), Box<dyn Error>> {
+        let router = ingest_router(test_ingest_state()?);
+
+        let forwarded = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/service-onboarding")
+                    .header("authorization", format!("Bearer {ADMIN_KEY}"))
+                    .header(CONTENT_TYPE, APPLICATION_JSON)
+                    .header("host", "canary.example")
+                    .header("x-forwarded-proto", "https")
+                    .body(Body::from(
+                        r#"{"service":"web api","url":"https://example.com/web/health"}"#,
+                    ))?,
+            )
+            .await?;
+        assert_eq!(forwarded.status(), StatusCode::CREATED);
+        let forwarded = json_body(forwarded).await?;
+        assert_eq!(
+            forwarded["links"]["report"],
+            "https://canary.example/api/v1/report?window=1h"
+        );
+        assert!(
+            forwarded["snippets"]["report_curl"]
+                .as_str()
+                .ok_or("missing report curl")?
+                .contains("https://canary.example/api/v1/report?window=1h")
+        );
+
+        let fallback = router
+            .oneshot(
+                Request::post("/api/v1/service-onboarding")
+                    .header("authorization", format!("Bearer {ADMIN_KEY}"))
+                    .header(CONTENT_TYPE, APPLICATION_JSON)
+                    .header("x-forwarded-proto", "ftp")
+                    .body(Body::from(
+                        r#"{"service":"worker api","url":"https://example.com/worker/health"}"#,
+                    ))?,
+            )
+            .await?;
+        assert_eq!(fallback.status(), StatusCode::CREATED);
+        let fallback = json_body(fallback).await?;
+        assert_eq!(
+            fallback["links"]["service_query"],
+            "http://localhost/api/v1/query?service=worker+api&window=1h"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn service_onboarding_rejects_invalid_scope_shape_and_conflicts_without_writes()
     -> Result<(), Box<dyn Error>> {
         let recorder = Arc::new(RecordingTargetControl::default());
@@ -3233,6 +2958,7 @@ mod tests {
             invalid_url["errors"]["url"],
             json!(["scheme must be http or https"])
         );
+        assert!(recorder.commands().is_empty());
 
         let create_response = router
             .clone()
@@ -3244,6 +2970,18 @@ mod tests {
             )?)
             .await?;
         assert_eq!(create_response.status(), StatusCode::CREATED);
+        let created = json_body(create_response).await?;
+        let target_id = created["target"]["id"]
+            .as_str()
+            .ok_or("missing target id")?
+            .to_owned();
+        assert_eq!(
+            recorder.commands(),
+            vec![TargetProbeLifecycleCommand::Track {
+                target_id,
+                interval_ms: 60_000,
+            }]
+        );
 
         let duplicate_response = router
             .clone()
@@ -3263,25 +3001,76 @@ mod tests {
             duplicate["errors"]["service"],
             json!(["already has a health target"])
         );
+        assert_eq!(duplicate["errors"].get("url"), None);
+
+        let duplicate_url_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/service-onboarding",
+                ADMIN_KEY,
+                r#"{"service":"different-worker","url":"http://127.0.0.1:9/health","allow_private":true}"#,
+            )?)
+            .await?;
+        assert_eq!(
+            duplicate_url_response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let duplicate_url = json_body(duplicate_url_response).await?;
+        assert_eq!(
+            duplicate_url["errors"]["url"],
+            json!(["is already monitored"])
+        );
+        assert_eq!(duplicate_url["errors"].get("service"), None);
+
+        let duplicate_service_and_url_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/service-onboarding",
+                ADMIN_KEY,
+                r#"{"service":"worker","url":"http://127.0.0.1:9/health","allow_private":true}"#,
+            )?)
+            .await?;
+        assert_eq!(
+            duplicate_service_and_url_response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let duplicate_service_and_url = json_body(duplicate_service_and_url_response).await?;
+        assert_eq!(
+            duplicate_service_and_url["errors"]["service"],
+            json!(["already has a health target"])
+        );
+        assert_eq!(
+            duplicate_service_and_url["errors"]["url"],
+            json!(["is already monitored"])
+        );
+        assert_eq!(recorder.commands().len(), 1);
 
         let keys_response = router
             .clone()
             .oneshot(read_request(ADMIN_KEY, "/api/v1/keys")?)
             .await?;
-        let key_count = json_body(keys_response).await?["keys"]
+        let keys_body = json_body(keys_response).await?;
+        let worker_key_count = keys_body["keys"]
             .as_array()
             .ok_or("keys should be an array")?
-            .len();
-        assert_eq!(key_count, 5);
+            .iter()
+            .filter(|key| key["name"] == "worker-ingest")
+            .count();
+        assert_eq!(worker_key_count, 1);
 
         let targets_response = router
             .oneshot(read_request(ADMIN_KEY, "/api/v1/targets")?)
             .await?;
-        let target_count = json_body(targets_response).await?["targets"]
+        let targets_body = json_body(targets_response).await?;
+        let worker_target_count = targets_body["targets"]
             .as_array()
             .ok_or("targets should be an array")?
-            .len();
-        assert_eq!(target_count, 1);
+            .iter()
+            .filter(|target| target["service"] == "worker")
+            .count();
+        assert_eq!(worker_target_count, 1);
 
         Ok(())
     }

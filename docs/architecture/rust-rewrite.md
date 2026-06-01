@@ -828,11 +828,10 @@ the Rust server accepts production traffic:
 73. Admin API-key routes now live in `canary-server::admin_keys`. The module
     owns API-key metadata listing, direct key creation, revocation,
     admin-key-specific request parsing, and the wire response shapes for key
-    lifecycle endpoints. `ingest_router` still owns the route strings, and
-    service onboarding stays in `lib.rs` because it atomically creates both a
-    health target and a scoped ingest key. The shared create-response
-    projection stays in `lib.rs` at that onboarding boundary rather than
-    coupling onboarding back to the admin-key module. The focused tests
+    lifecycle endpoints. `ingest_router` still owns the route strings. Service
+    onboarding remains outside `admin_keys` because it atomically creates both a
+    health target and a scoped ingest key rather than chaining the direct key
+    lifecycle handler. The focused tests
     `admin_api_key_mutations_follow_phoenix_contract`,
     `admin_api_key_create_defaults_and_rejects_invalid_scope`,
     `admin_api_key_routes_reject_non_admin_scopes`, and
@@ -955,6 +954,25 @@ the Rust server accepts production traffic:
     Problem Details envelopes for auth failures, query-bucket limiting,
     auth-before-limit ordering, content type, and representative Prometheus
     series after the split.
+80. Service onboarding now lives in
+    `canary-server::service_onboarding_routes`. The module owns
+    `POST /api/v1/service-onboarding`, including content-length preflight, raw
+    body-size enforcement, admin-scope authorization, JSON object decoding,
+    onboarding-specific validation, private-target opt-in, the atomic
+    target-plus-ingest-key store transaction, duplicate target conflict mapping,
+    target lifecycle fanout after commit, and the agent-facing links/snippets
+    returned to the caller. `ingest_router` still owns the route string. Direct
+    admin target and key handlers stay in `admin_targets` and `admin_keys`;
+    onboarding duplicates the tiny response projections it needs rather than
+    coupling to those sibling route modules. Shared auth, response, preflight,
+    and target URL validation helpers stay centralized in the server crate. The
+    focused tests `service_onboarding_creates_target_ingest_key_and_snippets`,
+    `service_onboarding_rejects_preflight_and_decode_failures_without_writes`,
+    `service_onboarding_links_use_forwarded_proto_and_host_fallbacks`, and
+    `service_onboarding_rejects_invalid_scope_shape_and_conflicts_without_writes`
+    lock the success body, issued-key usability, no-write failure paths,
+    auth-before-decode ordering, base URL behavior, conflict mapping, and
+    post-commit lifecycle command behavior after the split.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -983,6 +1001,6 @@ Phoenix behavior until the replacement is complete:
 ## Next Slices
 
 1. Continue converging the Rust replacement around small, typed contracts:
-   split the remaining Axum route helpers in `canary-server/src/lib.rs` by
-   route family, with service onboarding as the obvious remaining route
-   surface, without changing wire behavior.
+   split the remaining Axum query/parser helpers in `canary-server/src/lib.rs`
+   only where a route family can become deeper and clearer without changing
+   wire behavior.
