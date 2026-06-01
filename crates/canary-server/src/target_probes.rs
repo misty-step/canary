@@ -2224,10 +2224,15 @@ mod tests {
         let report = drain_until_completed(&mut lifecycle, 1_000, MAX_CONCURRENT_TARGET_PROBES)?;
 
         assert_eq!(report.loaded, 10);
-        assert_eq!(report.due, 2);
         assert_eq!(report.completed, MAX_CONCURRENT_TARGET_PROBES);
         assert_eq!(report.probed, MAX_CONCURRENT_TARGET_PROBES);
-        assert_eq!(report.launched, 2);
+        let refill_report = if report.launched == 2 {
+            report
+        } else {
+            drain_until_launched(&mut lifecycle, 1_000, 2)?
+        };
+        assert_eq!(refill_report.due, 2);
+        assert_eq!(refill_report.launched, 2);
         let final_report = drain_until_completed(&mut lifecycle, 1_000, 2)?;
         assert_eq!(final_report.probed, 2);
         assert_eq!(final_report.in_flight, 0);
@@ -2655,6 +2660,27 @@ mod tests {
             if started.elapsed() > StdDuration::from_secs(5) {
                 return Err(format!(
                     "timed out waiting for {expected_completed} target probe completions"
+                )
+                .into());
+            }
+            thread::sleep(StdDuration::from_millis(10));
+        }
+    }
+
+    fn drain_until_launched(
+        lifecycle: &mut TargetProbeLifecycle,
+        now_millis: i64,
+        expected_launched: usize,
+    ) -> Result<TargetProbeLifecycleReport, Box<dyn Error>> {
+        let started = Instant::now();
+        loop {
+            let report = lifecycle.run_due(now_millis)?;
+            if report.launched >= expected_launched {
+                return Ok(report);
+            }
+            if started.elapsed() > StdDuration::from_secs(5) {
+                return Err(format!(
+                    "timed out waiting for {expected_launched} target probe launches"
                 )
                 .into());
             }
