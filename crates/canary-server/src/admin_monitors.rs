@@ -23,9 +23,9 @@ use canary_store::{MonitorInsert, MonitorRecord};
 use serde_json::{Map, Value, json};
 
 use crate::{
-    IngestState, check_content_length, current_rfc3339, json_status_response,
-    optional_positive_i64, optional_string, problem_response, require_scope, required_string,
-    response,
+    IngestState, current_rfc3339,
+    http_contract::{check_content_length, json_status_response, problem_response, response},
+    optional_positive_i64, optional_string, require_scope, required_string,
 };
 
 pub(crate) async fn list_monitors(

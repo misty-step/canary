@@ -24,7 +24,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::{
-    IngestState, current_rfc3339, json_status_response, problem_response,
+    IngestState, current_rfc3339,
+    http_contract::{check_content_length, json_status_response, problem_response},
     require_query_limited_admin_scope, require_read_scope, require_scope,
 };
 use canary_http::auth::Permission;
@@ -151,7 +152,7 @@ pub(crate) async fn create_annotation(
     if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
         return problem_response(*problem);
     }
-    if let Err(problem) = crate::check_content_length(&headers) {
+    if let Err(problem) = check_content_length(&headers) {
         return problem_response(*problem);
     }
     if body.len() as u64 > MAX_JSON_BODY_BYTES {
@@ -209,7 +210,7 @@ fn create_annotation_for_subject(
     if let Err(problem) = require_query_limited_admin_scope(&state, &headers) {
         return problem_response(*problem);
     }
-    if let Err(problem) = crate::check_content_length(&headers) {
+    if let Err(problem) = check_content_length(&headers) {
         return problem_response(*problem);
     }
     if body.len() as u64 > MAX_JSON_BODY_BYTES {

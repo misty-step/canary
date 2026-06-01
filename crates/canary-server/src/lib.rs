@@ -16,26 +16,16 @@ use std::{
 
 use axum::{
     Router,
-    body::Body,
-    http::{
-        HeaderMap, HeaderValue, Response, StatusCode,
-        header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName},
-    },
+    http::header::{CONTENT_TYPE, HeaderName},
     routing::{delete, get, patch, post},
 };
-use canary_http::public::PublicResponse;
 #[cfg(test)]
 use canary_http::rate_limit::RateLimitKind;
-use canary_http::{
-    problem_details::{ProblemDetails, payload_too_large_problem},
-    request::MAX_JSON_BODY_BYTES,
-};
 use canary_ingest::{IngestConfig, IngestEffect, ValidationErrors};
 use canary_store::{IncidentCorrelation, Store};
 use canary_workers::health::{MonitorMode, MonitorSnapshot};
 use canary_workers::retention::RetentionPolicy;
 use canary_workers::webhooks::{TransportResult, WebhookRequest};
-use serde::Serialize;
 use serde_json::{Map, Value};
 
 mod admin_keys;
@@ -45,6 +35,7 @@ mod admin_webhooks;
 mod annotations;
 mod health_fanout;
 mod health_routes;
+mod http_contract;
 mod ingest_routes;
 mod metrics_routes;
 mod monitor_overdue;
@@ -116,9 +107,6 @@ pub use webhooks::{
     WebhookDeliveryDrainWorker, WebhookDeliveryRuntime, WebhookEnqueueEffectSink, WebhookScheduler,
     WebhookTransport,
 };
-
-const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
-const PROBLEM_CONTENT_TYPE: &str = "application/problem+json; charset=utf-8";
 
 fn default_webhook_transport() -> Arc<dyn WebhookTransport> {
     Arc::new(LazyHttpWebhookTransport)
@@ -936,110 +924,6 @@ fn current_unix_millis() -> i64 {
     i64::try_from(nanos / 1_000_000).unwrap_or(i64::MAX)
 }
 
-fn check_content_length(headers: &HeaderMap) -> Result<(), Box<ProblemDetails>> {
-    let Some(value) = headers.get(CONTENT_LENGTH) else {
-        return Ok(());
-    };
-
-    let length = value
-        .to_str()
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0);
-
-    if length > MAX_JSON_BODY_BYTES {
-        Err(Box::new(payload_too_large_problem(
-            "Request body exceeds 100KB limit.",
-        )))
-    } else {
-        Ok(())
-    }
-}
-
-fn json_response<T>(contract: PublicResponse<T>) -> Response<Body>
-where
-    T: Serialize,
-{
-    match serde_json::to_vec(&contract.body) {
-        Ok(body) => response(contract.status, contract.content_type, Body::from(body)),
-        Err(_) => internal_server_error(),
-    }
-}
-
-fn json_status_response<T>(status: u16, body: T) -> Response<Body>
-where
-    T: Serialize,
-{
-    match serde_json::to_vec(&body) {
-        Ok(body) => response(status, JSON_CONTENT_TYPE, Body::from(body)),
-        Err(_) => internal_server_error(),
-    }
-}
-
-fn problem_response(problem: ProblemDetails) -> Response<Body> {
-    let status = problem.status;
-    match serde_json::to_vec(&problem) {
-        Ok(body) => response(status, PROBLEM_CONTENT_TYPE, Body::from(body)),
-        Err(_) => internal_server_error(),
-    }
-}
-
-fn query_param_is_array(raw_query: Option<&str>, param: &str) -> bool {
-    let Some(raw_query) = raw_query else {
-        return false;
-    };
-    let bracket = format!("{param}[]");
-    let encoded_bracket = format!("{param}%5B%5D");
-    let mut seen = 0;
-
-    for pair in raw_query.split('&') {
-        let key = pair.split_once('=').map_or(pair, |(key, _)| key);
-        if key == param {
-            seen += 1;
-            if seen > 1 {
-                return true;
-            }
-        }
-        if key == bracket || key.eq_ignore_ascii_case(&encoded_bracket) {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn text_response(contract: PublicResponse<&'static str>) -> Response<Body> {
-    response(
-        contract.status,
-        contract.content_type,
-        Body::from(contract.body),
-    )
-}
-
-fn response(status: u16, content_type: &'static str, body: Body) -> Response<Body> {
-    let mut response = Response::new(body);
-    *response.status_mut() = status_code(status);
-    response
-        .headers_mut()
-        .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
-    response
-}
-
-fn internal_server_error() -> Response<Body> {
-    response(
-        StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-        "text/plain; charset=utf-8",
-        Body::from("internal server error"),
-    )
-}
-
-fn status_code(status: u16) -> StatusCode {
-    match StatusCode::from_u16(status) {
-        Ok(status) => status,
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
-    }
-}
-
 /// Headers set by the public adapter.
 pub const PUBLIC_CONTENT_TYPE: HeaderName = CONTENT_TYPE;
 
@@ -1060,13 +944,18 @@ mod tests {
 
     use axum::{
         body::{Body, to_bytes},
-        http::{Request, StatusCode, header::CONTENT_TYPE},
+        http::{
+            HeaderMap, HeaderValue, Method, Request, Response, StatusCode, header::CONTENT_TYPE,
+        },
     };
     use canary_core::{
         ids::{ErrorId, EventId},
         ingest::classification::{Category, Classification, Component, Persistence},
     };
-    use canary_http::public::{APPLICATION_JSON, DependencyStatus, OPENAPI_JSON};
+    use canary_http::{
+        public::{APPLICATION_JSON, DependencyStatus, OPENAPI_JSON},
+        request::MAX_JSON_BODY_BYTES,
+    };
     use canary_store::{
         API_KEY_PREFIX_LEN, ApiKeyInsert, ErrorIngest, ErrorIngestIds, ErrorIngestPayload,
         MonitorInsert, TargetCheckObservation, TargetInsert, TargetProbeCommit,
@@ -1171,6 +1060,127 @@ mod tests {
 
         drop_server(server).await?;
         fs::remove_file(path)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ingest_router_mounts_authenticated_route_matrix() -> Result<(), Box<dyn Error>> {
+        let router = ingest_router(test_ingest_state()?);
+        let routes = [
+            (Method::GET, "/metrics"),
+            (Method::POST, "/api/v1/errors"),
+            (Method::POST, "/api/v1/check-ins"),
+            (Method::GET, "/api/v1/query"),
+            (Method::GET, "/api/v1/report"),
+            (Method::GET, "/api/v1/timeline"),
+            (Method::GET, "/api/v1/webhook-deliveries"),
+            (Method::GET, "/api/v1/status"),
+            (Method::GET, "/api/v1/health-status"),
+            (Method::GET, "/api/v1/targets/TGT-route/checks"),
+            (Method::GET, "/api/v1/incidents"),
+            (Method::GET, "/api/v1/incidents/INC-route"),
+            (Method::GET, "/api/v1/incidents/INC-route/annotations"),
+            (Method::POST, "/api/v1/incidents/INC-route/annotations"),
+            (Method::GET, "/api/v1/groups/group-route/annotations"),
+            (Method::POST, "/api/v1/groups/group-route/annotations"),
+            (Method::GET, "/api/v1/annotations"),
+            (Method::POST, "/api/v1/annotations"),
+            (Method::GET, "/api/v1/errors/ERR-route"),
+            (Method::GET, "/api/v1/monitors"),
+            (Method::POST, "/api/v1/monitors"),
+            (Method::DELETE, "/api/v1/monitors/MON-route"),
+            (Method::GET, "/api/v1/webhooks"),
+            (Method::POST, "/api/v1/webhooks"),
+            (Method::DELETE, "/api/v1/webhooks/WHK-route"),
+            (Method::POST, "/api/v1/webhooks/WHK-route/test"),
+            (Method::GET, "/api/v1/keys"),
+            (Method::POST, "/api/v1/keys"),
+            (Method::POST, "/api/v1/keys/KEY-route/revoke"),
+            (Method::POST, "/api/v1/service-onboarding"),
+            (Method::GET, "/api/v1/targets"),
+            (Method::POST, "/api/v1/targets"),
+            (Method::PATCH, "/api/v1/targets/TGT-route"),
+            (Method::DELETE, "/api/v1/targets/TGT-route"),
+            (Method::POST, "/api/v1/targets/TGT-route/pause"),
+            (Method::POST, "/api/v1/targets/TGT-route/resume"),
+        ];
+
+        for (method, path) in routes {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri(path)
+                        .body(Body::empty())?,
+                )
+                .await?;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {path}"
+            );
+            let body = json_body(response).await?;
+            assert_eq!(body["code"], "invalid_api_key", "{method} {path}");
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn problem_details_responses_keep_shared_wire_contract() -> Result<(), Box<dyn Error>> {
+        let router = ingest_router(test_ingest_state()?);
+
+        let missing_auth = router
+            .clone()
+            .oneshot(Request::get("/api/v1/query").body(Body::empty())?)
+            .await?;
+        assert_problem_details(missing_auth, StatusCode::UNAUTHORIZED, "invalid_api_key").await?;
+
+        let wrong_scope = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/errors")
+                    .header("authorization", format!("Bearer {READ_KEY}"))
+                    .header(CONTENT_TYPE, APPLICATION_JSON)
+                    .body(Body::from(valid_error_body()))?,
+            )
+            .await?;
+        assert_problem_details(wrong_scope, StatusCode::FORBIDDEN, "insufficient_scope").await?;
+
+        let too_large = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/errors")
+                    .header("authorization", format!("Bearer {INGEST_KEY}"))
+                    .header("content-length", (MAX_JSON_BODY_BYTES + 1).to_string())
+                    .header(CONTENT_TYPE, APPLICATION_JSON)
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_problem_details(
+            too_large,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+        )
+        .await?;
+
+        let validation = router
+            .oneshot(
+                Request::post("/api/v1/monitors")
+                    .header("authorization", format!("Bearer {ADMIN_KEY}"))
+                    .header(CONTENT_TYPE, APPLICATION_JSON)
+                    .body(Body::from("{}"))?,
+            )
+            .await?;
+        assert_problem_details(
+            validation,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "validation_error",
+        )
+        .await?;
 
         Ok(())
     }
@@ -4928,7 +4938,9 @@ mod tests {
         let forbidden_status = forbidden.status();
         assert_eq!(
             forbidden.headers().get(CONTENT_TYPE),
-            Some(&HeaderValue::from_static(PROBLEM_CONTENT_TYPE))
+            Some(&HeaderValue::from_static(
+                http_contract::PROBLEM_CONTENT_TYPE
+            ))
         );
         let forbidden_body = json_body(forbidden).await?;
         assert_eq!(forbidden_status, StatusCode::FORBIDDEN);
@@ -4941,7 +4953,9 @@ mod tests {
         let unauthorized_status = unauthorized.status();
         assert_eq!(
             unauthorized.headers().get(CONTENT_TYPE),
-            Some(&HeaderValue::from_static(PROBLEM_CONTENT_TYPE))
+            Some(&HeaderValue::from_static(
+                http_contract::PROBLEM_CONTENT_TYPE
+            ))
         );
         let unauthorized_body = json_body(unauthorized).await?;
         assert_eq!(unauthorized_status, StatusCode::UNAUTHORIZED);
@@ -6124,6 +6138,33 @@ mod tests {
         let body = serde_json::from_slice(&bytes)?;
 
         Ok(body)
+    }
+
+    async fn assert_problem_details(
+        response: Response<Body>,
+        status: StatusCode,
+        code: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        assert_eq!(response.status(), status);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE),
+            Some(&HeaderValue::from_static(
+                http_contract::PROBLEM_CONTENT_TYPE
+            ))
+        );
+        let body = json_body(response).await?;
+        assert_eq!(body["status"], status.as_u16());
+        assert_eq!(body["code"], code);
+        for field in ["type", "title", "detail"] {
+            assert!(
+                body[field].as_str().is_some_and(|value| !value.is_empty()),
+                "missing non-empty Problem Details field: {field}"
+            );
+        }
+        if let Some(request_id) = body.get("request_id").filter(|value| !value.is_null()) {
+            assert!(request_id.as_str().is_some());
+        }
+        Ok(())
     }
 
     async fn text_body(response: Response<Body>) -> Result<String, Box<dyn Error>> {

@@ -24,8 +24,9 @@ use crate::health_routes::{
     combined_overall, combined_status_summary, health_monitor_response, health_target_response,
 };
 use crate::{
-    IngestState, json_status_response, problem_response, query_param_is_array, require_read_scope,
-    response,
+    IngestState,
+    http_contract::{json_status_response, problem_response, query_param_is_array, response},
+    require_read_scope,
 };
 
 #[derive(Deserialize)]

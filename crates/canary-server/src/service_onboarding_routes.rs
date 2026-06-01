@@ -24,8 +24,9 @@ use canary_store::{ApiKeyInsert, StoreError, TargetConflict, TargetInsert};
 use serde_json::{Map, Value, json};
 
 use crate::{
-    IngestState, TargetProbeLifecycleCommand, check_content_length, current_rfc3339,
-    json_status_response, problem_response, require_scope, validate_target_configuration,
+    IngestState, TargetProbeLifecycleCommand, current_rfc3339,
+    http_contract::{check_content_length, json_status_response, problem_response},
+    require_scope, validate_target_configuration,
 };
 
 pub(crate) async fn create_service_onboarding(

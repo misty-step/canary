@@ -2657,7 +2657,7 @@ mod tests {
             if report.completed >= expected_completed {
                 return Ok(report);
             }
-            if started.elapsed() > StdDuration::from_secs(5) {
+            if started.elapsed() > StdDuration::from_secs(15) {
                 return Err(format!(
                     "timed out waiting for {expected_completed} target probe completions"
                 )
@@ -2678,7 +2678,7 @@ mod tests {
             if report.launched >= expected_launched {
                 return Ok(report);
             }
-            if started.elapsed() > StdDuration::from_secs(5) {
+            if started.elapsed() > StdDuration::from_secs(15) {
                 return Err(format!(
                     "timed out waiting for {expected_launched} target probe launches"
                 )

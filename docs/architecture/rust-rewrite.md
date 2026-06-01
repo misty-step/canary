@@ -981,8 +981,8 @@ the Rust server accepts production traffic:
     one client does not fragment into many auth-fail identities.
     `canary-http::auth` still owns bearer parsing, scope wire semantics, and
     RFC 9457 Problem Details construction; `canary-server` root still owns
-    `IngestState`, route registration, response helpers, and the narrow
-    crate-local re-exports used by route families. The focused tests
+    `IngestState`, route registration, and the narrow crate-local re-exports
+    used by route families. The focused tests
     `admin_api_key_routes_reject_non_admin_scopes`,
     `error_ingest_rejects_missing_invalid_and_wrong_scope_keys`,
     `error_ingest_rejects_bad_persisted_scope_and_accounts_auth_fail`,
@@ -996,6 +996,18 @@ the Rust server accepts production traffic:
     malformed persisted-scope behavior, auth-fail accounting boundary, proxy
     identity canonicalization, and the guarantee that auth-fail saturation does
     not block later valid traffic.
+82. Shared Axum wire mechanics now live in `canary-server::http_contract`.
+    The module owns response content types, RFC 9457 Problem Details
+    serialization, public JSON/text response adaptation, content-length
+    preflight, status coercion, and Phoenix-compatible query-array detection
+    for string-only params. Route modules import this boundary directly instead
+    of treating `lib.rs` as a helper bag; `lib.rs` stays focused on process
+    state and route registration. The focused tests
+    `ingest_router_mounts_authenticated_route_matrix` and
+    `problem_details_responses_keep_shared_wire_contract`, alongside the
+    existing public/admin contract tests, lock that the extraction does not
+    unmount authenticated endpoints or drift the representative
+    `application/problem+json` envelopes for 401, 403, 413, and 422 responses.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed

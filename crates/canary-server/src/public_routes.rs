@@ -6,7 +6,7 @@
 use axum::{Router, body::Body, extract::State, http::Response, routing::get};
 use canary_http::public::{DependencyStatus, healthz_response, openapi_response, readyz_response};
 
-use crate::{json_response, text_response};
+use crate::http_contract::{json_response, text_response};
 
 /// Snapshot of dependency readiness for the public readiness endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

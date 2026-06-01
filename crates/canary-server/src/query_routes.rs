@@ -19,7 +19,11 @@ use canary_store::{
 };
 use serde::Deserialize;
 
-use crate::{IngestState, json_status_response, problem_response, require_read_scope};
+use crate::{
+    IngestState,
+    http_contract::{json_status_response, problem_response},
+    require_read_scope,
+};
 
 enum QueryKind {
     Service {

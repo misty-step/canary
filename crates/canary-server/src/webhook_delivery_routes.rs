@@ -17,7 +17,9 @@ use canary_store::{WebhookDeliveryPageError, WebhookDeliveryPageOptions};
 use serde::Deserialize;
 
 use crate::{
-    IngestState, json_status_response, problem_response, query_param_is_array, require_read_scope,
+    IngestState,
+    http_contract::{json_status_response, problem_response, query_param_is_array},
+    require_read_scope,
 };
 
 #[derive(Deserialize)]

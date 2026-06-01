@@ -11,7 +11,11 @@ use axum::{
 };
 use canary_http::problem_details::internal_problem;
 
-use crate::{IngestState, problem_response, require_query_limited_admin_scope, response};
+use crate::{
+    IngestState,
+    http_contract::{problem_response, response},
+    require_query_limited_admin_scope,
+};
 
 pub(crate) const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 

@@ -19,7 +19,11 @@ use canary_store::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{IngestState, json_status_response, problem_response, require_read_scope};
+use crate::{
+    IngestState,
+    http_contract::{json_status_response, problem_response},
+    require_read_scope,
+};
 
 #[derive(Deserialize)]
 pub(crate) struct StatusParams {

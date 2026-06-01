@@ -23,9 +23,10 @@ use canary_store::{TargetInsert, TargetRecord};
 use serde_json::{Map, Value, json};
 
 use crate::{
-    IngestState, TargetProbeLifecycleCommand, check_content_length, current_rfc3339,
-    json_status_response, optional_bool, optional_positive_i64, optional_positive_u32,
-    optional_string, problem_response, require_scope, response, validate_target_configuration,
+    IngestState, TargetProbeLifecycleCommand, current_rfc3339,
+    http_contract::{check_content_length, json_status_response, problem_response, response},
+    optional_bool, optional_positive_i64, optional_positive_u32, optional_string, require_scope,
+    validate_target_configuration,
 };
 
 pub(crate) async fn list_targets(
