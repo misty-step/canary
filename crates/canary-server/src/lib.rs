@@ -24,9 +24,6 @@ use axum::{
     },
     routing::{delete, get, patch, post},
 };
-use canary_core::query::{
-    ErrorGroupSummary, ReportCursor, decode_report_cursor, encode_report_cursor,
-};
 use canary_http::public::PublicResponse;
 use canary_http::{
     auth::{
@@ -35,9 +32,9 @@ use canary_http::{
     },
     problem_details::{
         ProblemDetails, internal_problem, invalid_cursor_problem, invalid_limit_problem,
-        invalid_observed_at_problem, invalid_report_cursor_problem, invalid_report_limit_problem,
-        invalid_string_param_problem, invalid_webhook_delivery_status_problem,
-        invalid_window_problem, not_found_problem, payload_too_large_problem, validation_problem,
+        invalid_observed_at_problem, invalid_string_param_problem,
+        invalid_webhook_delivery_status_problem, not_found_problem, payload_too_large_problem,
+        validation_problem,
     },
     rate_limit::{RateLimitKind, rate_limited_problem},
     request::{MAX_JSON_BODY_BYTES, decode_json_object},
@@ -46,10 +43,9 @@ use canary_ingest::{
     IngestConfig, IngestContext, IngestEffect, IngestError, ValidationErrors,
     ingest as ingest_error,
 };
-use canary_store::QueryError;
 use canary_store::{
-    ApiKeyInsert, IncidentCorrelation, IncidentListOptions, RecentTransition, SearchResult, Store,
-    StoreError, TargetConflict, TargetInsert, VerifiedApiKey,
+    ApiKeyInsert, IncidentCorrelation, Store, StoreError, TargetConflict, TargetInsert,
+    VerifiedApiKey,
 };
 use canary_store::{WebhookDeliveryPageError, WebhookDeliveryPageOptions};
 use canary_workers::health::{
@@ -72,6 +68,7 @@ mod monitor_overdue;
 mod public_routes;
 mod query_routes;
 mod rate_limit;
+mod report_routes;
 mod retention_prune;
 mod target_probes;
 mod tls_scan;
@@ -92,10 +89,7 @@ pub use health_fanout::{
     EnqueueFailure, EnqueueFailureKey, EnqueueFailureRecorder, EnqueueFailureSink,
     EventFanoutReport, HealthEventFanout, HealthEventSource,
 };
-use health_routes::{
-    combined_overall, combined_status_summary, health_monitor_response, health_status,
-    health_target_response, status, target_checks,
-};
+use health_routes::{health_status, status, target_checks};
 pub use monitor_overdue::{
     MonitorOverdueLifecycle, MonitorOverdueLifecycleConfig, MonitorOverdueLifecycleReport,
     MonitorOverdueLifecycleWorker, MonitorOverdueOutcome, MonitorOverdueRuntime,
@@ -104,6 +98,7 @@ pub use monitor_overdue::{
 pub use public_routes::{PublicReadiness, public_router};
 use query_routes::{list_incidents, query_errors, show_error, show_incident, timeline};
 use rate_limit::{RateLimitDecision, RateLimiter};
+use report_routes::report;
 pub use retention_prune::{
     RetentionPruneLifecycle, RetentionPruneLifecycleConfig, RetentionPruneLifecycleReport,
     RetentionPruneLifecycleWorker,
@@ -1080,126 +1075,6 @@ async fn webhook_deliveries(
     }
 }
 
-async fn report(
-    State(state): State<IngestState>,
-    headers: HeaderMap,
-    RawQuery(raw_query): RawQuery,
-    Query(params): Query<ReportParams>,
-) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
-    if query_param_is_array(raw_query.as_deref(), "q") {
-        return problem_response(invalid_string_param_problem("q"));
-    }
-
-    let window = params.window.as_deref().unwrap_or("1h");
-    let limit = match parse_report_limit(params.limit.as_deref()) {
-        Ok(limit) => limit,
-        Err(problem) => return problem_response(*problem),
-    };
-    let cursor = match parse_report_cursor(params.cursor.as_deref()) {
-        Ok(cursor) => cursor,
-        Err(problem) => return problem_response(*problem),
-    };
-
-    let store = match state.store.lock() {
-        Ok(store) => store,
-        Err(_) => return problem_response(internal_problem()),
-    };
-    let targets = match store.health_targets() {
-        Ok(targets) => targets,
-        Err(_) => return problem_response(internal_problem()),
-    };
-    let monitors = match store.health_monitors() {
-        Ok(monitors) => monitors,
-        Err(_) => return problem_response(internal_problem()),
-    };
-    let error_summary = match store.error_summary(window) {
-        Ok(summary) => summary,
-        Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
-        Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
-    };
-    let error_groups = match store.report_error_groups(window) {
-        Ok(groups) => groups,
-        Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
-        Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
-    };
-    let incidents = match store.active_incidents(IncidentListOptions::default()) {
-        Ok(incidents) => incidents.incidents,
-        Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
-        Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
-    };
-    let transitions = match store.recent_transitions(window) {
-        Ok(transitions) => transitions,
-        Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
-        Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
-    };
-    let search_results = match params.q.as_deref() {
-        Some(query) => match store.search_errors(query, window) {
-            Ok(results) => Some(results),
-            Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
-            Err(QueryError::Sqlite(_)) => Some(Vec::new()),
-        },
-        None => None,
-    };
-
-    let overall = combined_overall(&targets, &monitors, &error_summary);
-    let summary = combined_status_summary(&overall, &targets, &monitors, &error_summary, window);
-    let (targets, next_targets_offset) =
-        paginate_report_items(targets, limit, cursor.targets_offset);
-    let (monitors, next_monitor_offset) =
-        paginate_report_items(monitors, limit, cursor.monitor_offset);
-    let (error_groups, next_error_groups_offset) = paginate_report_items(
-        error_groups,
-        Some(limit.unwrap_or(25)),
-        cursor.error_groups_offset,
-    );
-    let next_cursor = ReportCursor {
-        targets_offset: next_targets_offset,
-        monitor_offset: next_monitor_offset,
-        error_groups_offset: next_error_groups_offset,
-    };
-    let cursor = encode_report_cursor(&next_cursor);
-    let truncated = cursor.is_some();
-
-    let mut body = json!({
-        "status": overall,
-        "summary": summary,
-        "targets": targets.iter().map(health_target_response).collect::<Vec<_>>(),
-        "monitors": monitors.iter().map(health_monitor_response).collect::<Vec<_>>(),
-        "error_groups": error_groups.iter().map(error_group_response).collect::<Vec<_>>(),
-        "incidents": incidents,
-        "recent_transitions": transitions.iter().map(recent_transition_response).collect::<Vec<_>>(),
-        "truncated": truncated,
-        "cursor": cursor,
-    });
-    if let (Some(results), Some(object)) = (search_results, body.as_object_mut()) {
-        object.insert(
-            "search_results".to_owned(),
-            Value::Array(results.iter().map(search_result_response).collect()),
-        );
-    }
-
-    if accepts_csv(&headers) {
-        response(
-            StatusCode::OK.as_u16(),
-            "text/csv; charset=utf-8",
-            Body::from(report_csv(&body)),
-        )
-    } else {
-        json_status_response(StatusCode::OK.as_u16(), body)
-    }
-}
-
-#[derive(Deserialize)]
-struct ReportParams {
-    window: Option<String>,
-    q: Option<String>,
-    limit: Option<String>,
-    cursor: Option<String>,
-}
-
 #[derive(Deserialize)]
 struct WebhookDeliveryParams {
     webhook_id: Option<String>,
@@ -1221,48 +1096,6 @@ struct ServiceOnboardingCreate {
     url: String,
     environment: String,
     interval_ms: Option<i64>,
-}
-
-fn error_group_response(group: &ErrorGroupSummary) -> Value {
-    json!({
-        "group_hash": group.group_hash,
-        "error_class": group.error_class,
-        "service": group.service,
-        "count": group.total_count,
-        "first_seen": group.first_seen,
-        "last_seen": group.last_seen,
-        "sample_message": group.sample_message,
-        "severity": group.severity,
-        "status": group.status,
-        "classification": {
-            "category": group.classification.category,
-            "persistence": group.classification.persistence,
-            "component": group.classification.component,
-        },
-    })
-}
-
-fn recent_transition_response(transition: &RecentTransition) -> Value {
-    json!({
-        "entity_type": transition.entity_type,
-        "entity_ref": transition.entity_ref,
-        "name": transition.name,
-        "service": transition.service,
-        "state": transition.state,
-        "transitioned_at": transition.transitioned_at,
-    })
-}
-
-fn search_result_response(result: &SearchResult) -> Value {
-    json!({
-        "id": result.id,
-        "service": result.service,
-        "error_class": result.error_class,
-        "message": result.message,
-        "group_hash": result.group_hash,
-        "created_at": result.created_at,
-        "score": result.score,
-    })
 }
 
 fn api_key_insert_response(key: &ApiKeyInsert, raw_key: &str) -> Value {
@@ -1984,204 +1817,6 @@ fn service_onboarding_conflict_problem(conflict: TargetConflict) -> ProblemDetai
     }
 
     validation_problem("Invalid service onboarding request.", errors)
-}
-
-fn parse_report_limit(limit: Option<&str>) -> Result<Option<usize>, Box<ProblemDetails>> {
-    match limit {
-        None => Ok(None),
-        Some(raw) => match raw.parse::<usize>() {
-            Ok(value) if value > 0 => Ok(Some(value)),
-            _ => Err(Box::new(invalid_report_limit_problem())),
-        },
-    }
-}
-
-fn parse_report_cursor(cursor: Option<&str>) -> Result<ReportCursor, Box<ProblemDetails>> {
-    match cursor {
-        None => Ok(ReportCursor::default()),
-        Some(cursor) => {
-            decode_report_cursor(cursor).ok_or_else(|| Box::new(invalid_report_cursor_problem()))
-        }
-    }
-}
-
-fn paginate_report_items<T: Clone>(
-    items: Vec<T>,
-    limit: Option<usize>,
-    offset: Option<usize>,
-) -> (Vec<T>, Option<usize>) {
-    let Some(offset) = offset else {
-        return (Vec::new(), None);
-    };
-    let remaining = items.into_iter().skip(offset).collect::<Vec<_>>();
-    let Some(limit) = limit else {
-        return (remaining, None);
-    };
-    let page = remaining.iter().take(limit).cloned().collect::<Vec<_>>();
-    let next_offset = if remaining.len() > page.len() {
-        Some(offset + page.len())
-    } else {
-        None
-    };
-    (page, next_offset)
-}
-
-fn accepts_csv(headers: &HeaderMap) -> bool {
-    headers
-        .get(HeaderName::from_static("accept"))
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(',')
-                .any(|part| part.trim().starts_with("text/csv"))
-        })
-}
-
-const REPORT_CSV_HEADERS: [&str; 17] = [
-    "section",
-    "position",
-    "id",
-    "name",
-    "service",
-    "error_class",
-    "url",
-    "state",
-    "count",
-    "first_seen",
-    "last_seen",
-    "severity",
-    "status",
-    "consecutive_failures",
-    "last_checked_at",
-    "cursor",
-    "truncated",
-];
-
-fn report_csv(report: &Value) -> String {
-    let mut rows = vec![REPORT_CSV_HEADERS.map(str::to_owned).to_vec()];
-    rows.extend(report_csv_targets(report));
-    rows.extend(report_csv_monitors(report));
-    rows.extend(report_csv_error_groups(report));
-    rows.into_iter()
-        .map(|row| {
-            row.into_iter()
-                .map(|value| csv_value(&value))
-                .collect::<Vec<_>>()
-                .join(",")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n"
-}
-
-fn report_csv_targets(report: &Value) -> Vec<Vec<String>> {
-    report
-        .get("targets")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .enumerate()
-        .map(|(index, target)| {
-            vec![
-                "targets".to_owned(),
-                (index + 1).to_string(),
-                csv_field(target, "id"),
-                csv_field(target, "name"),
-                String::new(),
-                String::new(),
-                csv_field(target, "url"),
-                csv_field(target, "state"),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                csv_field(target, "consecutive_failures"),
-                csv_field(target, "last_checked_at"),
-                csv_field(report, "cursor"),
-                csv_field(report, "truncated"),
-            ]
-        })
-        .collect()
-}
-
-fn report_csv_monitors(report: &Value) -> Vec<Vec<String>> {
-    report
-        .get("monitors")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .enumerate()
-        .map(|(index, monitor)| {
-            vec![
-                "monitors".to_owned(),
-                (index + 1).to_string(),
-                csv_field(monitor, "id"),
-                csv_field(monitor, "name"),
-                csv_field(monitor, "service"),
-                String::new(),
-                String::new(),
-                csv_field(monitor, "state"),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                csv_field(monitor, "last_check_in_status"),
-                String::new(),
-                csv_field(monitor, "last_check_in_at"),
-                csv_field(report, "cursor"),
-                csv_field(report, "truncated"),
-            ]
-        })
-        .collect()
-}
-
-fn report_csv_error_groups(report: &Value) -> Vec<Vec<String>> {
-    report
-        .get("error_groups")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .enumerate()
-        .map(|(index, group)| {
-            vec![
-                "error_groups".to_owned(),
-                (index + 1).to_string(),
-                String::new(),
-                String::new(),
-                csv_field(group, "service"),
-                csv_field(group, "error_class"),
-                String::new(),
-                String::new(),
-                csv_field(group, "count"),
-                csv_field(group, "first_seen"),
-                csv_field(group, "last_seen"),
-                csv_field(group, "severity"),
-                csv_field(group, "status"),
-                String::new(),
-                String::new(),
-                csv_field(report, "cursor"),
-                csv_field(report, "truncated"),
-            ]
-        })
-        .collect()
-}
-
-fn csv_field(value: &Value, key: &str) -> String {
-    match value.get(key) {
-        Some(Value::String(value)) => value.clone(),
-        Some(Value::Number(value)) => value.to_string(),
-        Some(Value::Bool(value)) => value.to_string(),
-        _ => String::new(),
-    }
-}
-
-fn csv_value(value: &str) -> String {
-    if value.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", value.replace('"', "\"\""))
-    } else {
-        value.to_owned()
-    }
 }
 
 fn query_param_is_array(raw_query: Option<&str>, param: &str) -> bool {
@@ -5513,29 +5148,6 @@ mod tests {
         assert_eq!(exact_page_body["truncated"], false);
         assert_eq!(exact_page_body["cursor"], Value::Null);
 
-        let partial_cursor = encode_report_cursor(&ReportCursor {
-            targets_offset: None,
-            monitor_offset: None,
-            error_groups_offset: Some(5),
-        })
-        .ok_or("partial report cursor should encode")?;
-        let partial_page = router
-            .clone()
-            .oneshot(read_request(
-                READ_KEY,
-                &format!("/api/v1/report?window=1h&limit=5&cursor={partial_cursor}"),
-            )?)
-            .await?;
-        let partial_page_body = json_body(partial_page).await?;
-        assert_eq!(partial_page_body["targets"], json!([]));
-        assert_eq!(partial_page_body["monitors"], json!([]));
-        assert_eq!(
-            partial_page_body["error_groups"].as_array().map(Vec::len),
-            Some(2)
-        );
-        assert_eq!(partial_page_body["truncated"], false);
-        assert_eq!(partial_page_body["cursor"], Value::Null);
-
         let csv = router
             .clone()
             .oneshot(
@@ -5595,6 +5207,123 @@ mod tests {
             .oneshot(read_request(INGEST_KEY, "/api/v1/report")?)
             .await?;
         assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn report_defaults_window_to_1h_and_rejects_invalid_window() -> Result<(), Box<dyn Error>>
+    {
+        let state = test_ingest_state()?;
+        {
+            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            store.commit_error_ingest(test_error_ingest(1, "2026-04-01T00:00:00Z"))?;
+        }
+        let router = ingest_router(state);
+
+        let default_window = router
+            .clone()
+            .oneshot(read_request(READ_KEY, "/api/v1/report")?)
+            .await?;
+        let default_body = json_body(default_window).await?;
+        assert_eq!(default_body["status"], "empty");
+        assert_eq!(default_body["summary"], "No services configured.");
+        assert_eq!(
+            default_body["error_groups"].as_array().map(Vec::len),
+            Some(0)
+        );
+
+        let invalid_window = router
+            .oneshot(read_request(READ_KEY, "/api/v1/report?window=99h")?)
+            .await?;
+        let invalid_status = invalid_window.status();
+        let invalid_body = json_body(invalid_window).await?;
+
+        assert_eq!(invalid_status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(invalid_body["code"], "validation_error");
+        assert_eq!(
+            invalid_body["errors"]["window"],
+            json!(["must be one of: 1h, 6h, 24h, 7d, 30d"])
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn report_paginates_targets_monitors_and_error_groups_independently()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        {
+            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            for service in [
+                "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf",
+            ] {
+                seed_monitor(&mut store, service)?;
+            }
+        }
+        let router = ingest_router(state);
+
+        for service in [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf",
+        ] {
+            let response = router
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/api/v1/targets",
+                    ADMIN_KEY,
+                    &format!(
+                        r#"{{"name":"{service}","service":"{service}","url":"https://example.com/{service}/health"}}"#
+                    ),
+                )?)
+                .await?;
+            assert_eq!(response.status(), StatusCode::CREATED);
+        }
+        for service in [
+            "svc-a", "svc-b", "svc-c", "svc-d", "svc-e", "svc-f", "svc-g",
+        ] {
+            let response = router
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/api/v1/errors",
+                    INGEST_KEY,
+                    &format!(
+                        r#"{{"service":"{service}","error_class":"TimeoutError","message":"timeout while reporting {service}"}}"#
+                    ),
+                )?)
+                .await?;
+            assert_eq!(response.status(), StatusCode::CREATED);
+        }
+
+        let first = router
+            .clone()
+            .oneshot(read_request(READ_KEY, "/api/v1/report?window=1h&limit=5")?)
+            .await?;
+        let first_body = json_body(first).await?;
+        assert_eq!(first_body["targets"].as_array().map(Vec::len), Some(5));
+        assert_eq!(first_body["monitors"].as_array().map(Vec::len), Some(5));
+        assert_eq!(first_body["error_groups"].as_array().map(Vec::len), Some(5));
+        let cursor = first_body["cursor"]
+            .as_str()
+            .ok_or("first report should return cursor")?;
+
+        let second = router
+            .oneshot(read_request(
+                READ_KEY,
+                &format!("/api/v1/report?window=1h&limit=5&cursor={cursor}"),
+            )?)
+            .await?;
+        let second_body = json_body(second).await?;
+
+        assert_eq!(second_body["targets"].as_array().map(Vec::len), Some(2));
+        assert_eq!(second_body["monitors"].as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            second_body["error_groups"].as_array().map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(second_body["truncated"], false);
+        assert_eq!(second_body["cursor"], Value::Null);
 
         Ok(())
     }

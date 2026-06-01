@@ -886,6 +886,21 @@ the Rust server accepts production traffic:
     `error_detail_accepts_read_scope_and_reports_missing_errors` lock the read
     response bodies, filter behavior, default windows, cursor behavior, auth
     failures, validation errors, and not-found contracts after the split.
+76. Report generation now lives in `canary-server::report_routes`. The module
+    owns `GET /api/v1/report`, including read-scope enforcement, `q` array
+    rejection, default `1h` window, invalid-window mapping, report limit/cursor
+    validation, store fan-in, independent target/monitor/error-group
+    pagination, report body assembly, optional search results, CSV content
+    negotiation, and CSV row shaping. `ingest_router` still owns the route
+    string. Cursor encoding remains in `canary-core`, Problem Details factories
+    remain in `canary-http`, report read models remain in `canary-store`, and
+    canonical health projections remain in `health_routes` so report does not
+    duplicate health JSON contracts. The focused tests
+    `report_accepts_read_scope_searches_paginates_and_renders_csv`,
+    `report_defaults_window_to_1h_and_rejects_invalid_window`, and
+    `report_paginates_targets_monitors_and_error_groups_independently` lock
+    report auth, search, pagination, CSV, invalid parameter, default-window,
+    invalid-window, and independent cursor behavior after the split.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -915,5 +930,5 @@ Phoenix behavior until the replacement is complete:
 
 1. Continue converging the Rust replacement around small, typed contracts:
    split the remaining Axum route helpers in `canary-server/src/lib.rs` by
-   route family so ingest, reporting, and webhook delivery reads can be
-   reviewed as independent adapters without changing wire behavior.
+   route family so ingest and webhook delivery reads can be reviewed as
+   independent adapters without changing wire behavior.
