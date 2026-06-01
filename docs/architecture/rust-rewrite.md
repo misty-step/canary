@@ -824,6 +824,21 @@ the Rust server accepts production traffic:
     `admin_monitor_routes_reject_non_admin_scopes` lock ID prefixes, default
     service/grace behavior, duplicate-name validation, RFC 9457 error bodies,
     delete semantics, and the no-write forbidden-scope case after the split.
+73. Admin API-key routes now live in `canary-server::admin_keys`. The module
+    owns API-key metadata listing, direct key creation, revocation,
+    admin-key-specific request parsing, and the wire response shapes for key
+    lifecycle endpoints. `ingest_router` still owns the route strings, and
+    service onboarding stays in `lib.rs` because it atomically creates both a
+    health target and a scoped ingest key. The shared create-response
+    projection stays in `lib.rs` at that onboarding boundary rather than
+    coupling onboarding back to the admin-key module. The focused tests
+    `admin_api_key_mutations_follow_phoenix_contract`,
+    `admin_api_key_create_defaults_and_rejects_invalid_scope`,
+    `admin_api_key_routes_reject_non_admin_scopes`, and
+    `service_onboarding_creates_target_ingest_key_and_snippets` lock
+    metadata-only list responses, raw-key create semantics, revocation,
+    forbidden-scope behavior, and the neighboring onboarding transaction after
+    the split.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -853,6 +868,5 @@ Phoenix behavior until the replacement is complete:
 
 1. Continue converging the Rust replacement around small, typed contracts:
    split the remaining Axum route helpers in `canary-server/src/lib.rs` by
-   route family so ingest, health, admin keys, query, and reporting can be
-   reviewed as independent adapters without
-   changing wire behavior.
+   route family so ingest, health, query, and reporting can be reviewed as
+   independent adapters without changing wire behavior.
