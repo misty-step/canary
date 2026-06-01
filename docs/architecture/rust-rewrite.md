@@ -782,6 +782,22 @@ the Rust server accepts production traffic:
     `annotations_create_list_paginate_and_emit_webhook_effect`, and
     `legacy_annotation_routes_and_errors_follow_phoenix_contract` lock the
     unauthenticated and annotation wire contracts after the split.
+70. Admin target mutation routes now live in `canary-server::admin_targets`.
+    The module owns `GET /api/v1/targets`, target creation, deletion, interval
+    patching, pause, resume, target-specific request parsing, target response
+    bodies, and the typed target-probe lifecycle commands emitted after
+    successful store writes. `ingest_router` still owns the route strings, and
+    service onboarding stays in `lib.rs` because it spans target creation plus
+    API-key creation in one transaction. Target check history also stays out of
+    the admin-target module because it is a read/query surface with different
+    scope behavior. The focused tests `admin_target_mutations_emit_lifecycle_commands`,
+    `admin_target_interval_update_reconfigures_only_when_cadence_changes`,
+    `admin_target_interval_update_rejects_invalid_scope_and_shape`,
+    `admin_target_create_rejects_ingest_scope_without_writing_or_commanding`,
+    `target_checks_accepts_read_scope_and_returns_recent_checks`, and
+    `target_checks_keeps_phoenix_error_and_empty_missing_target_behavior` lock
+    the lifecycle command, auth, validation, and neighboring read-route
+    contracts after the split.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -811,5 +827,6 @@ Phoenix behavior until the replacement is complete:
 
 1. Continue converging the Rust replacement around small, typed contracts:
    split the remaining Axum route helpers in `canary-server/src/lib.rs` by
-   route family so ingest, health, admin, query, and reporting can be reviewed
-   as independent adapters without changing wire behavior.
+   route family so ingest, health, admin webhooks, admin monitors, admin keys,
+   query, and reporting can be reviewed as independent adapters without
+   changing wire behavior.

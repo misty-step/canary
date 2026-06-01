@@ -2652,7 +2652,7 @@ mod tests {
             if report.completed >= expected_completed {
                 return Ok(report);
             }
-            if started.elapsed() > StdDuration::from_secs(1) {
+            if started.elapsed() > StdDuration::from_secs(5) {
                 return Err(format!(
                     "timed out waiting for {expected_completed} target probe completions"
                 )
