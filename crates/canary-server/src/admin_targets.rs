@@ -23,10 +23,14 @@ use canary_store::{TargetInsert, TargetRecord};
 use serde_json::{Map, Value, json};
 
 use crate::{
-    IngestState, TargetProbeLifecycleCommand, current_rfc3339,
+    IngestState, TargetProbeLifecycleCommand,
+    body_fields::{
+        optional_bool, optional_positive_i64, optional_positive_u32, optional_string,
+        required_string,
+    },
+    current_rfc3339,
     http_contract::{check_content_length, json_status_response, problem_response, response},
-    optional_bool, optional_positive_i64, optional_positive_u32, optional_string, require_scope,
-    validate_target_configuration,
+    require_scope, validate_target_configuration,
 };
 
 pub(crate) async fn list_targets(
@@ -271,8 +275,8 @@ fn parse_target_create(
     configured_allow_private: bool,
 ) -> Result<TargetInsert, Box<ProblemDetails>> {
     let mut errors: ValidationErrors = ValidationErrors::new();
-    let name = crate::required_string(&attrs, "name", &mut errors);
-    let url = crate::required_string(&attrs, "url", &mut errors);
+    let name = required_string(&attrs, "name", &mut errors);
+    let url = required_string(&attrs, "url", &mut errors);
     let method = optional_string(attrs.get("method")).unwrap_or_else(|| "GET".to_owned());
     if !matches!(method.as_str(), "GET" | "HEAD") {
         errors.insert(

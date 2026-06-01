@@ -21,18 +21,18 @@ use axum::{
 };
 #[cfg(test)]
 use canary_http::rate_limit::RateLimitKind;
-use canary_ingest::{IngestConfig, IngestEffect, ValidationErrors};
+use canary_ingest::{IngestConfig, IngestEffect};
 use canary_store::{IncidentCorrelation, Store};
 use canary_workers::health::{MonitorMode, MonitorSnapshot};
 use canary_workers::retention::RetentionPolicy;
 use canary_workers::webhooks::{TransportResult, WebhookRequest};
-use serde_json::{Map, Value};
 
 mod admin_keys;
 mod admin_monitors;
 mod admin_targets;
 mod admin_webhooks;
 mod annotations;
+mod body_fields;
 mod health_fanout;
 mod health_routes;
 mod http_contract;
@@ -777,119 +777,6 @@ impl TargetControlSink for TargetProbeLifecycleController {
     fn control_target(&self, command: TargetProbeLifecycleCommand) -> Result<(), String> {
         TargetProbeLifecycleController::control_target(self, command)
     }
-}
-
-fn optional_positive_i64(
-    attrs: &Map<String, Value>,
-    key: &str,
-    default: i64,
-    errors: &mut ValidationErrors,
-) -> i64 {
-    match attrs.get(key) {
-        Some(Value::Number(number)) => match number.as_i64().filter(|value| *value > 0) {
-            Some(value) => value,
-            None => {
-                errors.insert(key.to_owned(), vec!["must be greater than 0".to_owned()]);
-                default
-            }
-        },
-        Some(Value::Null) | None => default,
-        Some(_) => {
-            errors.insert(key.to_owned(), vec!["must be an integer".to_owned()]);
-            default
-        }
-    }
-}
-
-fn optional_positive_u32(
-    attrs: &Map<String, Value>,
-    key: &str,
-    default: u32,
-    errors: &mut ValidationErrors,
-) -> u32 {
-    match attrs.get(key) {
-        Some(Value::Number(number)) => match number.as_u64().and_then(|value| {
-            if value > 0 {
-                u32::try_from(value).ok()
-            } else {
-                None
-            }
-        }) {
-            Some(value) => value,
-            None => {
-                errors.insert(key.to_owned(), vec!["must be greater than 0".to_owned()]);
-                default
-            }
-        },
-        Some(Value::Null) | None => default,
-        Some(_) => {
-            errors.insert(key.to_owned(), vec!["must be an integer".to_owned()]);
-            default
-        }
-    }
-}
-
-fn required_string(
-    attrs: &Map<String, Value>,
-    key: &str,
-    errors: &mut ValidationErrors,
-) -> Option<String> {
-    match attrs.get(key) {
-        Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
-        _ => {
-            errors.insert(
-                key.to_owned(),
-                vec!["must be a non-empty string".to_owned()],
-            );
-            None
-        }
-    }
-}
-
-fn required_string_array(
-    attrs: &Map<String, Value>,
-    key: &str,
-    errors: &mut ValidationErrors,
-) -> Option<Vec<String>> {
-    match attrs.get(key) {
-        Some(Value::Array(values)) => {
-            let mut strings = Vec::new();
-            for (index, value) in values.iter().enumerate() {
-                match value {
-                    Value::String(event) if !event.is_empty() => strings.push(event.clone()),
-                    _ => {
-                        errors.insert(
-                            format!("{key}.{index}"),
-                            vec!["must be a non-empty string".to_owned()],
-                        );
-                    }
-                }
-            }
-            if errors
-                .keys()
-                .any(|field| field.starts_with(&format!("{key}.")))
-            {
-                None
-            } else {
-                Some(strings)
-            }
-        }
-        _ => {
-            errors.insert(key.to_owned(), vec!["must be an array".to_owned()]);
-            None
-        }
-    }
-}
-
-fn optional_string(value: Option<&Value>) -> Option<String> {
-    match value {
-        Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
-        _ => None,
-    }
-}
-
-fn optional_bool(value: Option<&Value>) -> bool {
-    matches!(value, Some(Value::Bool(true)))
 }
 
 fn monitor_snapshot(

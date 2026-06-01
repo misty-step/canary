@@ -1008,6 +1008,23 @@ the Rust server accepts production traffic:
     existing public/admin contract tests, lock that the extraction does not
     unmount authenticated endpoints or drift the representative
     `application/problem+json` envelopes for 401, 403, 413, and 422 responses.
+83. Shared JSON body field decoding now lives in
+    `canary-server::body_fields`. The module owns the repeated
+    Phoenix-compatible scalar rules used by admin target, admin monitor, admin
+    webhook, and monitor check-in payloads: required non-empty strings,
+    required string arrays with indexed error keys, optional non-empty strings,
+    explicit `true` booleans, positive integer defaults, and the exact
+    validation messages for invalid numeric shapes. Route modules import this
+    boundary directly instead of reaching through `lib.rs`; endpoint-specific
+    validation such as target URL policy, monitor modes, webhook event sets,
+    and check-in status remains in the route modules or worker/domain crates.
+    Time helpers, route strings, runtime boot wiring, and monitor snapshot
+    conversion were intentionally not folded into this module because they are
+    separate policies rather than body-field decoding. The focused
+    `body_fields::*` tests lock null/default handling, overflow-safe numeric
+    conversion, nested array error keys, and optional scalar behavior, while
+    the existing admin/check-in HTTP tests continue to prove public Problem
+    Details behavior through the route surface.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed

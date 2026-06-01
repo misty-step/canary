@@ -25,9 +25,11 @@ use canary_workers::health::{
 use serde_json::{Map, Value, json};
 
 use crate::{
-    HealthEventSource, IngestState, current_rfc3339, current_unix_millis,
+    HealthEventSource, IngestState,
+    body_fields::{optional_string, required_string},
+    current_rfc3339, current_unix_millis,
     http_contract::{check_content_length, json_status_response, problem_response},
-    monitor_snapshot, optional_string, require_ingest_scope, required_string,
+    monitor_snapshot, require_ingest_scope,
 };
 
 struct ParsedCheckIn {
