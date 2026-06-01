@@ -19,22 +19,19 @@ use axum::{
     body::Body,
     http::{
         HeaderMap, HeaderValue, Response, StatusCode,
-        header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderName},
+        header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName},
     },
     routing::{delete, get, patch, post},
 };
 use canary_http::public::PublicResponse;
+#[cfg(test)]
+use canary_http::rate_limit::RateLimitKind;
 use canary_http::{
-    auth::{
-        ApiKeyScope, BearerToken, Permission, extract_bearer, insufficient_scope_problem,
-        invalid_api_key_problem, missing_authorization_problem,
-    },
-    problem_details::{ProblemDetails, internal_problem, payload_too_large_problem},
-    rate_limit::{RateLimitKind, rate_limited_problem},
+    problem_details::{ProblemDetails, payload_too_large_problem},
     request::MAX_JSON_BODY_BYTES,
 };
 use canary_ingest::{IngestConfig, IngestEffect, ValidationErrors};
-use canary_store::{IncidentCorrelation, Store, VerifiedApiKey};
+use canary_store::{IncidentCorrelation, Store};
 use canary_workers::health::{MonitorMode, MonitorSnapshot};
 use canary_workers::retention::RetentionPolicy;
 use canary_workers::webhooks::{TransportResult, WebhookRequest};
@@ -56,6 +53,7 @@ mod query_routes;
 mod rate_limit;
 mod report_routes;
 mod retention_prune;
+mod server_auth;
 mod service_onboarding_routes;
 mod target_probes;
 mod tls_scan;
@@ -86,11 +84,18 @@ pub use monitor_overdue::{
 };
 pub use public_routes::{PublicReadiness, public_router};
 use query_routes::{list_incidents, query_errors, show_error, show_incident, timeline};
-use rate_limit::{RateLimitDecision, RateLimiter};
+#[cfg(test)]
+use rate_limit::RateLimitDecision;
+use rate_limit::RateLimiter;
 use report_routes::report;
 pub use retention_prune::{
     RetentionPruneLifecycle, RetentionPruneLifecycleConfig, RetentionPruneLifecycleReport,
     RetentionPruneLifecycleWorker,
+};
+#[cfg(test)]
+pub(crate) use server_auth::{UNKNOWN_AUTH_FAIL_IDENTITY, auth_fail_identity};
+pub(crate) use server_auth::{
+    require_ingest_scope, require_query_limited_admin_scope, require_read_scope, require_scope,
 };
 use service_onboarding_routes::create_service_onboarding;
 pub use target_probes::{
@@ -114,7 +119,6 @@ pub use webhooks::{
 
 const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
 const PROBLEM_CONTENT_TYPE: &str = "application/problem+json; charset=utf-8";
-const UNKNOWN_AUTH_FAIL_IDENTITY: &str = "unknown";
 
 fn default_webhook_transport() -> Arc<dyn WebhookTransport> {
     Arc::new(LazyHttpWebhookTransport)
@@ -930,152 +934,6 @@ fn health_state(value: &str) -> Result<canary_core::health::state_machine::Healt
 fn current_unix_millis() -> i64 {
     let nanos = time::OffsetDateTime::now_utc().unix_timestamp_nanos();
     i64::try_from(nanos / 1_000_000).unwrap_or(i64::MAX)
-}
-
-fn require_ingest_scope(
-    state: &IngestState,
-    headers: &HeaderMap,
-) -> Result<(), Box<ProblemDetails>> {
-    let key = require_scope(state, headers, Permission::Ingest)?;
-    enforce_rate_limit(state, RateLimitKind::Ingest, &key.id)
-}
-
-fn require_read_scope(state: &IngestState, headers: &HeaderMap) -> Result<(), Box<ProblemDetails>> {
-    let key = require_scope(state, headers, Permission::Read)?;
-    enforce_rate_limit(state, RateLimitKind::Query, &key.id)
-}
-
-fn require_query_limited_admin_scope(
-    state: &IngestState,
-    headers: &HeaderMap,
-) -> Result<(), Box<ProblemDetails>> {
-    let key = require_scope(state, headers, Permission::Admin)?;
-    enforce_rate_limit(state, RateLimitKind::Query, &key.id)
-}
-
-fn require_scope(
-    state: &IngestState,
-    headers: &HeaderMap,
-    permission: Permission,
-) -> Result<VerifiedApiKey, Box<ProblemDetails>> {
-    let authorization_headers = headers
-        .get_all(AUTHORIZATION)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .collect::<Vec<_>>();
-
-    let token = match extract_bearer(&authorization_headers) {
-        BearerToken::Present(token) => token,
-        BearerToken::Missing => return Err(Box::new(missing_authorization_problem(None))),
-    };
-
-    let store = state
-        .store
-        .lock()
-        .map_err(|_| Box::new(internal_problem()))?;
-    let Some(key) = store
-        .verify_api_key(token)
-        .map_err(|_| Box::new(internal_problem()))?
-    else {
-        account_auth_fail(state, headers);
-        return Err(Box::new(invalid_api_key_problem(None)));
-    };
-    drop(store);
-
-    let Some(scope) = ApiKeyScope::parse(&key.scope) else {
-        account_auth_fail(state, headers);
-        return Err(Box::new(invalid_api_key_problem(None)));
-    };
-    if scope.allows(permission) {
-        Ok(key)
-    } else {
-        Err(Box::new(insufficient_scope_problem(
-            scope, permission, None,
-        )))
-    }
-}
-
-fn account_auth_fail(state: &IngestState, headers: &HeaderMap) {
-    let identity = auth_fail_identity(headers, state.auth_fail_identity);
-    let _ = enforce_rate_limit(state, RateLimitKind::AuthFail, &identity);
-}
-
-fn auth_fail_identity(headers: &HeaderMap, config: AuthFailIdentityConfig) -> String {
-    if config.trust_proxy_headers
-        && let Some(identity) = trusted_proxy_client_identity(headers)
-    {
-        return identity;
-    }
-
-    UNKNOWN_AUTH_FAIL_IDENTITY.to_owned()
-}
-
-fn trusted_proxy_client_identity(headers: &HeaderMap) -> Option<String> {
-    header_proxy_token(headers, "fly-client-ip")
-        .or_else(|| forwarded_for_identity(headers))
-        .or_else(|| header_proxy_token(headers, "x-forwarded-for"))
-        .filter(|identity| !identity.is_empty())
-}
-
-fn forwarded_for_identity(headers: &HeaderMap) -> Option<String> {
-    let value = headers
-        .get(HeaderName::from_static("forwarded"))
-        .and_then(header_value_to_str)?;
-
-    value
-        .split(',')
-        .next_back()
-        .into_iter()
-        .flat_map(|entry| entry.split(';'))
-        .find_map(|part| {
-            let (name, value) = part.split_once('=')?;
-            if !name.trim().eq_ignore_ascii_case("for") {
-                return None;
-            }
-            Some(normalize_forwarded_for(value))
-        })
-        .filter(|identity| !identity.is_empty())
-}
-
-fn header_proxy_token(headers: &HeaderMap, name: &'static str) -> Option<String> {
-    headers
-        .get(HeaderName::from_static(name))
-        .and_then(header_value_to_str)
-        .and_then(|value| value.split(',').next_back())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(normalize_forwarded_for)
-}
-
-fn header_value_to_str(value: &HeaderValue) -> Option<&str> {
-    value.to_str().ok()
-}
-
-fn normalize_forwarded_for(value: &str) -> String {
-    value
-        .trim()
-        .trim_matches('"')
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_owned()
-}
-
-fn enforce_rate_limit(
-    state: &IngestState,
-    kind: RateLimitKind,
-    identity: &str,
-) -> Result<(), Box<ProblemDetails>> {
-    let mut limiter = state
-        .rate_limiter
-        .lock()
-        .map_err(|_| Box::new(internal_problem()))?;
-
-    match limiter.check(kind, identity) {
-        RateLimitDecision::Allowed => Ok(()),
-        RateLimitDecision::Limited {
-            retry_after_seconds,
-        } => Err(Box::new(rate_limited_problem(retry_after_seconds))),
-    }
 }
 
 fn check_content_length(headers: &HeaderMap) -> Result<(), Box<ProblemDetails>> {
@@ -4002,6 +3860,16 @@ mod tests {
     async fn admin_api_key_routes_reject_non_admin_scopes() -> Result<(), Box<dyn Error>> {
         let router = ingest_router(test_ingest_state()?);
 
+        let missing_list_response = router
+            .clone()
+            .oneshot(Request::get("/api/v1/keys").body(Body::empty())?)
+            .await?;
+        assert_eq!(missing_list_response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            json_body(missing_list_response).await?["code"],
+            "invalid_api_key"
+        );
+
         let read_list_response = router
             .clone()
             .oneshot(read_request(READ_KEY, "/api/v1/keys")?)
@@ -5089,15 +4957,19 @@ mod tests {
     #[tokio::test]
     async fn metrics_uses_query_rate_limit_after_admin_auth() -> Result<(), Box<dyn Error>> {
         let state = test_ingest_state()?;
-        let router = ingest_router(state);
-
-        for _ in 0..30 {
-            let response = router
-                .clone()
-                .oneshot(read_request(ADMIN_KEY, "/metrics")?)
-                .await?;
-            assert_eq!(response.status(), StatusCode::OK);
+        {
+            let mut limiter = state
+                .rate_limiter
+                .lock()
+                .map_err(|_| "rate limiter lock poisoned")?;
+            for _ in 0..30 {
+                assert_eq!(
+                    limiter.check(RateLimitKind::Query, "KEY-admin"),
+                    RateLimitDecision::Allowed
+                );
+            }
         }
+        let router = ingest_router(state);
 
         let response = router
             .clone()
@@ -5763,6 +5635,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn error_ingest_rejects_bad_persisted_scope_and_accounts_auth_fail()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?.with_auth_fail_identity(AuthFailIdentityConfig {
+            trust_proxy_headers: true,
+        });
+        {
+            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            seed_api_key(
+                &mut store,
+                "KEY-bad-scope",
+                "sk_live_bad_scope_secret",
+                "super-admin",
+                None,
+            )?;
+        }
+        let router = ingest_router(state.clone());
+
+        let response = router
+            .oneshot(
+                Request::post("/api/v1/errors")
+                    .header("authorization", "Bearer sk_live_bad_scope_secret")
+                    .header("fly-client-ip", "203.0.113.12")
+                    .header(CONTENT_TYPE, APPLICATION_JSON)
+                    .body(Body::from(valid_error_body()))?,
+            )
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "invalid_api_key");
+
+        let mut limiter = state
+            .rate_limiter
+            .lock()
+            .map_err(|_| "rate limiter lock poisoned")?;
+        for _ in 0..9 {
+            assert_eq!(
+                limiter.check(RateLimitKind::AuthFail, "203.0.113.12"),
+                RateLimitDecision::Allowed
+            );
+        }
+        assert!(matches!(
+            limiter.check(RateLimitKind::AuthFail, "203.0.113.12"),
+            RateLimitDecision::Limited { .. }
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn error_ingest_wrong_scope_does_not_account_auth_fail() -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?.with_auth_fail_identity(AuthFailIdentityConfig {
+            trust_proxy_headers: true,
+        });
+        let router = ingest_router(state.clone());
+
+        for _ in 0..10 {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post("/api/v1/errors")
+                        .header("authorization", format!("Bearer {READ_KEY}"))
+                        .header("fly-client-ip", "203.0.113.13")
+                        .header(CONTENT_TYPE, APPLICATION_JSON)
+                        .body(Body::from(valid_error_body()))?,
+                )
+                .await?;
+            let status = response.status();
+            let body = json_body(response).await?;
+
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_eq!(body["code"], "insufficient_scope");
+        }
+
+        let mut limiter = state
+            .rate_limiter
+            .lock()
+            .map_err(|_| "rate limiter lock poisoned")?;
+        assert_eq!(
+            limiter.check(RateLimitKind::AuthFail, "203.0.113.13"),
+            RateLimitDecision::Allowed
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn error_ingest_reports_validation_errors_without_writing() -> Result<(), Box<dyn Error>>
     {
         let state = test_ingest_state()?;
@@ -5940,32 +5900,49 @@ mod tests {
         });
         let router = ingest_router(state.clone());
 
-        for _ in 0..11 {
-            let response = router
-                .clone()
-                .oneshot(
-                    Request::post("/api/v1/errors")
-                        .header("authorization", "Bearer sk_live_unknown_secret")
-                        .header("fly-client-ip", "203.0.113.9")
-                        .header(CONTENT_TYPE, APPLICATION_JSON)
-                        .body(Body::from(valid_error_body()))?,
-                )
-                .await?;
-            let status = response.status();
-            let body = json_body(response).await?;
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/errors")
+                    .header("authorization", "Bearer sk_live_unknown_secret")
+                    .header("fly-client-ip", "203.0.113.9")
+                    .header(CONTENT_TYPE, APPLICATION_JSON)
+                    .body(Body::from(valid_error_body()))?,
+            )
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
 
-            assert_eq!(status, StatusCode::UNAUTHORIZED);
-            assert_eq!(body["code"], "invalid_api_key");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "invalid_api_key");
+
+        {
+            let mut limiter = state
+                .rate_limiter
+                .lock()
+                .map_err(|_| "rate limiter lock poisoned")?;
+            for _ in 0..9 {
+                assert_eq!(
+                    limiter.check(RateLimitKind::AuthFail, "203.0.113.9"),
+                    RateLimitDecision::Allowed
+                );
+            }
+            assert!(matches!(
+                limiter.check(RateLimitKind::AuthFail, "203.0.113.9"),
+                RateLimitDecision::Limited { .. }
+            ));
         }
 
-        let mut limiter = state
-            .rate_limiter
-            .lock()
-            .map_err(|_| "rate limiter lock poisoned")?;
-        assert!(matches!(
-            limiter.check(RateLimitKind::AuthFail, "203.0.113.9"),
-            RateLimitDecision::Limited { .. }
-        ));
+        let response = router
+            .oneshot(
+                Request::post("/api/v1/errors")
+                    .header("authorization", format!("Bearer {INGEST_KEY}"))
+                    .header("fly-client-ip", "203.0.113.9")
+                    .header(CONTENT_TYPE, APPLICATION_JSON)
+                    .body(Body::from(valid_error_body()))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
 
         Ok(())
     }
@@ -5976,19 +5953,17 @@ mod tests {
         let state = test_ingest_state()?;
         let router = ingest_router(state.clone());
 
-        for _ in 0..10 {
-            let response = router
-                .clone()
-                .oneshot(
-                    Request::post("/api/v1/errors")
-                        .header("authorization", "Bearer sk_live_unknown_secret")
-                        .header("x-forwarded-for", "198.51.100.4")
-                        .header(CONTENT_TYPE, APPLICATION_JSON)
-                        .body(Body::from(valid_error_body()))?,
-                )
-                .await?;
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        }
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/errors")
+                    .header("authorization", "Bearer sk_live_unknown_secret")
+                    .header("x-forwarded-for", "198.51.100.4")
+                    .header(CONTENT_TYPE, APPLICATION_JSON)
+                    .body(Body::from(valid_error_body()))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
         let mut limiter = state
             .rate_limiter
@@ -5998,6 +5973,12 @@ mod tests {
             limiter.check(RateLimitKind::AuthFail, "198.51.100.4"),
             RateLimitDecision::Allowed
         );
+        for _ in 0..9 {
+            assert_eq!(
+                limiter.check(RateLimitKind::AuthFail, UNKNOWN_AUTH_FAIL_IDENTITY),
+                RateLimitDecision::Allowed
+            );
+        }
         assert!(matches!(
             limiter.check(RateLimitKind::AuthFail, UNKNOWN_AUTH_FAIL_IDENTITY),
             RateLimitDecision::Limited { .. }
@@ -6023,7 +6004,11 @@ mod tests {
                         .body(Body::from(valid_error_body()))?,
                 )
                 .await?;
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let status = response.status();
+            let body = json_body(response).await?;
+
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert_eq!(body["code"], "invalid_api_key");
         }
 
         let mut limiter = state
@@ -6082,6 +6067,53 @@ mod tests {
                 }
             ),
             "203.0.113.11"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn auth_fail_identity_canonicalizes_proxy_ports_for_accounting()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?.with_auth_fail_identity(AuthFailIdentityConfig {
+            trust_proxy_headers: true,
+        });
+        let router = ingest_router(state.clone());
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/errors")
+                    .header("authorization", "Bearer sk_live_unknown_secret")
+                    .header("forwarded", r#"for="[2001:db8::1]:40000""#)
+                    .header("x-forwarded-for", "198.51.100.4:40000")
+                    .header(CONTENT_TYPE, APPLICATION_JSON)
+                    .body(Body::from(valid_error_body()))?,
+            )
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "invalid_api_key");
+
+        let mut limiter = state
+            .rate_limiter
+            .lock()
+            .map_err(|_| "rate limiter lock poisoned")?;
+        for _ in 0..9 {
+            assert_eq!(
+                limiter.check(RateLimitKind::AuthFail, "2001:db8::1"),
+                RateLimitDecision::Allowed
+            );
+        }
+        assert!(matches!(
+            limiter.check(RateLimitKind::AuthFail, "2001:db8::1"),
+            RateLimitDecision::Limited { .. }
+        ));
+        assert_eq!(
+            limiter.check(RateLimitKind::AuthFail, "[2001:db8::1]:40000"),
+            RateLimitDecision::Allowed
         );
 
         Ok(())

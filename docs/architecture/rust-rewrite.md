@@ -973,6 +973,29 @@ the Rust server accepts production traffic:
     lock the success body, issued-key usability, no-write failure paths,
     auth-before-decode ordering, base URL behavior, conflict mapping, and
     post-commit lifecycle command behavior after the split.
+81. Server-side authorization now lives in `canary-server::server_auth`. The
+    module owns store-backed API-key verification, scoped route authorization,
+    query/ingest rate-limit enforcement, invalid persisted-scope rejection,
+    silent invalid-key accounting, and trusted proxy identity parsing for the
+    auth-fail bucket, including canonicalizing proxy-emitted source ports so
+    one client does not fragment into many auth-fail identities.
+    `canary-http::auth` still owns bearer parsing, scope wire semantics, and
+    RFC 9457 Problem Details construction; `canary-server` root still owns
+    `IngestState`, route registration, response helpers, and the narrow
+    crate-local re-exports used by route families. The focused tests
+    `admin_api_key_routes_reject_non_admin_scopes`,
+    `error_ingest_rejects_missing_invalid_and_wrong_scope_keys`,
+    `error_ingest_rejects_bad_persisted_scope_and_accounts_auth_fail`,
+    `error_ingest_wrong_scope_does_not_account_auth_fail`,
+    `invalid_api_keys_are_silently_accounted_by_proxy_identity`,
+    `default_auth_fail_identity_ignores_spoofed_proxy_headers`,
+    `missing_authorization_does_not_account_auth_fail`, and
+    `auth_fail_identity_parses_trusted_proxy_headers_in_priority_order`, and
+    `auth_fail_identity_canonicalizes_proxy_ports_for_accounting` lock the
+    auth-before-decode ordering, missing/invalid/wrong-scope envelopes,
+    malformed persisted-scope behavior, auth-fail accounting boundary, proxy
+    identity canonicalization, and the guarantee that auth-fail saturation does
+    not block later valid traffic.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
