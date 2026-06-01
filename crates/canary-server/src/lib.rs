@@ -17,7 +17,7 @@ use std::{
 use axum::{
     Router,
     body::{Body, Bytes},
-    extract::{Query, RawQuery, State},
+    extract::State,
     http::{
         HeaderMap, HeaderValue, Response, StatusCode,
         header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderName},
@@ -31,10 +31,8 @@ use canary_http::{
         invalid_api_key_problem, missing_authorization_problem,
     },
     problem_details::{
-        ProblemDetails, internal_problem, invalid_cursor_problem, invalid_limit_problem,
-        invalid_observed_at_problem, invalid_string_param_problem,
-        invalid_webhook_delivery_status_problem, not_found_problem, payload_too_large_problem,
-        validation_problem,
+        ProblemDetails, internal_problem, invalid_observed_at_problem, not_found_problem,
+        payload_too_large_problem, validation_problem,
     },
     rate_limit::{RateLimitKind, rate_limited_problem},
     request::{MAX_JSON_BODY_BYTES, decode_json_object},
@@ -47,14 +45,13 @@ use canary_store::{
     ApiKeyInsert, IncidentCorrelation, Store, StoreError, TargetConflict, TargetInsert,
     VerifiedApiKey,
 };
-use canary_store::{WebhookDeliveryPageError, WebhookDeliveryPageOptions};
 use canary_workers::health::{
     HealthPlanError, MonitorCheckInInput, MonitorCheckInStatus, MonitorMode, MonitorSnapshot,
     ObservationContext, plan_monitor_check_in,
 };
 use canary_workers::retention::RetentionPolicy;
 use canary_workers::webhooks::{TransportResult, WebhookRequest};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 mod admin_keys;
@@ -72,6 +69,7 @@ mod report_routes;
 mod retention_prune;
 mod target_probes;
 mod tls_scan;
+mod webhook_delivery_routes;
 mod webhooks;
 
 use admin_keys::{create_api_key, list_api_keys, revoke_api_key};
@@ -114,6 +112,7 @@ pub use tls_scan::{
     TlsExpiryScanLifecycle, TlsExpiryScanLifecycleConfig, TlsExpiryScanLifecycleReport,
     TlsExpiryScanLifecycleWorker, TlsExpiryScanRuntimeError, run_tls_expiry_scan_once,
 };
+use webhook_delivery_routes::webhook_deliveries;
 pub use webhooks::{
     HttpWebhookTransport, InMemoryWebhookCircuit, InMemoryWebhookCooldown, StoreWebhookScheduler,
     WebhookCircuit, WebhookCooldown, WebhookDeliveryDrain, WebhookDeliveryDrainReport,
@@ -1029,60 +1028,6 @@ async fn create_service_onboarding(
     let _control_result = state.target_control.control_target(command);
 
     json_status_response(StatusCode::CREATED.as_u16(), response_body)
-}
-
-async fn webhook_deliveries(
-    State(state): State<IngestState>,
-    headers: HeaderMap,
-    RawQuery(raw_query): RawQuery,
-    Query(params): Query<WebhookDeliveryParams>,
-) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
-
-    if query_param_is_array(raw_query.as_deref(), "webhook_id") {
-        return problem_response(invalid_string_param_problem("webhook_id"));
-    }
-    if query_param_is_array(raw_query.as_deref(), "event") {
-        return problem_response(invalid_string_param_problem("event"));
-    }
-    if query_param_is_array(raw_query.as_deref(), "status") {
-        return problem_response(invalid_string_param_problem("status"));
-    }
-
-    let cursor = params.after.or(params.cursor);
-    let options = WebhookDeliveryPageOptions {
-        webhook_id: params.webhook_id,
-        event: params.event,
-        status: params.status,
-        limit: params.limit,
-        cursor,
-    };
-    let store = match state.store.lock() {
-        Ok(store) => store,
-        Err(_) => return problem_response(internal_problem()),
-    };
-
-    match store.webhook_delivery_page(options) {
-        Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
-        Err(WebhookDeliveryPageError::InvalidLimit) => problem_response(invalid_limit_problem()),
-        Err(WebhookDeliveryPageError::InvalidCursor) => problem_response(invalid_cursor_problem()),
-        Err(WebhookDeliveryPageError::InvalidStatus) => problem_response(
-            invalid_webhook_delivery_status_problem(canary_store::webhook_delivery_statuses()),
-        ),
-        Err(WebhookDeliveryPageError::Sqlite(_)) => problem_response(internal_problem()),
-    }
-}
-
-#[derive(Deserialize)]
-struct WebhookDeliveryParams {
-    webhook_id: Option<String>,
-    event: Option<String>,
-    status: Option<String>,
-    limit: Option<String>,
-    cursor: Option<String>,
-    after: Option<String>,
 }
 
 struct ParsedCheckIn {
@@ -4786,6 +4731,20 @@ mod tests {
             "2026-04-02T10:00:02Z"
         );
 
+        let event_filtered = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/webhook-deliveries?event=incident.updated",
+            )?)
+            .await?;
+        let event_filtered_body = json_body(event_filtered).await?;
+        assert_eq!(event_filtered_body["returned_count"], 1);
+        assert_eq!(
+            event_filtered_body["deliveries"][0]["delivery_id"],
+            "DLV-other"
+        );
+
         let pending = router
             .clone()
             .oneshot(read_request(
@@ -4820,6 +4779,7 @@ mod tests {
         let cursor = first_body["cursor"].as_str().ok_or("missing cursor")?;
 
         let second_page = router
+            .clone()
             .oneshot(read_request(
                 READ_KEY,
                 &format!(
@@ -4836,6 +4796,11 @@ mod tests {
             "DLV-suppressed"
         );
         assert_eq!(second_body["cursor"], Value::Null);
+
+        let admin_read = router
+            .oneshot(read_request(ADMIN_KEY, "/api/v1/webhook-deliveries")?)
+            .await?;
+        assert_eq!(admin_read.status(), StatusCode::OK);
 
         Ok(())
     }
@@ -4880,6 +4845,26 @@ mod tests {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "validation_error",
                 "status",
+                "must be a string",
+            ),
+            (
+                read_request(
+                    READ_KEY,
+                    "/api/v1/webhook-deliveries?webhook_id%5B%5D=WHK-alpha",
+                )?,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_error",
+                "webhook_id",
+                "must be a string",
+            ),
+            (
+                read_request(
+                    READ_KEY,
+                    "/api/v1/webhook-deliveries?event%5B%5D=error.new_class",
+                )?,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_error",
+                "event",
                 "must be a string",
             ),
         ];

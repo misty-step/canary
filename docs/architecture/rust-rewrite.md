@@ -901,6 +901,20 @@ the Rust server accepts production traffic:
     `report_paginates_targets_monitors_and_error_groups_independently` lock
     report auth, search, pagination, CSV, invalid parameter, default-window,
     invalid-window, and independent cursor behavior after the split.
+77. Webhook delivery ledger reads now live in
+    `canary-server::webhook_delivery_routes`. The module owns
+    `GET /api/v1/webhook-deliveries`, including read-scope enforcement,
+    scalar query-shape validation for `webhook_id`, `event`, and `status`,
+    `after`/`cursor` precedence, store page option assembly, and Problem
+    Details mapping for invalid limit, cursor, and delivery status values.
+    `ingest_router` still owns the route string. Durable delivery page queries
+    remain in `canary-store`; delivery execution, retries, cooldown, circuit
+    breaker, transport, and scheduling remain in `webhooks`. The focused tests
+    `webhook_deliveries_accept_read_scope_filters_and_paginate` and
+    `webhook_deliveries_reject_invalid_params_and_wrong_scope` lock filter
+    behavior, pending/suppressed/delivered response fields, cursor precedence,
+    invalid parameter mapping, scalar query validation, read auth, and missing
+    auth behavior after the split.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -930,5 +944,5 @@ Phoenix behavior until the replacement is complete:
 
 1. Continue converging the Rust replacement around small, typed contracts:
    split the remaining Axum route helpers in `canary-server/src/lib.rs` by
-   route family so ingest and webhook delivery reads can be reviewed as
-   independent adapters without changing wire behavior.
+   route family so ingest can be reviewed as an independent adapter without
+   changing wire behavior.
