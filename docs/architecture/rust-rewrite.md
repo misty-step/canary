@@ -798,6 +798,21 @@ the Rust server accepts production traffic:
     `target_checks_keeps_phoenix_error_and_empty_missing_target_behavior` lock
     the lifecycle command, auth, validation, and neighboring read-route
     contracts after the split.
+71. Admin webhook routes now live in `canary-server::admin_webhooks`. The
+    module owns webhook subscription listing, creation, deletion, the explicit
+    admin test-delivery endpoint, webhook-specific response bodies, validation,
+    and the blocking transport handoff used by the test endpoint. `ingest_router`
+    still owns the route strings, and webhook delivery ledgers stay out of this
+    module because they are read/query surfaces with pagination and status
+    filters rather than subscription mutation. The focused tests
+    `admin_webhook_mutations_follow_phoenix_contract`,
+    `admin_webhook_test_delivery_uses_blocking_transport_boundary`, and
+    `admin_webhook_create_rejects_invalid_scope_and_events` lock the existing
+    mutation, auth, validation, secret visibility, and blocking transport
+    contracts after the split. `admin_webhook_routes_reject_non_admin_scopes`
+    and `admin_webhook_test_delivery_maps_inactive_and_request_errors` add
+    coverage for adjacent authorization and test-delivery failure branches that
+    were easy to blur during extraction.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -827,6 +842,6 @@ Phoenix behavior until the replacement is complete:
 
 1. Continue converging the Rust replacement around small, typed contracts:
    split the remaining Axum route helpers in `canary-server/src/lib.rs` by
-   route family so ingest, health, admin webhooks, admin monitors, admin keys,
-   query, and reporting can be reviewed as independent adapters without
+   route family so ingest, health, admin monitors, admin keys, query, and
+   reporting can be reviewed as independent adapters without
    changing wire behavior.
