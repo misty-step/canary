@@ -17,7 +17,7 @@ use std::{
 use axum::{
     Router,
     body::{Body, Bytes},
-    extract::{Path, Query, RawQuery, State},
+    extract::{Query, RawQuery, State},
     http::{
         HeaderMap, HeaderValue, Response, StatusCode,
         header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderName},
@@ -34,11 +34,10 @@ use canary_http::{
         invalid_api_key_problem, missing_authorization_problem,
     },
     problem_details::{
-        ProblemDetails, internal_problem, invalid_cursor_problem, invalid_event_type_problem,
-        invalid_limit_problem, invalid_observed_at_problem, invalid_report_cursor_problem,
-        invalid_report_limit_problem, invalid_string_param_problem,
-        invalid_webhook_delivery_status_problem, invalid_window_problem, missing_query_problem,
-        not_found_problem, payload_too_large_problem, validation_problem,
+        ProblemDetails, internal_problem, invalid_cursor_problem, invalid_limit_problem,
+        invalid_observed_at_problem, invalid_report_cursor_problem, invalid_report_limit_problem,
+        invalid_string_param_problem, invalid_webhook_delivery_status_problem,
+        invalid_window_problem, not_found_problem, payload_too_large_problem, validation_problem,
     },
     rate_limit::{RateLimitKind, rate_limited_problem},
     request::{MAX_JSON_BODY_BYTES, decode_json_object},
@@ -47,11 +46,11 @@ use canary_ingest::{
     IngestConfig, IngestContext, IngestEffect, IngestError, ValidationErrors,
     ingest as ingest_error,
 };
+use canary_store::QueryError;
 use canary_store::{
     ApiKeyInsert, IncidentCorrelation, IncidentListOptions, RecentTransition, SearchResult, Store,
     StoreError, TargetConflict, TargetInsert, VerifiedApiKey,
 };
-use canary_store::{QueryError, ServiceQueryOptions, TimelineQueryError, TimelineQueryOptions};
 use canary_store::{WebhookDeliveryPageError, WebhookDeliveryPageOptions};
 use canary_workers::health::{
     HealthPlanError, MonitorCheckInInput, MonitorCheckInStatus, MonitorMode, MonitorSnapshot,
@@ -71,6 +70,7 @@ mod health_fanout;
 mod health_routes;
 mod monitor_overdue;
 mod public_routes;
+mod query_routes;
 mod rate_limit;
 mod retention_prune;
 mod target_probes;
@@ -102,6 +102,7 @@ pub use monitor_overdue::{
     MonitorOverdueRuntimeError, run_monitor_overdue_once,
 };
 pub use public_routes::{PublicReadiness, public_router};
+use query_routes::{list_incidents, query_errors, show_error, show_incident, timeline};
 use rate_limit::{RateLimitDecision, RateLimiter};
 pub use retention_prune::{
     RetentionPruneLifecycle, RetentionPruneLifecycleConfig, RetentionPruneLifecycleReport,
@@ -1035,105 +1036,6 @@ async fn create_service_onboarding(
     json_status_response(StatusCode::CREATED.as_u16(), response_body)
 }
 
-async fn query_errors(
-    State(state): State<IngestState>,
-    headers: HeaderMap,
-    Query(params): Query<QueryParams>,
-) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
-
-    let query_kind = match (
-        params.error_class.as_deref(),
-        params.service.as_deref(),
-        params.group_by.as_deref(),
-    ) {
-        (Some(error_class), service, _) => QueryKind::ErrorClass {
-            error_class: error_class.to_owned(),
-            service: service.map(ToOwned::to_owned),
-        },
-        (None, Some(service), _) => QueryKind::Service {
-            service: service.to_owned(),
-        },
-        (None, None, Some("error_class")) => QueryKind::ErrorClasses,
-        (None, None, _) => return problem_response(missing_query_problem()),
-    };
-
-    let default_window = match &query_kind {
-        QueryKind::Service { .. } => "1h",
-        QueryKind::ErrorClass { .. } | QueryKind::ErrorClasses => "24h",
-    };
-    let window = params.window.as_deref().unwrap_or(default_window);
-    let options = ServiceQueryOptions {
-        cursor: params.cursor,
-        with_annotation: params.with_annotation,
-        without_annotation: params.without_annotation,
-    };
-
-    let store = match state.store.lock() {
-        Ok(store) => store,
-        Err(_) => return problem_response(internal_problem()),
-    };
-
-    match query_kind {
-        QueryKind::Service { service } => {
-            match store.errors_by_service(&service, window, options) {
-                Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
-                Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
-                Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
-            }
-        }
-        QueryKind::ErrorClass {
-            error_class,
-            service,
-        } => match store.errors_by_error_class(&error_class, window, service.as_deref(), options) {
-            Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
-            Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
-            Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
-        },
-        QueryKind::ErrorClasses => match store.errors_by_class(window) {
-            Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
-            Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
-            Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
-        },
-    }
-}
-
-async fn timeline(
-    State(state): State<IngestState>,
-    headers: HeaderMap,
-    Query(params): Query<TimelineParams>,
-) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
-
-    let window = params.window.as_deref().unwrap_or("24h");
-    let cursor = params.after.or(params.cursor);
-    let options = TimelineQueryOptions {
-        service: params.service,
-        limit: params.limit,
-        cursor,
-        event_type: params.event_type,
-    };
-    let store = match state.store.lock() {
-        Ok(store) => store,
-        Err(_) => return problem_response(internal_problem()),
-    };
-
-    match store.timeline(window, options) {
-        Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
-        Err(TimelineQueryError::InvalidWindow) => problem_response(invalid_window_problem()),
-        Err(TimelineQueryError::InvalidLimit) => problem_response(invalid_limit_problem()),
-        Err(TimelineQueryError::InvalidCursor) => problem_response(invalid_cursor_problem()),
-        Err(TimelineQueryError::InvalidEventType(invalid)) => problem_response(
-            invalid_event_type_problem(&invalid, canary_core::webhook_events::business()),
-        ),
-        Err(TimelineQueryError::Sqlite(_)) => problem_response(internal_problem()),
-    }
-}
-
 async fn webhook_deliveries(
     State(state): State<IngestState>,
     headers: HeaderMap,
@@ -1290,33 +1192,12 @@ async fn report(
     }
 }
 
-enum QueryKind {
-    Service {
-        service: String,
-    },
-    ErrorClass {
-        error_class: String,
-        service: Option<String>,
-    },
-    ErrorClasses,
-}
-
 #[derive(Deserialize)]
 struct ReportParams {
     window: Option<String>,
     q: Option<String>,
     limit: Option<String>,
     cursor: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct TimelineParams {
-    service: Option<String>,
-    window: Option<String>,
-    limit: Option<String>,
-    cursor: Option<String>,
-    after: Option<String>,
-    event_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1896,74 +1777,6 @@ fn current_unix_millis() -> i64 {
     i64::try_from(nanos / 1_000_000).unwrap_or(i64::MAX)
 }
 
-async fn list_incidents(
-    State(state): State<IngestState>,
-    headers: HeaderMap,
-    Query(params): Query<QueryParams>,
-) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
-
-    let store = match state.store.lock() {
-        Ok(store) => store,
-        Err(_) => return problem_response(internal_problem()),
-    };
-
-    match store.active_incidents(IncidentListOptions {
-        with_annotation: params.with_annotation,
-        without_annotation: params.without_annotation,
-    }) {
-        Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
-        Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
-        Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
-    }
-}
-
-async fn show_error(
-    State(state): State<IngestState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
-
-    let store = match state.store.lock() {
-        Ok(store) => store,
-        Err(_) => return problem_response(internal_problem()),
-    };
-
-    match store.error_detail(&id) {
-        Ok(Some(result)) => json_status_response(StatusCode::OK.as_u16(), result),
-        Ok(None) => problem_response(not_found_problem(format!("Error {id} not found."))),
-        Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
-        Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
-    }
-}
-
-async fn show_incident(
-    State(state): State<IngestState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
-
-    let store = match state.store.lock() {
-        Ok(store) => store,
-        Err(_) => return problem_response(internal_problem()),
-    };
-
-    match store.incident_detail(&id) {
-        Ok(Some(result)) => json_status_response(StatusCode::OK.as_u16(), result),
-        Ok(None) => problem_response(not_found_problem(format!("Incident {id} not found."))),
-        Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
-        Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
-    }
-}
-
 fn require_ingest_scope(
     state: &IngestState,
     headers: &HeaderMap,
@@ -2429,17 +2242,6 @@ fn status_code(status: u16) -> StatusCode {
 
 /// Headers set by the public adapter.
 pub const PUBLIC_CONTENT_TYPE: HeaderName = CONTENT_TYPE;
-
-#[derive(Debug, Deserialize)]
-struct QueryParams {
-    service: Option<String>,
-    error_class: Option<String>,
-    group_by: Option<String>,
-    window: Option<String>,
-    cursor: Option<String>,
-    with_annotation: Option<String>,
-    without_annotation: Option<String>,
-}
 
 #[cfg(test)]
 mod tests {
@@ -4993,6 +4795,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn error_query_service_default_window_is_1h() -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let router = ingest_router(state);
+
+        let response = router
+            .clone()
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let response = router
+            .oneshot(read_request(READ_KEY, "/api/v1/query?service=test-svc")?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["service"], "test-svc");
+        assert_eq!(body["window"], "1h");
+        assert_eq!(body["total_errors"], 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn error_query_accepts_error_class_with_optional_service_filter()
     -> Result<(), Box<dyn Error>> {
         let state = test_ingest_state()?;
@@ -6236,6 +6063,107 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["summary"], "No active incidents.");
         assert_eq!(body["incidents"].as_array().map(Vec::len), Some(0));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn incidents_filters_with_annotation_and_without_annotation_are_applied()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let router = ingest_router(state.clone());
+
+        let first_error = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/errors",
+                INGEST_KEY,
+                r#"{"service":"api","error_class":"RuntimeError","message":"first"}"#,
+            )?)
+            .await?;
+        let first_body = json_body(first_error).await?;
+        let first_group = first_body["group_hash"]
+            .as_str()
+            .ok_or("missing first group hash")?
+            .to_owned();
+
+        let second_error = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/errors",
+                INGEST_KEY,
+                r#"{"service":"web","error_class":"RuntimeError","message":"second"}"#,
+            )?)
+            .await?;
+        let second_body = json_body(second_error).await?;
+        let second_group = second_body["group_hash"]
+            .as_str()
+            .ok_or("missing second group hash")?
+            .to_owned();
+
+        let annotated_incident_id = {
+            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            let annotated_id = canary_core::ids::IncidentId::generate().into_string();
+            store.correlate_incident(IncidentCorrelation {
+                signal_type: "error_group".to_owned(),
+                signal_ref: first_group,
+                service: "api".to_owned(),
+                incident_id: annotated_id.parse()?,
+                event_id: canary_core::ids::EventId::generate(),
+                now: "2026-05-28T20:00:00Z".to_owned(),
+            })?;
+            let plain_id = canary_core::ids::IncidentId::generate().into_string();
+            store.correlate_incident(IncidentCorrelation {
+                signal_type: "error_group".to_owned(),
+                signal_ref: second_group,
+                service: "web".to_owned(),
+                incident_id: plain_id.parse()?,
+                event_id: canary_core::ids::EventId::generate(),
+                now: "2026-05-28T20:00:01Z".to_owned(),
+            })?;
+            annotated_id
+        };
+
+        let annotation = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/incidents/{annotated_incident_id}/annotations"),
+                ADMIN_KEY,
+                r#"{"agent":"triage-bot","action":"acknowledged"}"#,
+            )?)
+            .await?;
+        assert_eq!(annotation.status(), StatusCode::CREATED);
+
+        let all = router
+            .clone()
+            .oneshot(read_request(READ_KEY, "/api/v1/incidents")?)
+            .await?;
+        let all_body = json_body(all).await?;
+        assert_eq!(all_body["incidents"].as_array().map(Vec::len), Some(2));
+
+        let with_annotation = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/incidents?with_annotation=acknowledged",
+            )?)
+            .await?;
+        let with_body = json_body(with_annotation).await?;
+        assert_eq!(with_body["incidents"].as_array().map(Vec::len), Some(1));
+        assert_eq!(with_body["incidents"][0]["id"], annotated_incident_id);
+
+        let without_annotation = router
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/incidents?without_annotation=acknowledged",
+            )?)
+            .await?;
+        let without_body = json_body(without_annotation).await?;
+        assert_eq!(without_body["incidents"].as_array().map(Vec::len), Some(1));
+        assert_ne!(without_body["incidents"][0]["id"], annotated_incident_id);
 
         Ok(())
     }

@@ -861,6 +861,31 @@ the Rust server accepts production traffic:
     `public_router_does_not_mount_private_routes` lock the response bodies,
     read-scope behavior, default windows, missing-target 200 response, and
     public/private route boundary after the split.
+75. Authenticated query read routes now live in
+    `canary-server::query_routes`. The module owns
+    `GET /api/v1/query`, `GET /api/v1/timeline`, `GET /api/v1/incidents`,
+    `GET /api/v1/incidents/{id}`, and `GET /api/v1/errors/{id}`, including
+    read-scope enforcement, query-kind selection, default windows, timeline
+    cursor precedence, incident annotation filters, and not-found Problem
+    Details. `ingest_router` still owns the route strings. Report generation
+    remains outside this module because CSV rendering and multi-surface cursor
+    pagination deserve their own boundary; webhook delivery reads remain
+    separate from webhook subscription mutation and worker delivery execution.
+    The focused tests `error_query_accepts_read_scope_and_returns_service_groups`,
+    `error_query_service_default_window_is_1h`,
+    `error_query_accepts_error_class_with_optional_service_filter`,
+    `error_query_accepts_group_by_error_class`,
+    `error_query_rejects_ingest_scope_and_invalid_params`,
+    `timeline_accepts_read_scope_filters_and_paginates`,
+    `timeline_rejects_invalid_params_and_wrong_scope`,
+    `incidents_accept_read_scope_and_return_empty_summary`,
+    `incidents_filters_with_annotation_and_without_annotation_are_applied`,
+    `incidents_reject_ingest_scope`,
+    `incident_detail_accepts_read_scope_and_reports_missing_incidents`,
+    `incident_detail_rejects_ingest_scope`, and
+    `error_detail_accepts_read_scope_and_reports_missing_errors` lock the read
+    response bodies, filter behavior, default windows, cursor behavior, auth
+    failures, validation errors, and not-found contracts after the split.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -890,5 +915,5 @@ Phoenix behavior until the replacement is complete:
 
 1. Continue converging the Rust replacement around small, typed contracts:
    split the remaining Axum route helpers in `canary-server/src/lib.rs` by
-   route family so ingest, query, and reporting can be reviewed as independent
-   adapters without changing wire behavior.
+   route family so ingest, reporting, and webhook delivery reads can be
+   reviewed as independent adapters without changing wire behavior.
