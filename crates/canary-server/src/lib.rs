@@ -23,7 +23,6 @@ use axum::{
 use canary_http::rate_limit::RateLimitKind;
 use canary_ingest::{IngestConfig, IngestEffect};
 use canary_store::{IncidentCorrelation, Store};
-use canary_workers::health::{MonitorMode, MonitorSnapshot};
 use canary_workers::retention::RetentionPolicy;
 use canary_workers::webhooks::{TransportResult, WebhookRequest};
 
@@ -777,33 +776,6 @@ impl TargetControlSink for TargetProbeLifecycleController {
     fn control_target(&self, command: TargetProbeLifecycleCommand) -> Result<(), String> {
         TargetProbeLifecycleController::control_target(self, command)
     }
-}
-
-fn monitor_snapshot(
-    snapshot: canary_store::MonitorCheckInSnapshot,
-) -> Result<MonitorSnapshot, String> {
-    Ok(MonitorSnapshot {
-        id: snapshot.id,
-        name: snapshot.name,
-        service: snapshot.service,
-        mode: monitor_mode(&snapshot.mode)?,
-        expected_every_ms: snapshot.expected_every_ms,
-        grace_ms: snapshot.grace_ms,
-        state: health_state(&snapshot.state)?,
-    })
-}
-
-fn monitor_mode(value: &str) -> Result<MonitorMode, String> {
-    match value {
-        "schedule" => Ok(MonitorMode::Schedule),
-        "ttl" => Ok(MonitorMode::Ttl),
-        _ => Err(format!("unknown monitor mode: {value}")),
-    }
-}
-
-fn health_state(value: &str) -> Result<canary_core::health::state_machine::HealthState, String> {
-    canary_core::health::state_machine::HealthState::parse_persisted(value)
-        .ok_or_else(|| format!("unknown health state: {value}"))
 }
 
 fn current_unix_millis() -> i64 {
@@ -2153,6 +2125,38 @@ mod tests {
 
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["code"], "not_found");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn monitor_check_in_returns_internal_problem_for_corrupt_persisted_monitor_mode()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        {
+            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            store.insert_monitor(MonitorInsert {
+                id: "MON-corrupt-mode".to_owned(),
+                name: "corrupt-mode".to_owned(),
+                service: "corrupt-mode".to_owned(),
+                mode: "weekly".to_owned(),
+                expected_every_ms: 90_000,
+                grace_ms: 5_000,
+                created_at: "2026-05-28T20:00:00Z".to_owned(),
+            })?;
+        }
+
+        let response = ingest_router(state)
+            .oneshot(check_in_request(
+                INGEST_KEY,
+                r#"{"monitor":"corrupt-mode","status":"alive"}"#,
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["code"], "internal_error");
 
         Ok(())
     }

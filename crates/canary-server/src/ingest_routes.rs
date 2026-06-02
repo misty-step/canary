@@ -18,9 +18,10 @@ use canary_http::{
     request::{MAX_JSON_BODY_BYTES, decode_json_object},
 };
 use canary_ingest::{IngestContext, IngestError, ValidationErrors, ingest as ingest_error};
+use canary_store::MonitorCheckInSnapshot;
 use canary_workers::health::{
-    HealthPlanError, MonitorCheckInInput, MonitorCheckInStatus, ObservationContext,
-    plan_monitor_check_in,
+    HealthPlanError, MonitorCheckInInput, MonitorCheckInStatus, MonitorMode, MonitorSnapshot,
+    ObservationContext, plan_monitor_check_in,
 };
 use serde_json::{Map, Value, json};
 
@@ -29,7 +30,7 @@ use crate::{
     body_fields::{optional_string, required_string},
     current_rfc3339, current_unix_millis,
     http_contract::{check_content_length, json_status_response, problem_response},
-    monitor_snapshot, require_ingest_scope,
+    require_ingest_scope,
 };
 
 struct ParsedCheckIn {
@@ -219,6 +220,31 @@ fn parse_check_in(attrs: Map<String, Value>) -> Result<ParsedCheckIn, Box<Proble
             context: encode_context(attrs.get("context")),
         },
     })
+}
+
+fn monitor_snapshot(snapshot: MonitorCheckInSnapshot) -> Result<MonitorSnapshot, String> {
+    Ok(MonitorSnapshot {
+        id: snapshot.id,
+        name: snapshot.name,
+        service: snapshot.service,
+        mode: monitor_mode(&snapshot.mode)?,
+        expected_every_ms: snapshot.expected_every_ms,
+        grace_ms: snapshot.grace_ms,
+        state: health_state(&snapshot.state)?,
+    })
+}
+
+fn monitor_mode(value: &str) -> Result<MonitorMode, String> {
+    match value {
+        "schedule" => Ok(MonitorMode::Schedule),
+        "ttl" => Ok(MonitorMode::Ttl),
+        _ => Err(format!("unknown monitor mode: {value}")),
+    }
+}
+
+fn health_state(value: &str) -> Result<canary_core::health::state_machine::HealthState, String> {
+    canary_core::health::state_machine::HealthState::parse_persisted(value)
+        .ok_or_else(|| format!("unknown health state: {value}"))
 }
 
 fn parse_check_in_status(
