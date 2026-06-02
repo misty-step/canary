@@ -52,7 +52,7 @@ pub(crate) async fn create_service_onboarding(
         Ok(attrs) => attrs,
         Err(problem) => return problem_response(*problem),
     };
-    let request = match parse_service_onboarding_create(attrs, state.allow_private_targets) {
+    let request = match parse_service_onboarding_create(attrs, state.allow_private_targets()) {
         Ok(request) => request,
         Err(problem) => return problem_response(*problem),
     };
@@ -87,7 +87,7 @@ pub(crate) async fn create_service_onboarding(
         interval_ms: target.interval_ms,
     };
 
-    let mut store = match state.store.lock() {
+    let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -100,7 +100,7 @@ pub(crate) async fn create_service_onboarding(
     }
     drop(store);
 
-    let _control_result = state.target_control.control_target(command);
+    let _control_result = state.control_target(command);
 
     json_status_response(StatusCode::CREATED.as_u16(), response_body)
 }

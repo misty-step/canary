@@ -1059,13 +1059,18 @@ post-commit runtime effects live behind `canary-server/src/runtime.rs`.
 
 That split keeps the server's public API (`CanaryServer`, `ServerConfig`, and
 boot/run errors) stable while hiding the store, webhook, probe, retention,
-monitor-overdue, and TLS scan composition needed to run the process. Do not move
-`IngestState` out as a field bag unless the route modules first get a deeper
-state interface; today it is still the shared Axum route-state contract.
+monitor-overdue, and TLS scan composition needed to run the process.
+
+Authenticated route capabilities live behind
+`canary-server/src/route_state.rs`. Its fields stay private: route modules can
+lock the single-writer store, read ingest configuration, emit post-commit
+effects, dispatch health fanout, send target lifecycle commands, use the admin
+webhook transport, account rate limits, and read private-target policy only
+through narrow methods. Keep route strings in `ingest_router`; add route-state
+surface only when a route needs a real capability, not as a convenience wrapper.
 
 ## Next Slices
 
 1. Continue converging the Rust replacement around small, typed contracts:
-   split remaining route-state, time, and parser helpers only where the new
-   module hides a real policy or translation boundary without changing wire
-   behavior.
+   split remaining time and parser helpers only where the new module hides a
+   real policy or translation boundary without changing wire behavior.

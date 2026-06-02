@@ -38,7 +38,7 @@ pub(crate) async fn list_webhooks(
         return problem_response(*problem);
     }
 
-    let store = match state.store.lock() {
+    let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -81,7 +81,7 @@ pub(crate) async fn create_webhook(
     };
     let response_body = webhook_insert_response(&webhook);
 
-    let mut store = match state.store.lock() {
+    let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -100,7 +100,7 @@ pub(crate) async fn delete_webhook(
         return problem_response(*problem);
     }
 
-    let mut store = match state.store.lock() {
+    let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -125,7 +125,7 @@ pub(crate) async fn test_webhook(
     }
 
     let subscription = {
-        let store = match state.store.lock() {
+        let store = match state.lock_store() {
             Ok(store) => store,
             Err(_) => return problem_response(internal_problem()),
         };
@@ -156,7 +156,7 @@ pub(crate) async fn test_webhook(
         return problem_response(webhook_delivery_failed_problem("webhook_inactive"));
     };
 
-    let transport = state.webhook_transport.clone();
+    let transport = state.webhook_transport();
     match tokio::task::spawn_blocking(move || transport.send(&request)).await {
         Ok(result) => match result {
             TransportResult::HttpStatus(status) if (200..=299).contains(&status) => {

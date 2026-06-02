@@ -3,8 +3,6 @@
 //! This crate adapts the stable wire contracts from `canary-http` to concrete
 //! HTTP responses. Domain decisions and body shapes stay out of the router.
 
-use std::sync::{Arc, Mutex};
-
 use axum::{
     Router,
     http::header::{CONTENT_TYPE, HeaderName},
@@ -12,10 +10,8 @@ use axum::{
 };
 #[cfg(test)]
 use canary_http::rate_limit::RateLimitKind;
-use canary_ingest::{IngestConfig, IngestEffect};
 #[cfg(test)]
 use canary_store::IncidentCorrelation;
-use canary_store::Store;
 
 mod admin_keys;
 mod admin_monitors;
@@ -34,6 +30,7 @@ mod query_routes;
 mod rate_limit;
 mod report_routes;
 mod retention_prune;
+mod route_state;
 mod runtime;
 mod server_auth;
 mod service_onboarding_routes;
@@ -74,7 +71,9 @@ pub use retention_prune::{
     RetentionPruneLifecycle, RetentionPruneLifecycleConfig, RetentionPruneLifecycleReport,
     RetentionPruneLifecycleWorker,
 };
-use runtime::default_webhook_transport;
+pub use route_state::{
+    AuthFailIdentityConfig, EventSink, IngestEffectSink, IngestState, TargetControlSink,
+};
 pub use runtime::{
     CanaryServer, RuntimeIngestEffectSink, ServerBootError, ServerConfig, ServerRunError,
 };
@@ -103,31 +102,10 @@ pub use webhooks::{
     WebhookTransport,
 };
 
-fn current_rfc3339() -> String {
+pub(crate) fn current_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
-}
-
-/// Sink for already-recorded service events that should fan out to webhooks.
-pub trait EventSink: Send + Sync + 'static {
-    /// Enqueue one event payload. Errors are advisory after the store commit.
-    fn enqueue_event(&self, event: &str, payload_json: &str) -> Result<(), String>;
-}
-
-#[derive(Debug, Default)]
-struct NoopEventSink;
-
-impl EventSink for NoopEventSink {
-    fn enqueue_event(&self, _event: &str, _payload_json: &str) -> Result<(), String> {
-        Ok(())
-    }
-}
-
-impl EventSink for WebhookEnqueueEffectSink {
-    fn enqueue_event(&self, event: &str, payload_json: &str) -> Result<(), String> {
-        WebhookEnqueueEffectSink::enqueue_event(self, event, payload_json)
-    }
 }
 
 /// Router for Canary's authenticated ingest endpoints.
@@ -179,199 +157,7 @@ pub fn ingest_router(state: IngestState) -> Router {
         .with_state(state)
 }
 
-/// Shared state needed by authenticated ingest routes.
-#[derive(Clone)]
-pub struct IngestState {
-    store: Arc<Mutex<Store>>,
-    config: IngestConfig,
-    effect_sink: Arc<dyn IngestEffectSink>,
-    health_fanout: HealthEventFanout,
-    target_control: Arc<dyn TargetControlSink>,
-    webhook_transport: Arc<dyn WebhookTransport>,
-    rate_limiter: Arc<Mutex<RateLimiter>>,
-    auth_fail_identity: AuthFailIdentityConfig,
-    allow_private_targets: bool,
-}
-
-/// Client identity source used only for Phoenix-compatible invalid-key
-/// accounting.
-///
-/// Phoenix records invalid supplied API keys against `conn.remote_ip` and
-/// deliberately ignores the rate-limit result. Rust keeps the same silent
-/// accounting contract while making proxy-header trust explicit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct AuthFailIdentityConfig {
-    /// Trust proxy-set client IP headers such as `fly-client-ip` and
-    /// `x-forwarded-for`.
-    pub trust_proxy_headers: bool,
-}
-
-impl IngestState {
-    /// Build ingest state from an already-open single-writer store.
-    pub fn new(store: Store, config: IngestConfig) -> Self {
-        Self::new_with_effect_sink(store, config, Arc::new(NoopIngestEffectSink))
-    }
-
-    /// Build ingest state with Rust webhook enqueue wired to a scheduler.
-    ///
-    /// This constructor persists webhook ledger rows and calls the supplied
-    /// scheduler for `EnqueueWebhook` effects. It does not implement delivery
-    /// transport or retry runtime; those remain behind the scheduler boundary.
-    pub fn new_with_webhook_scheduler(
-        store: Store,
-        config: IngestConfig,
-        scheduler: Arc<dyn WebhookScheduler>,
-    ) -> Self {
-        let store = Arc::new(Mutex::new(store));
-        let webhook_sink = Arc::new(WebhookEnqueueEffectSink::new(
-            store.clone(),
-            scheduler,
-            Arc::new(InMemoryWebhookCooldown::default()),
-        ));
-        Self {
-            store,
-            config,
-            effect_sink: webhook_sink.clone(),
-            health_fanout: HealthEventFanout::new_without_failure_sink(webhook_sink),
-            target_control: Arc::new(NoopTargetControlSink),
-            webhook_transport: default_webhook_transport(),
-            rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
-            auth_fail_identity: AuthFailIdentityConfig::default(),
-            allow_private_targets: false,
-        }
-    }
-
-    /// Build ingest state with an explicit post-commit effect sink.
-    pub fn new_with_effect_sink(
-        store: Store,
-        config: IngestConfig,
-        effect_sink: Arc<dyn IngestEffectSink>,
-    ) -> Self {
-        Self::new_with_shared_effect_sink(Arc::new(Mutex::new(store)), config, effect_sink)
-    }
-
-    /// Build ingest state from a shared single-writer store and explicit effect sink.
-    pub fn new_with_shared_effect_sink(
-        store: Arc<Mutex<Store>>,
-        config: IngestConfig,
-        effect_sink: Arc<dyn IngestEffectSink>,
-    ) -> Self {
-        Self {
-            store,
-            config,
-            effect_sink,
-            health_fanout: HealthEventFanout::new_without_failure_sink(Arc::new(NoopEventSink)),
-            target_control: Arc::new(NoopTargetControlSink),
-            webhook_transport: default_webhook_transport(),
-            rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
-            auth_fail_identity: AuthFailIdentityConfig::default(),
-            allow_private_targets: false,
-        }
-    }
-
-    /// Build ingest state from shared store plus explicit ingest and event sinks.
-    pub fn new_with_shared_sinks(
-        store: Arc<Mutex<Store>>,
-        config: IngestConfig,
-        effect_sink: Arc<dyn IngestEffectSink>,
-        event_sink: Arc<dyn EventSink>,
-    ) -> Self {
-        Self {
-            store,
-            config,
-            effect_sink,
-            health_fanout: HealthEventFanout::new_without_failure_sink(event_sink),
-            target_control: Arc::new(NoopTargetControlSink),
-            webhook_transport: default_webhook_transport(),
-            rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
-            auth_fail_identity: AuthFailIdentityConfig::default(),
-            allow_private_targets: false,
-        }
-    }
-
-    /// Build ingest state from shared store plus explicit ingest and health fanout sinks.
-    pub fn new_with_shared_fanout(
-        store: Arc<Mutex<Store>>,
-        config: IngestConfig,
-        effect_sink: Arc<dyn IngestEffectSink>,
-        health_fanout: HealthEventFanout,
-    ) -> Self {
-        Self {
-            store,
-            config,
-            effect_sink,
-            health_fanout,
-            target_control: Arc::new(NoopTargetControlSink),
-            webhook_transport: default_webhook_transport(),
-            rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
-            auth_fail_identity: AuthFailIdentityConfig::default(),
-            allow_private_targets: false,
-        }
-    }
-
-    /// Attach the target probe lifecycle control boundary used by admin routes.
-    pub fn with_target_control(mut self, target_control: Arc<dyn TargetControlSink>) -> Self {
-        self.target_control = target_control;
-        self
-    }
-
-    /// Attach the outbound webhook transport used by the admin test route.
-    pub fn with_webhook_transport(mut self, webhook_transport: Arc<dyn WebhookTransport>) -> Self {
-        self.webhook_transport = webhook_transport;
-        self
-    }
-
-    /// Configure the client identity source used for silent invalid-key
-    /// accounting.
-    pub fn with_auth_fail_identity(mut self, config: AuthFailIdentityConfig) -> Self {
-        self.auth_fail_identity = config;
-        self
-    }
-
-    /// Allow admin target creation to accept private/non-global probe hosts.
-    pub fn with_allow_private_targets(mut self, allow_private_targets: bool) -> Self {
-        self.allow_private_targets = allow_private_targets;
-        self
-    }
-}
-
-/// Best-effort sink for ingest effects emitted after the store transaction commits.
-pub trait IngestEffectSink: Send + Sync + 'static {
-    /// Handle effects. Errors are advisory and must not change the HTTP response.
-    fn handle(&self, effects: &[IngestEffect]) -> Result<(), String>;
-}
-
-#[derive(Debug, Default)]
-struct NoopIngestEffectSink;
-
-impl IngestEffectSink for NoopIngestEffectSink {
-    fn handle(&self, _effects: &[IngestEffect]) -> Result<(), String> {
-        Ok(())
-    }
-}
-
-/// Narrow control boundary from admin target writes to the probe lifecycle.
-pub trait TargetControlSink: Send + Sync + 'static {
-    /// Apply one target-scoped lifecycle command.
-    fn control_target(&self, command: TargetProbeLifecycleCommand) -> Result<(), String>;
-}
-
-#[derive(Debug, Default)]
-struct NoopTargetControlSink;
-
-impl TargetControlSink for NoopTargetControlSink {
-    fn control_target(&self, _command: TargetProbeLifecycleCommand) -> Result<(), String> {
-        Ok(())
-    }
-}
-
-impl TargetControlSink for TargetProbeLifecycleController {
-    fn control_target(&self, command: TargetProbeLifecycleCommand) -> Result<(), String> {
-        TargetProbeLifecycleController::control_target(self, command)
-    }
-}
-
-fn current_unix_millis() -> i64 {
+pub(crate) fn current_unix_millis() -> i64 {
     let nanos = time::OffsetDateTime::now_utc().unix_timestamp_nanos();
     i64::try_from(nanos / 1_000_000).unwrap_or(i64::MAX)
 }
@@ -388,7 +174,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process;
     use std::sync::{
-        Arc, Mutex as StdMutex,
+        Arc, Mutex, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     };
     use std::thread::{self, JoinHandle, ThreadId};
@@ -408,9 +194,10 @@ mod tests {
         public::{APPLICATION_JSON, DependencyStatus, OPENAPI_JSON},
         request::MAX_JSON_BODY_BYTES,
     };
+    use canary_ingest::{IngestConfig, IngestEffect};
     use canary_store::{
         API_KEY_PREFIX_LEN, ApiKeyInsert, ErrorIngest, ErrorIngestIds, ErrorIngestPayload,
-        MonitorInsert, TargetCheckObservation, TargetInsert, TargetProbeCommit,
+        MonitorInsert, Store, TargetCheckObservation, TargetInsert, TargetProbeCommit,
         WebhookDeliveryInsert, WebhookDeliveryJobInsert, WebhookDeliveryJobState,
         WebhookDeliveryStatus, WebhookSubscriptionInsert,
     };
@@ -419,6 +206,15 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    #[derive(Debug, Default)]
+    struct TestNoopIngestEffectSink;
+
+    impl IngestEffectSink for TestNoopIngestEffectSink {
+        fn handle(&self, _effects: &[IngestEffect]) -> Result<(), String> {
+            Ok(())
+        }
+    }
 
     const ADMIN_KEY: &str = "sk_live_admin_secret";
     const INGEST_KEY: &str = "sk_live_ingest_secret";
@@ -994,7 +790,7 @@ mod tests {
         assert!(delivery_id.starts_with("DLV-"));
         drop(jobs);
 
-        let store = state.store.lock().map_err(|_| "store lock poisoned")?;
+        let store = state.lock_store().map_err(|_| "store lock poisoned")?;
         let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
             delivery_id: Some(delivery_id),
             ..Default::default()
@@ -1018,7 +814,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::CREATED);
 
-        let store = state.store.lock().map_err(|_| "store lock poisoned")?;
+        let store = state.lock_store().map_err(|_| "store lock poisoned")?;
         let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
             webhook_id: Some("WHK-test".to_owned()),
             ..Default::default()
@@ -1036,11 +832,11 @@ mod tests {
         let scheduler = Arc::new(RecordingScheduler::default());
         let mut state = test_ingest_state_with_webhook_scheduler(scheduler.clone(), true)?;
         let cooldown = Arc::new(AlwaysCooldown);
-        state.effect_sink = Arc::new(WebhookEnqueueEffectSink::new(
-            state.store.clone(),
+        state.replace_effect_sink(Arc::new(WebhookEnqueueEffectSink::new(
+            state.shared_store(),
             scheduler.clone(),
             cooldown,
-        ));
+        )));
         let response = ingest_router(state.clone())
             .oneshot(error_request(INGEST_KEY, valid_error_body())?)
             .await?;
@@ -1055,7 +851,7 @@ mod tests {
             0
         );
 
-        let store = state.store.lock().map_err(|_| "store lock poisoned")?;
+        let store = state.lock_store().map_err(|_| "store lock poisoned")?;
         let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
             webhook_id: Some("WHK-test".to_owned()),
             ..Default::default()
@@ -1743,7 +1539,7 @@ mod tests {
         let state = IngestState::new_with_shared_fanout(
             store,
             IngestConfig::default(),
-            Arc::new(NoopIngestEffectSink),
+            Arc::new(TestNoopIngestEffectSink),
             HealthEventFanout::new(Arc::new(FailingEventSink), recorder.clone()),
         );
 
@@ -1790,7 +1586,7 @@ mod tests {
     -> Result<(), Box<dyn Error>> {
         let state = test_ingest_state()?;
         {
-            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
             store.insert_monitor(MonitorInsert {
                 id: "MON-corrupt-mode".to_owned(),
                 name: "corrupt-mode".to_owned(),
@@ -3161,7 +2957,7 @@ mod tests {
             RecordingTransport::request_error("connection refused"),
         ));
         {
-            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
             store.insert_webhook_subscription(WebhookSubscriptionInsert {
                 id: "WHK-inactive-test".to_owned(),
                 url: "https://example.com/inactive".to_owned(),
@@ -3778,7 +3574,7 @@ mod tests {
     -> Result<(), Box<dyn Error>> {
         let state = test_ingest_state()?;
         {
-            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
             store.create_pending_webhook_delivery(WebhookDeliveryInsert {
                 delivery_id: "DLV-old".to_owned(),
                 webhook_id: "WHK-alpha".to_owned(),
@@ -4024,7 +3820,7 @@ mod tests {
     async fn health_status_accepts_read_scope_and_returns_surfaces() -> Result<(), Box<dyn Error>> {
         let state = test_ingest_state()?.with_allow_private_targets(true);
         {
-            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
             seed_monitor(&mut store, "desktop-active-timer")?;
         }
         let router = ingest_router(state);
@@ -4322,7 +4118,7 @@ mod tests {
     {
         let state = test_ingest_state()?;
         {
-            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
             store.commit_error_ingest(test_error_ingest(1, "2026-04-01T00:00:00Z"))?;
         }
         let router = ingest_router(state);
@@ -4360,7 +4156,7 @@ mod tests {
     -> Result<(), Box<dyn Error>> {
         let state = test_ingest_state()?;
         {
-            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
             for service in [
                 "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf",
             ] {
@@ -4439,7 +4235,7 @@ mod tests {
     -> Result<(), Box<dyn Error>> {
         let state = test_ingest_state()?;
         {
-            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
             seed_target(&mut store, "metrics-svc")?;
             seed_monitor(&mut store, "metrics-monitor")?;
             store.create_pending_webhook_delivery(WebhookDeliveryInsert {
@@ -4520,7 +4316,7 @@ mod tests {
         let state = test_ingest_state()?;
         {
             let mut limiter = state
-                .rate_limiter
+                .rate_limiter()
                 .lock()
                 .map_err(|_| "rate limiter lock poisoned")?;
             for _ in 0..30 {
@@ -4589,7 +4385,7 @@ mod tests {
         let target = json_body(target_response).await?;
         let target_id = target["id"].as_str().ok_or("missing target id")?.to_owned();
         {
-            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
             store.commit_target_probe(TargetProbeCommit {
                 target_id: target_id.clone(),
                 state: "up".to_owned(),
@@ -4690,7 +4486,7 @@ mod tests {
         let sink = Arc::new(RecordingFailingSink::default());
         let state = test_ingest_state_with_sink(sink.clone())?;
         {
-            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
             seed_target(&mut store, "api")?;
         }
         let router = ingest_router(state);
@@ -4817,7 +4613,7 @@ mod tests {
             .ok_or("missing group hash")?
             .to_owned();
         let incident_id = {
-            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
             let id = canary_core::ids::IncidentId::generate().into_string();
             store.correlate_incident(IncidentCorrelation {
                 signal_type: "error_group".to_owned(),
@@ -5008,7 +4804,7 @@ mod tests {
             .to_owned();
 
         let annotated_incident_id = {
-            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
             let annotated_id = canary_core::ids::IncidentId::generate().into_string();
             store.correlate_incident(IncidentCorrelation {
                 signal_type: "error_group".to_owned(),
@@ -5202,7 +4998,7 @@ mod tests {
             trust_proxy_headers: true,
         });
         {
-            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
             seed_api_key(
                 &mut store,
                 "KEY-bad-scope",
@@ -5229,7 +5025,7 @@ mod tests {
         assert_eq!(body["code"], "invalid_api_key");
 
         let mut limiter = state
-            .rate_limiter
+            .rate_limiter()
             .lock()
             .map_err(|_| "rate limiter lock poisoned")?;
         for _ in 0..9 {
@@ -5272,7 +5068,7 @@ mod tests {
         }
 
         let mut limiter = state
-            .rate_limiter
+            .rate_limiter()
             .lock()
             .map_err(|_| "rate limiter lock poisoned")?;
         assert_eq!(
@@ -5407,7 +5203,7 @@ mod tests {
         let state = test_ingest_state()?;
         {
             let mut limiter = state
-                .rate_limiter
+                .rate_limiter()
                 .lock()
                 .map_err(|_| "rate limiter lock poisoned")?;
             for _ in 0..100 {
@@ -5479,7 +5275,7 @@ mod tests {
 
         {
             let mut limiter = state
-                .rate_limiter
+                .rate_limiter()
                 .lock()
                 .map_err(|_| "rate limiter lock poisoned")?;
             for _ in 0..9 {
@@ -5527,7 +5323,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
         let mut limiter = state
-            .rate_limiter
+            .rate_limiter()
             .lock()
             .map_err(|_| "rate limiter lock poisoned")?;
         assert_eq!(
@@ -5573,7 +5369,7 @@ mod tests {
         }
 
         let mut limiter = state
-            .rate_limiter
+            .rate_limiter()
             .lock()
             .map_err(|_| "rate limiter lock poisoned")?;
         assert_eq!(
@@ -5659,7 +5455,7 @@ mod tests {
         assert_eq!(body["code"], "invalid_api_key");
 
         let mut limiter = state
-            .rate_limiter
+            .rate_limiter()
             .lock()
             .map_err(|_| "rate limiter lock poisoned")?;
         for _ in 0..9 {
@@ -5720,13 +5516,13 @@ mod tests {
     }
 
     fn test_ingest_state() -> Result<IngestState, Box<dyn Error>> {
-        test_ingest_state_with_sink(Arc::new(NoopIngestEffectSink))
+        test_ingest_state_with_sink(Arc::new(TestNoopIngestEffectSink))
     }
 
     fn test_ingest_state_with_monitor(name: &str) -> Result<IngestState, Box<dyn Error>> {
         let state = test_ingest_state()?;
         {
-            let mut store = state.store.lock().map_err(|_| "store lock poisoned")?;
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
             seed_monitor(&mut store, name)?;
         }
         Ok(state)
@@ -5904,7 +5700,7 @@ mod tests {
     }
 
     fn error_count(state: &IngestState) -> Result<u64, Box<dyn Error>> {
-        let store = state.store.lock().map_err(|_| "store lock poisoned")?;
+        let store = state.lock_store().map_err(|_| "store lock poisoned")?;
         Ok(store.error_count()?)
     }
 

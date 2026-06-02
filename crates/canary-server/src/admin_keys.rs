@@ -39,7 +39,7 @@ pub(crate) async fn list_api_keys(
         return problem_response(*problem);
     }
 
-    let store = match state.store.lock() {
+    let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -103,7 +103,7 @@ pub(crate) async fn create_api_key(
     };
     let response_body = api_key_insert_response(&key, &raw_key);
 
-    let mut store = match state.store.lock() {
+    let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -122,7 +122,7 @@ pub(crate) async fn revoke_api_key(
         return problem_response(*problem);
     }
 
-    let mut store = match state.store.lock() {
+    let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };

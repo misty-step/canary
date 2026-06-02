@@ -19,7 +19,6 @@ use axum::Router;
 use canary_ingest::{IngestConfig, IngestEffect};
 use canary_store::{IncidentCorrelation, Store};
 use canary_workers::retention::RetentionPolicy;
-use canary_workers::webhooks::{TransportResult, WebhookRequest};
 
 use crate::{
     AuthFailIdentityConfig, EnqueueFailureKey, EnqueueFailureRecorder, HealthEventFanout,
@@ -30,8 +29,8 @@ use crate::{
     StoreWebhookScheduler, TargetProbeLifecycle, TargetProbeLifecycleConfig,
     TargetProbeLifecycleWorker, TargetProbeOptions, TargetProbeRuntime, TlsExpiryScanLifecycle,
     TlsExpiryScanLifecycleConfig, TlsExpiryScanLifecycleWorker, WebhookDeliveryDrain,
-    WebhookDeliveryDrainWorker, WebhookDeliveryRuntime, WebhookEnqueueEffectSink, WebhookTransport,
-    current_rfc3339, ingest_router, public_router,
+    WebhookDeliveryDrainWorker, WebhookDeliveryRuntime, WebhookEnqueueEffectSink, current_rfc3339,
+    ingest_router, public_router,
 };
 
 const DEFAULT_WEBHOOK_DRAIN_INTERVAL: StdDuration = StdDuration::from_secs(5);
@@ -155,20 +154,21 @@ impl CanaryServer {
 
         let transport = Arc::new(build_http_webhook_transport().map_err(ServerBootError::Http)?);
         let runtime = WebhookDeliveryRuntime::new(store.clone(), transport, webhook_circuit);
-        let drain = WebhookDeliveryDrain::new(store, runtime, config.webhook_drain_max_jobs);
+        let drain =
+            WebhookDeliveryDrain::new(store.clone(), runtime, config.webhook_drain_max_jobs);
         let webhook_worker =
             WebhookDeliveryDrainWorker::spawn(drain, config.webhook_drain_interval)
                 .map_err(ServerBootError::WebhookWorker)?;
         let allow_private_targets = config.target_probe_options.allow_private_targets;
         let target_transport = Arc::new(ReqwestProbeTransport);
         let target_runtime = TargetProbeRuntime::new(
-            ingest_state.store.clone(),
+            store.clone(),
             health_fanout.clone(),
             target_transport,
             config.target_probe_options,
         );
         let target_probe_worker = TargetProbeLifecycleWorker::spawn(
-            TargetProbeLifecycle::new(ingest_state.store.clone(), target_runtime),
+            TargetProbeLifecycle::new(store.clone(), target_runtime),
             TargetProbeLifecycleConfig {
                 tick_interval: config.target_probe_interval,
             },
@@ -176,8 +176,8 @@ impl CanaryServer {
         .map_err(ServerBootError::TargetProbeWorker)?;
         let monitor_overdue_worker = MonitorOverdueLifecycleWorker::spawn(
             MonitorOverdueLifecycle::new(
-                ingest_state.store.clone(),
-                MonitorOverdueRuntime::new(ingest_state.store.clone(), health_fanout),
+                store.clone(),
+                MonitorOverdueRuntime::new(store.clone(), health_fanout),
             ),
             MonitorOverdueLifecycleConfig {
                 tick_interval: config.monitor_overdue_interval,
@@ -185,14 +185,14 @@ impl CanaryServer {
         )
         .map_err(ServerBootError::MonitorOverdueWorker)?;
         let retention_prune_worker = RetentionPruneLifecycleWorker::spawn(
-            RetentionPruneLifecycle::new(ingest_state.store.clone(), config.retention_policy),
+            RetentionPruneLifecycle::new(store.clone(), config.retention_policy),
             RetentionPruneLifecycleConfig {
                 tick_interval: config.retention_prune_interval,
             },
         )
         .map_err(ServerBootError::RetentionPruneWorker)?;
         let tls_expiry_scan_worker = TlsExpiryScanLifecycleWorker::spawn(
-            TlsExpiryScanLifecycle::new(ingest_state.store.clone(), webhook_sink),
+            TlsExpiryScanLifecycle::new(store, webhook_sink),
             TlsExpiryScanLifecycleConfig {
                 tick_interval: config.tls_expiry_scan_interval,
             },
@@ -341,22 +341,6 @@ fn build_http_webhook_transport() -> Result<HttpWebhookTransport, String> {
         .map_err(|error| format!("failed to spawn webhook transport initializer: {error}"))?
         .join()
         .map_err(|_| "webhook transport initializer panicked".to_owned())?
-}
-
-pub(crate) fn default_webhook_transport() -> Arc<dyn WebhookTransport> {
-    Arc::new(LazyHttpWebhookTransport)
-}
-
-struct LazyHttpWebhookTransport;
-
-impl WebhookTransport for LazyHttpWebhookTransport {
-    fn send(&self, request: &WebhookRequest) -> TransportResult {
-        let request = request.clone();
-        match HttpWebhookTransport::try_new() {
-            Ok(transport) => transport.send(&request),
-            Err(error) => TransportResult::RequestError(error),
-        }
-    }
 }
 
 /// Runtime sink for ingest post-commit effects.

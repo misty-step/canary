@@ -63,17 +63,17 @@ pub(crate) async fn create_error(
         Err(problem) => return problem_response(*problem),
     };
 
-    let mut store = match state.store.lock() {
+    let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
 
-    let result = ingest_error(&mut store, &attrs, &state.config, IngestContext::now());
+    let result = ingest_error(&mut store, &attrs, state.config(), IngestContext::now());
     drop(store);
 
     match result {
         Ok(accepted) => {
-            let _ = state.effect_sink.handle(&accepted.post_commit_effects);
+            let _ = state.handle_effects(&accepted.post_commit_effects);
             json_status_response(
                 StatusCode::CREATED.as_u16(),
                 json!({
@@ -122,7 +122,7 @@ pub(crate) async fn create_check_in(
         Err(problem) => return problem_response(*problem),
     };
 
-    let mut store = match state.store.lock() {
+    let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -161,7 +161,7 @@ pub(crate) async fn create_check_in(
 
     if let Some(transition) = commit.transition {
         let _fanout_report = state
-            .health_fanout
+            .health_fanout()
             .dispatch(HealthEventSource::MonitorCheckIn, &transition);
     }
 

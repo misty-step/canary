@@ -41,7 +41,7 @@ pub(crate) async fn list_targets(
         return problem_response(*problem);
     }
 
-    let store = match state.store.lock() {
+    let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -78,7 +78,7 @@ pub(crate) async fn create_target(
         Ok(attrs) => attrs,
         Err(problem) => return problem_response(*problem),
     };
-    let target = match parse_target_create(attrs, state.allow_private_targets) {
+    let target = match parse_target_create(attrs, state.allow_private_targets()) {
         Ok(target) => target,
         Err(problem) => return problem_response(*problem),
     };
@@ -88,7 +88,7 @@ pub(crate) async fn create_target(
     };
     let response_body = target_insert_response(&target);
 
-    let mut store = match state.store.lock() {
+    let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -97,7 +97,7 @@ pub(crate) async fn create_target(
     }
     drop(store);
 
-    let _control_result = state.target_control.control_target(command);
+    let _control_result = state.control_target(command);
 
     json_status_response(StatusCode::CREATED.as_u16(), response_body)
 }
@@ -111,7 +111,7 @@ pub(crate) async fn delete_target(
         return problem_response(*problem);
     }
 
-    let mut store = match state.store.lock() {
+    let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -122,9 +122,8 @@ pub(crate) async fn delete_target(
     }
     drop(store);
 
-    let _control_result = state
-        .target_control
-        .control_target(TargetProbeLifecycleCommand::Untrack { target_id: id });
+    let _control_result =
+        state.control_target(TargetProbeLifecycleCommand::Untrack { target_id: id });
 
     response(
         StatusCode::NO_CONTENT.as_u16(),
@@ -162,7 +161,7 @@ pub(crate) async fn update_target_interval(
         Err(problem) => return problem_response(*problem),
     };
 
-    let mut store = match state.store.lock() {
+    let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -174,13 +173,10 @@ pub(crate) async fn update_target_interval(
     drop(store);
 
     if update.prior_active && update.prior_interval_ms != update.target.interval_ms {
-        let _control_result =
-            state
-                .target_control
-                .control_target(TargetProbeLifecycleCommand::Reconfigure {
-                    target_id: id,
-                    interval_ms: update.target.interval_ms,
-                });
+        let _control_result = state.control_target(TargetProbeLifecycleCommand::Reconfigure {
+            target_id: id,
+            interval_ms: update.target.interval_ms,
+        });
     }
 
     json_status_response(StatusCode::OK.as_u16(), target_response(update.target))
@@ -212,7 +208,7 @@ async fn set_target_active(
         return problem_response(*problem);
     }
 
-    let mut store = match state.store.lock() {
+    let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -232,7 +228,7 @@ async fn set_target_active(
             target_id: id.clone(),
         }
     };
-    let _control_result = state.target_control.control_target(command);
+    let _control_result = state.control_target(command);
 
     json_status_response(
         StatusCode::OK.as_u16(),

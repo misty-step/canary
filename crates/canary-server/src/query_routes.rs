@@ -93,7 +93,7 @@ pub(crate) async fn query_errors(
         without_annotation: params.without_annotation,
     };
 
-    let store = match state.store.lock() {
+    let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -139,7 +139,7 @@ pub(crate) async fn timeline(
         cursor,
         event_type: params.event_type,
     };
-    let store = match state.store.lock() {
+    let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -165,7 +165,7 @@ pub(crate) async fn list_incidents(
         return problem_response(*problem);
     }
 
-    let store = match state.store.lock() {
+    let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -189,7 +189,7 @@ pub(crate) async fn show_error(
         return problem_response(*problem);
     }
 
-    let store = match state.store.lock() {
+    let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -211,7 +211,7 @@ pub(crate) async fn show_incident(
         return problem_response(*problem);
     }
 
-    let store = match state.store.lock() {
+    let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };

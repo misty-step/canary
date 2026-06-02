@@ -38,7 +38,7 @@ pub(crate) async fn list_monitors(
         return problem_response(*problem);
     }
 
-    let store = match state.store.lock() {
+    let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -81,7 +81,7 @@ pub(crate) async fn create_monitor(
     };
     let response_body = monitor_insert_response(&monitor);
 
-    let mut store = match state.store.lock() {
+    let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -104,7 +104,7 @@ pub(crate) async fn delete_monitor(
         return problem_response(*problem);
     }
 
-    let mut store = match state.store.lock() {
+    let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };

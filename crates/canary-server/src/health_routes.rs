@@ -38,7 +38,7 @@ pub(crate) async fn health_status(
         return problem_response(*problem);
     }
 
-    let store = match state.store.lock() {
+    let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -71,7 +71,7 @@ pub(crate) async fn status(
     }
 
     let window = params.window.as_deref().unwrap_or("1h");
-    let store = match state.store.lock() {
+    let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -113,7 +113,7 @@ pub(crate) async fn target_checks(
     }
 
     let window = params.window.as_deref().unwrap_or("24h");
-    let store = match state.store.lock() {
+    let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };

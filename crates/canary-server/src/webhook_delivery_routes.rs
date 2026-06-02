@@ -60,7 +60,7 @@ pub(crate) async fn webhook_deliveries(
         limit: params.limit,
         cursor,
     };
-    let store = match state.store.lock() {
+    let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };

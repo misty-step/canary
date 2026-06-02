@@ -121,7 +121,7 @@ pub(crate) async fn list_annotations(
         return problem_response(annotation_missing_subject_problem("subject_id"));
     };
 
-    let store = match state.store.lock() {
+    let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -182,7 +182,7 @@ fn list_annotations_for_subject(
     if let Err(problem) = require_read_scope(&state, &headers) {
         return problem_response(*problem);
     }
-    let store = match state.store.lock() {
+    let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -236,7 +236,7 @@ fn create_annotation_request(
     not_found_detail: &'static str,
 ) -> Response<Body> {
     let annotation = {
-        let mut store = match state.store.lock() {
+        let mut store = match state.lock_store() {
             Ok(store) => store,
             Err(_) => return problem_response(internal_problem()),
         };
@@ -269,7 +269,7 @@ fn create_annotation_request(
         "annotation": annotation,
         "timestamp": timestamp,
     });
-    let _ = state.effect_sink.handle(&[IngestEffect::EnqueueWebhook {
+    let _ = state.handle_effects(&[IngestEffect::EnqueueWebhook {
         event: "annotation.added".to_owned(),
         payload_json: payload.to_string(),
     }]);

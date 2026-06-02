@@ -62,8 +62,7 @@ pub(crate) fn require_scope(
     };
 
     let store = state
-        .store
-        .lock()
+        .lock_store()
         .map_err(|_| Box::new(internal_problem()))?;
     let Some(key) = store
         .verify_api_key(token)
@@ -88,7 +87,7 @@ pub(crate) fn require_scope(
 }
 
 fn account_auth_fail(state: &IngestState, headers: &HeaderMap) {
-    let identity = auth_fail_identity(headers, state.auth_fail_identity);
+    let identity = auth_fail_identity(headers, state.auth_fail_identity());
     let _ = enforce_rate_limit(state, RateLimitKind::AuthFail, &identity);
 }
 
@@ -168,7 +167,7 @@ fn enforce_rate_limit(
     identity: &str,
 ) -> Result<(), Box<ProblemDetails>> {
     let mut limiter = state
-        .rate_limiter
+        .rate_limiter()
         .lock()
         .map_err(|_| Box::new(internal_problem()))?;
 
