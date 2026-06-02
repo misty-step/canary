@@ -36,6 +36,7 @@ mod server_auth;
 mod server_time;
 mod service_onboarding_routes;
 mod target_probes;
+mod target_request;
 mod tls_scan;
 mod webhook_delivery;
 mod webhook_delivery_routes;

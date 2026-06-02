@@ -1039,6 +1039,22 @@ the Rust server accepts production traffic:
     wire formatting and overflow-safe Unix millisecond conversion, while the
     existing route and worker tests continue to prove public behavior through
     fixed timestamps where determinism matters.
+85. Target probe request-shape validation now lives in
+    `canary-server::target_request`. The module owns target URL validation,
+    probe method validation, configured-header JSON parsing, lowercase header
+    normalization, duplicate detection after normalization, transport-owned
+    header rejection, header name/value validation, and the configured header
+    count/serialized-byte caps. Target probing still owns the deeper runtime
+    policies: DNS resolution, SSRF classification, TLS-expiry capture,
+    bounded HTTP transport, persistence, health transitions, lifecycle
+    scheduling, and post-commit fanout. This keeps the admin target route and
+    probe runtime sharing one request contract without turning
+    `target_probes` into a grab bag of parser helpers. The focused
+    `target_request::*` tests lock normalized headers, forbidden transport
+    headers, malformed values, duplicate normalized names, and count/size
+    limits, while `target_probes` integration tests still prove invalid
+    configured headers persist a failed probe without opening transport and
+    valid configured headers reach transport normalized.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -1096,6 +1112,12 @@ the root route table free of timestamp policy: edge code can ask for current
 UTC, current RFC3339, or current Unix milliseconds, but deterministic domain
 functions should continue accepting explicit timestamps instead of reaching for
 global time.
+
+Target probe request-shape validation lives in
+`canary-server/src/target_request.rs`. Keep it limited to persisted/admin
+request configuration: URL, method, and configured headers. DNS/IP policy, TLS
+capture, transport execution, persistence, and lifecycle scheduling stay in
+`target_probes.rs` or deeper worker/store crates.
 
 ## Next Slices
 
