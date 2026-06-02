@@ -36,6 +36,7 @@ mod server_auth;
 mod service_onboarding_routes;
 mod target_probes;
 mod tls_scan;
+mod webhook_delivery;
 mod webhook_delivery_routes;
 mod webhooks;
 
@@ -94,12 +95,14 @@ pub use tls_scan::{
     TlsExpiryScanLifecycle, TlsExpiryScanLifecycleConfig, TlsExpiryScanLifecycleReport,
     TlsExpiryScanLifecycleWorker, TlsExpiryScanRuntimeError, run_tls_expiry_scan_once,
 };
+pub use webhook_delivery::{
+    InMemoryWebhookCircuit, WebhookCircuit, WebhookDeliveryDrain, WebhookDeliveryDrainReport,
+    WebhookDeliveryDrainWorker, WebhookDeliveryRuntime,
+};
 use webhook_delivery_routes::webhook_deliveries;
 pub use webhooks::{
-    HttpWebhookTransport, InMemoryWebhookCircuit, InMemoryWebhookCooldown, StoreWebhookScheduler,
-    WebhookCircuit, WebhookCooldown, WebhookDeliveryDrain, WebhookDeliveryDrainReport,
-    WebhookDeliveryDrainWorker, WebhookDeliveryRuntime, WebhookEnqueueEffectSink, WebhookScheduler,
-    WebhookTransport,
+    HttpWebhookTransport, InMemoryWebhookCooldown, StoreWebhookScheduler, WebhookCooldown,
+    WebhookEnqueueEffectSink, WebhookScheduler, WebhookTransport,
 };
 
 pub(crate) fn current_rfc3339() -> String {
@@ -1283,6 +1286,31 @@ mod tests {
         assert_eq!(rows[0].status, WebhookDeliveryStatus::Retrying);
         assert_eq!(rows[0].attempt_count, 1);
         assert_eq!(rows[0].discarded_at, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_drain_rejects_invalid_retry_clock_without_claiming_job()
+    -> Result<(), Box<dyn Error>> {
+        let store = runtime_store(true)?;
+        let job_id = insert_due_webhook_job(&store, "DLV-drain-invalid-clock", 4)?;
+        let transport = Arc::new(RecordingTransport::status(500));
+        let runtime = WebhookDeliveryRuntime::new_without_circuit(store.clone(), transport);
+        let drain = WebhookDeliveryDrain::new(store.clone(), runtime, 10);
+
+        let error = match drain.drain_due("not-a-rfc3339") {
+            Ok(_) => return Err("invalid drain timestamp should fail".into()),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("invalid drain timestamp"));
+        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let job = store
+            .webhook_delivery_job(job_id)?
+            .ok_or("missing webhook delivery job")?;
+        assert_eq!(job.state, WebhookDeliveryJobState::Available);
+        assert_eq!(job.attempt, 0);
 
         Ok(())
     }

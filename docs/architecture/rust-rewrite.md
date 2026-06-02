@@ -1069,6 +1069,14 @@ webhook transport, account rate limits, and read private-target policy only
 through narrow methods. Keep route strings in `ingest_router`; add route-state
 surface only when a route needs a real capability, not as a convenience wrapper.
 
+Scheduled webhook delivery lives in `canary-server/src/webhook_delivery.rs`.
+That module owns the delivery runtime, circuit state, bounded drain pass, retry
+timestamp policy, and blocking worker lifecycle. `canary-server/src/webhooks.rs`
+keeps the other side of the boundary: enqueue effects, scheduler insertion,
+cooldown suppression, subscription translation, and outbound HTTP transport.
+Keep the split intact so the retry/circuit/worker policy stays deep and the
+enqueue path remains a small ingest side-effect adapter.
+
 ## Next Slices
 
 1. Continue converging the Rust replacement around small, typed contracts:
