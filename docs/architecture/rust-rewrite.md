@@ -1050,9 +1050,22 @@ Phoenix behavior until the replacement is complete:
   deterministic validation runs clippy and tests; advisory validation runs
   `cargo audit`.
 
+### Server Runtime Boundary
+
+The Rust server crate keeps route registration in `canary-server/src/lib.rs` so
+agents can audit the authenticated HTTP surface in one place. Process boot,
+worker lifecycles, outbound webhook transport construction, and ingest
+post-commit runtime effects live behind `canary-server/src/runtime.rs`.
+
+That split keeps the server's public API (`CanaryServer`, `ServerConfig`, and
+boot/run errors) stable while hiding the store, webhook, probe, retention,
+monitor-overdue, and TLS scan composition needed to run the process. Do not move
+`IngestState` out as a field bag unless the route modules first get a deeper
+state interface; today it is still the shared Axum route-state contract.
+
 ## Next Slices
 
 1. Continue converging the Rust replacement around small, typed contracts:
-   split the remaining Axum query/parser helpers in `canary-server/src/lib.rs`
-   only where a route family can become deeper and clearer without changing
-   wire behavior.
+   split remaining route-state, time, and parser helpers only where the new
+   module hides a real policy or translation boundary without changing wire
+   behavior.
