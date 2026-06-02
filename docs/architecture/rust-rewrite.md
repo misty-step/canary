@@ -1025,6 +1025,20 @@ the Rust server accepts production traffic:
     conversion, nested array error keys, and optional scalar behavior, while
     the existing admin/check-in HTTP tests continue to prove public Problem
     Details behavior through the route surface.
+84. Server wall-clock encoding now lives in `canary-server::server_time`. The
+    module owns the two persisted clock shapes the Rust server emits on request
+    and lifecycle paths: RFC3339 UTC strings for database/API timestamps and
+    Unix milliseconds for the health state machine. It also owns the RFC3339
+    formatting fallback used by lifecycle workers so timestamp formatting does
+    not drift across modules. This is deliberately not an injectable clock
+    trait: behavior-heavy code still accepts explicit timestamps at its public
+    boundary for deterministic tests, while route handlers and OS-thread
+    workers call the narrow wall-clock helpers at the edge. Domain-specific
+    parsing, such as webhook retry timestamp validation, remains in the module
+    that owns that domain policy. The focused `server_time::*` tests lock UTC
+    wire formatting and overflow-safe Unix millisecond conversion, while the
+    existing route and worker tests continue to prove public behavior through
+    fixed timestamps where determinism matters.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -1076,6 +1090,12 @@ keeps the other side of the boundary: enqueue effects, scheduler insertion,
 cooldown suppression, subscription translation, and outbound HTTP transport.
 Keep the split intact so the retry/circuit/worker policy stays deep and the
 enqueue path remains a small ingest side-effect adapter.
+
+Server wall-clock formatting lives in `canary-server/src/server_time.rs`. Keep
+the root route table free of timestamp policy: edge code can ask for current
+UTC, current RFC3339, or current Unix milliseconds, but deterministic domain
+functions should continue accepting explicit timestamps instead of reaching for
+global time.
 
 ## Next Slices
 

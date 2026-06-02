@@ -29,8 +29,8 @@ use crate::{
     StoreWebhookScheduler, TargetProbeLifecycle, TargetProbeLifecycleConfig,
     TargetProbeLifecycleWorker, TargetProbeOptions, TargetProbeRuntime, TlsExpiryScanLifecycle,
     TlsExpiryScanLifecycleConfig, TlsExpiryScanLifecycleWorker, WebhookDeliveryDrain,
-    WebhookDeliveryDrainWorker, WebhookDeliveryRuntime, WebhookEnqueueEffectSink, current_rfc3339,
-    ingest_router, public_router,
+    WebhookDeliveryDrainWorker, WebhookDeliveryRuntime, WebhookEnqueueEffectSink, ingest_router,
+    public_router, server_time::current_rfc3339,
 };
 
 const DEFAULT_WEBHOOK_DRAIN_INTERVAL: StdDuration = StdDuration::from_secs(5);

@@ -21,7 +21,8 @@ use canary_workers::health::{
 };
 
 use crate::{
-    EventFanoutReport, HealthEventFanout, HealthEventSource, current_rfc3339, current_unix_millis,
+    EventFanoutReport, HealthEventFanout, HealthEventSource,
+    server_time::{current_rfc3339, current_unix_millis},
 };
 
 /// Persisted result of one overdue monitor transition.

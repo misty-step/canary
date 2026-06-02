@@ -17,9 +17,12 @@ use std::{
 use canary_core::ids::EventId;
 use canary_store::{Store, TlsExpiryEventInsert, TlsExpiryScanCandidate};
 use canary_workers::tls_scan::{TlsExpiryScanInput, plan_tls_expiry_event};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::OffsetDateTime;
 
-use crate::{EventSink, current_rfc3339};
+use crate::{
+    EventSink,
+    server_time::{current_utc, format_rfc3339},
+};
 
 /// Configuration for the TLS-expiry scan lifecycle worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -322,8 +325,8 @@ fn run_lifecycle_worker(
     while !control.is_stopping() {
         if !control.is_paused() {
             match catch_unwind(AssertUnwindSafe(|| {
-                let now = OffsetDateTime::now_utc();
-                let now_string = now.format(&Rfc3339).unwrap_or_else(|_| current_rfc3339());
+                let now = current_utc();
+                let now_string = format_rfc3339(now);
                 lifecycle.run_due_until(now, now_string, || control.is_stopping())
             })) {
                 Ok(Ok(_)) => {}

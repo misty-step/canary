@@ -28,9 +28,9 @@ use serde_json::{Map, Value, json};
 use crate::{
     HealthEventSource, IngestState,
     body_fields::{optional_string, required_string},
-    current_rfc3339, current_unix_millis,
     http_contract::{check_content_length, json_status_response, problem_response},
     require_ingest_scope,
+    server_time::{current_rfc3339, current_unix_millis},
 };
 
 struct ParsedCheckIn {

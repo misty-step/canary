@@ -25,9 +25,9 @@ use serde_json::{Map, Value, json};
 use crate::{
     IngestState,
     body_fields::{optional_positive_i64, optional_string, required_string},
-    current_rfc3339,
     http_contract::{check_content_length, json_status_response, problem_response, response},
     require_scope,
+    server_time::current_rfc3339,
 };
 
 pub(crate) async fn list_monitors(

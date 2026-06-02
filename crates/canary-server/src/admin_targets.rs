@@ -28,9 +28,10 @@ use crate::{
         optional_bool, optional_positive_i64, optional_positive_u32, optional_string,
         required_string,
     },
-    current_rfc3339,
     http_contract::{check_content_length, json_status_response, problem_response, response},
-    require_scope, validate_target_configuration,
+    require_scope,
+    server_time::current_rfc3339,
+    validate_target_configuration,
 };
 
 pub(crate) async fn list_targets(

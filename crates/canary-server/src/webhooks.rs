@@ -12,7 +12,7 @@ use canary_workers::webhooks::{
 };
 use serde_json::{Value, json};
 
-use crate::{IngestEffectSink, current_rfc3339};
+use crate::{IngestEffectSink, server_time::current_rfc3339};
 
 /// Runtime boundary for scheduling webhook delivery jobs.
 pub trait WebhookScheduler: Send + Sync + 'static {

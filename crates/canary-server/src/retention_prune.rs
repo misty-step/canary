@@ -18,6 +18,8 @@ use canary_store::{RetentionPruneBatch, RetentionPruneTable, Store};
 use canary_workers::retention::{RetentionPolicy, plan_retention_prune};
 use time::OffsetDateTime;
 
+use crate::server_time::current_utc;
+
 /// Configuration for the retention prune lifecycle worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetentionPruneLifecycleConfig {
@@ -281,7 +283,7 @@ fn run_lifecycle_worker(
     while !control.is_stopping() {
         if !control.is_paused() {
             match catch_unwind(AssertUnwindSafe(|| {
-                lifecycle.run_due_until(OffsetDateTime::now_utc(), || control.is_stopping())
+                lifecycle.run_due_until(current_utc(), || control.is_stopping())
             })) {
                 Ok(Ok(_)) => {}
                 Ok(Err(_)) | Err(_) => control.record_failure(),

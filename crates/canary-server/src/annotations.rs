@@ -24,9 +24,10 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::{
-    IngestState, current_rfc3339,
+    IngestState,
     http_contract::{check_content_length, json_status_response, problem_response},
     require_query_limited_admin_scope, require_read_scope, require_scope,
+    server_time::current_rfc3339,
 };
 use canary_http::auth::Permission;
 

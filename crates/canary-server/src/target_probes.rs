@@ -39,7 +39,8 @@ use time::format_description::well_known::Rfc3339;
 use x509_parser::prelude::FromDer;
 
 use crate::{
-    EventFanoutReport, HealthEventFanout, HealthEventSource, current_rfc3339, current_unix_millis,
+    EventFanoutReport, HealthEventFanout, HealthEventSource,
+    server_time::{current_rfc3339, current_unix_millis},
 };
 
 const MAX_PROBE_BODY_BYTES: u64 = 64 * 1024;

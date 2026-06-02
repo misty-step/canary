@@ -33,6 +33,7 @@ mod retention_prune;
 mod route_state;
 mod runtime;
 mod server_auth;
+mod server_time;
 mod service_onboarding_routes;
 mod target_probes;
 mod tls_scan;
@@ -105,12 +106,6 @@ pub use webhooks::{
     WebhookEnqueueEffectSink, WebhookScheduler, WebhookTransport,
 };
 
-pub(crate) fn current_rfc3339() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
-}
-
 /// Router for Canary's authenticated ingest endpoints.
 pub fn ingest_router(state: IngestState) -> Router {
     Router::new()
@@ -158,11 +153,6 @@ pub fn ingest_router(state: IngestState) -> Router {
         .route("/api/v1/targets/{id}/pause", post(pause_target))
         .route("/api/v1/targets/{id}/resume", post(resume_target))
         .with_state(state)
-}
-
-pub(crate) fn current_unix_millis() -> i64 {
-    let nanos = time::OffsetDateTime::now_utc().unix_timestamp_nanos();
-    i64::try_from(nanos / 1_000_000).unwrap_or(i64::MAX)
 }
 
 /// Headers set by the public adapter.
@@ -4428,7 +4418,7 @@ mod tests {
                     error_detail: None,
                     region: None,
                 },
-                now: current_rfc3339(),
+                now: server_time::current_rfc3339(),
                 transition: None,
             })?;
         }

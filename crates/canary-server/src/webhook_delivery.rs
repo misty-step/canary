@@ -24,7 +24,7 @@ use serde_json::Value;
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
-    current_rfc3339,
+    server_time::current_rfc3339,
     webhooks::{WebhookTransport, delivery_insert, endpoint_from_subscription},
 };
 
