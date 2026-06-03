@@ -32,6 +32,7 @@ mod report_routes;
 mod retention_prune;
 mod route_state;
 mod runtime;
+mod runtime_env;
 mod server_auth;
 mod server_time;
 mod service_onboarding_routes;
@@ -80,6 +81,7 @@ pub use route_state::{
 pub use runtime::{
     CanaryServer, RuntimeIngestEffectSink, ServerBootError, ServerConfig, ServerRunError,
 };
+pub use runtime_env::{RuntimeEnvError, ServerProcessConfig};
 #[cfg(test)]
 pub(crate) use server_auth::{UNKNOWN_AUTH_FAIL_IDENTITY, auth_fail_identity};
 pub(crate) use server_auth::{
@@ -297,13 +299,22 @@ mod tests {
         assert_eq!(
             query.status(),
             StatusCode::UNAUTHORIZED,
-            "boot should not seed implicit API keys"
+            "boot should seed only the one-time bootstrap admin key"
         );
         assert!(server.enqueue_failure_snapshot().is_empty());
         assert_eq!(server.retention_prune_failure_count(), 0);
         assert_eq!(server.tls_expiry_scan_failure_count(), 0);
 
         drop_server(server).await?;
+        let store = {
+            let mut store = Store::open(&path)?;
+            store.migrate()?;
+            store
+        };
+        let keys = store.list_api_keys()?;
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].name, "bootstrap");
+        assert_eq!(keys[0].scope, "admin");
         fs::remove_file(path)?;
 
         Ok(())

@@ -2044,7 +2044,8 @@ mod tests {
         assert_eq!(saturated.in_flight, MAX_CONCURRENT_TARGET_PROBES);
 
         transport.release()?;
-        let report = drain_until_completed(&mut lifecycle, 1_000, MAX_CONCURRENT_TARGET_PROBES)?;
+        let report =
+            drain_until_completed_cumulative(&mut lifecycle, 1_000, MAX_CONCURRENT_TARGET_PROBES)?;
 
         assert_eq!(report.loaded, 10);
         assert_eq!(report.completed, MAX_CONCURRENT_TARGET_PROBES);
@@ -2056,7 +2057,7 @@ mod tests {
         };
         assert_eq!(refill_report.due, 2);
         assert_eq!(refill_report.launched, 2);
-        let final_report = drain_until_completed(&mut lifecycle, 1_000, 2)?;
+        let final_report = drain_until_completed_cumulative(&mut lifecycle, 1_000, 2)?;
         assert_eq!(final_report.probed, 2);
         assert_eq!(final_report.in_flight, 0);
         assert_eq!(transport.peak(), MAX_CONCURRENT_TARGET_PROBES);
@@ -2479,6 +2480,38 @@ mod tests {
             let report = lifecycle.run_due(now_millis)?;
             if report.completed >= expected_completed {
                 return Ok(report);
+            }
+            if started.elapsed() > StdDuration::from_secs(15) {
+                return Err(format!(
+                    "timed out waiting for {expected_completed} target probe completions"
+                )
+                .into());
+            }
+            thread::sleep(StdDuration::from_millis(10));
+        }
+    }
+
+    fn drain_until_completed_cumulative(
+        lifecycle: &mut TargetProbeLifecycle,
+        now_millis: i64,
+        expected_completed: usize,
+    ) -> Result<TargetProbeLifecycleReport, Box<dyn Error>> {
+        let started = Instant::now();
+        let mut total = TargetProbeLifecycleReport::default();
+        loop {
+            let report = lifecycle.run_due(now_millis)?;
+            total.loaded = report.loaded;
+            total.due = report.due;
+            total.launched += report.launched;
+            total.completed += report.completed;
+            total.probed += report.probed;
+            total.skipped_missing += report.skipped_missing;
+            total.failed += report.failed;
+            total.event_fanout_failed += report.event_fanout_failed;
+            total.in_flight = report.in_flight;
+            total.dropped_untracked += report.dropped_untracked;
+            if total.completed >= expected_completed {
+                return Ok(total);
             }
             if started.elapsed() > StdDuration::from_secs(15) {
                 return Err(format!(

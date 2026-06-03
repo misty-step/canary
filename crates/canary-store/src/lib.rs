@@ -18,6 +18,7 @@ mod oban_jobs;
 mod query;
 mod retention;
 mod schema;
+mod seeds;
 mod webhook_deliveries;
 
 pub use annotations::{
@@ -67,6 +68,9 @@ pub enum StoreError {
     /// SQLite rejected a connection, pragma, migration, or query.
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// API-key hashing failed while preparing a persisted secret.
+    #[error("secret hash error: {0}")]
+    SecretHash(#[from] bcrypt::BcryptError),
     /// A service-onboarding target conflicts with an existing target row.
     #[error("target conflict")]
     TargetConflict(TargetConflict),
@@ -96,6 +100,11 @@ impl Store {
     pub fn migrate(&mut self) -> Result<()> {
         schema::migrate(&mut self.connection)?;
         Ok(())
+    }
+
+    /// Apply the first-boot seed and return the one-time bootstrap key.
+    pub fn apply_initial_seed(&mut self, applied_at: &str) -> Result<Option<String>> {
+        seeds::apply_initial_seed(&mut self.connection, applied_at)
     }
 
     /// Return the Rust schema version stored in `PRAGMA user_version`.
@@ -1828,6 +1837,41 @@ mod tests {
             Some("2026-05-28T22:00:00Z".to_owned())
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn initial_seed_creates_bootstrap_key_once()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+
+        let Some(raw_key) = store.apply_initial_seed("2026-06-03T12:00:00Z")? else {
+            return Err("initial seed should disclose a bootstrap key".into());
+        };
+        let second = store.apply_initial_seed("2026-06-03T13:00:00Z")?;
+        let Some(verified) = store.verify_api_key(&raw_key)? else {
+            return Err("bootstrap key should verify".into());
+        };
+        let keys = store.list_api_keys()?;
+        let seed_runs = store.connection.query_row(
+            "SELECT COUNT(*) FROM seed_runs WHERE seed_name = 'initial_config_v1'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let applied_at = store.connection.query_row(
+            "SELECT applied_at FROM seed_runs WHERE seed_name = 'initial_config_v1'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+
+        assert_eq!(second, None);
+        assert_eq!(verified.name, "bootstrap");
+        assert_eq!(verified.scope, "admin");
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].name, "bootstrap");
+        assert_eq!(keys[0].scope, "admin");
+        assert_eq!(seed_runs, 1);
+        assert_eq!(applied_at, "2026-06-03T12:00:00Z");
         Ok(())
     }
 

@@ -1055,6 +1055,21 @@ the Rust server accepts production traffic:
     limits, while `target_probes` integration tests still prove invalid
     configured headers persist a failed probe without opening transport and
     valid configured headers reach transport normalized.
+86. The Rust service now has a production process entrypoint without moving
+    product policy into `main.rs`. `canary-server::runtime_env` owns the
+    Phoenix-compatible process environment contract: `CANARY_DB_PATH` defaults
+    to `/data/canary.db`, `PORT` defaults to `4000`,
+    `ALLOW_PRIVATE_TARGETS=true` enables private target probing, and
+    `ERROR_RETENTION_DAYS` / `CHECK_RETENTION_DAYS` keep the existing
+    retention defaults of 30 and 7 days. `src/main.rs` only parses that typed
+    config, binds the requested port, boots `CanaryServer`, and wires
+    SIGINT/SIGTERM graceful shutdown. `canary-store::seeds` owns the
+    Phoenix-compatible `initial_config_v1` first-boot seed: one bootstrap admin
+    API key, recorded in `seed_runs`, with the raw key disclosed only from the
+    boot path that actually inserted it. This creates the Rust deployable
+    artifact needed for Docker/Fly cutover while keeping storage, migrations,
+    workers, routes, and side-effect policy behind the existing runtime
+    boundary.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
@@ -1112,6 +1127,11 @@ the root route table free of timestamp policy: edge code can ask for current
 UTC, current RFC3339, or current Unix milliseconds, but deterministic domain
 functions should continue accepting explicit timestamps instead of reaching for
 global time.
+
+Process environment parsing lives in `canary-server/src/runtime_env.rs`. Keep
+`main.rs` as boot/bind/shutdown glue. New environment variables should be added
+only when they map to a real `ServerConfig` policy or deployment contract; do
+not let route modules or worker modules read process environment directly.
 
 Target probe request-shape validation lives in
 `canary-server/src/target_request.rs`. Keep it limited to persisted/admin

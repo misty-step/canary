@@ -128,6 +128,13 @@ impl CanaryServer {
 
         let mut store = Store::open(&config.database_path).map_err(ServerBootError::Store)?;
         store.migrate().map_err(ServerBootError::Store)?;
+        if let Some(raw_key) = store
+            .apply_initial_seed(&current_rfc3339())
+            .map_err(ServerBootError::Store)?
+        {
+            eprintln!("Bootstrap API key: {raw_key}");
+            eprintln!("Store this key securely - it will not be shown again.");
+        }
         let store = Arc::new(Mutex::new(store));
 
         let scheduler = Arc::new(StoreWebhookScheduler::new(store.clone()));
