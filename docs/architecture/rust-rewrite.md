@@ -1081,6 +1081,15 @@ the Rust server accepts production traffic:
     Phoenix-only `PHX_*` variables. `test/bin/entrypoint_test.sh` locks the
     command boundary so the deploy wrapper cannot silently drift back to the
     Phoenix release path.
+88. The first Fly production cutover to the Rust server completed on
+    2026-06-06. The evidence packet lives at
+    `docs/architecture/rust-cutover-evidence-2026-06-06.md` and records the
+    deployed image, machine version, health/readiness responses, Litestream
+    replication evidence, SSH image inspection, and authenticated Sploot read
+    checks. This is a production-serving milestone, not the full rewrite finish
+    line: Phoenix/Elixir remains in-repo as the parity source, fixture
+    generator, SDK boundary, and migration safety net until Rust owns those
+    contracts directly.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
