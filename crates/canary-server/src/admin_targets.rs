@@ -31,7 +31,7 @@ use crate::{
     http_contract::{check_content_length, json_status_response, problem_response, response},
     require_scope,
     server_time::current_rfc3339,
-    validate_target_configuration,
+    validate_target_configuration, validate_target_probe_interval_ms,
 };
 
 pub(crate) async fn list_targets(
@@ -284,6 +284,7 @@ fn parse_target_create(
     let headers = encode_target_headers(attrs.get("headers"), &mut errors);
 
     let interval_ms = optional_positive_i64(&attrs, "interval_ms", 60_000, &mut errors);
+    validate_target_probe_interval(interval_ms, &mut errors);
     let timeout_ms = optional_positive_i64(&attrs, "timeout_ms", 10_000, &mut errors);
     let degraded_after = optional_positive_u32(&attrs, "degraded_after", 1, &mut errors);
     let down_after = optional_positive_u32(&attrs, "down_after", 3, &mut errors);
@@ -365,6 +366,7 @@ fn parse_target_interval_update(attrs: &Map<String, Value>) -> Result<i64, Box<P
             vec!["is required for target interval updates".to_owned()],
         );
     }
+    validate_target_probe_interval(interval_ms, &mut errors);
 
     if errors.is_empty() {
         Ok(interval_ms)
@@ -373,6 +375,12 @@ fn parse_target_interval_update(attrs: &Map<String, Value>) -> Result<i64, Box<P
             "Invalid target configuration.",
             errors,
         )))
+    }
+}
+
+fn validate_target_probe_interval(interval_ms: i64, errors: &mut ValidationErrors) {
+    if let Err(reason) = validate_target_probe_interval_ms(interval_ms) {
+        errors.insert("interval_ms".to_owned(), vec![reason]);
     }
 }
 

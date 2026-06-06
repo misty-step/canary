@@ -27,7 +27,7 @@ use crate::server_time::current_rfc3339;
 use crate::{
     IngestState, TargetProbeLifecycleCommand,
     http_contract::{check_content_length, json_status_response, problem_response},
-    require_scope, validate_target_configuration,
+    require_scope, validate_target_configuration, validate_target_probe_interval_ms,
 };
 
 pub(crate) async fn create_service_onboarding(
@@ -340,7 +340,13 @@ fn optional_service_onboarding_interval(
 ) -> Option<i64> {
     match attrs.get("interval_ms") {
         Some(Value::Number(number)) => match number.as_i64().filter(|value| *value > 0) {
-            Some(value) => Some(value),
+            Some(value) => match validate_target_probe_interval_ms(value) {
+                Ok(()) => Some(value),
+                Err(reason) => {
+                    errors.insert("interval_ms".to_owned(), vec![reason]);
+                    None
+                }
+            },
             None => {
                 errors.insert(
                     "interval_ms".to_owned(),

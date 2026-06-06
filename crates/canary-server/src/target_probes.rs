@@ -39,6 +39,9 @@ use crate::{
     target_request::{parse_headers, validate_method, validate_url},
 };
 
+/// Smallest public target probe cadence accepted by HTTP target APIs.
+pub const MIN_TARGET_PROBE_INTERVAL_MS: i64 = 1_000;
+
 const MAX_PROBE_BODY_BYTES: u64 = 64 * 1024;
 const MAX_CONCURRENT_TARGET_PROBES: usize = 8;
 
@@ -441,7 +444,7 @@ impl TargetProbeLifecycle {
     fn reconcile(&mut self, active: Vec<ActiveTargetProbeSchedule>, now_millis: i64) {
         let mut next = BTreeMap::new();
         for target in active {
-            let interval_ms = target.interval_ms.max(1_000);
+            let interval_ms = target.interval_ms.max(MIN_TARGET_PROBE_INTERVAL_MS);
             let existing = self.schedules.remove(&target.target_id);
             let paused = existing.as_ref().is_some_and(|schedule| schedule.paused);
             let next_due_millis = existing
@@ -485,7 +488,7 @@ impl TargetProbeLifecycle {
                 target_id,
                 interval_ms,
             } => {
-                let interval_ms = interval_ms.max(1_000);
+                let interval_ms = interval_ms.max(MIN_TARGET_PROBE_INTERVAL_MS);
                 self.schedules.insert(
                     target_id,
                     ScheduledTarget {
@@ -521,7 +524,7 @@ impl TargetProbeLifecycle {
                 target_id,
                 interval_ms,
             } => {
-                let interval_ms = interval_ms.max(1_000);
+                let interval_ms = interval_ms.max(MIN_TARGET_PROBE_INTERVAL_MS);
                 if let Some(schedule) = self.schedules.get_mut(&target_id) {
                     schedule.interval_ms = interval_ms;
                     schedule.next_due_millis = schedule
@@ -653,6 +656,16 @@ pub fn validate_target_configuration(
     validate_method(method)?;
     parse_headers(headers)?;
     resolve_and_validate(host, port, allow_private_targets)?;
+    Ok(())
+}
+
+/// Validate one public target probe cadence before it reaches scheduling.
+pub fn validate_target_probe_interval_ms(interval_ms: i64) -> Result<(), String> {
+    if interval_ms < MIN_TARGET_PROBE_INTERVAL_MS {
+        return Err(format!(
+            "must be greater than or equal to {MIN_TARGET_PROBE_INTERVAL_MS}"
+        ));
+    }
     Ok(())
 }
 
@@ -1217,10 +1230,10 @@ fn elapsed_millis(started: Instant) -> i64 {
 }
 
 fn next_due_millis(target_id: &str, interval_ms: i64, now_millis: i64) -> i64 {
-    let interval_ms = interval_ms.max(1_000);
+    let interval_ms = interval_ms.max(MIN_TARGET_PROBE_INTERVAL_MS);
     let jitter_range = (interval_ms / 10).max(1);
     let jitter = deterministic_jitter(target_id, jitter_range);
-    now_millis.saturating_add((interval_ms + jitter).max(1_000))
+    now_millis.saturating_add((interval_ms + jitter).max(MIN_TARGET_PROBE_INTERVAL_MS))
 }
 
 fn deterministic_jitter(target_id: &str, jitter_range: i64) -> i64 {

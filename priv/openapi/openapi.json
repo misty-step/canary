@@ -3569,7 +3569,7 @@
           },
           "interval_ms": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1000
           },
           "timeout_ms": {
             "type": "integer",
@@ -3604,7 +3604,7 @@
         "properties": {
           "interval_ms": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1000
           }
         }
       },
@@ -4482,7 +4482,7 @@
           },
           "interval_ms": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1000
           },
           "allow_private": {
             "type": "boolean"

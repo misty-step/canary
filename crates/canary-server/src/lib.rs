@@ -93,7 +93,7 @@ pub use target_probes::{
     TargetProbeLifecycle, TargetProbeLifecycleCommand, TargetProbeLifecycleConfig,
     TargetProbeLifecycleController, TargetProbeLifecycleReport, TargetProbeLifecycleWorker,
     TargetProbeOptions, TargetProbeOutcome, TargetProbeRuntime, TargetProbeRuntimeError,
-    run_target_probe_once, validate_target_configuration,
+    run_target_probe_once, validate_target_configuration, validate_target_probe_interval_ms,
 };
 pub use tls_scan::{
     TlsExpiryScanLifecycle, TlsExpiryScanLifecycleConfig, TlsExpiryScanLifecycleReport,
@@ -2105,6 +2105,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_onboarding_rejects_subsecond_target_interval_without_writes()
+    -> Result<(), Box<dyn Error>> {
+        let recorder = Arc::new(RecordingTargetControl::default());
+        let state = test_ingest_state()?.with_target_control(recorder.clone());
+        let router = ingest_router(state);
+
+        let response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/service-onboarding",
+                ADMIN_KEY,
+                r#"{
+                    "service":"fast api",
+                    "url":"https://example.com/fast/health",
+                    "interval_ms":999
+                }"#,
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(response).await?;
+        assert_eq!(body["code"], "validation_error");
+        assert_eq!(
+            body["errors"]["interval_ms"],
+            json!(["must be greater than or equal to 1000"])
+        );
+        let targets = router
+            .oneshot(read_request(ADMIN_KEY, "/api/v1/targets")?)
+            .await?;
+        assert_eq!(json_body(targets).await?["targets"], json!([]));
+        assert!(recorder.commands().is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn service_onboarding_links_use_forwarded_proto_and_host_fallbacks()
     -> Result<(), Box<dyn Error>> {
         let router = ingest_router(test_ingest_state()?);
@@ -2478,6 +2514,22 @@ mod tests {
             StatusCode::UNPROCESSABLE_ENTITY
         );
 
+        let too_fast_response = router
+            .clone()
+            .oneshot(json_request(
+                "PATCH",
+                &format!("/api/v1/targets/{target_id}"),
+                ADMIN_KEY,
+                r#"{"interval_ms":999}"#,
+            )?)
+            .await?;
+        assert_eq!(too_fast_response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let too_fast = json_body(too_fast_response).await?;
+        assert_eq!(
+            too_fast["errors"]["interval_ms"],
+            json!(["must be greater than or equal to 1000"])
+        );
+
         let missing_response = router
             .oneshot(json_request(
                 "PATCH",
@@ -2495,6 +2547,44 @@ mod tests {
                 interval_ms: 60000,
             }]
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admin_target_create_rejects_subsecond_interval_without_writing_or_commanding()
+    -> Result<(), Box<dyn Error>> {
+        let recorder = Arc::new(RecordingTargetControl::default());
+        let state = test_ingest_state()?
+            .with_target_control(recorder.clone())
+            .with_allow_private_targets(true);
+        let router = ingest_router(state);
+
+        let response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/targets",
+                ADMIN_KEY,
+                r#"{
+                    "url":"http://127.0.0.1:9/health",
+                    "name":"Local API",
+                    "interval_ms":999,
+                    "allow_private":true
+                }"#,
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(response).await?;
+        assert_eq!(
+            body["errors"]["interval_ms"],
+            json!(["must be greater than or equal to 1000"])
+        );
+        let targets = router
+            .oneshot(read_request(ADMIN_KEY, "/api/v1/targets")?)
+            .await?;
+        assert_eq!(json_body(targets).await?["targets"], json!([]));
+        assert!(recorder.commands().is_empty());
 
         Ok(())
     }
