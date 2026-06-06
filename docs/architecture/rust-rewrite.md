@@ -1111,6 +1111,17 @@ the Rust server accepts production traffic:
     through `/api/v1/timeline` before acting. Phoenix keeps the same route and
     controller test so the in-repo contract oracle does not drift while Rust
     serves production.
+91. Rust now hardens the #031 replay/health boundary cases on the production
+    path. Persisted unsupported target methods are converted into an explicit
+    failed target check without opening transport, so migrated or corrupt rows
+    cannot crash probe execution. Public target creation surfaces now share the
+    `MIN_TARGET_PROBE_INTERVAL_MS` invariant with the lifecycle scheduler:
+    admin target creation, target interval update, and service onboarding reject
+    sub-second cadences before persistence or lifecycle commands, and OpenAPI
+    advertises `minimum: 1000` for those request fields. `CanaryServer::boot`
+    remains fail-fast for store open, migration, and first-boot seed errors;
+    the regression test proves a store boot failure returns
+    `ServerBootError::Store` before any `/readyz` surface can exist.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed

@@ -31,6 +31,18 @@ Make agent replay and health probing fail explicitly at contract boundaries inst
 - `lib/canary/health/probe.ex` uses `String.to_existing_atom/1` on persisted target methods; the changeset allows only `GET`/`HEAD`, but persisted or migrated rows should not be able to crash the probe process.
 - `lib/canary/release.ex` rescues migration and seed failures, which can turn schema problems into latent runtime behavior rather than an explicit readiness failure.
 
+**Rust production-path evidence.**
+
+- `1ab64a8` proves unsupported persisted target methods become explicit Rust
+  `connection_error` target checks without opening transport.
+- `184c5a3` proves Rust admin target creation, target interval update, and
+  service onboarding reject sub-second target cadences before persistence or
+  lifecycle commands; `priv/openapi/openapi.json` advertises the 1000ms lower
+  bound.
+- The Rust boot path in `CanaryServer::boot` fails before serving routes when
+  store open, migration, or first-boot seed fails; keep the narrow regression
+  test with this item until the Phoenix oracle is retired.
+
 **Responder-boundary check.** This is Canary-side substrate hardening only: ingest/health/query/readiness contracts. Consumers still own triage and repair decisions.
 
 **Lane.** Lane 2 (contract + observability). Pairs with #030: #030 makes the agent contract explicit; #031 makes malformed contract inputs fail deterministically.

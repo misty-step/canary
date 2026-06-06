@@ -324,6 +324,32 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn canary_server_boot_fails_before_readyz_when_store_cannot_open() -> Result<(), Box<dyn Error>>
+    {
+        let path = temp_db_path("missing-parent")
+            .with_extension("missing-parent-dir")
+            .join("canary.db");
+        let config = ServerConfig::new(path);
+
+        let error = match CanaryServer::boot(config) {
+            Ok(_) => return Err("store boot failure should prevent serving readyz".into()),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, ServerBootError::Store(_)),
+            "expected store boot error, got {error:?}"
+        );
+        assert!(
+            error
+                .to_string()
+                .starts_with("store boot failed: sqlite error:"),
+            "{error}"
+        );
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn ingest_router_mounts_authenticated_route_matrix() -> Result<(), Box<dyn Error>> {
         let router = ingest_router(test_ingest_state()?);
