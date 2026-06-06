@@ -1682,6 +1682,41 @@ mod tests {
     }
 
     #[test]
+    fn invalid_persisted_method_persists_failed_probe_without_opening_transport()
+    -> Result<(), Box<dyn Error>> {
+        let store = seeded_store_with_method("http://127.0.0.1/health", "up", "POST".to_owned())?;
+        let transport = StaticTransport::ok(200, "ok");
+        let sink = Arc::new(RecordingSink::default());
+        let fanout = HealthEventFanout::new_without_failure_sink(sink);
+
+        let outcome = run_target_probe_once(
+            &store,
+            &fanout,
+            &transport,
+            "TGT-api",
+            TargetProbeOptions {
+                allow_private_targets: true,
+                region: None,
+            },
+        )?;
+
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(outcome.result, "connection_error");
+        assert_eq!(outcome.state, "degraded");
+        let checks = store
+            .lock()
+            .map_err(|_| "store lock poisoned")?
+            .target_checks("TGT-api", "24h")?;
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].result, "connection_error");
+        assert_eq!(
+            checks[0].error_detail.as_deref(),
+            Some("unsupported target probe method: POST")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn valid_configured_headers_reach_transport_normalized() -> Result<(), Box<dyn Error>> {
         let store = seeded_store_with_headers(
             "http://127.0.0.1/health",
@@ -2558,6 +2593,23 @@ mod tests {
         state: &str,
         headers: Option<String>,
     ) -> Result<Arc<Mutex<Store>>, Box<dyn Error>> {
+        seeded_store_with_target_options(url, state, "GET".to_owned(), headers)
+    }
+
+    fn seeded_store_with_method(
+        url: &str,
+        state: &str,
+        method: String,
+    ) -> Result<Arc<Mutex<Store>>, Box<dyn Error>> {
+        seeded_store_with_target_options(url, state, method, None)
+    }
+
+    fn seeded_store_with_target_options(
+        url: &str,
+        state: &str,
+        method: String,
+        headers: Option<String>,
+    ) -> Result<Arc<Mutex<Store>>, Box<dyn Error>> {
         let mut store = Store::open_in_memory()?;
         store.migrate()?;
         store.insert_target(TargetInsert {
@@ -2565,7 +2617,7 @@ mod tests {
             url: url.to_owned(),
             name: "API".to_owned(),
             service: "api".to_owned(),
-            method: "GET".to_owned(),
+            method,
             headers,
             interval_ms: 60_000,
             timeout_ms: 10_000,
