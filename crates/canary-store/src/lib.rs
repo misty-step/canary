@@ -46,8 +46,9 @@ pub use oban_jobs::{
     WebhookDeliveryJobState,
 };
 pub use query::{
-    ErrorSummaryItem, IncidentListOptions, QueryError, QueryResult, RecentTransition, SearchResult,
-    ServiceQueryOptions, TimelineQueryError, TimelineQueryOptions, TimelineQueryResult,
+    ErrorGroupQueryError, ErrorGroupQueryResult, ErrorSummaryItem, IncidentListOptions, QueryError,
+    QueryResult, RecentTransition, SearchResult, ServiceQueryOptions, TimelineQueryError,
+    TimelineQueryOptions, TimelineQueryResult,
 };
 pub use retention::{
     RetentionPrune, RetentionPruneBatch, RetentionPruneBatchReport, RetentionPruneReport,
@@ -311,7 +312,7 @@ impl Store {
         service: &str,
         window: &str,
         options: ServiceQueryOptions,
-    ) -> QueryResult<canary_core::query::ErrorsByService> {
+    ) -> ErrorGroupQueryResult<canary_core::query::ErrorsByService> {
         query::errors_by_service(&self.connection, service, window, options)
     }
 
@@ -322,7 +323,7 @@ impl Store {
         window: &str,
         options: ServiceQueryOptions,
         now: time::OffsetDateTime,
-    ) -> QueryResult<canary_core::query::ErrorsByService> {
+    ) -> ErrorGroupQueryResult<canary_core::query::ErrorsByService> {
         query::errors_by_service_at(&self.connection, service, window, options, now)
     }
 
@@ -333,7 +334,7 @@ impl Store {
         window: &str,
         service: Option<&str>,
         options: ServiceQueryOptions,
-    ) -> QueryResult<canary_core::query::ErrorsByErrorClass> {
+    ) -> ErrorGroupQueryResult<canary_core::query::ErrorsByErrorClass> {
         query::errors_by_error_class(&self.connection, error_class, window, service, options)
     }
 
@@ -345,7 +346,7 @@ impl Store {
         service: Option<&str>,
         options: ServiceQueryOptions,
         now: time::OffsetDateTime,
-    ) -> QueryResult<canary_core::query::ErrorsByErrorClass> {
+    ) -> ErrorGroupQueryResult<canary_core::query::ErrorsByErrorClass> {
         query::errors_by_error_class_at(
             &self.connection,
             error_class,
@@ -2049,6 +2050,27 @@ mod tests {
             store.errors_by_service_at("cadence", "24h", ServiceQueryOptions::default(), as_of)?;
         assert_eq!(fresh_first_page.groups[0].group_hash, "group-051");
         assert_eq!(fresh_first_page.groups[0].total_count, 50);
+
+        Ok(())
+    }
+
+    #[test]
+    fn errors_by_service_rejects_malformed_cursor()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let store = migrated_store()?;
+        let as_of = OffsetDateTime::parse("2026-05-28T21:00:00Z", &Rfc3339)?;
+
+        let result = store.errors_by_service_at(
+            "cadence",
+            "24h",
+            ServiceQueryOptions {
+                cursor: Some("bogus".to_owned()),
+                ..ServiceQueryOptions::default()
+            },
+            as_of,
+        );
+
+        assert!(matches!(result, Err(ErrorGroupQueryError::InvalidCursor)));
 
         Ok(())
     }

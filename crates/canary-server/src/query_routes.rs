@@ -15,7 +15,8 @@ use canary_http::problem_details::{
     invalid_window_problem, missing_query_problem, not_found_problem,
 };
 use canary_store::{
-    IncidentListOptions, QueryError, ServiceQueryOptions, TimelineQueryError, TimelineQueryOptions,
+    ErrorGroupQueryError, IncidentListOptions, QueryError, ServiceQueryOptions, TimelineQueryError,
+    TimelineQueryOptions,
 };
 use serde::Deserialize;
 
@@ -102,8 +103,13 @@ pub(crate) async fn query_errors(
         QueryKind::Service { service } => {
             match store.errors_by_service(&service, window, options) {
                 Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
-                Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
-                Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
+                Err(ErrorGroupQueryError::InvalidWindow) => {
+                    problem_response(invalid_window_problem())
+                }
+                Err(ErrorGroupQueryError::InvalidCursor) => {
+                    problem_response(invalid_cursor_problem())
+                }
+                Err(ErrorGroupQueryError::Sqlite(_)) => problem_response(internal_problem()),
             }
         }
         QueryKind::ErrorClass {
@@ -111,8 +117,9 @@ pub(crate) async fn query_errors(
             service,
         } => match store.errors_by_error_class(&error_class, window, service.as_deref(), options) {
             Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
-            Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
-            Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
+            Err(ErrorGroupQueryError::InvalidWindow) => problem_response(invalid_window_problem()),
+            Err(ErrorGroupQueryError::InvalidCursor) => problem_response(invalid_cursor_problem()),
+            Err(ErrorGroupQueryError::Sqlite(_)) => problem_response(internal_problem()),
         },
         QueryKind::ErrorClasses => match store.errors_by_class(window) {
             Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),

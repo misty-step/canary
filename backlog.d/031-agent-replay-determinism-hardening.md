@@ -33,6 +33,11 @@ Make agent replay and health probing fail explicitly at contract boundaries inst
 
 **Rust production-path evidence.**
 
+- Rust `/api/v1/query?service=...&cursor=bogus` now returns the standard
+  RFC 9457 `422 validation_error` cursor problem instead of replaying the first
+  page. `canary-store` preserves legacy group-hash cursor support behind a
+  cursor-aware `ErrorGroupQueryError`, and the Axum adapter maps only
+  service/error-class query cursor failures to the public problem shape.
 - `1ab64a8` proves unsupported persisted target methods become explicit Rust
   `connection_error` target checks without opening transport.
 - `184c5a3` proves Rust admin target creation, target interval update, and

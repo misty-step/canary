@@ -3551,26 +3551,41 @@ mod tests {
                 read_request(INGEST_KEY, "/api/v1/query?service=test-svc")?,
                 StatusCode::FORBIDDEN,
                 "insufficient_scope",
+                false,
             ),
             (
                 read_request(READ_KEY, "/api/v1/query")?,
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "validation_error",
+                false,
             ),
             (
                 read_request(READ_KEY, "/api/v1/query?service=test-svc&window=99h")?,
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "validation_error",
+                false,
+            ),
+            (
+                read_request(READ_KEY, "/api/v1/query?service=test-svc&cursor=bogus")?,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "validation_error",
+                true,
             ),
         ];
 
-        for (request, expected_status, expected_code) in cases {
+        for (request, expected_status, expected_code, expect_cursor_error) in cases {
             let response = ingest_router(test_ingest_state()?).oneshot(request).await?;
             let status = response.status();
             let body = json_body(response).await?;
 
             assert_eq!(status, expected_status);
             assert_eq!(body["code"], expected_code);
+            if expect_cursor_error {
+                assert_eq!(
+                    body["errors"]["cursor"],
+                    json!(["must be a valid pagination cursor"])
+                );
+            }
         }
 
         Ok(())

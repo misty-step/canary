@@ -101,6 +101,23 @@ pub enum QueryError {
 /// Result type returned by query read models.
 pub type QueryResult<T> = std::result::Result<T, QueryError>;
 
+/// Error-group query failure.
+#[derive(Debug, thiserror::Error)]
+pub enum ErrorGroupQueryError {
+    /// Query window is outside Canary's closed set.
+    #[error("invalid query window")]
+    InvalidWindow,
+    /// Cursor is not a valid Phoenix query cursor.
+    #[error("invalid query cursor")]
+    InvalidCursor,
+    /// SQLite rejected a read query.
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+}
+
+/// Result type returned by error-group read models.
+pub type ErrorGroupQueryResult<T> = std::result::Result<T, ErrorGroupQueryError>;
+
 /// Timeline read-model failure.
 #[derive(Debug, thiserror::Error)]
 pub enum TimelineQueryError {
@@ -142,7 +159,7 @@ pub(crate) fn errors_by_service(
     service: &str,
     window: &str,
     options: ServiceQueryOptions,
-) -> QueryResult<ErrorsByService> {
+) -> ErrorGroupQueryResult<ErrorsByService> {
     errors_by_service_at(
         connection,
         service,
@@ -158,8 +175,8 @@ pub(crate) fn errors_by_service_at(
     window: &str,
     options: ServiceQueryOptions,
     now: OffsetDateTime,
-) -> QueryResult<ErrorsByService> {
-    let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
+) -> ErrorGroupQueryResult<ErrorsByService> {
+    let window = QueryWindow::parse(window).ok_or(ErrorGroupQueryError::InvalidWindow)?;
     let groups = list_error_groups(
         connection,
         ErrorGroupFilter::Service {
@@ -183,7 +200,7 @@ pub(crate) fn errors_by_error_class(
     window: &str,
     service: Option<&str>,
     options: ServiceQueryOptions,
-) -> QueryResult<ErrorsByErrorClass> {
+) -> ErrorGroupQueryResult<ErrorsByErrorClass> {
     errors_by_error_class_at(
         connection,
         error_class,
@@ -201,8 +218,8 @@ pub(crate) fn errors_by_error_class_at(
     service: Option<&str>,
     options: ServiceQueryOptions,
     now: OffsetDateTime,
-) -> QueryResult<ErrorsByErrorClass> {
-    let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
+) -> ErrorGroupQueryResult<ErrorsByErrorClass> {
+    let window = QueryWindow::parse(window).ok_or(ErrorGroupQueryError::InvalidWindow)?;
     let groups = list_error_groups(
         connection,
         ErrorGroupFilter::ErrorClass {
@@ -1423,9 +1440,9 @@ fn list_error_groups(
     window: QueryWindow,
     options: ServiceQueryOptions,
     now: OffsetDateTime,
-) -> QueryResult<Vec<ErrorGroupSummary>> {
+) -> ErrorGroupQueryResult<Vec<ErrorGroupSummary>> {
     let cutoff = window.cutoff_at(now);
-    let cursor = options.cursor.as_deref().and_then(decode_cursor);
+    let cursor = parse_query_cursor(options.cursor.as_deref())?;
     paged_error_groups(
         connection,
         filter.service(),
@@ -1436,6 +1453,15 @@ fn list_error_groups(
     )
 }
 
+fn parse_query_cursor(cursor: Option<&str>) -> ErrorGroupQueryResult<Option<QueryCursor>> {
+    match cursor {
+        None | Some("") => Ok(None),
+        Some(cursor) => decode_cursor(cursor)
+            .map(Some)
+            .ok_or(ErrorGroupQueryError::InvalidCursor),
+    }
+}
+
 fn paged_error_groups(
     connection: &Connection,
     service: Option<&str>,
@@ -1443,7 +1469,7 @@ fn paged_error_groups(
     cutoff: &str,
     cursor: Option<QueryCursor>,
     options: &ServiceQueryOptions,
-) -> QueryResult<Vec<ErrorGroupSummary>> {
+) -> ErrorGroupQueryResult<Vec<ErrorGroupSummary>> {
     match cursor {
         Some(QueryCursor::Structured(cursor)) => {
             let mut statement = connection.prepare(&format!(
@@ -1452,7 +1478,7 @@ fn paged_error_groups(
                  LIMIT 50",
                 service_groups_sql()
             ))?;
-            groups_from_rows(statement.query_map(
+            error_query_groups_from_rows(statement.query_map(
                 params![
                     service,
                     error_class,
@@ -1473,7 +1499,7 @@ fn paged_error_groups(
                  LIMIT 50",
                 service_groups_sql()
             ))?;
-            groups_from_rows(statement.query_map(
+            error_query_groups_from_rows(statement.query_map(
                 params![
                     service,
                     error_class,
@@ -1493,7 +1519,7 @@ fn paged_error_groups(
                  LIMIT 50",
                 service_groups_sql()
             ))?;
-            groups_from_rows(statement.query_map(
+            error_query_groups_from_rows(statement.query_map(
                 params![
                     service,
                     error_class,
@@ -1569,6 +1595,16 @@ fn groups_from_rows(
         impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<ErrorGroupSummary>,
     >,
 ) -> QueryResult<Vec<ErrorGroupSummary>> {
+    let groups = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(groups)
+}
+
+fn error_query_groups_from_rows(
+    rows: rusqlite::MappedRows<
+        '_,
+        impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<ErrorGroupSummary>,
+    >,
+) -> ErrorGroupQueryResult<Vec<ErrorGroupSummary>> {
     let groups = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(groups)
 }

@@ -1122,6 +1122,14 @@ the Rust server accepts production traffic:
     remains fail-fast for store open, migration, and first-boot seed errors;
     the regression test proves a store boot failure returns
     `ServerBootError::Store` before any `/readyz` surface can exist.
+92. Rust now rejects malformed `/api/v1/query` pagination cursors at the
+    service/error-class read-model boundary instead of silently falling back to
+    the first page. `canary-store` exposes a cursor-aware
+    `ErrorGroupQueryError` only for error-group queries, so status, report,
+    incident-detail, and health read models keep the smaller `QueryError`
+    surface. The Axum route maps that boundary to the standard RFC 9457
+    `422 validation_error` cursor problem, preserving legacy group-hash
+    cursors while making bad agent replay state fail explicitly.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed
