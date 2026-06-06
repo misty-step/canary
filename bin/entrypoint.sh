@@ -2,6 +2,7 @@
 set -e
 
 DB_PATH="${CANARY_DB_PATH:-/data/canary.db}"
+CANARY_BIN="${CANARY_BIN:-/app/bin/canary-server}"
 
 # --- Litestream env validation ---
 LITESTREAM_READY=0
@@ -32,7 +33,7 @@ fi
 
 # Start app under Litestream (continuous replication)
 if [ "$LITESTREAM_READY" = "1" ]; then
-  exec litestream replicate -exec "/app/bin/canary start" -config /etc/litestream.yml
+  exec litestream replicate -exec "$CANARY_BIN" -config /etc/litestream.yml
 else
-  exec /app/bin/canary start
+  exec "$CANARY_BIN"
 fi

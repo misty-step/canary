@@ -65,6 +65,8 @@ pub struct ServerConfig {
     pub retention_policy: RetentionPolicy,
     /// Client identity source for silent invalid-key accounting.
     pub auth_fail_identity: AuthFailIdentityConfig,
+    /// Whether first boot should disclose the one-time bootstrap key on stderr.
+    pub disclose_bootstrap_key: bool,
 }
 
 impl ServerConfig {
@@ -82,6 +84,7 @@ impl ServerConfig {
             tls_expiry_scan_interval: DEFAULT_TLS_EXPIRY_SCAN_INTERVAL,
             retention_policy: RetentionPolicy::default(),
             auth_fail_identity: AuthFailIdentityConfig::default(),
+            disclose_bootstrap_key: true,
         }
     }
 }
@@ -132,8 +135,12 @@ impl CanaryServer {
             .apply_initial_seed(&current_rfc3339())
             .map_err(ServerBootError::Store)?
         {
-            eprintln!("Bootstrap API key: {raw_key}");
-            eprintln!("Store this key securely - it will not be shown again.");
+            if config.disclose_bootstrap_key {
+                eprintln!("Bootstrap API key: {raw_key}");
+                eprintln!("Store this key securely - it will not be shown again.");
+            } else {
+                eprintln!("Bootstrap API key created but not disclosed by process config.");
+            }
         }
         let store = Arc::new(Mutex::new(store));
 

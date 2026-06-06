@@ -380,6 +380,43 @@ export class Ci {
     )
   }
 
+  private productionImageContainer(source: Directory): Container {
+    return source.dockerBuild()
+  }
+
+  private productionImageSmokeContainer(source: Directory): Container {
+    const service = this.productionImageContainer(source)
+      .withEnvVariable("CANARY_DB_PATH", "/tmp/canary-smoke.db")
+      .withEnvVariable("PORT", "4000")
+      .withEnvVariable("CANARY_DISCLOSE_BOOTSTRAP_KEY", "false")
+      .withExposedPort(4000)
+      .asService()
+
+    return dag
+      .container()
+      .from(RUST_IMAGE)
+      .withExec(["apt-get", "update", "-q"])
+      .withExec(["apt-get", "install", "-yq", "--no-install-recommends", "curl"])
+      .withServiceBinding("canary", service)
+      .withExec([
+        "bash",
+        "-ceu",
+        [
+          "for _ in {1..60}; do",
+          "  if curl --fail --silent --show-error http://canary:4000/healthz >/tmp/healthz.json &&",
+          "     curl --fail --silent --show-error http://canary:4000/readyz >/tmp/readyz.json; then",
+          "    grep -F '\"status\":\"ok\"' /tmp/healthz.json",
+          "    grep -F '\"status\":\"ready\"' /tmp/readyz.json",
+          "    exit 0",
+          "  fi",
+          "  sleep 1",
+          "done",
+          "cat /tmp/healthz.json /tmp/readyz.json 2>/dev/null || true",
+          "exit 1",
+        ].join("\n"),
+      ])
+  }
+
   @func()
   async fast(
     @argument({
@@ -525,6 +562,7 @@ export class Ci {
     await this.sdkQuality(repo)
     await this.typescriptQuality(repo)
     await this.rustQuality(repo)
+    await this.productionImageSmoke(repo)
     await this.secrets(repo)
   }
 
@@ -718,6 +756,30 @@ export class Ci {
     source?: Directory,
   ): Promise<void> {
     await (await this.rustQualityContainer(source!)).sync()
+  }
+
+  @func()
+  async productionImageSmoke(
+    @argument({
+      defaultPath: "/",
+      ignore: [
+        ".git",
+        "_build",
+        "deps",
+        "cover",
+        "canary_sdk/_build",
+        "canary_sdk/deps",
+        "canary_sdk/cover",
+        "clients/typescript/node_modules",
+        "clients/typescript/dist",
+        "clients/typescript/coverage",
+        "dagger/node_modules",
+        "target",
+      ],
+    })
+    source?: Directory,
+  ): Promise<void> {
+    await this.productionImageSmokeContainer(source!).sync()
   }
 
   @func()

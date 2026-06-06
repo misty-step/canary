@@ -1170,7 +1170,10 @@ PORT=4000
 SECRET_KEY_BASE=generate-with-mix-phx-gen-secret
 CANARY_DB_PATH=./canary_dev.db
 # Optional: Litestream (not needed for local dev)
-# LITESTREAM_REPLICA_URL=s3://bucket/canary.db
+# BUCKET_NAME=canary-obs-backups
+# AWS_ACCESS_KEY_ID=...
+# AWS_SECRET_ACCESS_KEY=...
+# AWS_ENDPOINT_URL_S3=https://fly.storage.tigris.dev
 ```
 
 ### Webhook testing
@@ -1184,26 +1187,25 @@ The `webhook_sink` mix task starts a tiny Bandit server that logs received paylo
 Multi-stage build. Litestream runs as entrypoint supervisor.
 
 ```dockerfile
-# Build stage
-FROM hexpm/elixir:1.17-erlang-27-debian-bookworm AS build
+FROM rust:1.94.0-bookworm AS build
 WORKDIR /app
-COPY mix.exs mix.lock ./
-RUN mix deps.get --only prod && mix deps.compile
-COPY config config
-COPY lib lib
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
 COPY priv priv
-ENV MIX_ENV=prod
-RUN mix release
+RUN cargo build --release --locked -p canary-server
 
-# Runtime stage
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y libstdc++6 openssl libncurses5 locales ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=litestream/litestream:latest /usr/local/bin/litestream /usr/local/bin/litestream
-COPY --from=build /app/_build/prod/rel/canary /app
+RUN useradd --create-home app && mkdir -p /app/bin /data && chown -R app:app /app /data
+COPY --from=build --chown=app:app /app/target/release/canary-server /app/bin/canary-server
 COPY litestream.yml /etc/litestream.yml
 COPY bin/entrypoint.sh /app/bin/entrypoint.sh
 WORKDIR /app
+USER app
+ENV CANARY_DB_PATH=/data/canary.db
+ENV PORT=4000
 CMD ["/app/bin/entrypoint.sh"]
 ```
 
@@ -1214,17 +1216,18 @@ CMD ["/app/bin/entrypoint.sh"]
 set -e
 
 DB_PATH="${CANARY_DB_PATH:-/data/canary.db}"
+CANARY_BIN="${CANARY_BIN:-/app/bin/canary-server}"
 
-# Restore from Litestream if DB doesn't exist locally
-if [ ! -f "$DB_PATH" ] && [ -n "$LITESTREAM_REPLICA_URL" ]; then
-  litestream restore -if-replica-exists -o "$DB_PATH" "$LITESTREAM_REPLICA_URL"
+# Restore from Litestream if DB does not exist locally and Tigris env is complete.
+if [ ! -f "$DB_PATH" ] && [ -n "${BUCKET_NAME:-}" ] && [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+  litestream restore -if-replica-exists -o "$DB_PATH" -config /etc/litestream.yml "$DB_PATH"
 fi
 
 # Start app under Litestream (continuous replication)
-if [ -n "$LITESTREAM_REPLICA_URL" ]; then
-  exec litestream replicate -exec "/app/bin/canary start" "$DB_PATH" "$LITESTREAM_REPLICA_URL"
+if [ -n "${BUCKET_NAME:-}" ] && [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ]; then
+  exec litestream replicate -exec "$CANARY_BIN" -config /etc/litestream.yml
 else
-  exec /app/bin/canary start
+  exec "$CANARY_BIN"
 fi
 ```
 
@@ -1245,7 +1248,6 @@ kill_timeout = "30s"
 
 [env]
   CANARY_DB_PATH = "/data/canary.db"
-  PHX_HOST = "canary.fly.dev"
   PORT = "4000"
 
 [http_service]
@@ -1257,6 +1259,13 @@ kill_timeout = "30s"
     interval = "30s"
     method = "GET"
     path = "/healthz"
+    timeout = "5s"
+
+  [[http_service.checks]]
+    grace_period = "15s"
+    interval = "30s"
+    method = "GET"
+    path = "/readyz"
     timeout = "5s"
 ```
 

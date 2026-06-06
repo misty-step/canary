@@ -42,6 +42,7 @@ FUNCTION_POLICIES = {
     "sdkQuality": "without_git",
     "typescriptQuality": "without_git",
     "rustQuality": "without_git",
+    "productionImageSmoke": "without_git",
     "rustAdvisories": "without_git",
     "secrets": "with_git",
     "secretsHistory": "with_git",

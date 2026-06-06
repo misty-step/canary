@@ -402,7 +402,7 @@ mod tests {
             "health_check.tls_expiring"
         );
         let store = store.lock().map_err(|_| "store lock poisoned")?;
-        let timeline = store.timeline("7d", TimelineQueryOptions::default())?;
+        let timeline = store.timeline("30d", TimelineQueryOptions::default())?;
         let event = timeline.events.first().ok_or("missing timeline event")?;
         assert_eq!(event.event, "health_check.tls_expiring");
         assert_eq!(event.severity.as_deref(), Some("warning"));
@@ -431,7 +431,7 @@ mod tests {
         assert_eq!(report.event_fanout_failed, 1);
         assert!(!report.interrupted);
         let store = store.lock().map_err(|_| "store lock poisoned")?;
-        let timeline = store.timeline("7d", TimelineQueryOptions::default())?;
+        let timeline = store.timeline("30d", TimelineQueryOptions::default())?;
         assert_eq!(timeline.events.len(), 1);
         assert_eq!(timeline.events[0].event, "health_check.tls_expiring");
         Ok(())

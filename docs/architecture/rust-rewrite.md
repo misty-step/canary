@@ -1061,7 +1061,10 @@ the Rust server accepts production traffic:
     to `/data/canary.db`, `PORT` defaults to `4000`,
     `ALLOW_PRIVATE_TARGETS=true` enables private target probing, and
     `ERROR_RETENTION_DAYS` / `CHECK_RETENTION_DAYS` keep the existing
-    retention defaults of 30 and 7 days. `src/main.rs` only parses that typed
+    retention defaults of 30 and 7 days. `CANARY_DISCLOSE_BOOTSTRAP_KEY=false`
+    is reserved for CI smoke runs that create disposable first-boot keys and
+    must not leak them into logs; production defaults to disclosing the key
+    once, matching the existing operator contract. `src/main.rs` only parses that typed
     config, binds the requested port, boots `CanaryServer`, and wires
     SIGINT/SIGTERM graceful shutdown. `canary-store::seeds` owns the
     Phoenix-compatible `initial_config_v1` first-boot seed: one bootstrap admin
@@ -1070,6 +1073,14 @@ the Rust server accepts production traffic:
     artifact needed for Docker/Fly cutover while keeping storage, migrations,
     workers, routes, and side-effect policy behind the existing runtime
     boundary.
+87. Production packaging now points at the Rust server without adding a second
+    release surface. The root `Dockerfile` builds only `canary-server` from the
+    Rust workspace and copies `/app/bin/canary-server` into the runtime image;
+    `bin/entrypoint.sh` remains the single Litestream restore/replicate wrapper
+    but executes that Rust binary directly; and `fly.toml` no longer exports
+    Phoenix-only `PHX_*` variables. `test/bin/entrypoint_test.sh` locks the
+    command boundary so the deploy wrapper cannot silently drift back to the
+    Phoenix release path.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed

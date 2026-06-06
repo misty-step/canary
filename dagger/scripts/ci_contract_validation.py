@@ -743,6 +743,14 @@ require(
     and "await (await this.rustAdvisoryContainer(repo)).sync()" in dagger_source,
     "Dagger fast, deterministic, and advisory gates must include Rust validation",
 )
+require(
+    "source.dockerBuild()" in dagger_source
+    and "async productionImageSmoke(" in dagger_source
+    and "await this.productionImageSmoke(repo)" in dagger_source
+    and "http://canary:4000/healthz" in dagger_source
+    and "http://canary:4000/readyz" in dagger_source,
+    "Dagger deterministic gate must build and smoke-test the production Docker image",
+)
 
 sync_result = subprocess.run(
     [sys.executable, str(source_argument_sync), "--check"],

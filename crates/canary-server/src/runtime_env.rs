@@ -14,6 +14,7 @@ const DEFAULT_DATABASE_PATH: &str = "/data/canary.db";
 const DEFAULT_PORT: u16 = 4000;
 const DEFAULT_ERROR_RETENTION_DAYS: i64 = 30;
 const DEFAULT_CHECK_RETENTION_DAYS: i64 = 7;
+const DISCLOSE_BOOTSTRAP_KEY_ENV: &str = "CANARY_DISCLOSE_BOOTSTRAP_KEY";
 
 /// Fully parsed process configuration for the Rust server binary.
 #[derive(Debug, Clone)]
@@ -52,6 +53,11 @@ impl ServerProcessConfig {
             env_value(&vars, "CHECK_RETENTION_DAYS"),
             DEFAULT_CHECK_RETENTION_DAYS,
         )?;
+        let disclose_bootstrap_key = parse_bool(
+            DISCLOSE_BOOTSTRAP_KEY_ENV,
+            env_value(&vars, DISCLOSE_BOOTSTRAP_KEY_ENV),
+        )?
+        .unwrap_or(true);
 
         let mut server = ServerConfig::new(database_path);
         server.target_probe_options = TargetProbeOptions {
@@ -62,6 +68,7 @@ impl ServerProcessConfig {
             error_retention_days,
             check_retention_days,
         };
+        server.disclose_bootstrap_key = disclose_bootstrap_key;
 
         Ok(Self {
             server,
@@ -126,6 +133,21 @@ fn parse_i64(
     }
 }
 
+fn parse_bool(
+    variable: &'static str,
+    value: Option<&str>,
+) -> Result<Option<bool>, RuntimeEnvError> {
+    match value {
+        Some("true") => Ok(Some(true)),
+        Some("false") => Ok(Some(false)),
+        Some(value) => Err(RuntimeEnvError::new(
+            variable,
+            format!("expected true or false, got {value:?}"),
+        )),
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +163,7 @@ mod tests {
         assert_eq!(config.listen_addr, SocketAddr::from(([0, 0, 0, 0], 4000)));
         assert_eq!(config.server.retention_policy, RetentionPolicy::default());
         assert!(!config.server.target_probe_options.allow_private_targets);
+        assert!(config.server.disclose_bootstrap_key);
         Ok(())
     }
 
@@ -152,6 +175,7 @@ mod tests {
             ("ALLOW_PRIVATE_TARGETS", "true"),
             ("ERROR_RETENTION_DAYS", "90"),
             ("CHECK_RETENTION_DAYS", "14"),
+            ("CANARY_DISCLOSE_BOOTSTRAP_KEY", "false"),
         ])?;
 
         assert_eq!(config.server.database_path, PathBuf::from("/tmp/canary.db"));
@@ -164,6 +188,7 @@ mod tests {
             }
         );
         assert!(config.server.target_probe_options.allow_private_targets);
+        assert!(!config.server.disclose_bootstrap_key);
         Ok(())
     }
 
@@ -179,6 +204,13 @@ mod tests {
                 "thirty"
             )])),
             Some("ERROR_RETENTION_DAYS")
+        );
+        assert_eq!(
+            error_variable(ServerProcessConfig::from_env([(
+                "CANARY_DISCLOSE_BOOTSTRAP_KEY",
+                "0"
+            )])),
+            Some("CANARY_DISCLOSE_BOOTSTRAP_KEY")
         );
     }
 

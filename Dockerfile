@@ -1,52 +1,35 @@
-# Use the official Elixir image for build
-FROM elixir:1.17-slim AS build
-
-RUN apt-get update -y && apt-get install -y build-essential git ca-certificates && rm -rf /var/lib/apt/lists/*
+FROM rust:1.94.0-bookworm@sha256:365468470075493dc4583f47387001854321c5a8583ea9604b297e67f01c5a4f AS build
 
 WORKDIR /app
 
-RUN mix local.hex --force && mix local.rebar --force
-
-ENV MIX_ENV=prod
-
-COPY mix.exs mix.lock ./
-RUN mix deps.get --only prod && mix deps.compile
-
-COPY config config
-COPY lib lib
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
 COPY priv priv
 
-RUN mix compile
-RUN mix release
+RUN cargo build --release --locked -p canary-server
 
-# --- Runtime stage ---
 FROM debian:bookworm-slim
 
 RUN apt-get update -y && \
-    apt-get install -y libstdc++6 openssl libncurses6 locales ca-certificates curl && \
+    apt-get install -y --no-install-recommends ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
-RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
-
-ENV LANG=en_US.UTF-8
-ENV LANGUAGE=en_US:en
-ENV LC_ALL=en_US.UTF-8
-
-# Litestream for SQLite replication
 COPY --from=litestream/litestream:latest /usr/local/bin/litestream /usr/local/bin/litestream
 
 WORKDIR /app
 
-RUN useradd --create-home app
-RUN mkdir -p /data && chown app:app /data
+RUN useradd --create-home app && \
+    mkdir -p /app/bin /data && \
+    chown -R app:app /app /data
 
-COPY --from=build --chown=app:app /app/_build/prod/rel/canary ./
+COPY --from=build --chown=app:app /app/target/release/canary-server /app/bin/canary-server
 COPY --chown=app:app litestream.yml /etc/litestream.yml
 COPY --chown=app:app bin/entrypoint.sh /app/bin/entrypoint.sh
-RUN chmod +x /app/bin/entrypoint.sh
+RUN chmod +x /app/bin/entrypoint.sh /app/bin/canary-server
 
 USER app
 
-ENV PHX_SERVER=true
+ENV CANARY_DB_PATH=/data/canary.db
+ENV PORT=4000
 
 CMD ["/app/bin/entrypoint.sh"]
