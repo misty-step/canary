@@ -1090,6 +1090,17 @@ the Rust server accepts production traffic:
     line: Phoenix/Elixir remains in-repo as the parity source, fixture
     generator, SDK boundary, and migration safety net until Rust owns those
     contracts directly.
+89. Rust now owns a fixture-generation path without deleting the independent
+    Phoenix oracle. `canary-store::fixtures` writes an empty Rust-migrated
+    schema fixture and a deterministic populated read-model fixture; the
+    implementation owns migration, seed rows, integrity checks, foreign-key
+    checks, checkpointing, and sidecar cleanup behind one store boundary.
+    `bin/regenerate-rust-fixtures` is the operator wrapper and
+    `crates/canary-store/examples/generate_fixtures.rs` is the cargo entrypoint.
+    The compatibility suite still keeps the Phoenix-generated DBs as the
+    non-Rust comparison source, while new tests prove the Rust-generated schema
+    fixture matches Rust DDL and the Rust-generated populated fixture satisfies
+    the same read-model assertions as the Phoenix/Ecto-authored fixture.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed

@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+schema_fixture="$repo_root/crates/canary-store/tests/fixtures/rust_schema.db"
+populated_fixture="$repo_root/crates/canary-store/tests/fixtures/rust_read_models.db"
+
+cd "$repo_root"
+
+cargo run -p canary-store --example generate_fixtures -- \
+  "$schema_fixture" \
+  "$populated_fixture"

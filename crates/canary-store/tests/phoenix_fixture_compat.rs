@@ -16,7 +16,7 @@ use canary_core::{
 use canary_store::{
     ErrorIngest, ErrorIngestIds, ErrorIngestPayload, IncidentCorrelation, IncidentListOptions,
     ServiceQueryOptions, Store, WebhookDeliveryInsert, WebhookDeliveryListOptions,
-    WebhookDeliveryStatus,
+    WebhookDeliveryStatus, fixtures,
 };
 use rusqlite::{Connection, OpenFlags, params};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -275,6 +275,56 @@ fn rust_store_writes_work_against_a_phoenix_fixture() -> Result<(), Box<dyn Erro
 }
 
 #[test]
+fn rust_fixture_generator_writes_schema_artifact_without_phoenix() -> Result<(), Box<dyn Error>> {
+    let (dir, path) = generated_fixture_path("rust-schema")?;
+    fixtures::write_schema_fixture(&path)?;
+    assert_no_sqlite_sidecars(&path);
+
+    let generated = Connection::open(&path)?;
+    assert_eq!(table_names(&generated)?, rust_table_names()?);
+    assert_eq!(user_version(&generated)?, RUST_SCHEMA_VERSION);
+    assert_eq!(
+        migration_versions_or_empty(&generated)?,
+        Vec::<String>::new()
+    );
+
+    let (rust_dir, rust) = rust_schema_connection()?;
+    for table in PRODUCT_TABLES {
+        assert_eq!(
+            columns(&generated, table)?,
+            columns(&rust, table)?,
+            "column drift in Rust-generated fixture table {table}"
+        );
+    }
+    assert_eq!(index_sql(&generated)?, index_sql(&rust)?);
+    for table in FOREIGN_KEY_TABLES {
+        assert_eq!(
+            foreign_keys(&generated, table)?,
+            foreign_keys(&rust, table)?,
+            "foreign-key drift in Rust-generated fixture table {table}"
+        );
+    }
+
+    fs::remove_dir_all(rust_dir)?;
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn rust_fixture_generator_writes_read_model_artifact_without_phoenix() -> Result<(), Box<dyn Error>>
+{
+    let (dir, path) = generated_fixture_path("rust-read-model")?;
+    fixtures::write_read_model_fixture(&path)?;
+    assert_no_sqlite_sidecars(&path);
+
+    let store = Store::open(&path)?;
+    assert_populated_read_models(&store)?;
+
+    fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
 fn webhook_delivery_queries_keep_order_on_a_phoenix_fixture() -> Result<(), Box<dyn Error>> {
     let (dir, path) = copy_fixture("webhook-order")?;
     let mut store = Store::open(&path)?;
@@ -315,52 +365,7 @@ fn rust_query_read_models_read_populated_phoenix_rows() -> Result<(), Box<dyn Er
     let (dir, path) = copy_populated_fixture("read-models")?;
     let store = Store::open(&path)?;
 
-    let error = store
-        .error_detail("ERR-readmodel0001")?
-        .ok_or("missing Phoenix fixture error detail")?;
-    assert_eq!(error.service, "ramp-api");
-    assert_eq!(error.group_hash, "grp-readmodel-runtime");
-    assert_eq!(
-        error.context.as_ref().and_then(|ctx| ctx.get("tenant")),
-        Some(&serde_json::json!("alpha"))
-    );
-    assert_eq!(error.group.as_ref().map(|group| group.total_count), Some(3));
-    assert_eq!(error.incident_ids, vec!["INC-readmodel0001"]);
-
-    let detail = store
-        .incident_detail("INC-readmodel0001")?
-        .ok_or("missing Phoenix fixture incident detail")?;
-    assert_eq!(detail.incident.service, "ramp-api");
-    assert_eq!(detail.annotations.len(), 1);
-    assert_eq!(detail.annotations[0].action, "acknowledged");
-    assert_eq!(detail.recent_timeline_events.len(), 1);
-    assert_eq!(detail.recent_timeline_events[0].event, "incident.opened");
-
-    let target = detail
-        .signals
-        .iter()
-        .find(|signal| signal.target_id.as_deref() == Some("TGT-readmodel-api"))
-        .ok_or("missing target health signal")?;
-    assert_eq!(target.target_name.as_deref(), Some("Ramp API"));
-    assert_eq!(target.current_state.as_deref(), Some("down"));
-    assert_eq!(target.consecutive_failures, Some(4));
-    assert_eq!(target.annotation_count, 1);
-
-    let monitor = detail
-        .signals
-        .iter()
-        .find(|signal| signal.monitor_id.as_deref() == Some("MON-readmodel-cron"))
-        .ok_or("missing monitor health signal")?;
-    assert_eq!(monitor.monitor_name.as_deref(), Some("Ramp nightly import"));
-    assert_eq!(monitor.current_state.as_deref(), Some("degraded"));
-
-    let group = detail
-        .signals
-        .iter()
-        .find(|signal| signal.group_hash.as_deref() == Some("grp-readmodel-runtime"))
-        .ok_or("missing error-group signal")?;
-    assert_eq!(group.error_class.as_deref(), Some("RuntimeError"));
-    assert_eq!(group.annotation_count, 1);
+    assert_populated_read_models(&store)?;
 
     fs::remove_dir_all(dir)?;
     Ok(())
@@ -621,6 +626,22 @@ fn copy_fixture_from(name: &str, source: PathBuf) -> Result<(PathBuf, PathBuf), 
     Ok((dir, path))
 }
 
+fn generated_fixture_path(name: &str) -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "canary-rust-fixture-{name}-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("rust_fixture.db");
+    Ok((dir, path))
+}
+
+fn assert_no_sqlite_sidecars(path: &Path) {
+    assert!(!path.with_extension("db-shm").exists());
+    assert!(!path.with_extension("db-wal").exists());
+}
+
 fn rust_schema_connection() -> Result<(PathBuf, Connection), Box<dyn Error>> {
     let (dir, path) = copy_fixture("rust-schema-empty")?;
     fs::remove_file(&path)?;
@@ -642,6 +663,13 @@ fn table_names(connection: &Connection) -> Result<BTreeSet<String>, Box<dyn Erro
     Ok(statement
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<BTreeSet<_>>>()?)
+}
+
+fn rust_table_names() -> Result<BTreeSet<String>, Box<dyn Error>> {
+    let (dir, connection) = rust_schema_connection()?;
+    let names = table_names(&connection)?;
+    fs::remove_dir_all(dir)?;
+    Ok(names)
 }
 
 fn columns(
@@ -732,6 +760,70 @@ fn migration_versions(connection: &Connection) -> Result<Vec<String>, Box<dyn Er
             row.get::<_, i64>(0).map(|version| version.to_string())
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn migration_versions_or_empty(connection: &Connection) -> Result<Vec<String>, Box<dyn Error>> {
+    let exists = connection.query_row(
+        "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'schema_migrations'",
+        [],
+        |_row| Ok(()),
+    );
+    match exists {
+        Ok(()) => migration_versions(connection),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(Vec::new()),
+        Err(error) => Err(Box::new(error)),
+    }
+}
+
+fn assert_populated_read_models(store: &Store) -> Result<(), Box<dyn Error>> {
+    let error = store
+        .error_detail("ERR-readmodel0001")?
+        .ok_or("missing fixture error detail")?;
+    assert_eq!(error.service, "ramp-api");
+    assert_eq!(error.group_hash, "grp-readmodel-runtime");
+    assert_eq!(
+        error.context.as_ref().and_then(|ctx| ctx.get("tenant")),
+        Some(&serde_json::json!("alpha"))
+    );
+    assert_eq!(error.group.as_ref().map(|group| group.total_count), Some(3));
+    assert_eq!(error.incident_ids, vec!["INC-readmodel0001"]);
+
+    let detail = store
+        .incident_detail("INC-readmodel0001")?
+        .ok_or("missing fixture incident detail")?;
+    assert_eq!(detail.incident.service, "ramp-api");
+    assert_eq!(detail.annotations.len(), 1);
+    assert_eq!(detail.annotations[0].action, "acknowledged");
+    assert_eq!(detail.recent_timeline_events.len(), 1);
+    assert_eq!(detail.recent_timeline_events[0].event, "incident.opened");
+
+    let target = detail
+        .signals
+        .iter()
+        .find(|signal| signal.target_id.as_deref() == Some("TGT-readmodel-api"))
+        .ok_or("missing target health signal")?;
+    assert_eq!(target.target_name.as_deref(), Some("Ramp API"));
+    assert_eq!(target.current_state.as_deref(), Some("down"));
+    assert_eq!(target.consecutive_failures, Some(4));
+    assert_eq!(target.annotation_count, 1);
+
+    let monitor = detail
+        .signals
+        .iter()
+        .find(|signal| signal.monitor_id.as_deref() == Some("MON-readmodel-cron"))
+        .ok_or("missing monitor health signal")?;
+    assert_eq!(monitor.monitor_name.as_deref(), Some("Ramp nightly import"));
+    assert_eq!(monitor.current_state.as_deref(), Some("degraded"));
+
+    let group = detail
+        .signals
+        .iter()
+        .find(|signal| signal.group_hash.as_deref() == Some("grp-readmodel-runtime"))
+        .ok_or("missing error-group signal")?;
+    assert_eq!(group.error_class.as_deref(), Some("RuntimeError"));
+    assert_eq!(group.annotation_count, 1);
+
+    Ok(())
 }
 
 fn normalize_sql(sql: &str) -> String {

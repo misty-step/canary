@@ -10,6 +10,7 @@ use rusqlite::Connection;
 
 mod annotations;
 mod api_keys;
+pub mod fixtures;
 mod health;
 mod incidents;
 mod ingest;
