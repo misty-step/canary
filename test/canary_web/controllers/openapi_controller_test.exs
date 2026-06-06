@@ -10,6 +10,7 @@ defmodule CanaryWeb.OpenAPIControllerTest do
     {"/api/v1/report", "get"},
     {"/api/v1/timeline", "get"},
     {"/api/v1/webhook-deliveries", "get"},
+    {"/api/v1/webhook-deliveries/{delivery_id}", "get"},
     {"/api/v1/status", "get"},
     {"/api/v1/health-status", "get"},
     {"/api/v1/targets/{id}/checks", "get"},
@@ -51,6 +52,8 @@ defmodule CanaryWeb.OpenAPIControllerTest do
     assert is_binary(guide["incident_entrypoint"])
     assert guide["incident_entrypoint"] =~ "`GET /api/v1/incidents/{id}`"
     assert guide["incident_entrypoint"] =~ "incident.opened"
+    assert guide["webhook_contract"] =~ "`GET /api/v1/webhook-deliveries/{delivery_id}`"
+    assert guide["webhook_contract"] =~ "`GET /api/v1/timeline`"
   end
 
   test "avoids unconstrained additionalProperties escape hatches", %{conn: conn} do

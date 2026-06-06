@@ -130,6 +130,11 @@ defmodule Canary.WebhookDeliveries do
     |> Canary.Repos.read_repo().all()
   end
 
+  @spec get(String.t()) :: WebhookDeliveryLedger.t() | nil
+  def get(delivery_id) do
+    Canary.Repos.read_repo().get(WebhookDeliveryLedger, delivery_id)
+  end
+
   @spec page(keyword()) ::
           {:ok,
            %{

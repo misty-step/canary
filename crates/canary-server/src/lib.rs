@@ -103,7 +103,7 @@ pub use webhook_delivery::{
     InMemoryWebhookCircuit, WebhookCircuit, WebhookDeliveryDrain, WebhookDeliveryDrainReport,
     WebhookDeliveryDrainWorker, WebhookDeliveryRuntime,
 };
-use webhook_delivery_routes::webhook_deliveries;
+use webhook_delivery_routes::{webhook_deliveries, webhook_delivery};
 pub use webhooks::{
     HttpWebhookTransport, InMemoryWebhookCooldown, StoreWebhookScheduler, WebhookCooldown,
     WebhookEnqueueEffectSink, WebhookScheduler, WebhookTransport,
@@ -119,6 +119,10 @@ pub fn ingest_router(state: IngestState) -> Router {
         .route("/api/v1/report", get(report))
         .route("/api/v1/timeline", get(timeline))
         .route("/api/v1/webhook-deliveries", get(webhook_deliveries))
+        .route(
+            "/api/v1/webhook-deliveries/{delivery_id}",
+            get(webhook_delivery),
+        )
         .route("/api/v1/status", get(status))
         .route("/api/v1/health-status", get(health_status))
         .route("/api/v1/targets/{id}/checks", get(target_checks))
@@ -331,6 +335,7 @@ mod tests {
             (Method::GET, "/api/v1/report"),
             (Method::GET, "/api/v1/timeline"),
             (Method::GET, "/api/v1/webhook-deliveries"),
+            (Method::GET, "/api/v1/webhook-deliveries/DLV-route"),
             (Method::GET, "/api/v1/status"),
             (Method::GET, "/api/v1/health-status"),
             (Method::GET, "/api/v1/targets/TGT-route/checks"),
@@ -3886,6 +3891,86 @@ mod tests {
         assert_eq!(body["monitors"][0]["name"], "desktop-active-timer");
         assert_eq!(body["monitors"][0]["state"], "unknown");
         assert!(body["monitors"][0].get("grace_ms").is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn webhook_delivery_show_returns_one_row_for_stable_delivery_id()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            store.create_pending_webhook_delivery(WebhookDeliveryInsert {
+                delivery_id: "DLV-diagnostic-show".to_owned(),
+                webhook_id: "WHK-diagnostic".to_owned(),
+                event: "incident.updated".to_owned(),
+                now: "2026-04-02T10:00:00Z".to_owned(),
+            })?;
+            store.mark_webhook_delivery_attempt("DLV-diagnostic-show", "2026-04-02T10:00:01Z")?;
+            store.mark_webhook_delivery_discarded(
+                "DLV-diagnostic-show",
+                "http_500",
+                "2026-04-02T10:00:02Z",
+            )?;
+        }
+
+        let response = ingest_router(state)
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/webhook-deliveries/DLV-diagnostic-show",
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["delivery_id"], "DLV-diagnostic-show");
+        assert_eq!(body["webhook_id"], "WHK-diagnostic");
+        assert_eq!(body["event"], "incident.updated");
+        assert_eq!(body["status"], "discarded");
+        assert_eq!(body["attempt_count"], 1);
+        assert_eq!(body["reason"], "http_500");
+        assert_eq!(body["last_attempt_at"], "2026-04-02T10:00:01Z");
+        assert_eq!(body["discarded_at"], "2026-04-02T10:00:02Z");
+        assert_eq!(body["completed_at"], "2026-04-02T10:00:02Z");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn webhook_delivery_show_reports_missing_and_wrong_scope() -> Result<(), Box<dyn Error>> {
+        let missing = ingest_router(test_ingest_state()?)
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/webhook-deliveries/DLV-missing",
+            )?)
+            .await?;
+        let missing_status = missing.status();
+        let missing_body = json_body(missing).await?;
+
+        assert_eq!(missing_status, StatusCode::NOT_FOUND);
+        assert_eq!(missing_body["code"], "not_found");
+        assert_eq!(
+            missing_body["detail"],
+            "Webhook delivery DLV-missing not found."
+        );
+
+        let forbidden = ingest_router(test_ingest_state()?)
+            .oneshot(read_request(
+                INGEST_KEY,
+                "/api/v1/webhook-deliveries/DLV-missing",
+            )?)
+            .await?;
+        let forbidden_status = forbidden.status();
+        let forbidden_body = json_body(forbidden).await?;
+
+        assert_eq!(forbidden_status, StatusCode::FORBIDDEN);
+        assert_eq!(forbidden_body["code"], "insufficient_scope");
+        assert_eq!(
+            forbidden_body["detail"],
+            "API key scope `ingest-only` cannot access this read endpoint. Use an `admin` or `read-only` key."
+        );
 
         Ok(())
     }

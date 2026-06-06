@@ -1101,6 +1101,16 @@ the Rust server accepts production traffic:
     non-Rust comparison source, while new tests prove the Rust-generated schema
     fixture matches Rust DDL and the Rust-generated populated fixture satisfies
     the same read-model assertions as the Phoenix/Ecto-authored fixture.
+90. Rust now owns the stable webhook-delivery diagnostic lookup named by the
+    agent-contract backlog. `canary-store::webhook_delivery` returns one
+    formatted ledger row by `X-Delivery-Id`, and
+    `GET /api/v1/webhook-deliveries/{delivery_id}` exposes it through the
+    read-scope route with RFC 9457 `404` for missing rows. The OpenAPI
+    `info.x-agent-guide.webhook_contract` now tells agents to dedupe by
+    delivery id, inspect this row for diagnostics, and replay durable state
+    through `/api/v1/timeline` before acting. Phoenix keeps the same route and
+    controller test so the in-repo contract oracle does not drift while Rust
+    serves production.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed

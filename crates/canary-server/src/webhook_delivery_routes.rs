@@ -6,12 +6,12 @@
 
 use axum::{
     body::Body,
-    extract::{Query, RawQuery, State},
+    extract::{Path, Query, RawQuery, State},
     http::{HeaderMap, Response, StatusCode},
 };
 use canary_http::problem_details::{
     internal_problem, invalid_cursor_problem, invalid_limit_problem, invalid_string_param_problem,
-    invalid_webhook_delivery_status_problem,
+    invalid_webhook_delivery_status_problem, not_found_problem,
 };
 use canary_store::{WebhookDeliveryPageError, WebhookDeliveryPageOptions};
 use serde::Deserialize;
@@ -73,5 +73,28 @@ pub(crate) async fn webhook_deliveries(
             invalid_webhook_delivery_status_problem(canary_store::webhook_delivery_statuses()),
         ),
         Err(WebhookDeliveryPageError::Sqlite(_)) => problem_response(internal_problem()),
+    }
+}
+
+pub(crate) async fn webhook_delivery(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    Path(delivery_id): Path<String>,
+) -> Response<Body> {
+    if let Err(problem) = require_read_scope(&state, &headers) {
+        return problem_response(*problem);
+    }
+
+    let store = match state.lock_store() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+
+    match store.webhook_delivery(&delivery_id) {
+        Ok(Some(delivery)) => json_status_response(StatusCode::OK.as_u16(), delivery),
+        Ok(None) => problem_response(not_found_problem(format!(
+            "Webhook delivery {delivery_id} not found."
+        ))),
+        Err(_) => problem_response(internal_problem()),
     }
 }

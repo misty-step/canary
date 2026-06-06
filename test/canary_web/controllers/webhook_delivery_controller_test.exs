@@ -185,4 +185,46 @@ defmodule CanaryWeb.WebhookDeliveryControllerTest do
       assert body["errors"]["cursor"] == ["must be a valid pagination cursor"]
     end
   end
+
+  describe "GET /api/v1/webhook-deliveries/:delivery_id" do
+    test "returns one delivery by stable delivery id", %{conn: conn} do
+      assert :ok =
+               WebhookDeliveries.create_pending(
+                 "DLV-show",
+                 "WHK-show",
+                 "incident.updated",
+                 "2026-04-02T13:00:00Z"
+               )
+
+      assert :ok = WebhookDeliveries.mark_attempt("DLV-show", "2026-04-02T13:00:01Z")
+
+      assert :ok =
+               WebhookDeliveries.mark_discarded(
+                 "DLV-show",
+                 "http_500",
+                 "2026-04-02T13:00:02Z"
+               )
+
+      conn = get(conn, "/api/v1/webhook-deliveries/DLV-show")
+      body = json_response(conn, 200)
+
+      assert body["delivery_id"] == "DLV-show"
+      assert body["webhook_id"] == "WHK-show"
+      assert body["event"] == "incident.updated"
+      assert body["status"] == "discarded"
+      assert body["attempt_count"] == 1
+      assert body["reason"] == "http_500"
+      assert body["last_attempt_at"] == "2026-04-02T13:00:01Z"
+      assert body["discarded_at"] == "2026-04-02T13:00:02Z"
+      assert body["completed_at"] == "2026-04-02T13:00:02Z"
+    end
+
+    test "returns problem details for missing delivery ids", %{conn: conn} do
+      conn = get(conn, "/api/v1/webhook-deliveries/DLV-missing")
+      body = json_response(conn, 404)
+
+      assert body["code"] == "not_found"
+      assert body["detail"] == "Webhook delivery DLV-missing not found."
+    end
+  end
 end

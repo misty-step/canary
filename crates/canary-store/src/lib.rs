@@ -522,6 +522,14 @@ impl Store {
         webhook_deliveries::page(&self.connection, options)
     }
 
+    /// Return one webhook delivery ledger row by stable delivery id.
+    pub fn webhook_delivery(
+        &self,
+        delivery_id: &str,
+    ) -> Result<Option<canary_core::query::WebhookDelivery>> {
+        webhook_deliveries::get(&self.connection, delivery_id)
+    }
+
     /// Return active webhook subscriptions for one event.
     pub fn active_webhook_subscriptions_for_event(
         &self,
@@ -1036,6 +1044,36 @@ mod tests {
             }),
             Err(WebhookDeliveryPageError::InvalidStatus)
         ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_returns_one_formatted_row_by_delivery_id()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        store.create_pending_webhook_delivery(WebhookDeliveryInsert {
+            delivery_id: "DLV-diagnostic".to_owned(),
+            webhook_id: "WHK-diagnostic".to_owned(),
+            event: "incident.updated".to_owned(),
+            now: "2026-05-28T20:00:00Z".to_owned(),
+        })?;
+        store.mark_webhook_delivery_attempt("DLV-diagnostic", "2026-05-28T20:00:01Z")?;
+        store.mark_webhook_delivery_delivered("DLV-diagnostic", "2026-05-28T20:00:02Z")?;
+
+        let delivery = store
+            .webhook_delivery("DLV-diagnostic")?
+            .ok_or("missing delivery")?;
+        assert_eq!(delivery.delivery_id, "DLV-diagnostic");
+        assert_eq!(delivery.webhook_id, "WHK-diagnostic");
+        assert_eq!(delivery.event, "incident.updated");
+        assert_eq!(delivery.status, "delivered");
+        assert_eq!(delivery.attempt_count, 1);
+        assert_eq!(
+            delivery.completed_at.as_deref(),
+            Some("2026-05-28T20:00:02Z")
+        );
+        assert!(store.webhook_delivery("DLV-missing")?.is_none());
 
         Ok(())
     }

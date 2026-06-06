@@ -69,6 +69,7 @@ defmodule CanaryWeb.Router do
       get "/report", ReportController, :index
       get "/timeline", TimelineController, :index
       get "/webhook-deliveries", WebhookDeliveryController, :index
+      get "/webhook-deliveries/:delivery_id", WebhookDeliveryController, :show
       get "/status", StatusController, :index
       get "/health-status", HealthController, :status
       get "/targets/:id/checks", HealthController, :target_checks

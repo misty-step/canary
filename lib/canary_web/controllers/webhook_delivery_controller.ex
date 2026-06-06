@@ -3,6 +3,21 @@ defmodule CanaryWeb.WebhookDeliveryController do
 
   alias Canary.WebhookDeliveries
 
+  def show(conn, %{"delivery_id" => delivery_id}) do
+    case WebhookDeliveries.get(delivery_id) do
+      nil ->
+        CanaryWeb.Plugs.ProblemDetails.render_error(
+          conn,
+          404,
+          "not_found",
+          "Webhook delivery #{delivery_id} not found."
+        )
+
+      delivery ->
+        json(conn, format_delivery(delivery))
+    end
+  end
+
   def index(conn, params) do
     cursor = Map.get(params, "after") || Map.get(params, "cursor")
 

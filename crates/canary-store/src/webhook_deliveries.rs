@@ -427,6 +427,23 @@ pub(crate) fn page(
     Ok(webhook_deliveries_response(deliveries, cursor))
 }
 
+pub(crate) fn get(connection: &Connection, delivery_id: &str) -> Result<Option<WebhookDelivery>> {
+    let mut statement = connection.prepare(
+        "SELECT delivery_id, webhook_id, event, status, attempt_count, reason,
+                first_attempt_at, last_attempt_at, delivered_at, discarded_at,
+                created_at, updated_at
+         FROM webhook_deliveries
+         WHERE delivery_id = ?1",
+    )?;
+    let result = statement.query_row([delivery_id], row);
+
+    match result {
+        Ok(row) => Ok(Some(format_delivery(row))),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub(crate) fn active_subscriptions_for_event(
     connection: &Connection,
     event: &str,
