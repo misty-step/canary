@@ -2,8 +2,7 @@
 //!
 //! These helpers are operator/test utilities, not runtime behavior. They keep
 //! fixture generation behind the store crate so shell scripts do not learn
-//! schema details and Phoenix is no longer the only way to materialize the
-//! compatibility databases.
+//! schema details and fixture materialization remains a Rust-owned operation.
 
 use std::{fs, path::Path};
 

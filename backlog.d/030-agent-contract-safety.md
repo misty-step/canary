@@ -22,7 +22,7 @@ replay webhook delivery context without out-of-band human interpretation.
 
 - [ ] Every authenticated OpenAPI operation declares the required Canary API
       key scope in a machine-readable field, and a contract test fails when
-      `lib/canary_web/router.ex` scope pipelines and `priv/openapi/openapi.json`
+      `crates/canary-server/src/lib.rs` route wiring and `priv/openapi/openapi.json`
       drift.
 - [ ] Every JSON response schema either includes a deterministic `summary`
       field or is listed in a small documented exception table with the reason
@@ -47,7 +47,7 @@ replay webhook delivery context without out-of-band human interpretation.
       for `triaged`, `fix-proposed`, `fix-verified`, and `noise-dismissed`,
       plus expected opaque `metadata` keys for consumers that choose to use
       them.
-- [ ] `mix test test/canary_web/controllers/openapi_controller_test.exs --trace --max-failures 3`
+- [ ] `cargo test -p canary-server openapi --locked`
       covers scope annotations, summary completeness, and the new delivery-id
       lookup contract.
 - [ ] `./bin/validate --fast` green on the branch that introduces the pass.
@@ -55,12 +55,12 @@ replay webhook delivery context without out-of-band human interpretation.
 ## Notes
 
 **Why now.** The current repo is strong on agent-facing primitives, but the
-contract is weaker than the runtime. `router.ex` enforces `:scope_ingest`,
-`:scope_read`, and `:scope_admin`, while `openapi.json` exposes a global
-`bearerAuth` scheme and a scope enum but does not bind required scopes to
-operations. The spec also says agents should dedupe by `X-Delivery-Id` and
-replay through the timeline, but the delivery ledger is list-only from the
-contract's point of view.
+contract is weaker than the runtime. The Rust router enforces ingest, read,
+and admin permissions, while `openapi.json` exposes a global `bearerAuth`
+scheme and a scope enum but does not bind required scopes to operations. The
+spec also says agents should dedupe by `X-Delivery-Id` and replay through the
+timeline, but the delivery ledger is list-only from the contract's point of
+view.
 
 **Research signal.** Current agent-observability work is converging on rich
 structured traces, tool-call context, state transitions, operation replay, and
@@ -72,14 +72,15 @@ machine-verifiable enough for downstream agents to operate safely.
 **Execution sketch.**
 
 1. Add a small OpenAPI extension such as `x-canary-required-scope` to every
-   authenticated operation, using router pipelines as source-of-truth evidence.
+   authenticated operation, using Rust route registration as source-of-truth
+   evidence.
 2. Extend the primary operation descriptions and add structured
    `x-agent-guidance` only where it helps an autonomous consumer choose the
    next call.
-3. Extend the existing OpenAPI controller/contract tests to assert scope and
+3. Extend the existing Rust OpenAPI/route contract tests to assert scope and
    summary completeness.
-4. Add `WebhookDeliveryController.show/2`, route it under the read scope, and
-   expose the response schema in OpenAPI.
+4. Add the delivery lookup route under the read permission and expose the
+   response schema in OpenAPI.
 5. Update `info.x-agent-guide` to make cold-start, annotation write-back, and
    delivery-id diagnostics subordinate to timeline replay.
 
@@ -87,5 +88,5 @@ machine-verifiable enough for downstream agents to operate safely.
 generic replay semantics. Consumers still decide what to do with that context.
 
 **Lane.** Lane 2 (contract + observability). Depends on #011 and #012, both
-already done. Ships independently, but should land after #028 if only one
+already done. Ships independently.
 contract item can be active at a time.

@@ -1,4 +1,4 @@
-//! Compatibility tests for Rust store operations on a Phoenix-migrated SQLite database.
+//! Compatibility tests for Rust store operations on the frozen legacy SQLite database.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -21,11 +21,11 @@ use canary_store::{
 use rusqlite::{Connection, OpenFlags, params};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-const PHOENIX_FIXTURE: &str = "tests/fixtures/phoenix_schema.db";
-const POPULATED_PHOENIX_FIXTURE: &str = "tests/fixtures/phoenix_read_models.db";
+const LEGACY_FIXTURE: &str = "tests/fixtures/legacy_schema.db";
+const POPULATED_LEGACY_FIXTURE: &str = "tests/fixtures/legacy_read_models.db";
 const RUST_SCHEMA_VERSION: u32 = 2026042200;
 
-const PHOENIX_MIGRATIONS: &[&str] = &[
+const LEGACY_MIGRATIONS: &[&str] = &[
     "20260314000001",
     "20260314230000",
     "20260322120000",
@@ -118,7 +118,7 @@ struct ForeignKey {
 }
 
 #[test]
-fn phoenix_fixture_has_the_tables_rust_expects() -> Result<(), Box<dyn Error>> {
+fn legacy_fixture_has_the_tables_rust_expects() -> Result<(), Box<dyn Error>> {
     let fixture = open_fixture_read_only()?;
     let mut names = table_names(&fixture)?;
     assert!(names.remove("schema_migrations"));
@@ -130,7 +130,7 @@ fn phoenix_fixture_has_the_tables_rust_expects() -> Result<(), Box<dyn Error>> {
     assert_eq!(user_version(&fixture)?, 0);
     assert_eq!(
         migration_versions(&fixture)?,
-        PHOENIX_MIGRATIONS
+        LEGACY_MIGRATIONS
             .iter()
             .map(|version| (*version).to_owned())
             .collect::<Vec<_>>()
@@ -140,7 +140,7 @@ fn phoenix_fixture_has_the_tables_rust_expects() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn phoenix_fixture_columns_match_rust_schema() -> Result<(), Box<dyn Error>> {
+fn legacy_fixture_columns_match_rust_schema() -> Result<(), Box<dyn Error>> {
     let fixture = open_fixture_read_only()?;
     let (rust_dir, rust) = rust_schema_connection()?;
 
@@ -148,7 +148,7 @@ fn phoenix_fixture_columns_match_rust_schema() -> Result<(), Box<dyn Error>> {
         assert_eq!(
             columns(&fixture, table)?,
             columns(&rust, table)?,
-            "column drift in {table}; regenerate via bin/regenerate-phoenix-fixture after auditing the Rust schema"
+            "column drift in {table}; regenerate Rust fixtures with bin/regenerate-rust-fixtures and audit the frozen legacy fixture"
         );
     }
 
@@ -157,7 +157,7 @@ fn phoenix_fixture_columns_match_rust_schema() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn phoenix_fixture_indexes_and_foreign_keys_match_rust_schema() -> Result<(), Box<dyn Error>> {
+fn legacy_fixture_indexes_and_foreign_keys_match_rust_schema() -> Result<(), Box<dyn Error>> {
     let fixture = open_fixture_read_only()?;
     let (rust_dir, rust) = rust_schema_connection()?;
 
@@ -180,7 +180,7 @@ fn phoenix_fixture_indexes_and_foreign_keys_match_rust_schema() -> Result<(), Bo
 }
 
 #[test]
-fn rust_migrate_restamps_a_phoenix_fixture_without_schema_drift() -> Result<(), Box<dyn Error>> {
+fn rust_migrate_restamps_a_legacy_fixture_without_schema_drift() -> Result<(), Box<dyn Error>> {
     let (dir, path) = copy_fixture("restamp")?;
     let before = Connection::open(&path)?;
     let mut before_tables = table_names(&before)?;
@@ -199,7 +199,7 @@ fn rust_migrate_restamps_a_phoenix_fixture_without_schema_drift() -> Result<(), 
     let after = Connection::open(&path)?;
     assert_eq!(
         migration_versions(&after)?,
-        PHOENIX_MIGRATIONS
+        LEGACY_MIGRATIONS
             .iter()
             .map(|version| (*version).to_owned())
             .collect::<Vec<_>>()
@@ -215,14 +215,14 @@ fn rust_migrate_restamps_a_phoenix_fixture_without_schema_drift() -> Result<(), 
 }
 
 #[test]
-fn rust_store_writes_work_against_a_phoenix_fixture() -> Result<(), Box<dyn Error>> {
+fn rust_store_writes_work_against_a_legacy_fixture() -> Result<(), Box<dyn Error>> {
     let (dir, path) = copy_fixture("write")?;
     let mut store = Store::open(&path)?;
 
     let ingest = error_ingest(
         "ERR-123456789abc",
         "EVT-123456789abc",
-        "group-phoenix-fixture",
+        "group-legacy-fixture",
         "2026-05-28T20:00:00Z",
     )?;
     let commit = store.commit_error_ingest(ingest)?;
@@ -237,7 +237,7 @@ fn rust_store_writes_work_against_a_phoenix_fixture() -> Result<(), Box<dyn Erro
 
     let incident = store.correlate_incident(IncidentCorrelation {
         signal_type: "error_group".to_owned(),
-        signal_ref: "group-phoenix-fixture".to_owned(),
+        signal_ref: "group-legacy-fixture".to_owned(),
         service: "cadence".to_owned(),
         incident_id: IncidentId::from_str("INC-123456789abc")?,
         event_id: EventId::from_str("EVT-abcdefghijkl")?,
@@ -275,7 +275,7 @@ fn rust_store_writes_work_against_a_phoenix_fixture() -> Result<(), Box<dyn Erro
 }
 
 #[test]
-fn rust_fixture_generator_writes_schema_artifact_without_phoenix() -> Result<(), Box<dyn Error>> {
+fn rust_fixture_generator_writes_schema_artifact() -> Result<(), Box<dyn Error>> {
     let (dir, path) = generated_fixture_path("rust-schema")?;
     fixtures::write_schema_fixture(&path)?;
     assert_no_sqlite_sidecars(&path);
@@ -311,8 +311,7 @@ fn rust_fixture_generator_writes_schema_artifact_without_phoenix() -> Result<(),
 }
 
 #[test]
-fn rust_fixture_generator_writes_read_model_artifact_without_phoenix() -> Result<(), Box<dyn Error>>
-{
+fn rust_fixture_generator_writes_read_model_artifact() -> Result<(), Box<dyn Error>> {
     let (dir, path) = generated_fixture_path("rust-read-model")?;
     fixtures::write_read_model_fixture(&path)?;
     assert_no_sqlite_sidecars(&path);
@@ -325,7 +324,7 @@ fn rust_fixture_generator_writes_read_model_artifact_without_phoenix() -> Result
 }
 
 #[test]
-fn webhook_delivery_queries_keep_order_on_a_phoenix_fixture() -> Result<(), Box<dyn Error>> {
+fn webhook_delivery_queries_keep_order_on_a_legacy_fixture() -> Result<(), Box<dyn Error>> {
     let (dir, path) = copy_fixture("webhook-order")?;
     let mut store = Store::open(&path)?;
 
@@ -361,7 +360,7 @@ fn webhook_delivery_queries_keep_order_on_a_phoenix_fixture() -> Result<(), Box<
 }
 
 #[test]
-fn rust_query_read_models_read_populated_phoenix_rows() -> Result<(), Box<dyn Error>> {
+fn rust_query_read_models_read_populated_legacy_rows() -> Result<(), Box<dyn Error>> {
     let (dir, path) = copy_populated_fixture("read-models")?;
     let store = Store::open(&path)?;
 
@@ -372,8 +371,8 @@ fn rust_query_read_models_read_populated_phoenix_rows() -> Result<(), Box<dyn Er
 }
 
 #[test]
-fn rust_now_relative_queries_read_populated_phoenix_rows_at_fixed_time()
--> Result<(), Box<dyn Error>> {
+fn rust_now_relative_queries_read_populated_legacy_rows_at_fixed_time() -> Result<(), Box<dyn Error>>
+{
     let (dir, path) = copy_populated_fixture("read-models-at")?;
     let store = Store::open(&path)?;
     let as_of = OffsetDateTime::parse("2026-05-28T20:02:00Z", &Rfc3339)?;
@@ -451,7 +450,7 @@ fn rust_now_relative_queries_read_populated_phoenix_rows_at_fixed_time()
 }
 
 #[test]
-fn rust_fixed_clock_queries_keep_phoenix_pagination_and_incident_boundary()
+fn rust_fixed_clock_queries_keep_legacy_pagination_and_incident_boundary()
 -> Result<(), Box<dyn Error>> {
     let (dir, path) = copy_populated_fixture("read-model-boundaries")?;
     insert_paged_error_groups(&path, "2026-05-28T20:00:00Z")?;
@@ -539,7 +538,7 @@ fn rust_fixed_clock_queries_keep_phoenix_pagination_and_incident_boundary()
 }
 
 #[test]
-fn rust_health_read_models_read_populated_phoenix_rows() -> Result<(), Box<dyn Error>> {
+fn rust_health_read_models_read_populated_legacy_rows() -> Result<(), Box<dyn Error>> {
     let (dir, path) = copy_populated_fixture("health-read-models")?;
     let mut store = Store::open(&path)?;
 
@@ -592,11 +591,11 @@ fn rust_health_read_models_read_populated_phoenix_rows() -> Result<(), Box<dyn E
 }
 
 fn fixture_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(PHOENIX_FIXTURE)
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(LEGACY_FIXTURE)
 }
 
 fn populated_fixture_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(POPULATED_PHOENIX_FIXTURE)
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(POPULATED_LEGACY_FIXTURE)
 }
 
 fn open_fixture_read_only() -> Result<Connection, Box<dyn Error>> {
@@ -617,11 +616,11 @@ fn copy_populated_fixture(name: &str) -> Result<(PathBuf, PathBuf), Box<dyn Erro
 fn copy_fixture_from(name: &str, source: PathBuf) -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let dir = std::env::temp_dir().join(format!(
-        "canary-phoenix-fixture-{name}-{}-{nonce}",
+        "canary-legacy-fixture-{name}-{}-{nonce}",
         std::process::id()
     ));
     fs::create_dir_all(&dir)?;
-    let path = dir.join("phoenix_fixture.db");
+    let path = dir.join("legacy_fixture.db");
     fs::copy(source, &path)?;
     Ok((dir, path))
 }

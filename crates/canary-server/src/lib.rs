@@ -2170,6 +2170,21 @@ mod tests {
                 .ok_or("missing typescript snippet")?
                 .contains("service: \"billing api\"")
         );
+        let snippet_keys = created["snippets"]
+            .as_object()
+            .ok_or("missing snippets object")?
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            snippet_keys,
+            vec![
+                "error_ingest_curl",
+                "report_curl",
+                "service_query_curl",
+                "typescript_init"
+            ]
+        );
 
         let ingest_response = router
             .clone()

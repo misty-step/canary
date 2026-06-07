@@ -14,8 +14,6 @@ import {
   argument,
 } from "@dagger.io/dagger"
 
-const ELIXIR_IMAGE =
-  "hexpm/elixir:1.17.3-erlang-27.3-debian-bookworm-20250224-slim@sha256:e900346c099e9fe54f0be4b4cc015106798ba244b70adef029b5d9f2860ae269"
 const NODE_IMAGE =
   "node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94"
 const PYTHON_IMAGE =
@@ -93,56 +91,6 @@ async function lockfileDigest(
   path: string,
 ): Promise<string> {
   return source.file(path).digest({ excludeMetadata: true })
-}
-
-/** Elixir container with system deps, Hex/Rebar caches, and mix deps fetched. */
-async function elixirContainer(
-  source: Directory,
-  workdir: string,
-  mixEnv: string,
-  cacheNamespace: string,
-  lockfilePath: string,
-): Promise<Container> {
-  const digest = await lockfileDigest(source, lockfilePath)
-  const platformKey = await cachePlatformKey()
-  const imageKey = imageIdentity(ELIXIR_IMAGE)
-  const depsCache = dag.cacheVolume(
-    cacheVolumeName(`${cacheNamespace}-deps`, platformKey, imageKey, digest),
-  )
-  const buildCache = dag.cacheVolume(
-    cacheVolumeName(`${cacheNamespace}-build`, platformKey, imageKey, digest),
-  )
-  const hexCache = dag.cacheVolume(
-    cacheVolumeName(`${cacheNamespace}-hex-home`, platformKey, imageKey, digest),
-  )
-  const rebarCache = dag.cacheVolume(
-    cacheVolumeName(`${cacheNamespace}-rebar-home`, platformKey, imageKey, digest),
-  )
-  const packageDir = workdir === "." ? "/work" : `/work/${workdir}`
-
-  return dag
-    .container()
-    .from(ELIXIR_IMAGE)
-    .withExec(["apt-get", "update", "-q"])
-    .withExec([
-      "apt-get",
-      "install",
-      "-yq",
-      "--no-install-recommends",
-      "build-essential",
-      "git",
-    ])
-    .withExec(["mix", "local.hex", "--force"])
-    .withExec(["mix", "local.rebar", "--force"])
-    .withEnvVariable("HOME", "/root")
-    .withEnvVariable("MIX_ENV", mixEnv)
-    .withMountedCache(`${packageDir}/deps`, depsCache)
-    .withMountedCache(`${packageDir}/_build`, buildCache)
-    .withMountedCache("/root/.hex", hexCache)
-    .withMountedCache("/root/.cache/rebar3", rebarCache)
-    .withMountedDirectory("/work", source)
-    .withWorkdir(packageDir)
-    .withExec(["mix", "deps.get"])
 }
 
 async function nodeContainer(
@@ -227,60 +175,17 @@ function secretsContainer(source: Directory, mode: "dir" | "git"): Container {
 
 @object()
 export class Ci {
-  private async rootQualityContainer(source: Directory): Promise<Container> {
-    return (await elixirContainer(source, ".", "test", "canary-root-test", "mix.lock"))
-      .withExec(["mix", "compile", "--warnings-as-errors"])
-      .withExec(["mix", "format", "--check-formatted"])
-      .withExec(["mix", "credo", "--strict"])
-      .withExec(["mix", "sobelow", "--config", "--exit", "--threshold", "medium"])
-      .withExec(["mix", "test", "--cover"])
+  private scriptsQualityContainer(source: Directory): Container {
+    return dag
+      .container()
+      .from(PYTHON_IMAGE)
+      .withExec(["apt-get", "update"])
+      .withExec(["apt-get", "install", "-y", "--no-install-recommends", "jq"])
+      .withMountedDirectory("/work", source)
+      .withWorkdir("/work")
       .withExec(["bash", "test/bin/entrypoint_test.sh"])
       .withExec(["bash", "test/bin/dr_test.sh"])
-  }
-
-  private async rootDialyzerContainer(source: Directory): Promise<Container> {
-    return (
-      await elixirContainer(source, ".", "dev", "canary-root-dev", "mix.lock")
-    )
-      .withEnvVariable("ERL_FLAGS", "+S 2:2")
-      .withExec(["mix", "dialyzer"])
-  }
-
-  private async rootFastContainer(source: Directory): Promise<Container> {
-    return (await elixirContainer(source, ".", "test", "canary-root-test", "mix.lock"))
-      .withExec(["mix", "format", "--check-formatted"])
-      .withExec(["mix", "compile", "--warnings-as-errors"])
-      .withExec(["bash", "test/bin/entrypoint_test.sh"])
-      .withExec(["bash", "test/bin/dr_test.sh"])
-  }
-
-  private async sdkQualityContainer(source: Directory): Promise<Container> {
-    return (
-      await elixirContainer(
-        source,
-        "canary_sdk",
-        "test",
-        "canary-sdk-test",
-        "canary_sdk/mix.lock",
-      )
-    )
-      .withExec(["mix", "compile", "--warnings-as-errors"])
-      .withExec(["mix", "format", "--check-formatted"])
-      .withExec(["mix", "test", "--cover"])
-  }
-
-  private async sdkFastContainer(source: Directory): Promise<Container> {
-    return (
-      await elixirContainer(
-        source,
-        "canary_sdk",
-        "test",
-        "canary-sdk-test",
-        "canary_sdk/mix.lock",
-      )
-    )
-      .withExec(["mix", "format", "--check-formatted"])
-      .withExec(["mix", "compile", "--warnings-as-errors"])
+      .withExec(["bash", "test/bin/dogfood_audit_test.sh"])
   }
 
   private async typescriptQualityContainer(source: Directory): Promise<Container> {
@@ -335,24 +240,6 @@ export class Ci {
       .withExec(["cargo", "audit"])
   }
 
-  private async rootAdvisoryContainer(source: Directory): Promise<Container> {
-    return (await elixirContainer(source, ".", "test", "canary-root-test", "mix.lock")).withExec(
-      ["mix", "deps.audit", "--ignore-file", ".mix_audit.ignore"],
-    )
-  }
-
-  private async sdkAdvisoryContainer(source: Directory): Promise<Container> {
-    return (
-      await elixirContainer(
-        source,
-        "canary_sdk",
-        "test",
-        "canary-sdk-test",
-        "canary_sdk/mix.lock",
-      )
-    ).withExec(["mix", "deps.audit", "--ignore-file", ".mix_audit.ignore"])
-  }
-
   private async typescriptAdvisoryContainer(source: Directory): Promise<Container> {
     return (
       await nodeContainer(
@@ -368,16 +255,6 @@ export class Ci {
     return (
       await nodeContainer(source, "dagger", "dagger/package-lock.json", "canary-dagger")
     ).withExec(["npx", "redocly", "lint", "/work/priv/openapi/openapi.json"])
-  }
-
-  private async apiContractsContainer(
-    source: Directory,
-  ): Promise<Container> {
-    return (
-      await elixirContainer(source, ".", "test", "canary-root-contract-test", "mix.lock")
-    ).withExec(
-      ["mix", "test", "--only", "contract"],
-    )
   }
 
   private productionImageContainer(source: Directory): Container {
@@ -426,9 +303,6 @@ export class Ci {
         "_build",
         "deps",
         "cover",
-        "canary_sdk/_build",
-        "canary_sdk/deps",
-        "canary_sdk/cover",
         "clients/typescript/node_modules",
         "clients/typescript/dist",
         "clients/typescript/coverage",
@@ -441,8 +315,7 @@ export class Ci {
     const repo = source!
 
     await codexAgentRolesContainer(repo).sync()
-    await (await this.rootFastContainer(repo)).sync()
-    await (await this.sdkFastContainer(repo)).sync()
+    await this.scriptsQualityContainer(repo).sync()
     await (await this.typescriptFastContainer(repo)).sync()
     await (await this.rustFastContainer(repo)).sync()
   }
@@ -456,9 +329,6 @@ export class Ci {
         "_build",
         "deps",
         "cover",
-        "canary_sdk/_build",
-        "canary_sdk/deps",
-        "canary_sdk/cover",
         "clients/typescript/node_modules",
         "clients/typescript/dist",
         "clients/typescript/coverage",
@@ -470,8 +340,6 @@ export class Ci {
   ): Promise<void> {
     const repo = source!.withoutDirectory(".git")
 
-    await (await this.rootAdvisoryContainer(repo)).sync()
-    await (await this.sdkAdvisoryContainer(repo)).sync()
     await (await this.typescriptAdvisoryContainer(repo)).sync()
     await (await this.rustAdvisoryContainer(repo)).sync()
   }
@@ -484,9 +352,6 @@ export class Ci {
         "_build",
         "deps",
         "cover",
-        "canary_sdk/_build",
-        "canary_sdk/deps",
-        "canary_sdk/cover",
         "clients/typescript/node_modules",
         "clients/typescript/dist",
         "clients/typescript/coverage",
@@ -513,9 +378,6 @@ export class Ci {
         "_build",
         "deps",
         "cover",
-        "canary_sdk/_build",
-        "canary_sdk/deps",
-        "canary_sdk/cover",
         "clients/typescript/node_modules",
         "clients/typescript/dist",
         "clients/typescript/coverage",
@@ -540,9 +402,6 @@ export class Ci {
         "_build",
         "deps",
         "cover",
-        "canary_sdk/_build",
-        "canary_sdk/deps",
-        "canary_sdk/cover",
         "clients/typescript/node_modules",
         "clients/typescript/dist",
         "clients/typescript/coverage",
@@ -556,10 +415,7 @@ export class Ci {
 
     await this.ciContract(repo)
     await this.openapiContract(repo)
-    await this.apiContracts(repo)
-    await this.rootQuality(repo)
-    await this.rootDialyzer(repo)
-    await this.sdkQuality(repo)
+    await this.scriptsQualityContainer(repo).sync()
     await this.typescriptQuality(repo)
     await this.rustQuality(repo)
     await this.productionImageSmoke(repo)
@@ -575,9 +431,6 @@ export class Ci {
         "_build",
         "deps",
         "cover",
-        "canary_sdk/_build",
-        "canary_sdk/deps",
-        "canary_sdk/cover",
         "clients/typescript/node_modules",
         "clients/typescript/dist",
         "clients/typescript/coverage",
@@ -599,9 +452,6 @@ export class Ci {
         "_build",
         "deps",
         "cover",
-        "canary_sdk/_build",
-        "canary_sdk/deps",
-        "canary_sdk/cover",
         "clients/typescript/node_modules",
         "clients/typescript/dist",
         "clients/typescript/coverage",
@@ -615,102 +465,6 @@ export class Ci {
   }
 
   @func()
-  async apiContracts(
-    @argument({
-      defaultPath: "/",
-      ignore: [
-        ".git",
-        "_build",
-        "deps",
-        "cover",
-        "canary_sdk/_build",
-        "canary_sdk/deps",
-        "canary_sdk/cover",
-        "clients/typescript/node_modules",
-        "clients/typescript/dist",
-        "clients/typescript/coverage",
-        "dagger/node_modules",
-        "target",
-      ],
-    })
-    source?: Directory,
-  ): Promise<void> {
-    await (await this.apiContractsContainer(source!)).sync()
-  }
-
-  @func()
-  async rootQuality(
-    @argument({
-      defaultPath: "/",
-      ignore: [
-        ".git",
-        "_build",
-        "deps",
-        "cover",
-        "canary_sdk/_build",
-        "canary_sdk/deps",
-        "canary_sdk/cover",
-        "clients/typescript/node_modules",
-        "clients/typescript/dist",
-        "clients/typescript/coverage",
-        "dagger/node_modules",
-        "target",
-      ],
-    })
-    source?: Directory,
-  ): Promise<void> {
-    await (await this.rootQualityContainer(source!)).sync()
-  }
-
-  @func()
-  async rootDialyzer(
-    @argument({
-      defaultPath: "/",
-      ignore: [
-        ".git",
-        "_build",
-        "deps",
-        "cover",
-        "canary_sdk/_build",
-        "canary_sdk/deps",
-        "canary_sdk/cover",
-        "clients/typescript/node_modules",
-        "clients/typescript/dist",
-        "clients/typescript/coverage",
-        "dagger/node_modules",
-        "target",
-      ],
-    })
-    source?: Directory,
-  ): Promise<void> {
-    await (await this.rootDialyzerContainer(source!)).sync()
-  }
-
-  @func()
-  async sdkQuality(
-    @argument({
-      defaultPath: "/",
-      ignore: [
-        ".git",
-        "_build",
-        "deps",
-        "cover",
-        "canary_sdk/_build",
-        "canary_sdk/deps",
-        "canary_sdk/cover",
-        "clients/typescript/node_modules",
-        "clients/typescript/dist",
-        "clients/typescript/coverage",
-        "dagger/node_modules",
-        "target",
-      ],
-    })
-    source?: Directory,
-  ): Promise<void> {
-    await (await this.sdkQualityContainer(source!)).sync()
-  }
-
-  @func()
   async typescriptQuality(
     @argument({
       defaultPath: "/",
@@ -719,9 +473,6 @@ export class Ci {
         "_build",
         "deps",
         "cover",
-        "canary_sdk/_build",
-        "canary_sdk/deps",
-        "canary_sdk/cover",
         "clients/typescript/node_modules",
         "clients/typescript/dist",
         "clients/typescript/coverage",
@@ -743,9 +494,6 @@ export class Ci {
         "_build",
         "deps",
         "cover",
-        "canary_sdk/_build",
-        "canary_sdk/deps",
-        "canary_sdk/cover",
         "clients/typescript/node_modules",
         "clients/typescript/dist",
         "clients/typescript/coverage",
@@ -767,9 +515,6 @@ export class Ci {
         "_build",
         "deps",
         "cover",
-        "canary_sdk/_build",
-        "canary_sdk/deps",
-        "canary_sdk/cover",
         "clients/typescript/node_modules",
         "clients/typescript/dist",
         "clients/typescript/coverage",
@@ -791,9 +536,6 @@ export class Ci {
         "_build",
         "deps",
         "cover",
-        "canary_sdk/_build",
-        "canary_sdk/deps",
-        "canary_sdk/cover",
         "clients/typescript/node_modules",
         "clients/typescript/dist",
         "clients/typescript/coverage",
@@ -814,9 +556,6 @@ export class Ci {
         "_build",
         "deps",
         "cover",
-        "canary_sdk/_build",
-        "canary_sdk/deps",
-        "canary_sdk/cover",
         "clients/typescript/node_modules",
         "clients/typescript/dist",
         "clients/typescript/coverage",
@@ -838,9 +577,6 @@ export class Ci {
         "_build",
         "deps",
         "cover",
-        "canary_sdk/_build",
-        "canary_sdk/deps",
-        "canary_sdk/cover",
         "clients/typescript/node_modules",
         "clients/typescript/dist",
         "clients/typescript/coverage",

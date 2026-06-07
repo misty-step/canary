@@ -14,7 +14,7 @@ Make agent replay and health probing fail explicitly at contract boundaries inst
 - Move repo mutation, issue creation, or downstream repair work into Canary.
 
 ## Oracle
-- [ ] Malformed cursor values on agent-facing pagination endpoints return RFC 9457 `422 validation_error` responses instead of silently falling back to the first page or a legacy hash path. Cover at least `/api/v1/query` with `mix test test/canary_web/controllers/query_controller_test.exs --trace --max-failures 3`.
+- [ ] Malformed cursor values on agent-facing pagination endpoints return RFC 9457 `422 validation_error` responses instead of silently falling back to the first page or a legacy hash path. Cover at least `/api/v1/query` with `cargo test -p canary-server malformed_query_cursor --locked`.
 - [ ] Health target creation rejects intervals that cannot safely schedule jittered checks. The lower bound is documented in the target schema/OpenAPI contract, and a controller test proves the invalid interval never spawns a checker.
 - [ ] Persisted target methods cannot crash `Canary.Health.Probe.check/1`; invalid methods are rejected before persistence or converted into an explicit probe error in a focused unit test.
 - [ ] Boot-time migration or seed failure cannot leave `/readyz` reporting healthy against an unverifiable schema. The chosen behavior is either fail-fast startup or readiness-gated failure, covered by a narrow test or release-task assertion.
@@ -26,10 +26,9 @@ Make agent replay and health probing fail explicitly at contract boundaries inst
 
 **Evidence from grooming.**
 
-- `lib/canary/query/errors.ex` treats malformed cursors as a no-op or legacy hash path instead of surfacing a contract error.
-- `lib/canary/schemas/target.ex` only requires `interval_ms > 0`, while `lib/canary/health/checker.ex` computes jitter with `div(target.interval_ms, 10)` and uses it as a divisor.
-- `lib/canary/health/probe.ex` uses `String.to_existing_atom/1` on persisted target methods; the changeset allows only `GET`/`HEAD`, but persisted or migrated rows should not be able to crash the probe process.
-- `lib/canary/release.ex` rescues migration and seed failures, which can turn schema problems into latent runtime behavior rather than an explicit readiness failure.
+- Rust replay and health code has shipped the malformed-cursor, unsafe-cadence,
+  invalid-method, and boot-failure regressions listed below; keep this item
+  open only until the evidence is folded into the active Rust contract suite.
 
 **Rust production-path evidence.**
 

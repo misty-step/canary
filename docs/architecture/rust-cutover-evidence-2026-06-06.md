@@ -120,9 +120,10 @@ Evidence:
 - This proves the Rust server is serving production behind Fly for the checked
   public and read-only routes. It does not prove every admin, ingest, webhook,
   retention, target-probe, TLS-scan, and monitor path under production load.
-- The repository still contains the Phoenix/Elixir service and tests as parity
-  sources, fixture generators, SDK boundary, and migration safety net. Removing
-  them requires a separate Rust-owned migration/fixture/DR plan.
+- This packet predates the scorched-earth deletion branch. It proves the first
+  Rust production image served Fly, but it does not by itself prove the later
+  removal of the executable Elixir service, Elixir SDK, and Mix/Dagger lanes.
+  Validate that branch with the current Rust-only `./bin/validate` gate.
 - `flyctl logs --no-tail` still includes old Phoenix shutdown log lines before
   the Rust process starts. The post-start evidence is the Rust listener line,
   the running image contents, and the passing health/readiness checks.

@@ -135,7 +135,6 @@ fn service_onboarding_response(
             "error_ingest_curl": error_ingest_curl(base_url, raw_key, request),
             "report_curl": report_curl(base_url),
             "service_query_curl": service_query_curl(base_url, &request.service),
-            "elixir_logger": elixir_logger_snippet(base_url, raw_key, request),
             "typescript_init": typescript_init_snippet(base_url, raw_key, request),
         },
     })
@@ -196,17 +195,6 @@ fn service_query_curl(base_url: &str, service: &str) -> String {
     format!(
         "curl \"{base_url}/api/v1/query?service={}&window=1h\" \\\n  -H \"Authorization: Bearer $CANARY_READ_KEY\"",
         encode_form_value(service)
-    )
-}
-
-fn elixir_logger_snippet(
-    base_url: &str,
-    raw_key: &str,
-    request: &ServiceOnboardingCreate,
-) -> String {
-    format!(
-        "CanarySdk.attach(\n  endpoint: \"{base_url}\",\n  api_key: \"{raw_key}\",\n  service: \"{}\",\n  environment: \"{}\"\n)",
-        request.service, request.environment
     )
 }
 

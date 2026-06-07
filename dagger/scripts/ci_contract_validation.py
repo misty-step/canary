@@ -609,7 +609,7 @@ export class Ci {
   async deterministic(
     source?: Directory,
   ): Promise<void> {
-    await this.rootQuality(source!)
+    await this.rustQuality(source!)
   }
 
   @func()
@@ -638,7 +638,7 @@ export class Ci {
   @func()
   @check()
   async deterministic(source?: Directory): Promise<void> {
-    await this.rootQuality(source!)
+    await this.rustQuality(source!)
   }
 
   @func()
@@ -722,11 +722,11 @@ require(
     "dagger/src/index.ts must scope cache volumes by dag.defaultPlatform()",
 )
 require(
-    dagger_source.count("const platformKey = await cachePlatformKey()") == 3,
+    dagger_source.count("const platformKey = await cachePlatformKey()") == 2,
     "Each Dagger dependency container must compute a platform cache key once",
 )
 require(
-    dagger_source.count("platformKey, imageKey, digest") == 8,
+    dagger_source.count("platformKey, imageKey, digest") == 4,
     "Every Dagger cache volume must scope its key by platform, image, and lockfile digest",
 )
 require(
@@ -779,7 +779,7 @@ with tempfile.TemporaryDirectory() as tmp:
     log_path = tmp_path / "dagger.log"
     docker_log_path = tmp_path / "docker.log"
     ssh_log_path = tmp_path / "ssh.log"
-    mix_log_path = tmp_path / "mix.log"
+    cargo_log_path = tmp_path / "cargo.log"
     npm_log_path = tmp_path / "npm.log"
     dagger_path = tmp_path / "dagger"
     dagger_path.write_text(
@@ -833,12 +833,12 @@ with tempfile.TemporaryDirectory() as tmp:
         f"printf '%s\\n' \"$*\" >> \"{ssh_log_path}\"\n"
     )
     ssh_path.chmod(0o755)
-    mix_path = tmp_path / "mix"
-    mix_path.write_text(
+    cargo_path = tmp_path / "cargo"
+    cargo_path.write_text(
         "#!/usr/bin/env bash\n"
-        f"printf '%s\\n' \"$*\" >> \"{mix_log_path}\"\n"
+        f"printf '%s\\n' \"$*\" >> \"{cargo_log_path}\"\n"
     )
-    mix_path.chmod(0o755)
+    cargo_path.chmod(0o755)
     npm_path = tmp_path / "npm"
     npm_path.write_text(
         "#!/usr/bin/env bash\n"
@@ -887,7 +887,7 @@ with tempfile.TemporaryDirectory() as tmp:
         log_path.write_text("")
         docker_log_path.write_text("")
         ssh_log_path.write_text("")
-        mix_log_path.write_text("")
+        cargo_log_path.write_text("")
         npm_log_path.write_text("")
 
     reset_logs()
@@ -1237,8 +1237,8 @@ with tempfile.TemporaryDirectory() as tmp:
         "bin/bootstrap must stay quiet about Docker runtimes when the active Docker client works",
     )
     require(
-        read_lines(mix_log_path) == ["setup", "deps.get"],
-        "bin/bootstrap must run mix setup for the root app and deps.get for the Elixir SDK",
+        read_lines(cargo_log_path) == ["fetch --locked"],
+        "bin/bootstrap must fetch locked Rust dependencies",
     )
     require(
         read_lines(npm_log_path) == ["ci"],

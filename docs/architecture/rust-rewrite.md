@@ -56,17 +56,22 @@ Avoid small crates or modules that only rename another layer. In the Phoenix
 service, thin facades such as summary/status/report response builders are useful
 locally but should not become Rust crate boundaries.
 
-## Current Parity Anchors
+## Current Contract Anchors
 
-- Endpoint map: `priv/openapi/openapi.json` and `lib/canary_web/router.ex`.
-- Error body shape: `lib/canary_web/plugs/problem_details.ex`.
-- Typed ID prefixes: `lib/canary/id.ex`.
-- Pure health transitions: `lib/canary/health/state_machine.ex` and
-  `test/canary/health/state_machine_test.exs`.
-- Error grouping and classification: `lib/canary/errors/grouping.ex`,
-  `lib/canary/errors/classification.ex`, and `lib/canary/errors/ingest.ex`.
-- SQLite schema: `priv/repo/migrations/*.exs`.
-- Webhook delivery contract: `lib/canary/workers/webhook_delivery.ex`.
+- Endpoint map and agent replay guide: `priv/openapi/openapi.json`.
+- Error body shape: `crates/canary-http/src/problem_details.rs`.
+- Typed ID prefixes: `crates/canary-core/src/ids.rs`.
+- Pure health transitions: `crates/canary-core/src/health/state_machine.rs`.
+- Error grouping and classification:
+  `crates/canary-core/src/ingest/grouping.rs`,
+  `crates/canary-core/src/ingest/classification.rs`, and
+  `crates/canary-ingest/src/lib.rs`.
+- SQLite schema and migrations: `crates/canary-store/src/migrations.rs`.
+- Webhook delivery contract: `crates/canary-workers/src/webhooks.rs`.
+- Frozen legacy cutover fixtures:
+  `crates/canary-store/tests/fixtures/legacy_schema.db` and
+  `crates/canary-store/tests/fixtures/legacy_read_models.db`.
+- Rust-owned fixture generator: `bin/regenerate-rust-fixtures`.
 - Footguns to encode, not rediscover: `CLAUDE.md`.
 
 ## Compatibility Rules
@@ -226,18 +231,16 @@ the Rust server accepts production traffic:
     time, and best-effort webhook enqueue. This keeps correlation behind one
     deep persistence method instead of spreading incident rules through Axum
     handlers or worker glue.
-26. `crates/canary-store/tests/phoenix_fixture_compat.rs`: the Rust store now
-    has a checked Phoenix-migrated SQLite fixture gate before production
-    traffic moves. The fixture preserves Ecto's `schema_migrations` ledger and
-    `user_version = 0`; Rust tests compare tables, product columns, explicit
-    indexes, partial unique indexes, foreign keys, and the FTS trigger surface
-    against a fresh Rust-migrated schema. The same fixture is copied into
-    temporary writable databases to prove `Store::migrate` can restamp a
-    Phoenix DB without deleting the Ecto ledger and that Rust ingest, incident
-    correlation, FTS, and webhook delivery queries work against the
-    Phoenix-shaped file. `bin/regenerate-phoenix-fixture` is the only intended
-    refresh path, and it uses a partitioned Phoenix test database so normal
-    local test state is not the fixture source.
+26. `crates/canary-store/tests/legacy_fixture_compat.rs`: the Rust store keeps
+    a checked frozen SQLite cutover fixture gate. The fixture preserves the
+    historical `schema_migrations` ledger and `user_version = 0`; Rust tests
+    compare tables, product columns, explicit indexes, partial unique indexes,
+    foreign keys, and the FTS trigger surface against a fresh Rust-migrated
+    schema. The same fixture is copied into temporary writable databases to
+    prove `Store::migrate` can restamp an old production-shaped DB without
+    deleting the historical ledger and that Rust ingest, incident correlation,
+    FTS, and webhook delivery queries work against the legacy file. New fixture
+    generation is Rust-owned through `bin/regenerate-rust-fixtures`.
 27. `canary-store::commit_health_transition`: target and monitor health
     transitions now enter the store through one deep command boundary. The
     command writes the appropriate health state row, appends the deterministic
@@ -429,15 +432,15 @@ the Rust server accepts production traffic:
     failed lifecycle pass. This keeps the Rust rewrite stricter where types own
     behavior, but tolerant at the persisted-data boundary that Phoenix already
     treated as best-effort.
-41. `bin/regenerate-phoenix-fixture` now emits both an empty Phoenix-migrated
-    schema fixture and a populated Phoenix/Ecto read-model fixture. The
-    populated fixture is seeded through Phoenix schemas and changesets with
-    production-shaped errors, error groups, target state, monitor state,
-    incident signals, annotations, and timeline events. Rust opens that
-    Phoenix-created SQLite file directly and proves `Store::error_detail` and
-    `Store::incident_detail` can read the joined graph: error-group metadata,
-    incident backreferences, incident annotations, recent timeline events,
-    target health signals, monitor health signals, and per-subject annotation
+41. `bin/regenerate-rust-fixtures` emits both an empty Rust-migrated schema
+    fixture and a populated Rust read-model fixture. The populated fixture is
+    seeded through Rust store commands with production-shaped errors, error
+    groups, target state, monitor state, incident signals, annotations, and
+    timeline events. Rust opens the generated SQLite file directly and proves
+    `Store::error_detail` and `Store::incident_detail` can read the joined
+    graph: error-group metadata, incident backreferences, incident annotations,
+    recent timeline events, target health signals, monitor health signals, and
+    per-subject annotation
     counts. This is intentionally not a claim about now-relative windows or
     list pagination; those need deterministic-clock coverage instead of static
     future timestamps.
@@ -1086,21 +1089,20 @@ the Rust server accepts production traffic:
     `docs/architecture/rust-cutover-evidence-2026-06-06.md` and records the
     deployed image, machine version, health/readiness responses, Litestream
     replication evidence, SSH image inspection, and authenticated Sploot read
-    checks. This is a production-serving milestone, not the full rewrite finish
-    line: Phoenix/Elixir remains in-repo as the parity source, fixture
-    generator, SDK boundary, and migration safety net until Rust owns those
-    contracts directly.
-89. Rust now owns a fixture-generation path without deleting the independent
-    Phoenix oracle. `canary-store::fixtures` writes an empty Rust-migrated
+    checks. This is a production-serving milestone; the current branch removes
+    the executable Elixir service, Elixir SDK, and Mix/Dagger lanes. The
+    remaining non-Rust evidence is frozen SQLite cutover data, not a live
+    implementation path.
+89. Rust now owns the fixture-generation path. `canary-store::fixtures` writes
+    an empty Rust-migrated
     schema fixture and a deterministic populated read-model fixture; the
     implementation owns migration, seed rows, integrity checks, foreign-key
     checks, checkpointing, and sidecar cleanup behind one store boundary.
     `bin/regenerate-rust-fixtures` is the operator wrapper and
     `crates/canary-store/examples/generate_fixtures.rs` is the cargo entrypoint.
-    The compatibility suite still keeps the Phoenix-generated DBs as the
-    non-Rust comparison source, while new tests prove the Rust-generated schema
-    fixture matches Rust DDL and the Rust-generated populated fixture satisfies
-    the same read-model assertions as the Phoenix/Ecto-authored fixture.
+    The compatibility suite keeps frozen legacy DBs as cutover evidence, while
+    new tests prove the Rust-generated schema fixture matches Rust DDL and the
+    Rust-generated populated fixture satisfies the same read-model assertions.
 90. Rust now owns the stable webhook-delivery diagnostic lookup named by the
     agent-contract backlog. `canary-store::webhook_delivery` returns one
     formatted ledger row by `X-Delivery-Id`, and
