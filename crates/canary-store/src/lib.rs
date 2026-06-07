@@ -104,6 +104,13 @@ impl Store {
         Ok(())
     }
 
+    /// Verify that the writable SQLite connection can answer a trivial query.
+    pub fn readiness_check(&self) -> Result<()> {
+        self.connection
+            .query_row("SELECT 1", [], |_| Ok(()))
+            .map_err(Into::into)
+    }
+
     /// Apply the first-boot seed and return the one-time bootstrap key.
     pub fn apply_initial_seed(&mut self, applied_at: &str) -> Result<Option<String>> {
         seeds::apply_initial_seed(&mut self.connection, applied_at)
@@ -686,6 +693,31 @@ mod tests {
 
         store.migrate()?;
         assert_eq!(store.schema_version()?, schema::SCHEMA_VERSION);
+
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_rejects_partial_existing_schema_without_stamping_version() -> Result<()> {
+        let mut store = Store::open_in_memory()?;
+        store.connection.execute_batch(
+            "CREATE TABLE targets (
+                id TEXT PRIMARY KEY,
+                url TEXT NOT NULL,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );",
+        )?;
+
+        let error = store
+            .migrate()
+            .err()
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+        let StoreError::Sqlite(_) = error else {
+            return Err(error);
+        };
+        assert_eq!(store.schema_version()?, 0);
 
         Ok(())
     }
@@ -3422,6 +3454,11 @@ mod tests {
             "INSERT INTO target_state (target_id, state) VALUES ('TGT-admin', 'up')",
             [],
         )?;
+        store.connection.execute(
+            "INSERT INTO target_checks (target_id, checked_at, result)
+             VALUES ('TGT-admin', '2026-05-28T19:01:00Z', 'ok')",
+            [],
+        )?;
 
         let targets = store.list_targets()?;
         assert_eq!(targets.len(), 1);
@@ -3479,6 +3516,22 @@ mod tests {
         );
         assert!(store.delete_target("TGT-admin")?);
         assert!(store.list_targets()?.is_empty());
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT COUNT(*) FROM target_state WHERE target_id = 'TGT-admin'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            0
+        );
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT COUNT(*) FROM target_checks WHERE target_id = 'TGT-admin'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?,
+            0
+        );
         assert!(!store.delete_target("TGT-admin")?);
 
         Ok(())

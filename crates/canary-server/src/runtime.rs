@@ -16,6 +16,7 @@ use std::{
 };
 
 use axum::Router;
+use canary_http::public::DependencyStatus;
 use canary_ingest::{IngestConfig, IngestEffect};
 use canary_store::{IncidentCorrelation, Store};
 use canary_workers::retention::RetentionPolicy;
@@ -24,12 +25,13 @@ use crate::{
     AuthFailIdentityConfig, EnqueueFailureKey, EnqueueFailureRecorder, HealthEventFanout,
     HttpWebhookTransport, InMemoryWebhookCircuit, InMemoryWebhookCooldown, IngestEffectSink,
     IngestState, MonitorOverdueLifecycle, MonitorOverdueLifecycleConfig,
-    MonitorOverdueLifecycleWorker, MonitorOverdueRuntime, PublicReadiness, ReqwestProbeTransport,
-    RetentionPruneLifecycle, RetentionPruneLifecycleConfig, RetentionPruneLifecycleWorker,
-    StoreWebhookScheduler, TargetProbeLifecycle, TargetProbeLifecycleConfig,
-    TargetProbeLifecycleWorker, TargetProbeOptions, TargetProbeRuntime, TlsExpiryScanLifecycle,
-    TlsExpiryScanLifecycleConfig, TlsExpiryScanLifecycleWorker, WebhookDeliveryDrain,
-    WebhookDeliveryDrainWorker, WebhookDeliveryRuntime, WebhookEnqueueEffectSink, ingest_router,
+    MonitorOverdueLifecycleWorker, MonitorOverdueRuntime, PublicReadiness, PublicReadinessProbe,
+    PublicReadinessSnapshot, ReqwestProbeTransport, RetentionPruneLifecycle,
+    RetentionPruneLifecycleConfig, RetentionPruneLifecycleWorker, StoreWebhookScheduler,
+    TargetProbeLifecycle, TargetProbeLifecycleConfig, TargetProbeLifecycleWorker,
+    TargetProbeOptions, TargetProbeRuntime, TlsExpiryScanLifecycle, TlsExpiryScanLifecycleConfig,
+    TlsExpiryScanLifecycleWorker, WebhookDeliveryDrain, WebhookDeliveryDrainWorker,
+    WebhookDeliveryRuntime, WebhookEnqueueEffectSink, WebhookTransport, ingest_router,
     public_router, server_time::current_rfc3339,
 };
 
@@ -67,6 +69,9 @@ pub struct ServerConfig {
     pub auth_fail_identity: AuthFailIdentityConfig,
     /// Whether first boot should disclose the one-time bootstrap key on stderr.
     pub disclose_bootstrap_key: bool,
+    /// Test-only outbound webhook transport builder.
+    #[cfg(test)]
+    pub webhook_transport_builder: fn() -> Result<Arc<dyn WebhookTransport>, String>,
 }
 
 impl ServerConfig {
@@ -85,6 +90,8 @@ impl ServerConfig {
             retention_policy: RetentionPolicy::default(),
             auth_fail_identity: AuthFailIdentityConfig::default(),
             disclose_bootstrap_key: true,
+            #[cfg(test)]
+            webhook_transport_builder: build_default_webhook_transport,
         }
     }
 }
@@ -166,7 +173,10 @@ impl CanaryServer {
             health_fanout.clone(),
         );
 
-        let transport = Arc::new(build_http_webhook_transport().map_err(ServerBootError::Http)?);
+        #[cfg(test)]
+        let transport = (config.webhook_transport_builder)().map_err(ServerBootError::Http)?;
+        #[cfg(not(test))]
+        let transport = build_default_webhook_transport().map_err(ServerBootError::Http)?;
         let runtime = WebhookDeliveryRuntime::new(store.clone(), transport, webhook_circuit);
         let drain =
             WebhookDeliveryDrain::new(store.clone(), runtime, config.webhook_drain_max_jobs);
@@ -206,7 +216,7 @@ impl CanaryServer {
         )
         .map_err(ServerBootError::RetentionPruneWorker)?;
         let tls_expiry_scan_worker = TlsExpiryScanLifecycleWorker::spawn(
-            TlsExpiryScanLifecycle::new(store, webhook_sink),
+            TlsExpiryScanLifecycle::new(store.clone(), webhook_sink),
             TlsExpiryScanLifecycleConfig {
                 tick_interval: config.tls_expiry_scan_interval,
             },
@@ -216,7 +226,10 @@ impl CanaryServer {
             .with_target_control(Arc::new(target_probe_worker.controller()))
             .with_auth_fail_identity(config.auth_fail_identity)
             .with_allow_private_targets(allow_private_targets);
-        let router = public_router(PublicReadiness::ready()).merge(ingest_router(ingest_state));
+        let readiness = PublicReadiness::from_probe(Arc::new(StoreReadinessProbe {
+            store: store.clone(),
+        }));
+        let router = public_router(readiness).merge(ingest_router(ingest_state));
 
         Ok(Self {
             router,
@@ -348,13 +361,33 @@ impl fmt::Display for ServerRunError {
 
 impl Error for ServerRunError {}
 
-fn build_http_webhook_transport() -> Result<HttpWebhookTransport, String> {
-    thread::Builder::new()
+struct StoreReadinessProbe {
+    store: Arc<Mutex<Store>>,
+}
+
+impl PublicReadinessProbe for StoreReadinessProbe {
+    fn snapshot(&self) -> PublicReadinessSnapshot {
+        let database = match self
+            .store
+            .lock()
+            .map_err(|_| ())
+            .and_then(|store| store.readiness_check().map_err(|_| ()))
+        {
+            Ok(()) => DependencyStatus::Ok,
+            Err(()) => DependencyStatus::Error,
+        };
+        PublicReadinessSnapshot::new(database, DependencyStatus::Ok)
+    }
+}
+
+fn build_default_webhook_transport() -> Result<Arc<dyn WebhookTransport>, String> {
+    let transport = thread::Builder::new()
         .name("canary-webhook-transport-init".to_owned())
         .spawn(HttpWebhookTransport::try_new)
         .map_err(|error| format!("failed to spawn webhook transport initializer: {error}"))?
         .join()
-        .map_err(|_| "webhook transport initializer panicked".to_owned())?
+        .map_err(|_| "webhook transport initializer panicked".to_owned())??;
+    Ok(Arc::new(transport))
 }
 
 /// Runtime sink for ingest post-commit effects.

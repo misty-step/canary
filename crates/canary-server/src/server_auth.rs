@@ -68,13 +68,13 @@ pub(crate) fn require_scope(
         .verify_api_key(token)
         .map_err(|_| Box::new(internal_problem()))?
     else {
-        account_auth_fail(state, headers);
+        account_auth_fail(state, headers)?;
         return Err(Box::new(invalid_api_key_problem(None)));
     };
     drop(store);
 
     let Some(scope) = ApiKeyScope::parse(&key.scope) else {
-        account_auth_fail(state, headers);
+        account_auth_fail(state, headers)?;
         return Err(Box::new(invalid_api_key_problem(None)));
     };
     if scope.allows(permission) {
@@ -86,9 +86,9 @@ pub(crate) fn require_scope(
     }
 }
 
-fn account_auth_fail(state: &IngestState, headers: &HeaderMap) {
+fn account_auth_fail(state: &IngestState, headers: &HeaderMap) -> Result<(), Box<ProblemDetails>> {
     let identity = auth_fail_identity(headers, state.auth_fail_identity());
-    let _ = enforce_rate_limit(state, RateLimitKind::AuthFail, &identity);
+    enforce_rate_limit(state, RateLimitKind::AuthFail, &identity)
 }
 
 pub(crate) fn auth_fail_identity(headers: &HeaderMap, config: AuthFailIdentityConfig) -> String {

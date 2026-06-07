@@ -25,6 +25,7 @@ use serde_json::{Map, Value, json};
 use crate::{
     IngestState,
     body_fields::{required_string, required_string_array},
+    egress::validate_public_http_destination,
     http_contract::{check_content_length, json_status_response, problem_response, response},
     require_scope,
     server_time::current_rfc3339,
@@ -229,6 +230,11 @@ fn parse_webhook_create(
             "Invalid webhook configuration.",
         )));
     };
+    if validate_public_http_destination(&url, "webhook").is_err() {
+        return Err(Box::new(validation_detail_problem(
+            "Invalid webhook configuration.",
+        )));
+    }
 
     let invalid = events
         .iter()

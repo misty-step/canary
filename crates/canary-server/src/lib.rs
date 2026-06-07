@@ -19,6 +19,7 @@ mod admin_targets;
 mod admin_webhooks;
 mod annotations;
 mod body_fields;
+mod egress;
 mod health_fanout;
 mod health_routes;
 mod http_contract;
@@ -65,7 +66,9 @@ pub use monitor_overdue::{
     MonitorOverdueLifecycleWorker, MonitorOverdueOutcome, MonitorOverdueRuntime,
     MonitorOverdueRuntimeError, run_monitor_overdue_once,
 };
-pub use public_routes::{PublicReadiness, public_router};
+pub use public_routes::{
+    PublicReadiness, PublicReadinessProbe, PublicReadinessSnapshot, public_router,
+};
 use query_routes::{list_incidents, query_errors, show_error, show_incident, timeline};
 #[cfg(test)]
 use rate_limit::RateLimitDecision;
@@ -216,6 +219,21 @@ mod tests {
         }
     }
 
+    struct ToggleReadinessProbe {
+        ready: AtomicBool,
+    }
+
+    impl PublicReadinessProbe for ToggleReadinessProbe {
+        fn snapshot(&self) -> PublicReadinessSnapshot {
+            let database = if self.ready.load(Ordering::SeqCst) {
+                DependencyStatus::Ok
+            } else {
+                DependencyStatus::Error
+            };
+            PublicReadinessSnapshot::new(database, DependencyStatus::Ok)
+        }
+    }
+
     const ADMIN_KEY: &str = "sk_live_admin_secret";
     const INGEST_KEY: &str = "sk_live_ingest_secret";
     const READ_KEY: &str = "sk_live_read_secret";
@@ -277,6 +295,29 @@ mod tests {
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(body["status"], "not_ready");
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn readyz_reads_live_probe_on_each_request() -> Result<(), Box<dyn Error>> {
+        let probe = Arc::new(ToggleReadinessProbe {
+            ready: AtomicBool::new(true),
+        });
+        let router = public_router(PublicReadiness::from_probe(probe.clone()));
+
+        let ready_response = router
+            .clone()
+            .oneshot(Request::get("/readyz").body(Body::empty())?)
+            .await?;
+        assert_eq!(ready_response.status(), StatusCode::OK);
+
+        probe.ready.store(false, Ordering::SeqCst);
+        let not_ready_response = router
+            .oneshot(Request::get("/readyz").body(Body::empty())?)
+            .await?;
+        assert_eq!(not_ready_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json_body(not_ready_response).await?["status"], "not_ready");
 
         Ok(())
     }
@@ -492,6 +533,7 @@ mod tests {
 
         let config = ServerConfig {
             webhook_drain_interval: StdDuration::from_millis(10),
+            webhook_transport_builder: local_webhook_transport_builder,
             ..ServerConfig::new(path.clone())
         };
         let server = CanaryServer::boot(config)?;
@@ -577,6 +619,7 @@ mod tests {
 
         let config = ServerConfig {
             webhook_drain_interval: StdDuration::from_millis(10),
+            webhook_transport_builder: local_webhook_transport_builder,
             ..ServerConfig::new(path.clone())
         };
         let server = CanaryServer::boot(config)?;
@@ -1063,7 +1106,9 @@ mod tests {
                 Some(42),
             ),
         };
-        let transport = HttpWebhookTransport::try_new()?;
+        let transport = HttpWebhookTransport::with_timeout_allowing_private_destinations(
+            StdDuration::from_secs(10),
+        )?;
 
         let result = transport.send(&request);
         let captured = join_http_server(server)?;
@@ -1122,7 +1167,9 @@ mod tests {
                 None,
             ),
         };
-        let transport = HttpWebhookTransport::try_new()?;
+        let transport = HttpWebhookTransport::with_timeout_allowing_private_destinations(
+            StdDuration::from_secs(10),
+        )?;
 
         let result = transport.send(&request);
         let captured = join_http_server(server)?;
@@ -1148,7 +1195,9 @@ mod tests {
                 None,
             ),
         };
-        let transport = HttpWebhookTransport::try_new()?;
+        let transport = HttpWebhookTransport::with_timeout_allowing_private_destinations(
+            StdDuration::from_secs(10),
+        )?;
 
         let result = transport.send(&request);
         let captured = join_http_server(server)?;
@@ -1176,12 +1225,46 @@ mod tests {
                 None,
             ),
         };
-        let transport = HttpWebhookTransport::with_timeout(StdDuration::from_millis(200))?;
+        let transport = HttpWebhookTransport::with_timeout_allowing_private_destinations(
+            StdDuration::from_millis(200),
+        )?;
 
         let TransportResult::RequestError(reason) = transport.send(&request) else {
             return Err("connection failure should map to request error".into());
         };
         assert!(!reason.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn http_webhook_transport_rejects_private_destination_before_request()
+    -> Result<(), Box<dyn Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let request = WebhookRequest {
+            url: format!("http://{addr}/hook"),
+            body: "{}".to_owned(),
+            headers: canary_http::webhooks::headers_for_body(
+                "{}",
+                "test-webhook-secret",
+                "error.new_class",
+                "DLV-http-private",
+                None,
+            ),
+        };
+        let transport = HttpWebhookTransport::with_timeout(StdDuration::from_millis(200))?;
+
+        let TransportResult::RequestError(reason) = transport.send(&request) else {
+            return Err("private destination should be rejected before HTTP request".into());
+        };
+        assert!(reason.contains("non-global") || reason.contains("localhost"));
+        listener.set_nonblocking(true)?;
+        match listener.accept() {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Ok(_) => return Err("transport should not connect to rejected destination".into()),
+            Err(error) => return Err(error.into()),
+        }
 
         Ok(())
     }
@@ -1193,7 +1276,11 @@ mod tests {
         let store = runtime_store_with_url(true, &url)?;
         let runtime = WebhookDeliveryRuntime::new_without_circuit(
             store.clone(),
-            Arc::new(HttpWebhookTransport::try_new()?),
+            Arc::new(
+                HttpWebhookTransport::with_timeout_allowing_private_destinations(
+                    StdDuration::from_secs(10),
+                )?,
+            ),
         );
 
         let execution = runtime.deliver(&webhook_job("DLV-runtime-http", 1, 4))?;
@@ -1319,6 +1406,38 @@ mod tests {
         assert_eq!(rows[0].status, WebhookDeliveryStatus::Retrying);
         assert_eq!(rows[0].attempt_count, 1);
         assert_eq!(rows[0].discarded_at, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_drain_reschedules_claimed_job_after_runtime_panic()
+    -> Result<(), Box<dyn Error>> {
+        let store = runtime_store(true)?;
+        let job_id = insert_due_webhook_job(&store, "DLV-drain-panic", 4)?;
+        let transport = Arc::new(PanicOnceTransport::new());
+        let runtime = WebhookDeliveryRuntime::new_without_circuit(store.clone(), transport);
+        let drain = WebhookDeliveryDrain::new(store.clone(), runtime, 10);
+
+        let report = drain.drain_due("2026-05-28T20:00:00Z")?;
+
+        assert_eq!(
+            report,
+            WebhookDeliveryDrainReport {
+                claimed: 1,
+                completed: 0,
+                retried: 1,
+                discarded: 0,
+            }
+        );
+        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let job = store
+            .webhook_delivery_job(job_id)?
+            .ok_or("missing webhook delivery job")?;
+        assert_eq!(job.state, WebhookDeliveryJobState::Scheduled);
+        assert_eq!(job.scheduled_at, "2026-05-28T20:00:01Z");
+        assert_eq!(job.attempt, 1);
+        assert_eq!(job.args["delivery_id"], "DLV-drain-panic");
 
         Ok(())
     }
@@ -3043,6 +3162,7 @@ mod tests {
         assert_eq!(invalid_event["detail"], "Invalid event types: bogus.event");
 
         let invalid_shape_response = router
+            .clone()
             .oneshot(json_request(
                 "POST",
                 "/api/v1/webhooks",
@@ -3058,6 +3178,23 @@ mod tests {
             json_body(invalid_shape_response).await?["detail"],
             "Invalid webhook configuration."
         );
+
+        let local_webhook_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/webhooks",
+                ADMIN_KEY,
+                r#"{"url":"http://127.0.0.1:9/hook","events":["error.new_class"]}"#,
+            )?)
+            .await?;
+        assert_eq!(
+            local_webhook_response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let local_webhook = json_body(local_webhook_response).await?;
+        assert_eq!(local_webhook["code"], "validation_error");
+        assert_eq!(local_webhook["detail"], "Invalid webhook configuration.");
 
         Ok(())
     }
@@ -5551,6 +5688,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_api_keys_are_rejected_by_auth_fail_rate_limit() -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?.with_auth_fail_identity(AuthFailIdentityConfig {
+            trust_proxy_headers: true,
+        });
+        let router = ingest_router(state);
+
+        for _ in 0..10 {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post("/api/v1/errors")
+                        .header("authorization", "Bearer sk_live_unknown_secret")
+                        .header("fly-client-ip", "203.0.113.9")
+                        .header(CONTENT_TYPE, APPLICATION_JSON)
+                        .body(Body::from(valid_error_body()))?,
+                )
+                .await?;
+            let status = response.status();
+            let body = json_body(response).await?;
+
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert_eq!(body["code"], "invalid_api_key");
+        }
+
+        let response = router
+            .oneshot(
+                Request::post("/api/v1/errors")
+                    .header("authorization", "Bearer sk_live_unknown_secret")
+                    .header("fly-client-ip", "203.0.113.9")
+                    .header(CONTENT_TYPE, APPLICATION_JSON)
+                    .body(Body::from(valid_error_body()))?,
+            )
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["code"], "rate_limited");
+        assert!(body["retry_after"].as_u64().is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn default_auth_fail_identity_ignores_spoofed_proxy_headers() -> Result<(), Box<dyn Error>>
     {
         let state = test_ingest_state()?;
@@ -6137,6 +6318,22 @@ mod tests {
         handle
             .join()
             .map_err(|_| std::io::Error::other("HTTP test server panicked"))?
+    }
+
+    fn local_webhook_transport_builder() -> Result<Arc<dyn WebhookTransport>, String> {
+        let transport = thread::Builder::new()
+            .name("canary-test-webhook-transport-init".to_owned())
+            .spawn(|| {
+                HttpWebhookTransport::with_timeout_allowing_private_destinations(
+                    StdDuration::from_secs(10),
+                )
+            })
+            .map_err(|error| {
+                format!("failed to spawn test webhook transport initializer: {error}")
+            })?
+            .join()
+            .map_err(|_| "test webhook transport initializer panicked".to_owned())??;
+        Ok(Arc::new(transport))
     }
 
     fn http_request_complete(bytes: &[u8]) -> bool {

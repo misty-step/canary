@@ -1,5 +1,7 @@
 //! Ordered SQLite schema migrations ported from the Phoenix Ecto migrations.
 
+use std::collections::BTreeSet;
+
 use rusqlite::Connection;
 
 /// Current Rust schema version.
@@ -8,9 +10,52 @@ pub const SCHEMA_VERSION: u32 = 2026042200;
 pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
     transaction.execute_batch(SCHEMA_SQL)?;
+    validate_schema_columns(&transaction)?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
+}
+
+const APP_TABLES: &[&str] = &[
+    "api_keys",
+    "errors",
+    "error_groups",
+    "targets",
+    "target_checks",
+    "target_state",
+    "webhooks",
+    "seed_runs",
+    "oban_jobs",
+    "incidents",
+    "incident_signals",
+    "service_events",
+    "annotations",
+    "webhook_deliveries",
+    "monitors",
+    "monitor_state",
+    "monitor_check_ins",
+];
+
+fn validate_schema_columns(connection: &Connection) -> rusqlite::Result<()> {
+    let reference = Connection::open_in_memory()?;
+    reference.execute_batch(SCHEMA_SQL)?;
+    for table in APP_TABLES {
+        let expected = table_columns(&reference, table)?;
+        let actual = table_columns(connection, table)?;
+        if let Some(column) = expected.difference(&actual).next() {
+            return Err(rusqlite::Error::InvalidColumnName(format!(
+                "{table}.{column}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn table_columns(connection: &Connection, table: &str) -> rusqlite::Result<BTreeSet<String>> {
+    let escaped_table = table.replace('"', "\"\"");
+    let mut statement = connection.prepare(&format!("PRAGMA table_info(\"{escaped_table}\")"))?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+    rows.collect()
 }
 
 const SCHEMA_SQL: &str = r#"

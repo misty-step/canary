@@ -1094,6 +1094,13 @@ pub(crate) fn delete_target(
 ) -> Result<bool> {
     let transaction = connection.transaction()?;
     let changed = transaction.execute("DELETE FROM targets WHERE id = ?1", [target_id])?;
+    if changed > 0 {
+        transaction.execute("DELETE FROM target_state WHERE target_id = ?1", [target_id])?;
+        transaction.execute(
+            "DELETE FROM target_checks WHERE target_id = ?1",
+            [target_id],
+        )?;
+    }
     transaction.commit()?;
     Ok(changed > 0)
 }

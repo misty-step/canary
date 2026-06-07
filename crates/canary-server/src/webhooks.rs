@@ -12,7 +12,9 @@ use canary_workers::webhooks::{
 };
 use serde_json::{Value, json};
 
-use crate::{IngestEffectSink, server_time::current_rfc3339};
+use crate::{
+    IngestEffectSink, egress::validate_public_http_destination, server_time::current_rfc3339,
+};
 
 /// Runtime boundary for scheduling webhook delivery jobs.
 pub trait WebhookScheduler: Send + Sync + 'static {
@@ -121,6 +123,7 @@ pub trait WebhookTransport: Send + Sync + 'static {
 /// Concrete HTTP transport for outbound webhook delivery.
 pub struct HttpWebhookTransport {
     client: reqwest::blocking::Client,
+    allow_private_destinations: bool,
 }
 
 impl HttpWebhookTransport {
@@ -138,6 +141,20 @@ impl HttpWebhookTransport {
 
     /// Build an HTTP transport with an explicit timeout and no hidden retries.
     pub fn with_timeout(timeout: StdDuration) -> Result<Self, String> {
+        Self::with_timeout_and_private_destinations(timeout, false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_timeout_allowing_private_destinations(
+        timeout: StdDuration,
+    ) -> Result<Self, String> {
+        Self::with_timeout_and_private_destinations(timeout, true)
+    }
+
+    fn with_timeout_and_private_destinations(
+        timeout: StdDuration,
+        allow_private_destinations: bool,
+    ) -> Result<Self, String> {
         let client = reqwest::blocking::Client::builder()
             .timeout(timeout)
             .connect_timeout(Self::DEFAULT_CONNECT_TIMEOUT)
@@ -147,12 +164,21 @@ impl HttpWebhookTransport {
             .build()
             .map_err(|error| format!("failed to build webhook HTTP transport: {error}"))?;
 
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            allow_private_destinations,
+        })
     }
 }
 
 impl WebhookTransport for HttpWebhookTransport {
     fn send(&self, request: &WebhookRequest) -> TransportResult {
+        if !self.allow_private_destinations
+            && let Err(error) = validate_public_http_destination(&request.url, "webhook")
+        {
+            return TransportResult::RequestError(error);
+        }
+
         let mut builder = self.client.post(&request.url).body(request.body.clone());
         for (name, value) in request.headers.as_pairs() {
             builder = builder.header(name, value);

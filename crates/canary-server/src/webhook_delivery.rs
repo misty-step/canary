@@ -365,7 +365,19 @@ impl WebhookDeliveryDrain {
                 }
             };
 
-            let execution = self.runtime.deliver(&job)?;
+            let execution = match catch_unwind(AssertUnwindSafe(|| self.runtime.deliver(&job))) {
+                Ok(Ok(execution)) => execution,
+                Ok(Err(_)) | Err(_) => {
+                    let completion = completion_for_runtime_error(now, &row)?;
+                    self.complete_job(row.id, completion)?;
+                    if row.attempt >= row.max_attempts {
+                        report.discarded += 1;
+                    } else {
+                        report.retried += 1;
+                    }
+                    continue;
+                }
+            };
             match completion_for_execution(now, &execution)? {
                 DrainCompletion::Retry { scheduled_at } => {
                     self.complete_job(
@@ -411,6 +423,26 @@ impl WebhookDeliveryDrain {
             .complete_webhook_delivery_job(job_id, completion)
             .map_err(|error| error.to_string())
     }
+}
+
+fn completion_for_runtime_error(
+    now: &str,
+    row: &WebhookDeliveryJobRow,
+) -> Result<WebhookDeliveryJobCompletion, String> {
+    let max_attempts = if row.max_attempts == 0 {
+        MAX_ATTEMPTS
+    } else {
+        row.max_attempts
+    };
+    if row.attempt >= max_attempts {
+        return Ok(WebhookDeliveryJobCompletion::Discard {
+            now: now.to_owned(),
+        });
+    }
+
+    Ok(WebhookDeliveryJobCompletion::Retry {
+        scheduled_at: add_seconds(now, 1)?,
+    })
 }
 
 #[derive(Default)]
