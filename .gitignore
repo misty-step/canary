@@ -58,6 +58,9 @@ thinktank.log
 # in the globally configured Spellbook install, not as repo-local vendored code.
 /.spellbook/*/
 
+# Local provider dispatch transcripts are receipt evidence, not project source.
+/.harness-kit/traces/provider-lanes/
+
 # Generated artifacts
 design-catalog.html
 .claude/scheduled_tasks.lock

@@ -1110,9 +1110,8 @@ the Rust server accepts production traffic:
     read-scope route with RFC 9457 `404` for missing rows. The OpenAPI
     `info.x-agent-guide.webhook_contract` now tells agents to dedupe by
     delivery id, inspect this row for diagnostics, and replay durable state
-    through `/api/v1/timeline` before acting. Phoenix keeps the same route and
-    controller test so the in-repo contract oracle does not drift while Rust
-    serves production.
+    through `/api/v1/timeline` before acting. The Rust route and OpenAPI
+    contract are now the live in-repo oracle.
 91. Rust now hardens the #031 replay/health boundary cases on the production
     path. Persisted unsupported target methods are converted into an explicit
     failed target check without opening transport, so migrated or corrupt rows
@@ -1140,8 +1139,9 @@ decisions already expressed by `canary-core` or `canary-http`.
 
 ## Verification Expectations
 
-Every migration slice needs both Rust-native tests and parity tests against the
-Phoenix behavior until the replacement is complete:
+Every Rust-owned migration and release slice needs Rust-native tests, plus
+frozen legacy fixture or contract coverage where historical compatibility
+matters:
 
 - Unit tests cover pure behavior in `canary-core`.
 - Golden tests lock wire bodies, headers, IDs, HMAC signatures, and OpenAPI

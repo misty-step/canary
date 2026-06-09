@@ -32,7 +32,7 @@ Prefer these over re-deriving from the code base.
 ## Invariants (hard rules)
 
 - **Single writer.** All writes go through `canary-store::Store`; the production runtime shares one writable SQLite store behind the server lock.
-- **`StateMachine.transition/4` stays pure.** No side effects. Verified by table-driven tests.
+- **`canary_core::health::state_machine::transition` stays pure.** No side effects. Verified by table-driven tests.
 - **Summaries are deterministic templates.** No LLM on the request path.
 - **RFC 9457 Problem Details** for every error response.
 - **Scoped API keys** (`ingest-only` / `read-only` / `admin`) enforced at the router. See `docs/api-key-rotation.md`.

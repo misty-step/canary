@@ -29,8 +29,8 @@ includes the Rust service workspace and the TypeScript SDK package.
 Canary has no human dashboard by design — agents are the UI. Operators who
 need to look at current state use the query API directly (`GET
 /api/v1/status`, `GET /api/v1/report`, `GET /api/v1/query`, `GET
-/api/v1/errors/{id}`) or drop into the remote console with `flyctl ssh
-console --app canary-obs -C "bin/canary remote"`. See
+/api/v1/errors/{id}`) and use the DR scripts in `bin/` for storage and
+backup checks. See
 [`docs/operator-dashboard-removal.md`](docs/operator-dashboard-removal.md)
 for the decision record.
 

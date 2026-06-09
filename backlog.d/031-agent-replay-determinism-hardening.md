@@ -44,8 +44,8 @@ Make agent replay and health probing fail explicitly at contract boundaries inst
   lifecycle commands; `priv/openapi/openapi.json` advertises the 1000ms lower
   bound.
 - The Rust boot path in `CanaryServer::boot` fails before serving routes when
-  store open, migration, or first-boot seed fails; keep the narrow regression
-  test with this item until the Phoenix oracle is retired.
+  store open, migration, or first-boot seed fails; the narrow regression test
+  remains the Rust-owned oracle for this boot boundary.
 
 **Responder-boundary check.** This is Canary-side substrate hardening only: ingest/health/query/readiness contracts. Consumers still own triage and repair decisions.
 
