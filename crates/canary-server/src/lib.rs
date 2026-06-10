@@ -24,6 +24,7 @@ mod health_fanout;
 mod health_routes;
 mod http_contract;
 mod ingest_routes;
+pub mod keygen;
 mod metrics_routes;
 mod monitor_overdue;
 mod public_routes;
