@@ -13,13 +13,11 @@ COMMON_IGNORE = [
     "_build",
     "deps",
     "cover",
-    "canary_sdk/_build",
-    "canary_sdk/deps",
-    "canary_sdk/cover",
     "clients/typescript/node_modules",
     "clients/typescript/dist",
     "clients/typescript/coverage",
     "dagger/node_modules",
+    "target",
 ]
 
 SOURCE_POLICIES = {
@@ -35,11 +33,10 @@ FUNCTION_POLICIES = {
     "deterministic": "without_git",
     "ciContract": "without_git",
     "openapiContract": "without_git",
-    "apiContracts": "without_git",
-    "rootQuality": "without_git",
-    "rootDialyzer": "without_git",
-    "sdkQuality": "without_git",
     "typescriptQuality": "without_git",
+    "rustQuality": "without_git",
+    "productionImageSmoke": "without_git",
+    "rustAdvisories": "without_git",
     "secrets": "with_git",
     "secretsHistory": "with_git",
 }

@@ -12,9 +12,7 @@ kill_timeout = "30s"
 
 [env]
   CANARY_DB_PATH = "/data/canary.db"
-  PHX_HOST = "canary-obs.fly.dev"
   PORT = "4000"
-  PHX_SERVER = "true"
 
 [http_service]
   internal_port = 4000
@@ -28,6 +26,13 @@ kill_timeout = "30s"
     interval = "30s"
     method = "GET"
     path = "/healthz"
+    timeout = "5s"
+
+  [[http_service.checks]]
+    grace_period = "15s"
+    interval = "30s"
+    method = "GET"
+    path = "/readyz"
     timeout = "5s"
 
 [[vm]]

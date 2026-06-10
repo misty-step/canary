@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/canary-core",
+  "crates/canary-http",
+  "crates/canary-ingest",
+  "crates/canary-server",
+  "crates/canary-store",
+  "crates/canary-workers",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/misty-step/canary"
+rust-version = "1.94"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"

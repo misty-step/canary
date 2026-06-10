@@ -13,7 +13,7 @@
         "Process the returned events in order, then persist the response cursor before going idle again.",
         "Write incident or error-group annotations back to Canary when the agent completes follow-up work."
       ],
-      "webhook_contract": "Deduplicate deliveries by x-delivery-id. Webhooks are non-authoritative wake-up hints; the timeline is the durable event log and must be replayed for correctness.",
+      "webhook_contract": "Deduplicate deliveries by x-delivery-id. For disputed or failed deliveries, read `GET /api/v1/webhook-deliveries/{delivery_id}` for diagnostics, then replay durable state through `GET /api/v1/timeline` before acting. Webhooks are non-authoritative wake-up hints; the timeline is the durable event log and must be replayed for correctness.",
       "crash_recovery": "After a crash or restart, resume from the last persisted cursor, replay missed timeline events, and continue polling until the API returns no further cursor.",
       "cursor_precedence": "When both `after` and `cursor` are provided on timeline-style pagination endpoints, Canary resolves `after` first and ignores `cursor` for that request.",
       "incident_entrypoint": "On an `incident.opened` webhook, call `GET /api/v1/incidents/{id}` once — the response carries summary, the full incident metadata, a deterministic action brief, up to 25 correlated signals with per-type context, up to 20 newest annotations, and up to 5 most recent timeline events. Only fall through to /query, /timeline, or /errors/{id} when `signals_truncated` or `annotations_truncated` is true, or the agent needs raw stack traces."
@@ -590,6 +590,49 @@
           },
           "422": {
             "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          }
+        }
+      }
+    },
+    "/api/v1/webhook-deliveries/{delivery_id}": {
+      "get": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Inspect one webhook delivery by stable delivery id",
+        "description": "Use this diagnostic endpoint after deduplicating by `x-delivery-id`; replay `/api/v1/timeline` before taking action because webhooks are wake-up hints, not durable state.",
+        "parameters": [
+          {
+            "name": "delivery_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Webhook delivery ledger row.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookDelivery"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
           },
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
@@ -1216,6 +1259,56 @@
       }
     },
     "/api/v1/targets/{id}": {
+      "patch": {
+        "tags": [
+          "Targets"
+        ],
+        "summary": "Update a target probe interval",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TargetUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Target updated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Target"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          }
+        }
+      },
       "delete": {
         "tags": [
           "Targets"
@@ -1613,6 +1706,9 @@
           },
           "403": {
             "$ref": "#/components/responses/ForbiddenProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
           },
           "500": {
             "$ref": "#/components/responses/InternalProblem"
@@ -3473,7 +3569,7 @@
           },
           "interval_ms": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1000
           },
           "timeout_ms": {
             "type": "integer",
@@ -3495,7 +3591,21 @@
             "type": "integer"
           },
           "allow_private": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Compatibility flag. Private target URLs are accepted only when the server is configured with ALLOW_PRIVATE_TARGETS=true."
+          }
+        }
+      },
+      "TargetUpdateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "interval_ms"
+        ],
+        "properties": {
+          "interval_ms": {
+            "type": "integer",
+            "minimum": 1000
           }
         }
       },
@@ -4308,7 +4418,8 @@
         "additionalProperties": false,
         "properties": {
           "name": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           },
           "scope": {
             "$ref": "#/components/schemas/ApiKeyScope"
@@ -4372,10 +4483,11 @@
           },
           "interval_ms": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1000
           },
           "allow_private": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Compatibility flag. Private target URLs are accepted only when the server is configured with ALLOW_PRIVATE_TARGETS=true."
           }
         }
       },
@@ -4402,7 +4514,6 @@
           "error_ingest_curl",
           "report_curl",
           "service_query_curl",
-          "elixir_logger",
           "typescript_init"
         ],
         "properties": {
@@ -4413,9 +4524,6 @@
             "type": "string"
           },
           "service_query_curl": {
-            "type": "string"
-          },
-          "elixir_logger": {
             "type": "string"
           },
           "typescript_init": {

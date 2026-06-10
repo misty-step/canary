@@ -28,13 +28,8 @@
 | 022 | Contract hygiene + shallow-module collapse | high | done | M |
 | 023 | Incident as atomic agent unit (detail API) | high | done | M |
 | 024 | Signal-agnostic annotations | medium | done | M |
-| 025 | Audit test helpers for Ecto PK cast-drop | low | done | S |
-| 026 | Credo check: EctoPKViaCast | high | done | S |
-| 027 | Credo check: PreloadThenTake | high | done | S |
 | 030 | Agent contract safety pass | high | ready | M |
-| 028 | OpenAPI ↔ Ecto type-parity Dagger lane | medium | ready | M |
 | 031 | Agent replay determinism hardening | high | ready | M |
-| 029 | Code-review pattern catalog + reviewer wiring | medium | ready | S |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
 
@@ -75,19 +70,13 @@
 ### Active order (2026-05-24)
 
 1. **030** — Agent contract safety pass (scope annotations, summary completeness, cold-start guidance, annotation write-back, delivery-id lookup)
-2. **028** — OpenAPI ↔ Ecto type-parity Dagger lane (narrow contract correctness gate; supports 030 but can ship independently)
-3. **031** — Agent replay determinism hardening (malformed cursor, unsafe target cadence, invalid probe method, unverifiable boot state)
-4. **029** — Code-review pattern catalog + reviewer wiring (ships independently, pure docs)
+2. **031** — Agent replay determinism hardening (malformed cursor, unsafe target cadence, invalid probe method, unverifiable boot state)
 
 022 + 023 landed on 2026-04-21. 024 landed on 2026-04-22. 026 landed on
 2026-04-23 — Ramp
-substrate now complete; bb/011 unblocks the north star. 026-029
-captured 2026-04-22 from /reflect prevent-coderabbit-patterns — codify
-CodeRabbit's recurring finds at the highest-leverage target in the
-Continuous Learning hierarchy. 027 landed in `fcd2991`; 025 was subsumed by
-the #026 lint rule plus the fixed `test/canary/query_test.exs` helper and
-archived during the 2026-05-19 grooming pass. 010 stays blocked on bb/011.
-020 stays blocked on Adminifi URLs.
+substrate now complete; bb/011 unblocks the north star. Elixir-era lint and
+parity backlog items were retired during the Rust scorched-earth migration.
+010 stays blocked on bb/011. 020 stays blocked on Adminifi URLs.
 
 ## Migration Notes
 
@@ -97,17 +86,18 @@ archived during the 2026-05-19 grooming pass. 010 stays blocked on bb/011.
 - Bitterblossom triage sprite tracked at `bitterblossom/backlog.d/011-canary-triage-sprite.md`.
 - 2026-04-02: Added 012–015 from multi-AI architecture audit. Promoted 006, 011 to high.
 - 2026-04-21: Added 022–024 from grooming investigation (three parallel investigators: archaeologist / strategist / scout). Three themes: contract hygiene, incident-as-atomic-agent-unit, signal-agnostic annotations. 022 ready to ship first; 023 + 024 land the Canary-side substrate for the ramp pattern.
-- 2026-04-22: Added 026–029 from `/reflect prevent-coderabbit-patterns` after shipping 022 + 023. Four structural prevention items for the classes of issue CodeRabbit surfaced: two Credo checks (PK-via-cast, preload-then-take), one Dagger lane (OpenAPI ↔ Ecto type parity), and one reviewer-wiring docs pass (canary-patterns.md catalog). Companion cross-repo convention in spellbook `#048` + `#049`.
 - 2026-05-19: Groomed stale active backlog. Archived 025 as subsumed by #026
   and archived shipped 027. Added 030 from the agent-contract safety theme:
   per-operation scope metadata, summary completeness discipline, cold-start
   guidance, annotation write-back conventions, and delivery-id-addressable
   webhook diagnostics without crossing the responder boundary.
-- 2026-05-24: Groomed toward usefulness/elegance: promoted #030 ahead of the
-  narrower parity lane, added #031 for deterministic replay/health/readiness
-  boundary failures, and clarified that #010 is now blocked on the downstream
-  bitterblossom triage sprite rather than Canary-side annotation/timeline
-  substrate.
+- 2026-05-24: Groomed toward usefulness/elegance: promoted #030, added #031
+  for deterministic replay/health/readiness boundary failures, and clarified
+  that #010 is now blocked on the downstream bitterblossom triage sprite rather
+  than Canary-side annotation/timeline substrate.
+- 2026-06-07: Retired Elixir-era active backlog items during the Rust
+  scorched-earth migration; Rust-owned Dagger, OpenAPI, and cargo tests are now
+  the active contract surfaces.
 
 ## Status
 

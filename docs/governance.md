@@ -45,18 +45,17 @@ leakage a P0 issue. Push protection is the cheapest backstop.
 ### Dependabot
 
 - Dependabot security updates: **enabled**.
-- Dependabot version updates: **enabled** for `mix`, `github-actions`, and
-  `docker` ecosystems.
+- Dependabot version updates: **enabled** for `cargo`, `npm`,
+  `github-actions`, and `docker` ecosystems.
 - Grouped updates where supported to avoid PR noise.
 
-Rationale: Elixir/OTP, Phoenix, and the Dagger action surface are all
-attack-relevant dependency axes.
+Rationale: Rust crates, npm packages, container images, and the Dagger action
+surface are all attack-relevant dependency axes.
 
 ### Code scanning
 
 - GitHub-native code scanning (CodeQL or equivalent): **enabled** for the
-  primary languages in use (`ruby`/`elixir` via third-party actions where
-  CodeQL coverage is incomplete).
+  primary languages in use.
 
 ### Access
 

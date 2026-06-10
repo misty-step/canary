@@ -20,34 +20,32 @@ Existing tools (Sentry, Uptime Robot) are designed around humans staring at dash
 git clone https://github.com/misty-step/canary && cd canary
 cp .env.example .env
 ./bin/bootstrap    # installs deps for the core service and SDK packages
-mix phx.server     # starts on localhost:4000
+cargo run -p canary-server
 ```
 
-No Docker required for local development. The repo also includes Elixir and
-TypeScript SDK packages.
+No Docker is required for local development outside the Dagger gate. The repo
+includes the Rust service workspace and the TypeScript SDK package.
 
 Canary has no human dashboard by design — agents are the UI. Operators who
 need to look at current state use the query API directly (`GET
 /api/v1/status`, `GET /api/v1/report`, `GET /api/v1/query`, `GET
-/api/v1/errors/{id}`) or drop into the remote console with `flyctl ssh
-console --app canary-obs -C "bin/canary remote"`. See
+/api/v1/errors/{id}`) and use the DR scripts in `bin/` for storage and
+backup checks. See
 [`docs/operator-dashboard-removal.md`](docs/operator-dashboard-removal.md)
 for the decision record.
 
 ## Development
 
-This is a monorepo with three maintained packages:
+This is a monorepo with two maintained package surfaces:
 
-- `.` — Canary core service
-- `canary_sdk/` — Elixir SDK
+- `crates/` — Canary Rust service workspace
 - `clients/typescript/` — TypeScript SDK
 
 ### Toolchain
 
 Supported local toolchains are pinned in `.tool-versions`:
 
-- Erlang/OTP `27.3.4.9`
-- Elixir `1.17.3-otp-27`
+- Rust `1.94.0`
 - Node.js `22.22.0`
 
 Local validation also requires the `dagger` CLI, pinned to the version declared
@@ -56,7 +54,8 @@ client first and falls back to Colima-over-SSH if direct Docker access is
 unavailable. GitHub Actions and git hooks delegate to the same pinned Dagger
 surface.
 
-The production Dockerfile also builds on Elixir `1.17`, and CI uses the same pinned toolchain versions.
+The production Dockerfile builds the Rust `canary-server` binary, and CI uses
+the same pinned toolchain versions.
 
 ### Bootstrap
 
@@ -68,9 +67,8 @@ From the repo root:
 
 That command:
 
-- runs `mix setup` for the core service
-- installs `canary_sdk/` dependencies
 - runs `npm ci` for `clients/typescript/`
+- runs `cargo fetch --locked` for the Rust workspace
 - configures `core.hooksPath` to use `.githooks/`
 
 ### Validation
@@ -115,9 +113,10 @@ python3 dagger/scripts/sync_source_arguments.py --write
 The deterministic portion of that gate enforces checks across the maintained
 packages:
 
-- core: compile, format, credo, sobelow, coverage, dialyzer
-- Elixir SDK: compile, format, coverage
+- Rust workspace: format, check, clippy, tests
 - TypeScript SDK: typecheck, coverage, build
+- operator scripts: entrypoint, DR, and dogfood audit tests
+- production image: Docker build plus `/healthz` and `/readyz` smoke
 
 The default gate also includes the git-history secrets scan. Run live
 dependency advisory scans explicitly when you want current registry state as
@@ -456,11 +455,9 @@ See `fly.toml`, `Dockerfile`, `litestream.yml`, and `bin/entrypoint.sh`.
 
 ## Tech Stack
 
-- **Elixir/OTP** — GenServer-per-target health checkers, DynamicSupervisor, crash isolation
-- **Phoenix** — HTTP routing, plug pipeline, telemetry, and a thin LiveView operator console
-- **SQLite** — WAL mode, write-serialized, Ecto abstraction preserves Postgres migration path
-- **Oban** — Webhook delivery retries, retention pruning, TLS scanning
-- **Req/Finch** — Connection-pooled HTTP probes
+- **Rust** — Typed service core, Axum HTTP runtime, deterministic workers, and compile-time guardrails
+- **SQLite** — WAL mode with one explicit writer boundary in `canary-store`
+- **Reqwest** — HTTP target probes and outbound webhook delivery
 - **Litestream + Fly Tigris** — Continuous SQLite replication to Fly-managed object storage
 
 ## License

@@ -1,12 +1,7 @@
-/_build/
-/deps/
 *.db
 *.db-shm
 *.db-wal
-/cover/
-erl_crash.dump
-*.ez
-*.beam
+!crates/canary-store/tests/fixtures/*.db
 /tmp/
 .env
 .env.*
@@ -47,12 +42,18 @@ thinktank.log
 # Dependencies
 /node_modules/
 
+# Rust build output
+/target/
+
 # OS
 .DS_Store
 
 # Local Spellbook traces are transient. Harness source and provider rosters live
 # in the globally configured Spellbook install, not as repo-local vendored code.
 /.spellbook/*/
+
+# Local provider dispatch transcripts are receipt evidence, not project source.
+/.harness-kit/traces/provider-lanes/
 
 # Generated artifacts
 design-catalog.html

@@ -609,7 +609,7 @@ export class Ci {
   async deterministic(
     source?: Directory,
   ): Promise<void> {
-    await this.rootQuality(source!)
+    await this.rustQuality(source!)
   }
 
   @func()
@@ -638,7 +638,7 @@ export class Ci {
   @func()
   @check()
   async deterministic(source?: Directory): Promise<void> {
-    await this.rootQuality(source!)
+    await this.rustQuality(source!)
   }
 
   @func()
@@ -726,8 +726,30 @@ require(
     "Each Dagger dependency container must compute a platform cache key once",
 )
 require(
-    dagger_source.count("platformKey, imageKey, digest") == 5,
+    dagger_source.count("platformKey, imageKey, digest") == 4,
     "Every Dagger cache volume must scope its key by platform, image, and lockfile digest",
+)
+require(
+    "async function rustContainer(source: Directory)" in dagger_source
+    and ".withExec([\"cargo\", \"fmt\", \"--all\", \"--check\"])" in dagger_source
+    and ".withExec([\"cargo\", \"check\", \"--workspace\", \"--all-targets\", \"--locked\"])" in dagger_source
+    and "\"clippy\"" in dagger_source
+    and ".withExec([\"cargo\", \"test\", \"--workspace\", \"--locked\"])" in dagger_source,
+    "Dagger must run Rust format, check, clippy, and tests from a Rust container",
+)
+require(
+    "await (await this.rustFastContainer(repo)).sync()" in dagger_source
+    and "await this.rustQuality(repo)" in dagger_source
+    and "await (await this.rustAdvisoryContainer(repo)).sync()" in dagger_source,
+    "Dagger fast, deterministic, and advisory gates must include Rust validation",
+)
+require(
+    "source.dockerBuild()" in dagger_source
+    and "async productionImageSmoke(" in dagger_source
+    and "await this.productionImageSmoke(repo)" in dagger_source
+    and "http://canary:4000/healthz" in dagger_source
+    and "http://canary:4000/readyz" in dagger_source,
+    "Dagger deterministic gate must build and smoke-test the production Docker image",
 )
 
 sync_result = subprocess.run(
@@ -757,7 +779,7 @@ with tempfile.TemporaryDirectory() as tmp:
     log_path = tmp_path / "dagger.log"
     docker_log_path = tmp_path / "docker.log"
     ssh_log_path = tmp_path / "ssh.log"
-    mix_log_path = tmp_path / "mix.log"
+    cargo_log_path = tmp_path / "cargo.log"
     npm_log_path = tmp_path / "npm.log"
     dagger_path = tmp_path / "dagger"
     dagger_path.write_text(
@@ -811,12 +833,12 @@ with tempfile.TemporaryDirectory() as tmp:
         f"printf '%s\\n' \"$*\" >> \"{ssh_log_path}\"\n"
     )
     ssh_path.chmod(0o755)
-    mix_path = tmp_path / "mix"
-    mix_path.write_text(
+    cargo_path = tmp_path / "cargo"
+    cargo_path.write_text(
         "#!/usr/bin/env bash\n"
-        f"printf '%s\\n' \"$*\" >> \"{mix_log_path}\"\n"
+        f"printf '%s\\n' \"$*\" >> \"{cargo_log_path}\"\n"
     )
-    mix_path.chmod(0o755)
+    cargo_path.chmod(0o755)
     npm_path = tmp_path / "npm"
     npm_path.write_text(
         "#!/usr/bin/env bash\n"
@@ -865,7 +887,7 @@ with tempfile.TemporaryDirectory() as tmp:
         log_path.write_text("")
         docker_log_path.write_text("")
         ssh_log_path.write_text("")
-        mix_log_path.write_text("")
+        cargo_log_path.write_text("")
         npm_log_path.write_text("")
 
     reset_logs()
@@ -1215,8 +1237,8 @@ with tempfile.TemporaryDirectory() as tmp:
         "bin/bootstrap must stay quiet about Docker runtimes when the active Docker client works",
     )
     require(
-        read_lines(mix_log_path) == ["setup", "deps.get"],
-        "bin/bootstrap must run mix setup for the root app and deps.get for the Elixir SDK",
+        read_lines(cargo_log_path) == ["fetch --locked"],
+        "bin/bootstrap must fetch locked Rust dependencies",
     )
     require(
         read_lines(npm_log_path) == ["ci"],

@@ -17,6 +17,7 @@ reset_env() {
   unset AWS_REGION
   unset AWS_ENDPOINT_URL_S3
   unset LITESTREAM_STUB_CREATE_DB
+  unset CANARY_BIN
 }
 
 setup_stubs() {
@@ -66,7 +67,7 @@ run_entrypoint_failure() {
 
 assert_contains() {
   local output="$1" expected="$2" test_name="$3"
-  if echo "$output" | grep -qF "$expected"; then
+  if grep -qF -- "$expected" <<<"$output"; then
     echo "  PASS: $test_name"
     PASS=$((PASS + 1))
   else
@@ -79,7 +80,7 @@ assert_contains() {
 
 assert_not_contains() {
   local output="$1" unexpected="$2" test_name="$3"
-  if echo "$output" | grep -qF "$unexpected"; then
+  if grep -qF -- "$unexpected" <<<"$output"; then
     echo "  FAIL: $test_name"
     echo "    Expected NOT to contain: $unexpected"
     echo "    Got: $output"
@@ -179,7 +180,7 @@ reset_env
 setup_stubs
 export BUCKET_NAME="my-bucket"
 OUTPUT=$(run_entrypoint)
-assert_contains "$OUTPUT" "EXEC:/app/bin/canary start" \
+assert_contains "$OUTPUT" "EXEC:/app/bin/canary-server" \
   "starts app directly when creds missing"
 assert_not_contains "$OUTPUT" "litestream replicate" \
   "does not run litestream replicate when creds missing"
@@ -194,6 +195,8 @@ export AWS_SECRET_ACCESS_KEY="secret"
 OUTPUT=$(run_entrypoint)
 assert_contains "$OUTPUT" "EXEC:litestream replicate" \
   "starts via litestream when fully configured"
+assert_contains "$OUTPUT" "-exec /app/bin/canary-server" \
+  "replicates the Rust server binary"
 
 # --- Test 7: Missing DB triggers restore before startup ---
 echo "Test 7: Missing DB restores from Litestream before startup"

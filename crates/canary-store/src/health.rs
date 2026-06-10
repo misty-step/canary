@@ -1,0 +1,1855 @@
+//! Health-transition persistence.
+//!
+//! Target probes and monitor check-ins are different sources, but their
+//! product contract is the same once state changes: update the health state,
+//! append the deterministic timeline event, and correlate the health signal
+//! into the incident graph in one SQLite transaction.
+
+use std::collections::BTreeMap;
+
+use canary_core::{
+    ids::{EventId, IncidentId},
+    query::QueryWindow,
+};
+use rusqlite::{OptionalExtension, params, params_from_iter};
+use serde_json::json;
+
+use crate::{
+    IncidentCorrelation, IncidentCorrelationEvent, Result,
+    incidents::correlate_in_transaction,
+    query::{QueryError, QueryResult},
+};
+
+/// Persisted event emitted by a health transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthTransitionCommit {
+    /// Health transition event name.
+    pub event: String,
+    /// Service-event row id.
+    pub id: String,
+    /// Health event payload JSON.
+    pub payload_json: String,
+    /// Incident event emitted by correlation, when correlation changed state.
+    pub incident_event: Option<IncidentCorrelationEvent>,
+}
+
+/// Persisted outcome of one target probe observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetProbeCommitResult {
+    /// Health transition emitted by this probe, when the probe changed state.
+    pub transition: Option<HealthTransitionCommit>,
+    /// Persisted target-state sequence after the probe.
+    pub sequence: i64,
+}
+
+/// Persisted outcome of one monitor check-in observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorCheckInCommitResult {
+    /// Health transition emitted by this check-in, when it changed state.
+    pub transition: Option<HealthTransitionCommit>,
+    /// Persisted monitor-state sequence after the check-in.
+    pub sequence: i64,
+}
+
+/// Persisted outcome of one monitor overdue evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorOverdueCommitResult {
+    /// Health transition emitted by this overdue evaluation.
+    pub transition: HealthTransitionCommit,
+    /// Persisted monitor-state sequence after the overdue evaluation.
+    pub sequence: i64,
+}
+
+/// Persisted target TLS data eligible for a daily expiry scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsExpiryScanCandidate {
+    /// Target row id.
+    pub target_id: String,
+    /// Target display name.
+    pub name: String,
+    /// Service name resolved with Phoenix's target service fallback.
+    pub service: String,
+    /// Target URL.
+    pub url: String,
+    /// Latest persisted TLS certificate expiration timestamp.
+    pub tls_expires_at: String,
+}
+
+/// One TLS-expiring service event to persist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsExpiryEventInsert {
+    /// Service-event row id.
+    pub event_id: EventId,
+    /// Target row id.
+    pub target_id: String,
+    /// Target display name.
+    pub name: String,
+    /// Service name resolved with Phoenix's target service fallback.
+    pub service: String,
+    /// Target URL.
+    pub url: String,
+    /// Persisted TLS certificate expiration timestamp.
+    pub tls_expires_at: String,
+    /// Whole days until certificate expiry.
+    pub days_until_expiry: i64,
+    /// Service event timestamp.
+    pub now: String,
+}
+
+/// Persisted TLS-expiring event returned for post-commit fanout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsExpiryEventCommit {
+    /// Health TLS warning event name.
+    pub event: String,
+    /// Service-event row id.
+    pub id: String,
+    /// Health event payload JSON.
+    pub payload_json: String,
+}
+
+/// Monitor row to insert.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorInsert {
+    /// Monitor id.
+    pub id: String,
+    /// Unique monitor name used by check-in clients.
+    pub name: String,
+    /// Service name resolved with Phoenix's monitor service fallback.
+    pub service: String,
+    /// Monitor mode, `schedule` or `ttl`.
+    pub mode: String,
+    /// Expected interval in milliseconds.
+    pub expected_every_ms: i64,
+    /// Grace period in milliseconds.
+    pub grace_ms: i64,
+    /// Creation timestamp.
+    pub created_at: String,
+}
+
+/// HTTP target row to insert.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetInsert {
+    /// Target id.
+    pub id: String,
+    /// Probe URL.
+    pub url: String,
+    /// Target display name.
+    pub name: String,
+    /// Service name resolved with Phoenix's target service fallback.
+    pub service: String,
+    /// HTTP method, currently `GET` or `HEAD`.
+    pub method: String,
+    /// JSON encoded request headers.
+    pub headers: Option<String>,
+    /// Probe interval in milliseconds.
+    pub interval_ms: i64,
+    /// Probe timeout in milliseconds.
+    pub timeout_ms: i64,
+    /// Expected HTTP status expression.
+    pub expected_status: String,
+    /// Required response body substring.
+    pub body_contains: Option<String>,
+    /// Consecutive failures before degraded.
+    pub degraded_after: u32,
+    /// Consecutive failures before down.
+    pub down_after: u32,
+    /// Consecutive successes before recovery.
+    pub up_after: u32,
+    /// Active flag.
+    pub active: bool,
+    /// Creation timestamp.
+    pub created_at: String,
+}
+
+/// HTTP target row returned by admin target APIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetRecord {
+    /// Target id.
+    pub id: String,
+    /// Probe URL.
+    pub url: String,
+    /// Target display name.
+    pub name: String,
+    /// Service name resolved with Phoenix's target service fallback.
+    pub service: String,
+    /// HTTP method.
+    pub method: String,
+    /// Probe interval in milliseconds.
+    pub interval_ms: i64,
+    /// Probe timeout in milliseconds.
+    pub timeout_ms: i64,
+    /// Expected HTTP status expression.
+    pub expected_status: String,
+    /// Active flag.
+    pub active: bool,
+    /// Creation timestamp.
+    pub created_at: String,
+}
+
+/// Existing target rows that would conflict with service onboarding.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TargetConflict {
+    /// Another target already owns the service name.
+    pub service: bool,
+    /// Another target already probes the exact URL.
+    pub url: bool,
+}
+
+/// Non-HTTP monitor row returned by admin monitor APIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorRecord {
+    /// Monitor id.
+    pub id: String,
+    /// Unique monitor name used by check-in clients.
+    pub name: String,
+    /// Service name resolved with Phoenix's monitor service fallback.
+    pub service: String,
+    /// Monitor mode, `schedule` or `ttl`.
+    pub mode: String,
+    /// Expected interval in milliseconds.
+    pub expected_every_ms: i64,
+    /// Grace period in milliseconds.
+    pub grace_ms: i64,
+    /// Creation timestamp.
+    pub created_at: String,
+}
+
+/// Persisted outcome of updating one target's probe interval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetIntervalUpdate {
+    /// Admin-visible target row after the update.
+    pub target: TargetRecord,
+    /// Previous interval used by the probe lifecycle.
+    pub prior_interval_ms: i64,
+    /// Whether the target was active before the update committed.
+    pub prior_active: bool,
+}
+
+/// Target configuration and state needed to execute and plan one probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetProbeSnapshot {
+    /// Target id.
+    pub id: String,
+    /// Target display name.
+    pub name: String,
+    /// Service name.
+    pub service: String,
+    /// Probe URL.
+    pub url: String,
+    /// HTTP method.
+    pub method: String,
+    /// JSON encoded request headers.
+    pub headers: Option<String>,
+    /// Probe timeout in milliseconds.
+    pub timeout_ms: i64,
+    /// Expected HTTP status expression.
+    pub expected_status: String,
+    /// Required response body substring.
+    pub body_contains: Option<String>,
+    /// Consecutive failures before degraded.
+    pub degraded_after: u32,
+    /// Consecutive failures before down.
+    pub down_after: u32,
+    /// Consecutive successes before recovery.
+    pub up_after: u32,
+    /// Current target health state.
+    pub state: String,
+    /// Current consecutive failure counter.
+    pub consecutive_failures: u32,
+    /// Current consecutive success counter.
+    pub consecutive_successes: u32,
+}
+
+/// Active target row needed by the probe lifecycle adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveTargetProbeSchedule {
+    /// Target id.
+    pub target_id: String,
+    /// Probe interval in milliseconds.
+    pub interval_ms: i64,
+}
+
+/// Monitor configuration and state needed to plan one check-in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorCheckInSnapshot {
+    /// Monitor id.
+    pub id: String,
+    /// Unique monitor name.
+    pub name: String,
+    /// Service name.
+    pub service: String,
+    /// Monitor mode, `schedule` or `ttl`.
+    pub mode: String,
+    /// Expected interval in milliseconds.
+    pub expected_every_ms: i64,
+    /// Grace period in milliseconds.
+    pub grace_ms: i64,
+    /// Current monitor health state.
+    pub state: String,
+}
+
+/// Monitor configuration and state needed to evaluate overdue deadlines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorOverdueCandidate {
+    /// Monitor row id.
+    pub id: String,
+    /// Monitor display name.
+    pub name: String,
+    /// Service name.
+    pub service: String,
+    /// Monitor mode, `schedule` or `ttl`.
+    pub mode: String,
+    /// Configured expected interval.
+    pub expected_every_ms: i64,
+    /// Configured grace period.
+    pub grace_ms: i64,
+    /// Current monitor health state.
+    pub state: String,
+    /// Last check-in status, when any.
+    pub last_check_in_status: Option<String>,
+    /// Last check-in timestamp, when any.
+    pub last_check_in_at: Option<String>,
+    /// Current deadline timestamp.
+    pub deadline_at: Option<String>,
+    /// First missed deadline timestamp.
+    pub first_missed_at: Option<String>,
+}
+
+/// One observed HTTP target probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetProbeCommit {
+    /// Target id.
+    pub target_id: String,
+    /// Persisted state after the probe.
+    pub state: String,
+    /// Persisted consecutive failure counter after the probe.
+    pub consecutive_failures: u32,
+    /// Persisted consecutive success counter after the probe.
+    pub consecutive_successes: u32,
+    /// Whether this check was successful.
+    pub check_succeeded: bool,
+    /// Concrete target probe row to persist.
+    pub check: TargetCheckObservation,
+    /// Timestamp for check and state writes.
+    pub now: String,
+    /// Transition metadata, present only when this probe changed state.
+    pub transition: Option<TargetTransitionEvent>,
+}
+
+/// Target transition metadata emitted by a probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetTransitionEvent {
+    /// Target display name.
+    pub name: String,
+    /// Service name resolved with Phoenix's target service fallback.
+    pub service: String,
+    /// Target URL.
+    pub url: String,
+    /// Previous target state.
+    pub previous_state: String,
+    /// Service-event id for the health transition.
+    pub event_id: EventId,
+    /// Incident id to use if the transition opens an incident.
+    pub incident_id: IncidentId,
+    /// Service-event id to use if incident correlation emits an event.
+    pub incident_event_id: EventId,
+}
+
+/// Observed HTTP target probe persisted with a target transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetCheckObservation {
+    /// HTTP status code returned by the target, when a response was received.
+    pub status_code: Option<i64>,
+    /// Probe latency in milliseconds.
+    pub latency_ms: Option<i64>,
+    /// Phoenix-compatible probe result, for example `ok` or `error`.
+    pub result: String,
+    /// TLS certificate expiration timestamp, when known.
+    pub tls_expires_at: Option<String>,
+    /// Probe error detail, when the probe failed before a valid response.
+    pub error_detail: Option<String>,
+    /// Probe region.
+    pub region: Option<String>,
+}
+
+/// Compact target-check row returned by health-status read models.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthCheckSummary {
+    /// Probe timestamp.
+    pub checked_at: String,
+    /// Phoenix-compatible probe result.
+    pub result: String,
+    /// HTTP status code returned by the target, when available.
+    pub status_code: Option<i64>,
+    /// Probe latency in milliseconds, when measured.
+    pub latency_ms: Option<i64>,
+}
+
+/// Target-check row returned by the target checks API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetCheckRead {
+    /// Probe timestamp.
+    pub checked_at: String,
+    /// Phoenix-compatible probe result.
+    pub result: String,
+    /// HTTP status code returned by the target, when available.
+    pub status_code: Option<i64>,
+    /// Probe latency in milliseconds, when measured.
+    pub latency_ms: Option<i64>,
+    /// TLS certificate expiration timestamp, when known.
+    pub tls_expires_at: Option<String>,
+    /// Probe error detail, when the probe failed before a valid response.
+    pub error_detail: Option<String>,
+}
+
+/// HTTP target row returned by health-status read models.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthTargetStatus {
+    /// Target id.
+    pub id: String,
+    /// Target display name.
+    pub name: String,
+    /// Service name resolved with Phoenix's target service fallback.
+    pub service: String,
+    /// Probe URL.
+    pub url: String,
+    /// Current target state.
+    pub state: String,
+    /// Current consecutive failure counter.
+    pub consecutive_failures: u32,
+    /// Last probe timestamp.
+    pub last_checked_at: Option<String>,
+    /// Last successful probe timestamp.
+    pub last_success_at: Option<String>,
+    /// Latency from the newest recent check.
+    pub latency_ms: Option<i64>,
+    /// TLS expiration from the newest recent check that reported one.
+    pub tls_expires_at: Option<String>,
+    /// Five newest target checks, newest first.
+    pub recent_checks: Vec<HealthCheckSummary>,
+}
+
+/// Non-HTTP monitor row returned by health-status read models.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthMonitorStatus {
+    /// Monitor id.
+    pub id: String,
+    /// Monitor display name.
+    pub name: String,
+    /// Service name resolved with Phoenix's monitor service fallback.
+    pub service: String,
+    /// Monitor mode, `schedule` or `ttl`.
+    pub mode: String,
+    /// Expected interval in milliseconds.
+    pub expected_every_ms: i64,
+    /// Grace period in milliseconds.
+    pub grace_ms: i64,
+    /// Current monitor state.
+    pub state: String,
+    /// Last check-in status.
+    pub last_check_in_status: Option<String>,
+    /// Last check-in timestamp.
+    pub last_check_in_at: Option<String>,
+    /// Last successful check-in timestamp.
+    pub last_success_at: Option<String>,
+    /// Last failed check-in timestamp.
+    pub last_failure_at: Option<String>,
+    /// Current monitor deadline timestamp.
+    pub deadline_at: Option<String>,
+}
+
+/// One observed non-HTTP monitor check-in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorCheckInCommit {
+    /// Monitor id.
+    pub monitor_id: String,
+    /// Persisted state after the check-in.
+    pub state: String,
+    /// Last check-in timestamp after this check-in.
+    pub last_check_in_at: Option<String>,
+    /// Last check-in status after this check-in.
+    pub last_check_in_status: Option<String>,
+    /// Deadline after this check-in.
+    pub deadline_at: Option<String>,
+    /// Concrete monitor check-in row to persist.
+    pub check_in: MonitorCheckInObservation,
+    /// Timestamp for state writes.
+    pub now: String,
+    /// Transition metadata, present only when this check-in changed state.
+    pub transition: Option<MonitorTransitionEvent>,
+}
+
+/// One overdue monitor transition to persist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorOverdueCommit {
+    /// Monitor id.
+    pub monitor_id: String,
+    /// Persisted state after overdue evaluation.
+    pub state: String,
+    /// First missed deadline timestamp after this evaluation.
+    pub first_missed_at: Option<String>,
+    /// Last check-in timestamp to preserve in transition payloads.
+    pub last_check_in_at: Option<String>,
+    /// Last check-in status to preserve in transition payloads.
+    pub last_check_in_status: Option<String>,
+    /// Deadline to preserve in transition payloads and state.
+    pub deadline_at: Option<String>,
+    /// Timestamp for state and transition writes.
+    pub now: String,
+    /// Transition metadata emitted by this overdue evaluation.
+    pub transition: MonitorTransitionEvent,
+}
+
+/// Monitor transition metadata emitted by a check-in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorTransitionEvent {
+    /// Monitor display name.
+    pub name: String,
+    /// Service name resolved with Phoenix's monitor service fallback.
+    pub service: String,
+    /// Monitor mode, `schedule` or `ttl`.
+    pub mode: String,
+    /// Expected interval in milliseconds.
+    pub expected_every_ms: i64,
+    /// Grace period in milliseconds.
+    pub grace_ms: i64,
+    /// Previous monitor state.
+    pub previous_state: String,
+    /// Service-event id for the health transition.
+    pub event_id: EventId,
+    /// Incident id to use if the transition opens an incident.
+    pub incident_id: IncidentId,
+    /// Service-event id to use if incident correlation emits an event.
+    pub incident_event_id: EventId,
+}
+
+/// Observed non-HTTP monitor check-in persisted with a monitor transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorCheckInObservation {
+    /// Check-in id.
+    pub id: String,
+    /// Caller supplied idempotency key or external check-in id.
+    pub external_id: Option<String>,
+    /// Phoenix-compatible check-in status.
+    pub status: String,
+    /// Observed timestamp.
+    pub observed_at: String,
+    /// TTL supplied by this check-in, when present.
+    pub ttl_ms: Option<i64>,
+    /// Human-readable check-in summary.
+    pub summary: Option<String>,
+    /// JSON context string.
+    pub context: Option<String>,
+}
+
+pub(crate) fn commit_target_probe(
+    connection: &mut rusqlite::Connection,
+    probe: TargetProbeCommit,
+) -> Result<TargetProbeCommitResult> {
+    let transaction = connection.transaction()?;
+    let sequence = match &probe.transition {
+        Some(_) => next_sequence(&transaction, "target_state", "target_id", &probe.target_id)?,
+        None => current_sequence(&transaction, "target_state", "target_id", &probe.target_id)?,
+    };
+    upsert_target_state_fields(
+        &transaction,
+        TargetStateWrite {
+            target_id: &probe.target_id,
+            state: &probe.state,
+            consecutive_failures: probe.consecutive_failures,
+            consecutive_successes: probe.consecutive_successes,
+            check_succeeded: probe.check_succeeded,
+            now: &probe.now,
+            transitioned: probe.transition.is_some(),
+        },
+        sequence,
+    )?;
+    insert_target_check(&transaction, &probe.target_id, &probe.now, &probe.check)?;
+
+    let transition = if let Some(event) = &probe.transition {
+        Some(record_target_transition(
+            &transaction,
+            TargetTransitionRecord {
+                target_id: &probe.target_id,
+                name: &event.name,
+                service: &event.service,
+                url: &event.url,
+                previous_state: &event.previous_state,
+                state: &probe.state,
+                consecutive_failures: probe.consecutive_failures,
+                check_succeeded: probe.check_succeeded,
+                now: &probe.now,
+                event_id: &event.event_id,
+                incident_id: event.incident_id.clone(),
+                incident_event_id: event.incident_event_id.clone(),
+                sequence,
+            },
+        )?)
+    } else {
+        None
+    };
+
+    transaction.commit()?;
+    Ok(TargetProbeCommitResult {
+        transition,
+        sequence,
+    })
+}
+
+pub(crate) fn commit_monitor_check_in(
+    connection: &mut rusqlite::Connection,
+    check_in: MonitorCheckInCommit,
+) -> Result<MonitorCheckInCommitResult> {
+    let transaction = connection.transaction()?;
+    let sequence = match &check_in.transition {
+        Some(_) => next_sequence(
+            &transaction,
+            "monitor_state",
+            "monitor_id",
+            &check_in.monitor_id,
+        )?,
+        None => current_sequence(
+            &transaction,
+            "monitor_state",
+            "monitor_id",
+            &check_in.monitor_id,
+        )?,
+    };
+    upsert_monitor_state_fields(
+        &transaction,
+        MonitorStateWrite {
+            monitor_id: &check_in.monitor_id,
+            state: &check_in.state,
+            last_check_in_at: check_in.last_check_in_at.as_deref(),
+            last_check_in_status: check_in.last_check_in_status.as_deref(),
+            deadline_at: check_in.deadline_at.as_deref(),
+            first_missed_at: MonitorFirstMissedAtWrite::Clear,
+            now: &check_in.now,
+            transitioned: check_in.transition.is_some(),
+        },
+        sequence,
+    )?;
+    insert_monitor_check_in(&transaction, &check_in.monitor_id, &check_in.check_in)?;
+
+    let transition = if let Some(event) = &check_in.transition {
+        Some(record_monitor_transition(
+            &transaction,
+            MonitorTransitionRecord {
+                monitor_id: &check_in.monitor_id,
+                name: &event.name,
+                service: &event.service,
+                mode: &event.mode,
+                expected_every_ms: event.expected_every_ms,
+                grace_ms: event.grace_ms,
+                previous_state: &event.previous_state,
+                state: &check_in.state,
+                last_check_in_at: check_in.last_check_in_at.as_deref(),
+                last_check_in_status: check_in.last_check_in_status.as_deref(),
+                deadline_at: check_in.deadline_at.as_deref(),
+                now: &check_in.now,
+                event_id: &event.event_id,
+                incident_id: event.incident_id.clone(),
+                incident_event_id: event.incident_event_id.clone(),
+                sequence,
+            },
+        )?)
+    } else {
+        None
+    };
+
+    transaction.commit()?;
+    Ok(MonitorCheckInCommitResult {
+        transition,
+        sequence,
+    })
+}
+
+pub(crate) fn commit_monitor_overdue(
+    connection: &mut rusqlite::Connection,
+    overdue: MonitorOverdueCommit,
+) -> Result<MonitorOverdueCommitResult> {
+    let transaction = connection.transaction()?;
+    let sequence = next_sequence(
+        &transaction,
+        "monitor_state",
+        "monitor_id",
+        &overdue.monitor_id,
+    )?;
+    upsert_monitor_state_fields(
+        &transaction,
+        MonitorStateWrite {
+            monitor_id: &overdue.monitor_id,
+            state: &overdue.state,
+            last_check_in_at: None,
+            last_check_in_status: None,
+            deadline_at: overdue.deadline_at.as_deref(),
+            first_missed_at: match overdue.first_missed_at.as_deref() {
+                Some(first_missed_at) => MonitorFirstMissedAtWrite::Set(first_missed_at),
+                None => MonitorFirstMissedAtWrite::Preserve,
+            },
+            now: &overdue.now,
+            transitioned: true,
+        },
+        sequence,
+    )?;
+    let transition = record_monitor_transition(
+        &transaction,
+        MonitorTransitionRecord {
+            monitor_id: &overdue.monitor_id,
+            name: &overdue.transition.name,
+            service: &overdue.transition.service,
+            mode: &overdue.transition.mode,
+            expected_every_ms: overdue.transition.expected_every_ms,
+            grace_ms: overdue.transition.grace_ms,
+            previous_state: &overdue.transition.previous_state,
+            state: &overdue.state,
+            last_check_in_at: overdue.last_check_in_at.as_deref(),
+            last_check_in_status: overdue.last_check_in_status.as_deref(),
+            deadline_at: overdue.deadline_at.as_deref(),
+            now: &overdue.now,
+            event_id: &overdue.transition.event_id,
+            incident_id: overdue.transition.incident_id,
+            incident_event_id: overdue.transition.incident_event_id,
+            sequence,
+        },
+    )?;
+
+    transaction.commit()?;
+    Ok(MonitorOverdueCommitResult {
+        transition,
+        sequence,
+    })
+}
+
+pub(crate) fn tls_expiry_scan_candidates(
+    connection: &rusqlite::Connection,
+) -> Result<Vec<TlsExpiryScanCandidate>> {
+    let mut statement = connection.prepare(
+        "SELECT target_id, name, service, url, tls_expires_at
+         FROM (
+            SELECT
+                t.id AS target_id,
+                t.name AS name,
+                COALESCE(NULLIF(t.service, ''), t.name) AS service,
+                t.url AS url,
+                (
+                    SELECT c.tls_expires_at
+                    FROM target_checks c
+                    WHERE c.target_id = t.id
+                      AND c.tls_expires_at IS NOT NULL
+                    ORDER BY c.checked_at DESC
+                    LIMIT 1
+                ) AS tls_expires_at
+            FROM targets t
+            WHERE COALESCE(t.active, 1) = 1
+              AND lower(t.url) LIKE 'https://%'
+         )
+         WHERE tls_expires_at IS NOT NULL
+         ORDER BY target_id",
+    )?;
+    let candidates = statement
+        .query_map([], |row| {
+            Ok(TlsExpiryScanCandidate {
+                target_id: row.get(0)?,
+                name: row.get(1)?,
+                service: row.get(2)?,
+                url: row.get(3)?,
+                tls_expires_at: row.get(4)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(candidates)
+}
+
+pub(crate) fn record_tls_expiring_event(
+    connection: &mut rusqlite::Connection,
+    event: TlsExpiryEventInsert,
+) -> Result<TlsExpiryEventCommit> {
+    let transaction = connection.transaction()?;
+    let payload_json = tls_expiring_payload(&event).to_string();
+    let summary = format!(
+        "{}: TLS expires in {} day(s)",
+        event.service, event.days_until_expiry
+    );
+    insert_service_event(
+        &transaction,
+        ServiceEventInsert {
+            event_id: &event.event_id,
+            service: &event.service,
+            event: "health_check.tls_expiring",
+            entity_type: "target",
+            entity_ref: &event.target_id,
+            state: "degraded",
+            summary: &summary,
+            payload_json: &payload_json,
+            now: &event.now,
+        },
+    )?;
+    transaction.commit()?;
+    Ok(TlsExpiryEventCommit {
+        event: "health_check.tls_expiring".to_owned(),
+        id: event.event_id.as_str().to_owned(),
+        payload_json,
+    })
+}
+
+pub(crate) fn insert_monitor(
+    connection: &rusqlite::Connection,
+    monitor: MonitorInsert,
+) -> Result<()> {
+    connection.execute(
+        "INSERT INTO monitors (id, name, service, mode, expected_every_ms, grace_ms, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            monitor.id,
+            monitor.name,
+            monitor.service,
+            monitor.mode,
+            monitor.expected_every_ms,
+            monitor.grace_ms,
+            monitor.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn create_monitor(
+    connection: &mut rusqlite::Connection,
+    monitor: MonitorInsert,
+) -> Result<bool> {
+    let transaction = connection.transaction()?;
+    let exists = transaction
+        .query_row(
+            "SELECT 1 FROM monitors WHERE name = ?1 LIMIT 1",
+            [&monitor.name],
+            |_row| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if exists {
+        transaction.commit()?;
+        return Ok(false);
+    }
+
+    transaction.execute(
+        "INSERT INTO monitors (id, name, service, mode, expected_every_ms, grace_ms, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            monitor.id,
+            monitor.name,
+            monitor.service,
+            monitor.mode,
+            monitor.expected_every_ms,
+            monitor.grace_ms,
+            monitor.created_at,
+        ],
+    )?;
+    transaction.execute(
+        "INSERT INTO monitor_state (monitor_id, state, sequence) VALUES (?1, 'unknown', 0)",
+        [&monitor.id],
+    )?;
+    transaction.commit()?;
+    Ok(true)
+}
+
+pub(crate) fn list_monitors(connection: &rusqlite::Connection) -> Result<Vec<MonitorRecord>> {
+    let mut statement = connection.prepare(
+        "SELECT
+            id, name, COALESCE(NULLIF(service, ''), name), mode,
+            expected_every_ms, COALESCE(grace_ms, 0), created_at
+         FROM monitors
+         ORDER BY name",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(MonitorRecord {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            service: row.get(2)?,
+            mode: row.get(3)?,
+            expected_every_ms: row.get(4)?,
+            grace_ms: row.get(5)?,
+            created_at: row.get(6)?,
+        })
+    })?;
+    let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub(crate) fn health_monitors(
+    connection: &rusqlite::Connection,
+) -> Result<Vec<HealthMonitorStatus>> {
+    let mut statement = connection.prepare(
+        "SELECT
+            m.id, m.name, COALESCE(NULLIF(m.service, ''), m.name), m.mode,
+            m.expected_every_ms, COALESCE(m.grace_ms, 0),
+            COALESCE(s.state, 'unknown'), s.last_check_in_status,
+            s.last_check_in_at, s.last_success_at, s.last_failure_at, s.deadline_at
+         FROM monitors AS m
+         LEFT JOIN monitor_state AS s ON s.monitor_id = m.id
+         ORDER BY m.name",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(HealthMonitorStatus {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            service: row.get(2)?,
+            mode: row.get(3)?,
+            expected_every_ms: row.get(4)?,
+            grace_ms: row.get(5)?,
+            state: row.get(6)?,
+            last_check_in_status: row.get(7)?,
+            last_check_in_at: row.get(8)?,
+            last_success_at: row.get(9)?,
+            last_failure_at: row.get(10)?,
+            deadline_at: row.get(11)?,
+        })
+    })?;
+    let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub(crate) fn delete_monitor(
+    connection: &mut rusqlite::Connection,
+    monitor_id: &str,
+) -> Result<bool> {
+    let transaction = connection.transaction()?;
+    let changed = transaction.execute("DELETE FROM monitors WHERE id = ?1", [monitor_id])?;
+    transaction.commit()?;
+    Ok(changed > 0)
+}
+
+pub(crate) fn insert_target(connection: &rusqlite::Connection, target: TargetInsert) -> Result<()> {
+    connection.execute(
+        "INSERT INTO targets (
+            id, url, name, service, method, headers, interval_ms, timeout_ms,
+            expected_status, body_contains, degraded_after, down_after,
+            up_after, active, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            target.id,
+            target.url,
+            target.name,
+            target.service,
+            target.method,
+            target.headers,
+            target.interval_ms,
+            target.timeout_ms,
+            target.expected_status,
+            target.body_contains,
+            target.degraded_after,
+            target.down_after,
+            target.up_after,
+            if target.active { 1 } else { 0 },
+            target.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn target_conflict(
+    connection: &rusqlite::Connection,
+    service: &str,
+    url: &str,
+) -> Result<TargetConflict> {
+    let service = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM targets WHERE service = ?1 LIMIT 1)",
+        [service],
+        |row| row.get::<_, i64>(0),
+    )? == 1;
+    let url = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM targets WHERE url = ?1 LIMIT 1)",
+        [url],
+        |row| row.get::<_, i64>(0),
+    )? == 1;
+
+    Ok(TargetConflict { service, url })
+}
+
+pub(crate) fn list_targets(connection: &rusqlite::Connection) -> Result<Vec<TargetRecord>> {
+    let mut statement = connection.prepare(
+        "SELECT
+            id, url, name, COALESCE(NULLIF(service, ''), name),
+            COALESCE(method, 'GET'), COALESCE(interval_ms, 60000),
+            COALESCE(timeout_ms, 10000), COALESCE(expected_status, '200'),
+            COALESCE(active, 1), created_at
+         FROM targets
+         ORDER BY name",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(TargetRecord {
+            id: row.get(0)?,
+            url: row.get(1)?,
+            name: row.get(2)?,
+            service: row.get(3)?,
+            method: row.get(4)?,
+            interval_ms: row.get(5)?,
+            timeout_ms: row.get(6)?,
+            expected_status: row.get(7)?,
+            active: row.get::<_, i64>(8)? == 1,
+            created_at: row.get(9)?,
+        })
+    })?;
+    let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub(crate) fn health_targets(connection: &rusqlite::Connection) -> Result<Vec<HealthTargetStatus>> {
+    let mut statement = connection.prepare(
+        "SELECT
+            t.id, t.name, COALESCE(NULLIF(t.service, ''), t.name), t.url,
+            COALESCE(s.state, 'unknown'), COALESCE(s.consecutive_failures, 0),
+            s.last_checked_at, s.last_success_at
+         FROM targets AS t
+         LEFT JOIN target_state AS s ON s.target_id = t.id
+         ORDER BY t.name",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(HealthTargetStatus {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            service: row.get(2)?,
+            url: row.get(3)?,
+            state: row.get(4)?,
+            consecutive_failures: row.get(5)?,
+            last_checked_at: row.get(6)?,
+            last_success_at: row.get(7)?,
+            latency_ms: None,
+            tls_expires_at: None,
+            recent_checks: Vec::new(),
+        })
+    })?;
+    let mut targets = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let target_ids = targets
+        .iter()
+        .map(|target| target.id.clone())
+        .collect::<Vec<_>>();
+    let recent = recent_checks_by_target(connection, &target_ids)?;
+
+    for target in &mut targets {
+        if let Some(rows) = recent.get(&target.id) {
+            target.latency_ms = rows.first().and_then(|row| row.latency_ms);
+            target.tls_expires_at = rows
+                .iter()
+                .find_map(|row| row.tls_expires_at.as_ref().cloned());
+            target.recent_checks = rows
+                .iter()
+                .map(|row| HealthCheckSummary {
+                    checked_at: row.checked_at.clone(),
+                    result: row.result.clone(),
+                    status_code: row.status_code,
+                    latency_ms: row.latency_ms,
+                })
+                .collect();
+        }
+    }
+
+    Ok(targets)
+}
+
+pub(crate) fn target_checks(
+    connection: &rusqlite::Connection,
+    target_id: &str,
+    window: &str,
+) -> QueryResult<Vec<TargetCheckRead>> {
+    target_checks_at(
+        connection,
+        target_id,
+        window,
+        time::OffsetDateTime::now_utc(),
+    )
+}
+
+pub(crate) fn target_checks_at(
+    connection: &rusqlite::Connection,
+    target_id: &str,
+    window: &str,
+    now: time::OffsetDateTime,
+) -> QueryResult<Vec<TargetCheckRead>> {
+    let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
+    let cutoff = window.cutoff_at(now);
+    let mut statement = connection.prepare(
+        "SELECT checked_at, result, status_code, latency_ms, tls_expires_at, error_detail
+         FROM target_checks
+         WHERE target_id = ?1 AND checked_at >= ?2
+         ORDER BY checked_at DESC
+         LIMIT 500",
+    )?;
+    let rows = statement.query_map(params![target_id, cutoff], |row| {
+        Ok(TargetCheckRead {
+            checked_at: row.get(0)?,
+            result: row.get(1)?,
+            status_code: row.get(2)?,
+            latency_ms: row.get(3)?,
+            tls_expires_at: row.get(4)?,
+            error_detail: row.get(5)?,
+        })
+    })?;
+    let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub(crate) fn delete_target(
+    connection: &mut rusqlite::Connection,
+    target_id: &str,
+) -> Result<bool> {
+    let transaction = connection.transaction()?;
+    let changed = transaction.execute("DELETE FROM targets WHERE id = ?1", [target_id])?;
+    if changed > 0 {
+        transaction.execute("DELETE FROM target_state WHERE target_id = ?1", [target_id])?;
+        transaction.execute(
+            "DELETE FROM target_checks WHERE target_id = ?1",
+            [target_id],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(changed > 0)
+}
+
+pub(crate) fn update_target_active(
+    connection: &mut rusqlite::Connection,
+    target_id: &str,
+    active: bool,
+) -> Result<bool> {
+    let transaction = connection.transaction()?;
+    let changed = transaction.execute(
+        "UPDATE targets SET active = ?2 WHERE id = ?1",
+        rusqlite::params![target_id, if active { 1 } else { 0 }],
+    )?;
+    if changed > 0 {
+        let state = if active { "unknown" } else { "paused" };
+        transaction.execute(
+            "UPDATE target_state SET state = ?2 WHERE target_id = ?1",
+            rusqlite::params![target_id, state],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(changed > 0)
+}
+
+pub(crate) fn update_target_interval(
+    connection: &mut rusqlite::Connection,
+    target_id: &str,
+    interval_ms: i64,
+) -> Result<Option<TargetIntervalUpdate>> {
+    let transaction = connection.transaction()?;
+    let prior = transaction
+        .query_row(
+            "SELECT COALESCE(interval_ms, 60000), COALESCE(active, 1)
+             FROM targets
+             WHERE id = ?1",
+            [target_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? == 1)),
+        )
+        .optional()?;
+
+    let Some((prior_interval_ms, prior_active)) = prior else {
+        transaction.commit()?;
+        return Ok(None);
+    };
+
+    transaction.execute(
+        "UPDATE targets SET interval_ms = ?2 WHERE id = ?1",
+        params![target_id, interval_ms],
+    )?;
+    let target = target_record_by_id(&transaction, target_id)?;
+    transaction.commit()?;
+
+    Ok(Some(TargetIntervalUpdate {
+        target,
+        prior_interval_ms,
+        prior_active,
+    }))
+}
+
+pub(crate) fn target_probe_snapshot_by_id(
+    connection: &mut rusqlite::Connection,
+    target_id: &str,
+) -> Result<Option<TargetProbeSnapshot>> {
+    let transaction = connection.transaction()?;
+    let target = transaction
+        .query_row(
+            "SELECT
+                id, name, COALESCE(NULLIF(service, ''), name), url,
+                COALESCE(method, 'GET'), headers, COALESCE(timeout_ms, 10000),
+                COALESCE(expected_status, '200'), body_contains,
+                COALESCE(degraded_after, 1), COALESCE(down_after, 3),
+                COALESCE(up_after, 1)
+             FROM targets WHERE id = ?1 AND active = 1",
+            [target_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, u32>(9)?,
+                    row.get::<_, u32>(10)?,
+                    row.get::<_, u32>(11)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let Some((
+        id,
+        name,
+        service,
+        url,
+        method,
+        headers,
+        timeout_ms,
+        expected_status,
+        body_contains,
+        degraded_after,
+        down_after,
+        up_after,
+    )) = target
+    else {
+        transaction.commit()?;
+        return Ok(None);
+    };
+
+    transaction.execute(
+        "INSERT OR IGNORE INTO target_state (target_id, state) VALUES (?1, 'unknown')",
+        [&id],
+    )?;
+    let (state, consecutive_failures, consecutive_successes) = transaction.query_row(
+        "SELECT
+            state, COALESCE(consecutive_failures, 0), COALESCE(consecutive_successes, 0)
+         FROM target_state WHERE target_id = ?1",
+        [&id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, u32>(2)?,
+            ))
+        },
+    )?;
+    transaction.commit()?;
+
+    Ok(Some(TargetProbeSnapshot {
+        id,
+        name,
+        service,
+        url,
+        method,
+        headers,
+        timeout_ms,
+        expected_status,
+        body_contains,
+        degraded_after,
+        down_after,
+        up_after,
+        state,
+        consecutive_failures,
+        consecutive_successes,
+    }))
+}
+
+fn target_record_by_id(
+    connection: &rusqlite::Connection,
+    target_id: &str,
+) -> rusqlite::Result<TargetRecord> {
+    connection.query_row(
+        "SELECT
+            id, url, name, COALESCE(NULLIF(service, ''), name),
+            COALESCE(method, 'GET'), COALESCE(interval_ms, 60000),
+            COALESCE(timeout_ms, 10000), COALESCE(expected_status, '200'),
+            COALESCE(active, 1), created_at
+         FROM targets
+         WHERE id = ?1",
+        [target_id],
+        |row| {
+            Ok(TargetRecord {
+                id: row.get(0)?,
+                url: row.get(1)?,
+                name: row.get(2)?,
+                service: row.get(3)?,
+                method: row.get(4)?,
+                interval_ms: row.get(5)?,
+                timeout_ms: row.get(6)?,
+                expected_status: row.get(7)?,
+                active: row.get::<_, i64>(8)? == 1,
+                created_at: row.get(9)?,
+            })
+        },
+    )
+}
+
+pub(crate) fn active_target_probe_schedules(
+    connection: &rusqlite::Connection,
+) -> Result<Vec<ActiveTargetProbeSchedule>> {
+    let mut statement = connection.prepare(
+        "SELECT id, COALESCE(interval_ms, 60000)
+         FROM targets
+         WHERE active = 1
+         ORDER BY id",
+    )?;
+    let schedules = statement
+        .query_map([], |row| {
+            Ok(ActiveTargetProbeSchedule {
+                target_id: row.get(0)?,
+                interval_ms: row.get(1)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(schedules)
+}
+
+pub(crate) fn monitor_check_in_snapshot_by_name(
+    connection: &mut rusqlite::Connection,
+    name: &str,
+) -> Result<Option<MonitorCheckInSnapshot>> {
+    let transaction = connection.transaction()?;
+    let monitor = transaction
+        .query_row(
+            "SELECT id, name, service, mode, expected_every_ms, grace_ms
+             FROM monitors WHERE name = ?1",
+            [name],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let Some((id, name, service, mode, expected_every_ms, grace_ms)) = monitor else {
+        transaction.commit()?;
+        return Ok(None);
+    };
+
+    transaction.execute(
+        "INSERT OR IGNORE INTO monitor_state (monitor_id, state) VALUES (?1, 'unknown')",
+        [&id],
+    )?;
+    let state = transaction.query_row(
+        "SELECT state FROM monitor_state WHERE monitor_id = ?1",
+        [&id],
+        |row| row.get::<_, String>(0),
+    )?;
+    transaction.commit()?;
+
+    Ok(Some(MonitorCheckInSnapshot {
+        id,
+        name,
+        service,
+        mode,
+        expected_every_ms,
+        grace_ms,
+        state,
+    }))
+}
+
+pub(crate) fn monitor_overdue_candidates(
+    connection: &rusqlite::Connection,
+) -> Result<Vec<MonitorOverdueCandidate>> {
+    let mut statement = connection.prepare(
+        "SELECT
+            m.id, m.name, m.service, m.mode, m.expected_every_ms, m.grace_ms,
+            s.state, s.last_check_in_status, s.last_check_in_at, s.deadline_at,
+            s.first_missed_at
+         FROM monitors m
+         JOIN monitor_state s ON s.monitor_id = m.id
+         WHERE s.deadline_at IS NOT NULL
+         ORDER BY m.id",
+    )?;
+    let candidates = statement
+        .query_map([], |row| {
+            Ok(MonitorOverdueCandidate {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                service: row.get(2)?,
+                mode: row.get(3)?,
+                expected_every_ms: row.get(4)?,
+                grace_ms: row.get(5)?,
+                state: row.get(6)?,
+                last_check_in_status: row.get(7)?,
+                last_check_in_at: row.get(8)?,
+                deadline_at: row.get(9)?,
+                first_missed_at: row.get(10)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(candidates)
+}
+
+fn next_sequence(
+    transaction: &rusqlite::Transaction<'_>,
+    table: &str,
+    id_column: &str,
+    id: &str,
+) -> Result<i64> {
+    let sql = format!("SELECT sequence FROM {table} WHERE {id_column} = ?1");
+    let current = transaction
+        .query_row(&sql, [id], |row| row.get::<_, i64>(0))
+        .optional()?
+        .unwrap_or(0);
+    Ok(current + 1)
+}
+
+fn current_sequence(
+    transaction: &rusqlite::Transaction<'_>,
+    table: &str,
+    id_column: &str,
+    id: &str,
+) -> Result<i64> {
+    let sql = format!("SELECT sequence FROM {table} WHERE {id_column} = ?1");
+    Ok(transaction
+        .query_row(&sql, [id], |row| row.get::<_, i64>(0))
+        .optional()?
+        .unwrap_or(0))
+}
+
+struct TargetStateWrite<'a> {
+    target_id: &'a str,
+    state: &'a str,
+    consecutive_failures: u32,
+    consecutive_successes: u32,
+    check_succeeded: bool,
+    now: &'a str,
+    transitioned: bool,
+}
+
+fn upsert_target_state_fields(
+    transaction: &rusqlite::Transaction<'_>,
+    write: TargetStateWrite<'_>,
+    sequence: i64,
+) -> Result<()> {
+    let last_success_at = write.check_succeeded.then_some(write.now);
+    let last_failure_at = (!write.check_succeeded).then_some(write.now);
+    let last_transition_at = write.transitioned.then_some(write.now);
+    transaction.execute(
+        "INSERT INTO target_state (
+            target_id, state, consecutive_failures, consecutive_successes,
+            last_checked_at, last_success_at, last_failure_at, last_transition_at, sequence
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(target_id) DO UPDATE SET
+            state = excluded.state,
+            consecutive_failures = excluded.consecutive_failures,
+            consecutive_successes = excluded.consecutive_successes,
+            last_checked_at = excluded.last_checked_at,
+            last_success_at = COALESCE(excluded.last_success_at, target_state.last_success_at),
+            last_failure_at = COALESCE(excluded.last_failure_at, target_state.last_failure_at),
+            last_transition_at = COALESCE(excluded.last_transition_at, target_state.last_transition_at),
+            sequence = excluded.sequence",
+        params![
+            write.target_id,
+            write.state,
+            write.consecutive_failures,
+            write.consecutive_successes,
+            write.now,
+            last_success_at,
+            last_failure_at,
+            last_transition_at,
+            sequence,
+        ],
+    )?;
+    Ok(())
+}
+
+enum MonitorFirstMissedAtWrite<'a> {
+    Clear,
+    Preserve,
+    Set(&'a str),
+}
+
+struct MonitorStateWrite<'a> {
+    monitor_id: &'a str,
+    state: &'a str,
+    last_check_in_at: Option<&'a str>,
+    last_check_in_status: Option<&'a str>,
+    deadline_at: Option<&'a str>,
+    first_missed_at: MonitorFirstMissedAtWrite<'a>,
+    now: &'a str,
+    transitioned: bool,
+}
+
+fn upsert_monitor_state_fields(
+    transaction: &rusqlite::Transaction<'_>,
+    write: MonitorStateWrite<'_>,
+    sequence: i64,
+) -> Result<()> {
+    let last_success_at =
+        matches!(write.last_check_in_status, Some("alive" | "ok")).then_some(write.now);
+    let last_failure_at = matches!(write.last_check_in_status, Some("error")).then_some(write.now);
+    let last_transition_at = write.transitioned.then_some(write.now);
+    let (first_missed_mode, first_missed_at) = match write.first_missed_at {
+        MonitorFirstMissedAtWrite::Clear => ("clear", None),
+        MonitorFirstMissedAtWrite::Preserve => ("preserve", None),
+        MonitorFirstMissedAtWrite::Set(first_missed_at) => ("set", Some(first_missed_at)),
+    };
+    transaction.execute(
+        "INSERT INTO monitor_state (
+            monitor_id, state, last_check_in_status, last_check_in_at,
+            last_success_at, last_failure_at, deadline_at, first_missed_at,
+            last_transition_at, sequence
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(monitor_id) DO UPDATE SET
+            state = excluded.state,
+            last_check_in_status = COALESCE(excluded.last_check_in_status, monitor_state.last_check_in_status),
+            last_check_in_at = COALESCE(excluded.last_check_in_at, monitor_state.last_check_in_at),
+            last_success_at = COALESCE(excluded.last_success_at, monitor_state.last_success_at),
+            last_failure_at = COALESCE(excluded.last_failure_at, monitor_state.last_failure_at),
+            deadline_at = COALESCE(excluded.deadline_at, monitor_state.deadline_at),
+            first_missed_at = CASE ?11
+                WHEN 'clear' THEN NULL
+                WHEN 'set' THEN excluded.first_missed_at
+                ELSE monitor_state.first_missed_at
+            END,
+            last_transition_at = COALESCE(excluded.last_transition_at, monitor_state.last_transition_at),
+            sequence = excluded.sequence",
+        params![
+            write.monitor_id,
+            write.state,
+            write.last_check_in_status,
+            write.last_check_in_at,
+            last_success_at,
+            last_failure_at,
+            write.deadline_at,
+            first_missed_at,
+            last_transition_at,
+            sequence,
+            first_missed_mode,
+        ],
+    )?;
+    Ok(())
+}
+
+struct TargetTransitionRecord<'a> {
+    target_id: &'a str,
+    name: &'a str,
+    service: &'a str,
+    url: &'a str,
+    previous_state: &'a str,
+    state: &'a str,
+    consecutive_failures: u32,
+    check_succeeded: bool,
+    now: &'a str,
+    event_id: &'a EventId,
+    incident_id: IncidentId,
+    incident_event_id: EventId,
+    sequence: i64,
+}
+
+fn record_target_transition(
+    transaction: &rusqlite::Transaction<'_>,
+    transition: TargetTransitionRecord<'_>,
+) -> Result<HealthTransitionCommit> {
+    let payload_json = target_payload(&transition).to_string();
+    let event = event_name_for(transition.state).to_owned();
+    let summary = format!(
+        "{}: {} {}",
+        transition.service, transition.name, transition.state
+    );
+    insert_service_event(
+        transaction,
+        ServiceEventInsert {
+            event_id: transition.event_id,
+            service: transition.service,
+            event: &event,
+            entity_type: "target",
+            entity_ref: transition.target_id,
+            state: transition.state,
+            summary: &summary,
+            payload_json: &payload_json,
+            now: transition.now,
+        },
+    )?;
+    let incident_event = correlate_in_transaction(
+        transaction,
+        IncidentCorrelation {
+            signal_type: "health_transition".to_owned(),
+            signal_ref: transition.target_id.to_owned(),
+            service: transition.service.to_owned(),
+            incident_id: transition.incident_id,
+            event_id: transition.incident_event_id,
+            now: transition.now.to_owned(),
+        },
+    )?;
+    Ok(HealthTransitionCommit {
+        event,
+        id: transition.event_id.as_str().to_owned(),
+        payload_json,
+        incident_event,
+    })
+}
+
+struct MonitorTransitionRecord<'a> {
+    monitor_id: &'a str,
+    name: &'a str,
+    service: &'a str,
+    mode: &'a str,
+    expected_every_ms: i64,
+    grace_ms: i64,
+    previous_state: &'a str,
+    state: &'a str,
+    last_check_in_at: Option<&'a str>,
+    last_check_in_status: Option<&'a str>,
+    deadline_at: Option<&'a str>,
+    now: &'a str,
+    event_id: &'a EventId,
+    incident_id: IncidentId,
+    incident_event_id: EventId,
+    sequence: i64,
+}
+
+fn record_monitor_transition(
+    transaction: &rusqlite::Transaction<'_>,
+    transition: MonitorTransitionRecord<'_>,
+) -> Result<HealthTransitionCommit> {
+    let payload_json = monitor_payload(&transition).to_string();
+    let event = event_name_for(transition.state).to_owned();
+    let summary = format!(
+        "{}: {} {}",
+        transition.service, transition.name, transition.state
+    );
+    insert_service_event(
+        transaction,
+        ServiceEventInsert {
+            event_id: transition.event_id,
+            service: transition.service,
+            event: &event,
+            entity_type: "monitor",
+            entity_ref: transition.monitor_id,
+            state: transition.state,
+            summary: &summary,
+            payload_json: &payload_json,
+            now: transition.now,
+        },
+    )?;
+    let incident_event = correlate_in_transaction(
+        transaction,
+        IncidentCorrelation {
+            signal_type: "health_transition".to_owned(),
+            signal_ref: transition.monitor_id.to_owned(),
+            service: transition.service.to_owned(),
+            incident_id: transition.incident_id,
+            event_id: transition.incident_event_id,
+            now: transition.now.to_owned(),
+        },
+    )?;
+    Ok(HealthTransitionCommit {
+        event,
+        id: transition.event_id.as_str().to_owned(),
+        payload_json,
+        incident_event,
+    })
+}
+
+fn insert_target_check(
+    transaction: &rusqlite::Transaction<'_>,
+    target_id: &str,
+    checked_at: &str,
+    check: &TargetCheckObservation,
+) -> Result<()> {
+    transaction.execute(
+        "INSERT INTO target_checks (
+            target_id, checked_at, status_code, latency_ms, result,
+            tls_expires_at, error_detail, region
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            target_id,
+            checked_at,
+            check.status_code,
+            check.latency_ms,
+            check.result,
+            check.tls_expires_at,
+            check.error_detail,
+            check.region,
+        ],
+    )?;
+    Ok(())
+}
+
+struct RecentTargetCheckRow {
+    target_id: String,
+    checked_at: String,
+    result: String,
+    status_code: Option<i64>,
+    latency_ms: Option<i64>,
+    tls_expires_at: Option<String>,
+}
+
+fn recent_checks_by_target(
+    connection: &rusqlite::Connection,
+    target_ids: &[String],
+) -> Result<BTreeMap<String, Vec<RecentTargetCheckRow>>> {
+    if target_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let placeholders = std::iter::repeat_n("?", target_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT target_id, checked_at, result, status_code, latency_ms, tls_expires_at
+         FROM (
+            SELECT
+                target_id, checked_at, result, status_code, latency_ms, tls_expires_at,
+                ROW_NUMBER() OVER (PARTITION BY target_id ORDER BY checked_at DESC) AS rn
+            FROM target_checks
+            WHERE target_id IN ({placeholders})
+         )
+         WHERE rn <= 5
+         ORDER BY target_id, rn"
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(target_ids.iter()), |row| {
+        Ok(RecentTargetCheckRow {
+            target_id: row.get(0)?,
+            checked_at: row.get(1)?,
+            result: row.get(2)?,
+            status_code: row.get(3)?,
+            latency_ms: row.get(4)?,
+            tls_expires_at: row.get(5)?,
+        })
+    })?;
+
+    let mut by_target = BTreeMap::<String, Vec<RecentTargetCheckRow>>::new();
+    for row in rows {
+        let row = row?;
+        by_target
+            .entry(row.target_id.clone())
+            .or_default()
+            .push(row);
+    }
+    Ok(by_target)
+}
+
+fn insert_monitor_check_in(
+    transaction: &rusqlite::Transaction<'_>,
+    monitor_id: &str,
+    check_in: &MonitorCheckInObservation,
+) -> Result<()> {
+    transaction.execute(
+        "INSERT INTO monitor_check_ins (
+            id, monitor_id, external_id, status, observed_at, ttl_ms, summary, context
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            check_in.id,
+            monitor_id,
+            check_in.external_id,
+            check_in.status,
+            check_in.observed_at,
+            check_in.ttl_ms,
+            check_in.summary,
+            check_in.context,
+        ],
+    )?;
+    Ok(())
+}
+
+struct ServiceEventInsert<'a> {
+    event_id: &'a EventId,
+    service: &'a str,
+    event: &'a str,
+    entity_type: &'a str,
+    entity_ref: &'a str,
+    state: &'a str,
+    summary: &'a str,
+    payload_json: &'a str,
+    now: &'a str,
+}
+
+fn insert_service_event(
+    transaction: &rusqlite::Transaction<'_>,
+    event: ServiceEventInsert<'_>,
+) -> Result<()> {
+    transaction.execute(
+        "INSERT INTO service_events (
+            id, service, event, entity_type, entity_ref, severity, summary, payload, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            event.event_id.as_str(),
+            event.service,
+            event.event,
+            event.entity_type,
+            event.entity_ref,
+            health_severity(event.state),
+            event.summary,
+            event.payload_json,
+            event.now,
+        ],
+    )?;
+    Ok(())
+}
+
+fn target_payload(transition: &TargetTransitionRecord<'_>) -> serde_json::Value {
+    json!({
+        "event": event_name_for(transition.state),
+        "target": {
+            "name": transition.name,
+            "service": transition.service,
+            "url": transition.url,
+        },
+        "state": transition.state,
+        "previous_state": transition.previous_state,
+        "consecutive_failures": transition.consecutive_failures,
+        "last_success_at": if transition.check_succeeded { Some(transition.now) } else { None },
+        "sequence": transition.sequence,
+        "timestamp": transition.now,
+    })
+}
+
+fn monitor_payload(transition: &MonitorTransitionRecord<'_>) -> serde_json::Value {
+    json!({
+        "event": event_name_for(transition.state),
+        "monitor": {
+            "name": transition.name,
+            "service": transition.service,
+            "mode": transition.mode,
+            "expected_every_ms": transition.expected_every_ms,
+            "grace_ms": transition.grace_ms,
+        },
+        "state": transition.state,
+        "previous_state": transition.previous_state,
+        "last_check_in_at": transition.last_check_in_at,
+        "last_check_in_status": transition.last_check_in_status,
+        "deadline_at": transition.deadline_at,
+        "sequence": transition.sequence,
+        "timestamp": transition.now,
+    })
+}
+
+fn tls_expiring_payload(event: &TlsExpiryEventInsert) -> serde_json::Value {
+    json!({
+        "event": "health_check.tls_expiring",
+        "target": {
+            "name": event.name,
+            "service": event.service,
+            "url": event.url,
+        },
+        "tls_expires_at": event.tls_expires_at,
+        "days_until_expiry": event.days_until_expiry,
+        "timestamp": event.now,
+    })
+}
+
+fn event_name_for(state: &str) -> &'static str {
+    match state {
+        "up" => "health_check.recovered",
+        "degraded" => "health_check.degraded",
+        "down" => "health_check.down",
+        _ => "health_check.updated",
+    }
+}
+
+fn health_severity(state: &str) -> &'static str {
+    match state {
+        "down" => "error",
+        "degraded" => "warning",
+        _ => "info",
+    }
+}

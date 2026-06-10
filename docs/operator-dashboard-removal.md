@@ -28,9 +28,8 @@ under backlog item #022 ("Contract hygiene and shallow-module collapse").
 Remove routes, LiveViews, login controller, dashboard layout, dashboard
 auth hook, dashboard tests, and the `DASHBOARD_PASSWORD` config surface.
 Operators consume the same data agents do: the query API (`GET
-/api/v1/query`, `GET /api/v1/errors/:id`, `GET /api/v1/status`, etc.) or
-the remote console (`flyctl ssh console --app canary-obs -C "bin/canary
-remote"`).
+/api/v1/query`, `GET /api/v1/errors/:id`, `GET /api/v1/status`, etc.) and
+the storage/backup operator scripts under `bin/`.
 
 Strengths:
 
@@ -46,8 +45,9 @@ Strengths:
 Weaknesses:
 
 - Operators who manually inspected `/dashboard` must switch to `curl |
-  jq` against the API or `bin/canary remote`. The README update tells
-  them how. This is a tiny blast radius: Canary has one operator today.
+  jq` against the API and the DR scripts in `bin/`. The README update
+  tells them how. This is a tiny blast radius: Canary has one operator
+  today.
 
 ### (b) Commit to the dashboard
 
@@ -73,7 +73,7 @@ Weaknesses:
 ## Decision
 
 Select (a). The dashboard is deleted. Operators read through the query
-API or `bin/canary remote` — the same primitives agents use.
+API and the DR scripts in `bin/` -- the same primitives agents use.
 
 ## Execution
 
@@ -98,9 +98,10 @@ item #022 on branch `deliver/022-contract-hygiene`. Changes:
   `test/canary_web/controllers/service_onboarding_controller_test.exs`.
 - Update `README.md` and the demo/qa skills to point operators at the
   query API and `flyctl ssh console` instead of `/dashboard`.
-- Drop `phoenix_live_view`, `phoenix_html`, and `lazy_html` from
-  `mix.exs` — no remaining users. `bcrypt_elixir` stays; `Canary.Auth`
-  still hashes API keys.
+- Drop `phoenix_live_view`, `phoenix_html`, and `lazy_html` from the
+  former Elixir dependency manifest -- no remaining users.
+  `bcrypt_elixir` stayed at that point because `Canary.Auth` still hashed
+  API keys before the later Rust migration.
 
 ## Follow-ups
 
