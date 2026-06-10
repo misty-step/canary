@@ -1,13 +1,7 @@
-/_build/
-/deps/
 *.db
 *.db-shm
 *.db-wal
 !crates/canary-store/tests/fixtures/*.db
-/cover/
-erl_crash.dump
-*.ez
-*.beam
 /tmp/
 .env
 .env.*

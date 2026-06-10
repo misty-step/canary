@@ -313,6 +313,11 @@ impl Store {
         api_keys::verify_key(&self.connection, raw_key)
     }
 
+    /// Return whether a raw bearer token has any active row with the same prefix.
+    pub fn active_api_key_prefix_exists(&self, raw_key: &str) -> Result<bool> {
+        api_keys::active_key_prefix_exists(&self.connection, raw_key)
+    }
+
     /// Query recent error groups for a service.
     pub fn errors_by_service(
         &self,
@@ -1979,6 +1984,37 @@ mod tests {
     }
 
     #[test]
+    fn errors_by_service_excludes_resolved_groups()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        store.commit_error_ingest(error_ingest(
+            "ERR-active123456",
+            "EVT-active123456",
+            "group-active",
+            "2026-05-28T20:00:00Z",
+        ))?;
+        store.connection.execute(
+            "INSERT INTO error_groups (
+                group_hash, service, error_class, severity, first_seen_at, last_seen_at,
+                last_error_id, total_count, status
+             ) VALUES ('group-resolved', 'cadence', 'ResolvedError', 'error',
+                '2026-05-28T20:00:00Z', '2026-05-28T20:00:00Z',
+                'ERR-resolved123', 99, 'resolved')",
+            [],
+        )?;
+        let now = OffsetDateTime::parse("2026-05-28T21:00:00Z", &Rfc3339)?;
+
+        let result =
+            store.errors_by_service_at("cadence", "24h", ServiceQueryOptions::default(), now)?;
+
+        assert_eq!(result.total_errors, 1);
+        assert_eq!(result.groups.len(), 1);
+        assert_eq!(result.groups[0].group_hash, "group-active");
+
+        Ok(())
+    }
+
+    #[test]
     fn errors_by_service_cursor_follows_count_then_hash_order()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let store = migrated_store()?;
@@ -2128,6 +2164,14 @@ mod tests {
                 ],
             )?;
         }
+        store.connection.execute(
+            "INSERT INTO error_groups (
+                group_hash, service, error_class, severity, first_seen_at, last_seen_at,
+                last_error_id, total_count, status
+             ) VALUES ('group-class-resolved', 'svc-resolved', 'ResolvedError', 'error',
+                ?1, ?1, 'ERR-class-resolved', 1000, 'resolved')",
+            [now],
+        )?;
         let as_of = OffsetDateTime::parse("2026-05-28T21:00:00Z", &Rfc3339)?;
 
         let result = store.errors_by_class_at("24h", as_of)?;

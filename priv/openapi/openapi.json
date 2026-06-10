@@ -3591,7 +3591,8 @@
             "type": "integer"
           },
           "allow_private": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Compatibility flag. Private target URLs are accepted only when the server is configured with ALLOW_PRIVATE_TARGETS=true."
           }
         }
       },
@@ -4485,7 +4486,8 @@
             "minimum": 1000
           },
           "allow_private": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Compatibility flag. Private target URLs are accepted only when the server is configured with ALLOW_PRIVATE_TARGETS=true."
           }
         }
       },

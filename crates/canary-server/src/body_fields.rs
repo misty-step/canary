@@ -117,10 +117,6 @@ pub(crate) fn optional_string(value: Option<&Value>) -> Option<String> {
     }
 }
 
-pub(crate) fn optional_bool(value: Option<&Value>) -> bool {
-    matches!(value, Some(Value::Bool(true)))
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -218,20 +214,15 @@ mod tests {
     }
 
     #[test]
-    fn optional_scalars_only_accept_non_empty_strings_and_true_booleans() -> Result<(), String> {
+    fn optional_string_accepts_only_non_empty_strings() -> Result<(), String> {
         let attrs = object(json!({
             "string": "svc",
-            "empty": "",
-            "truthy": true,
-            "falsey": false
+            "empty": ""
         }))?;
 
         assert_eq!(optional_string(attrs.get("string")), Some("svc".to_owned()));
         assert_eq!(optional_string(attrs.get("empty")), None);
         assert_eq!(optional_string(attrs.get("missing")), None);
-        assert!(optional_bool(attrs.get("truthy")));
-        assert!(!optional_bool(attrs.get("falsey")));
-        assert!(!optional_bool(attrs.get("missing")));
         Ok(())
     }
 }

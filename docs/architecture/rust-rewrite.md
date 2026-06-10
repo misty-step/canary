@@ -26,9 +26,8 @@ contract tests.
 crates/
   canary-core/      # typed IDs, health FSM, grouping, classification, incidents
   canary-http/      # RFC 9457, auth/scope wire behavior, OpenAPI parity helpers
-  canary-store/     # SQLite schema, migrations, single-writer repository
+  canary-store/     # SQLite schema, single-writer repository, query read models
   canary-ingest/    # validates payloads and commits grouped errors
-  canary-events/    # timeline ledger and event fanout
   canary-workers/   # webhook delivery, retention, TLS scan, retry ledger
   canary-server/    # Axum router, app wiring, config, telemetry, shutdown
 ```
@@ -49,8 +48,9 @@ The crate boundaries should stay deep:
 - `canary-store` will hide SQLite, migrations, and the single-writer boundary.
 - `canary-ingest` will expose one high-level `ingest` operation rather than a
   scatter of validation, grouping, classification, and incident hooks.
-- `canary-events` will make timeline append plus webhook fanout one committed
-  operation, so callers cannot forget half of the product contract.
+- `canary-server` effect sinks make timeline append plus webhook fanout part of
+  one committed runtime path, so callers cannot forget half of the product
+  contract.
 
 Avoid small crates or modules that only rename another layer. In the Phoenix
 service, thin facades such as summary/status/report response builders are useful
@@ -66,7 +66,7 @@ locally but should not become Rust crate boundaries.
   `crates/canary-core/src/ingest/grouping.rs`,
   `crates/canary-core/src/ingest/classification.rs`, and
   `crates/canary-ingest/src/lib.rs`.
-- SQLite schema and migrations: `crates/canary-store/src/migrations.rs`.
+- SQLite schema and migrations: `crates/canary-store/src/schema.rs`.
 - Webhook delivery contract: `crates/canary-workers/src/webhooks.rs`.
 - Frozen legacy cutover fixtures:
   `crates/canary-store/tests/fixtures/legacy_schema.db` and

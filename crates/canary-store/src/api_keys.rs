@@ -127,6 +127,19 @@ pub(crate) fn verify_key(connection: &Connection, raw_key: &str) -> Result<Optio
     Ok(None)
 }
 
+pub(crate) fn active_key_prefix_exists(connection: &Connection, raw_key: &str) -> Result<bool> {
+    let prefix = key_prefix(raw_key);
+    let exists = connection.query_row(
+        "SELECT EXISTS (
+            SELECT 1 FROM api_keys
+            WHERE key_prefix = ?1 AND revoked_at IS NULL
+         )",
+        [prefix],
+        |row| row.get::<_, bool>(0),
+    )?;
+    Ok(exists)
+}
+
 pub(crate) fn key_prefix(raw_key: &str) -> String {
     raw_key.chars().take(API_KEY_PREFIX_LEN).collect()
 }

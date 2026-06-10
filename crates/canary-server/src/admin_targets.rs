@@ -24,10 +24,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     IngestState, TargetProbeLifecycleCommand,
-    body_fields::{
-        optional_bool, optional_positive_i64, optional_positive_u32, optional_string,
-        required_string,
-    },
+    body_fields::{optional_positive_i64, optional_positive_u32, optional_string, required_string},
     http_contract::{check_content_length, json_status_response, problem_response, response},
     require_scope,
     server_time::current_rfc3339,
@@ -310,9 +307,8 @@ fn parse_target_create(
         )));
     };
     let service = optional_string(attrs.get("service")).unwrap_or_else(|| name.clone());
-    let allow_private = configured_allow_private || optional_bool(attrs.get("allow_private"));
     if let Err(reason) =
-        validate_target_configuration(&url, &method, headers.as_deref(), allow_private)
+        validate_target_configuration(&url, &method, headers.as_deref(), configured_allow_private)
     {
         return Err(Box::new(invalid_target_url_problem(reason)));
     }

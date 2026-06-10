@@ -60,6 +60,7 @@ pub(crate) fn require_scope(
         BearerToken::Present(token) => token,
         BearerToken::Missing => return Err(Box::new(missing_authorization_problem(None))),
     };
+    let auth_fail_identity = reject_limited_unknown_prefix(state, headers, token)?;
 
     let store = state
         .lock_store()
@@ -68,13 +69,13 @@ pub(crate) fn require_scope(
         .verify_api_key(token)
         .map_err(|_| Box::new(internal_problem()))?
     else {
-        account_auth_fail(state, headers)?;
+        account_auth_fail_identity(state, &auth_fail_identity)?;
         return Err(Box::new(invalid_api_key_problem(None)));
     };
     drop(store);
 
     let Some(scope) = ApiKeyScope::parse(&key.scope) else {
-        account_auth_fail(state, headers)?;
+        account_auth_fail_identity(state, &auth_fail_identity)?;
         return Err(Box::new(invalid_api_key_problem(None)));
     };
     if scope.allows(permission) {
@@ -86,9 +87,43 @@ pub(crate) fn require_scope(
     }
 }
 
-fn account_auth_fail(state: &IngestState, headers: &HeaderMap) -> Result<(), Box<ProblemDetails>> {
+fn reject_limited_unknown_prefix(
+    state: &IngestState,
+    headers: &HeaderMap,
+    token: &str,
+) -> Result<String, Box<ProblemDetails>> {
     let identity = auth_fail_identity(headers, state.auth_fail_identity());
-    enforce_rate_limit(state, RateLimitKind::AuthFail, &identity)
+    let mut limiter = state
+        .rate_limiter()
+        .lock()
+        .map_err(|_| Box::new(internal_problem()))?;
+
+    let retry_after_seconds = match limiter.peek(RateLimitKind::AuthFail, &identity) {
+        RateLimitDecision::Allowed => return Ok(identity),
+        RateLimitDecision::Limited {
+            retry_after_seconds,
+        } => retry_after_seconds,
+    };
+    drop(limiter);
+
+    let store = state
+        .lock_store()
+        .map_err(|_| Box::new(internal_problem()))?;
+    if store
+        .active_api_key_prefix_exists(token)
+        .map_err(|_| Box::new(internal_problem()))?
+    {
+        Ok(identity)
+    } else {
+        Err(Box::new(rate_limited_problem(retry_after_seconds)))
+    }
+}
+
+fn account_auth_fail_identity(
+    state: &IngestState,
+    identity: &str,
+) -> Result<(), Box<ProblemDetails>> {
+    enforce_rate_limit(state, RateLimitKind::AuthFail, identity)
 }
 
 pub(crate) fn auth_fail_identity(headers: &HeaderMap, config: AuthFailIdentityConfig) -> String {

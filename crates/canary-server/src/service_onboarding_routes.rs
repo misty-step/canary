@@ -254,17 +254,16 @@ fn parse_service_onboarding_create(
     let environment = optional_trimmed_string(attrs.get("environment"))
         .unwrap_or_else(|| "production".to_owned());
     let interval_ms = optional_service_onboarding_interval(&attrs, &mut errors);
-    let allow_private = match attrs.get("allow_private") {
-        Some(Value::Bool(value)) => *value,
-        Some(Value::Null) | None => false,
+    match attrs.get("allow_private") {
+        Some(Value::Bool(_)) => {}
+        Some(Value::Null) | None => {}
         Some(_) => {
             errors.insert(
                 "allow_private".to_owned(),
                 vec!["must be a boolean".to_owned()],
             );
-            false
         }
-    };
+    }
 
     if !errors.is_empty() {
         return Err(Box::new(validation_problem(
@@ -285,8 +284,7 @@ fn parse_service_onboarding_create(
             ValidationErrors::new(),
         )));
     };
-    if let Err(reason) =
-        validate_target_configuration(&url, "GET", None, configured_allow_private || allow_private)
+    if let Err(reason) = validate_target_configuration(&url, "GET", None, configured_allow_private)
     {
         return Err(Box::new(validation_problem(
             "Invalid service onboarding request.",

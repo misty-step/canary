@@ -8,11 +8,19 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 
 use reqwest::Url;
 
-/// Validate a server-side HTTP(S) destination and return resolved addresses.
+/// Validated outbound HTTP(S) destination with the DNS answer that was checked.
+#[derive(Debug, Clone)]
+pub(crate) struct ValidatedHttpDestination {
+    pub(crate) url: Url,
+    pub(crate) host: String,
+    pub(crate) addrs: Vec<SocketAddr>,
+}
+
+/// Validate a server-side HTTP(S) destination and return a pinned request plan.
 pub(crate) fn validate_public_http_destination(
     raw_url: &str,
     surface: &str,
-) -> Result<Vec<SocketAddr>, String> {
+) -> Result<ValidatedHttpDestination, String> {
     let url = Url::parse(raw_url).map_err(|error| format!("{surface} URL is invalid: {error}"))?;
     match url.scheme() {
         "http" | "https" => {}
@@ -23,7 +31,8 @@ pub(crate) fn validate_public_http_destination(
     }
     let host = url
         .host_str()
-        .ok_or_else(|| format!("{surface} URL is missing a host"))?;
+        .ok_or_else(|| format!("{surface} URL is missing a host"))?
+        .to_owned();
     let port = url
         .port_or_known_default()
         .ok_or_else(|| format!("{surface} URL is missing a port"))?;
@@ -32,7 +41,7 @@ pub(crate) fn validate_public_http_destination(
         return Err(format!("{surface} URL resolves to localhost"));
     }
 
-    let addrs = (host, port)
+    let addrs = (host.as_str(), port)
         .to_socket_addrs()
         .map_err(|error| format!("{surface} DNS resolution failed: {error}"))?
         .collect::<Vec<_>>();
@@ -47,7 +56,7 @@ pub(crate) fn validate_public_http_destination(
             ));
         }
     }
-    Ok(addrs)
+    Ok(ValidatedHttpDestination { url, host, addrs })
 }
 
 fn is_global_ip(ip: IpAddr) -> bool {

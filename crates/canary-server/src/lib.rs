@@ -2518,6 +2518,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_onboarding_request_allow_private_cannot_override_server_policy()
+    -> Result<(), Box<dyn Error>> {
+        let recorder = Arc::new(RecordingTargetControl::default());
+        let state = test_ingest_state()?.with_target_control(recorder.clone());
+        let router = ingest_router(state);
+
+        let response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/service-onboarding",
+                ADMIN_KEY,
+                r#"{"service":"worker","url":"http://127.0.0.1:9/health","allow_private":true}"#,
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(response).await?;
+        assert_eq!(body["detail"], "Invalid service onboarding request.");
+        assert!(
+            body["errors"]["url"][0].as_str().is_some_and(
+                |message| message.contains("non-global") || message.contains("localhost")
+            )
+        );
+
+        let targets = router
+            .oneshot(read_request(ADMIN_KEY, "/api/v1/targets")?)
+            .await?;
+        assert_eq!(json_body(targets).await?["targets"], json!([]));
+        assert!(recorder.commands().is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn admin_target_interval_update_reconfigures_only_when_cadence_changes()
     -> Result<(), Box<dyn Error>> {
         let recorder = Arc::new(RecordingTargetControl::default());
@@ -2774,6 +2808,40 @@ mod tests {
             .oneshot(read_request(ADMIN_KEY, "/api/v1/targets")?)
             .await?;
         assert_eq!(json_body(list).await?["targets"], json!([]));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn admin_target_request_allow_private_cannot_override_server_policy()
+    -> Result<(), Box<dyn Error>> {
+        let recorder = Arc::new(RecordingTargetControl::default());
+        let state = test_ingest_state()?.with_target_control(recorder.clone());
+        let router = ingest_router(state);
+
+        let response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/targets",
+                ADMIN_KEY,
+                r#"{"url":"http://127.0.0.1:9/health","name":"Local API","allow_private":true}"#,
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json_body(response).await?;
+        assert_eq!(body["code"], "validation_error");
+        assert!(
+            body["detail"].as_str().is_some_and(
+                |message| message.contains("non-global") || message.contains("localhost")
+            )
+        );
+
+        let list = router
+            .oneshot(read_request(ADMIN_KEY, "/api/v1/targets")?)
+            .await?;
+        assert_eq!(json_body(list).await?["targets"], json!([]));
+        assert!(recorder.commands().is_empty());
 
         Ok(())
     }

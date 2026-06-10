@@ -641,7 +641,7 @@ fn error_class_aggregates(
     let mut statement = connection.prepare(
         "SELECT error_class, COALESCE(SUM(total_count), 0), COUNT(DISTINCT service)
          FROM error_groups
-         WHERE last_seen_at >= ?1
+         WHERE last_seen_at >= ?1 AND status = 'active'
          GROUP BY error_class
          ORDER BY SUM(total_count) DESC, error_class ASC
          LIMIT 50",
@@ -662,7 +662,7 @@ fn error_class_totals(connection: &Connection, cutoff: &str) -> QueryResult<(u64
     Ok(connection.query_row(
         "SELECT COALESCE(SUM(total_count), 0), COUNT(DISTINCT error_class)
          FROM error_groups
-         WHERE last_seen_at >= ?1",
+         WHERE last_seen_at >= ?1 AND status = 'active'",
         [cutoff],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?)
@@ -1553,6 +1553,7 @@ fn service_groups_sql() -> &'static str {
      WHERE (?1 IS NULL OR g.service = ?1)
        AND (?2 IS NULL OR g.error_class = ?2)
        AND g.last_seen_at >= ?3
+       AND g.status = 'active'
        AND (?4 IS NULL OR EXISTS (
          SELECT 1 FROM annotations a
          WHERE a.group_hash = g.group_hash AND a.action = ?5

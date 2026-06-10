@@ -13,7 +13,9 @@ use canary_workers::webhooks::{
 use serde_json::{Value, json};
 
 use crate::{
-    IngestEffectSink, egress::validate_public_http_destination, server_time::current_rfc3339,
+    IngestEffectSink,
+    egress::{ValidatedHttpDestination, validate_public_http_destination},
+    server_time::current_rfc3339,
 };
 
 /// Runtime boundary for scheduling webhook delivery jobs.
@@ -122,7 +124,7 @@ pub trait WebhookTransport: Send + Sync + 'static {
 
 /// Concrete HTTP transport for outbound webhook delivery.
 pub struct HttpWebhookTransport {
-    client: reqwest::blocking::Client,
+    timeout: StdDuration,
     allow_private_destinations: bool,
 }
 
@@ -155,31 +157,62 @@ impl HttpWebhookTransport {
         timeout: StdDuration,
         allow_private_destinations: bool,
     ) -> Result<Self, String> {
-        let client = reqwest::blocking::Client::builder()
+        let _ = reqwest::blocking::Client::builder()
             .timeout(timeout)
             .connect_timeout(Self::DEFAULT_CONNECT_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .http1_only()
             .user_agent(Self::USER_AGENT)
+            .no_proxy()
             .build()
             .map_err(|error| format!("failed to build webhook HTTP transport: {error}"))?;
 
         Ok(Self {
-            client,
+            timeout,
             allow_private_destinations,
         })
+    }
+
+    fn client_for_destination(
+        &self,
+        destination: Option<&ValidatedHttpDestination>,
+    ) -> Result<reqwest::blocking::Client, String> {
+        let mut builder = reqwest::blocking::Client::builder()
+            .timeout(self.timeout)
+            .connect_timeout(Self::DEFAULT_CONNECT_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .http1_only()
+            .user_agent(Self::USER_AGENT)
+            .no_proxy();
+
+        if let Some(destination) = destination {
+            builder = builder.resolve_to_addrs(&destination.host, &destination.addrs);
+        }
+
+        builder
+            .build()
+            .map_err(|error| format!("failed to build webhook HTTP transport: {error}"))
     }
 }
 
 impl WebhookTransport for HttpWebhookTransport {
     fn send(&self, request: &WebhookRequest) -> TransportResult {
-        if !self.allow_private_destinations
-            && let Err(error) = validate_public_http_destination(&request.url, "webhook")
-        {
-            return TransportResult::RequestError(error);
-        }
-
-        let mut builder = self.client.post(&request.url).body(request.body.clone());
+        let destination = if self.allow_private_destinations {
+            None
+        } else {
+            match validate_public_http_destination(&request.url, "webhook") {
+                Ok(destination) => Some(destination),
+                Err(error) => return TransportResult::RequestError(error),
+            }
+        };
+        let client = match self.client_for_destination(destination.as_ref()) {
+            Ok(client) => client,
+            Err(error) => return TransportResult::RequestError(error),
+        };
+        let url = destination
+            .as_ref()
+            .map_or(request.url.as_str(), |destination| destination.url.as_str());
+        let mut builder = client.post(url).body(request.body.clone());
         for (name, value) in request.headers.as_pairs() {
             builder = builder.header(name, value);
         }

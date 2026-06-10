@@ -23,6 +23,11 @@ impl RateLimiter {
         self.check_at(kind, identity, Instant::now())
     }
 
+    /// Check whether a request would be limited without consuming capacity.
+    pub(crate) fn peek(&mut self, kind: RateLimitKind, identity: &str) -> RateLimitDecision {
+        self.peek_at(kind, identity, Instant::now())
+    }
+
     fn check_at(&mut self, kind: RateLimitKind, identity: &str, now: Instant) -> RateLimitDecision {
         let policy = kind.policy();
         self.buckets.retain(|key, bucket| {
@@ -57,6 +62,31 @@ impl RateLimiter {
                 );
                 RateLimitDecision::Allowed
             }
+        }
+    }
+
+    fn peek_at(&mut self, kind: RateLimitKind, identity: &str, now: Instant) -> RateLimitDecision {
+        self.buckets.retain(|key, bucket| {
+            now.duration_since(bucket.window_start) < window_duration(key.kind)
+        });
+        let key = RateLimitBucketKey {
+            kind,
+            identity: identity.to_owned(),
+        };
+
+        match self.buckets.get(&key) {
+            Some(bucket)
+                if now.duration_since(bucket.window_start) < window_duration(kind)
+                    && bucket.count >= kind.policy().limit =>
+            {
+                RateLimitDecision::Limited {
+                    retry_after_seconds: retry_after_seconds(
+                        window_duration(kind),
+                        now.duration_since(bucket.window_start),
+                    ),
+                }
+            }
+            _ => RateLimitDecision::Allowed,
         }
     }
 }
@@ -170,5 +200,35 @@ mod tests {
             RateLimitDecision::Allowed
         );
         assert_eq!(limiter.buckets.len(), 1);
+    }
+
+    #[test]
+    fn peek_reports_limited_without_consuming_capacity() {
+        let mut limiter = RateLimiter::default();
+        let start = Instant::now();
+
+        for _ in 0..29 {
+            assert_eq!(
+                limiter.check_at(RateLimitKind::Query, "KEY-read", start),
+                RateLimitDecision::Allowed
+            );
+        }
+
+        assert_eq!(
+            limiter.peek_at(RateLimitKind::Query, "KEY-read", start),
+            RateLimitDecision::Allowed
+        );
+        assert_eq!(
+            limiter.check_at(RateLimitKind::Query, "KEY-read", start),
+            RateLimitDecision::Allowed
+        );
+        assert!(matches!(
+            limiter.peek_at(RateLimitKind::Query, "KEY-read", start),
+            RateLimitDecision::Limited { .. }
+        ));
+        assert!(matches!(
+            limiter.check_at(RateLimitKind::Query, "KEY-read", start),
+            RateLimitDecision::Limited { .. }
+        ));
     }
 }
