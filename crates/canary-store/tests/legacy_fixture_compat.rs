@@ -6,6 +6,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     str::FromStr,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -91,6 +92,8 @@ const FOREIGN_KEY_TABLES: &[&str] = &[
     "monitor_check_ins",
     "monitor_state",
 ];
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, PartialEq, Eq)]
 struct Column {
@@ -614,11 +617,7 @@ fn copy_populated_fixture(name: &str) -> Result<(PathBuf, PathBuf), Box<dyn Erro
 }
 
 fn copy_fixture_from(name: &str, source: PathBuf) -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "canary-legacy-fixture-{name}-{}-{nonce}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("canary-legacy-fixture-{name}-{}", temp_suffix()?));
     fs::create_dir_all(&dir)?;
     let path = dir.join("legacy_fixture.db");
     fs::copy(source, &path)?;
@@ -626,14 +625,16 @@ fn copy_fixture_from(name: &str, source: PathBuf) -> Result<(PathBuf, PathBuf), 
 }
 
 fn generated_fixture_path(name: &str) -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "canary-rust-fixture-{name}-{}-{nonce}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("canary-rust-fixture-{name}-{}", temp_suffix()?));
     fs::create_dir_all(&dir)?;
     let path = dir.join("rust_fixture.db");
     Ok((dir, path))
+}
+
+fn temp_suffix() -> Result<String, Box<dyn Error>> {
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    Ok(format!("{}-{nonce}-{counter}", std::process::id()))
 }
 
 fn assert_no_sqlite_sidecars(path: &Path) {
