@@ -1,8 +1,10 @@
 //! Production process entrypoint for the Rust Canary server.
 
-use std::{error::Error, process};
+use std::{error::Error, path::PathBuf, process};
 
-use canary_server::{CanaryServer, ServerProcessConfig};
+use canary_server::{CanaryServer, ServerProcessConfig, keygen};
+
+const DEFAULT_DB_PATH: &str = "/data/canary.db";
 
 #[tokio::main]
 async fn main() {
@@ -13,6 +15,14 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Box<dyn Error>> {
+    // Operator subcommand: `canary-server mint-key [--scope S] [--name N]`.
+    // Recovery path for issuing a scoped API key directly against the SQLite
+    // store when the one-time bootstrap key has been lost. Defaults to admin.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("mint-key") {
+        return run_mint_key(&args[1..]);
+    }
+
     let config = ServerProcessConfig::from_env(std::env::vars())?;
     let listener = tokio::net::TcpListener::bind(config.listen_addr).await?;
     let local_addr = listener.local_addr()?;
@@ -20,6 +30,38 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     eprintln!("canary-server listening on {local_addr}");
     server.serve(listener, shutdown_signal()).await?;
+    Ok(())
+}
+
+fn run_mint_key(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let mut scope = "admin".to_owned();
+    let mut name = "operator-minted".to_owned();
+    let mut iter = args.iter();
+    while let Some(flag) = iter.next() {
+        match flag.as_str() {
+            "--scope" => {
+                scope = iter.next().ok_or("--scope requires a value")?.clone();
+            }
+            "--name" => {
+                name = iter.next().ok_or("--name requires a value")?.clone();
+            }
+            other => return Err(format!("unknown mint-key argument: {other}").into()),
+        }
+    }
+
+    let db_path = std::env::var("CANARY_DB_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_DB_PATH));
+
+    let raw_key = keygen::mint_key(&db_path, &scope, &name)?;
+    // The raw key prints to stdout; everything else goes to stderr so the key
+    // can be captured cleanly (e.g. `... mint-key | tail -1`).
+    eprintln!(
+        "Minted {scope} API key {name:?} against {}",
+        db_path.display()
+    );
+    eprintln!("Store this key securely - it will not be shown again.");
+    println!("{raw_key}");
     Ok(())
 }
 
