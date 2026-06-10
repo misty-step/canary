@@ -67,7 +67,7 @@ run_entrypoint_failure() {
 
 assert_contains() {
   local output="$1" expected="$2" test_name="$3"
-  if echo "$output" | grep -qF "$expected"; then
+  if grep -qF -- "$expected" <<<"$output"; then
     echo "  PASS: $test_name"
     PASS=$((PASS + 1))
   else
@@ -80,7 +80,7 @@ assert_contains() {
 
 assert_not_contains() {
   local output="$1" unexpected="$2" test_name="$3"
-  if echo "$output" | grep -qF "$unexpected"; then
+  if grep -qF -- "$unexpected" <<<"$output"; then
     echo "  FAIL: $test_name"
     echo "    Expected NOT to contain: $unexpected"
     echo "    Got: $output"

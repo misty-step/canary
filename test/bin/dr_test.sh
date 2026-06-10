@@ -50,7 +50,7 @@ run_failure() {
 
 assert_contains() {
   local output="$1" expected="$2" test_name="$3"
-  if echo "$output" | grep -qF "$expected"; then
+  if grep -qF -- "$expected" <<<"$output"; then
     echo "  PASS: $test_name"
     PASS=$((PASS + 1))
   else

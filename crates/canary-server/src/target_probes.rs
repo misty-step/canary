@@ -2012,7 +2012,7 @@ mod tests {
             thread::sleep(StdDuration::from_millis(10));
         }
 
-        let blocked = lifecycle.run_due(1_001)?;
+        let blocked = drain_until_completed(&mut lifecycle, 1_001, 1)?;
         assert_eq!(blocked.completed, 1);
         assert_eq!(blocked.probed, 1);
         assert_eq!(blocked.launched, 0);
