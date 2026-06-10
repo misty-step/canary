@@ -722,12 +722,17 @@ require(
     "dagger/src/index.ts must scope cache volumes by dag.defaultPlatform()",
 )
 require(
-    dagger_source.count("const platformKey = await cachePlatformKey()") == 2,
+    dagger_source.count("const platformKey = await cachePlatformKey()") == 3,
     "Each Dagger dependency container must compute a platform cache key once",
 )
 require(
-    dagger_source.count("platformKey, imageKey, digest") == 5,
+    dagger_source.count("platformKey, imageKey, digest") == 8,
     "Every Dagger cache volume must scope its key by platform, image, and lockfile digest",
+)
+require(
+    "async function repoUsesRust(source: Directory)" in dagger_source
+    and 'expected Cargo.lock or mix.lock' in dagger_source,
+    "Dagger strict must support both Rust and legacy Elixir candidate source shapes",
 )
 
 sync_result = subprocess.run(
