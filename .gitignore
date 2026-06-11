@@ -45,6 +45,15 @@ thinktank.log
 # Rust build output
 /target/
 
+# Legacy Elixir build output from pre-Rust branches
+/_build/
+/deps/
+/canary_sdk/_build/
+/canary_sdk/deps/
+/canary_sdk/cover/
+/cover/
+erl_crash.dump
+
 # OS
 .DS_Store
 

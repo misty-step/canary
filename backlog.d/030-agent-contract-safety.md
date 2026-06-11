@@ -32,11 +32,11 @@ replay webhook delivery context without out-of-band human interpretation.
       have operation-level descriptions or `x-agent-guidance` metadata that
       says when to call them, what to trust in the response, and what to do
       next.
-- [ ] `GET /api/v1/webhook-deliveries/{delivery_id}` returns one ledger row
+- [x] `GET /api/v1/webhook-deliveries/{delivery_id}` returns one ledger row
       by stable `X-Delivery-Id`, including event type, status, attempt count,
       response metadata, payload identity, and enough context for an agent to
       reconcile a disputed or failed delivery.
-- [ ] `info.x-agent-guide.webhook_contract` documents the canonical recovery
+- [x] `info.x-agent-guide.webhook_contract` documents the canonical recovery
       path: dedupe by `X-Delivery-Id`, read the delivery row for diagnostics,
       and replay durable state through `/api/v1/timeline` before acting.
 - [ ] `info.x-agent-guide` includes a `cold_start` path for agents with no
@@ -61,6 +61,14 @@ scheme and a scope enum but does not bind required scopes to operations. The
 spec also says agents should dedupe by `X-Delivery-Id` and replay through the
 timeline, but the delivery ledger is list-only from the contract's point of
 view.
+
+**2026-06-11 grooming evidence.** Rust now exposes
+`GET /api/v1/webhook-deliveries/{delivery_id}` and the checked-in
+`info.x-agent-guide.webhook_contract` names that diagnostic path. The remaining
+gap is the operation-level contract: an inspection of `priv/openapi/openapi.json`
+found 40 operations, zero `x-canary-required-scope` entries, and zero
+`x-agent-guidance` entries. Keep this ticket focused on scope metadata, summary
+completeness, cold-start guidance, and annotation write-back conventions.
 
 **Research signal.** Current agent-observability work is converging on rich
 structured traces, tool-call context, state transitions, operation replay, and
@@ -89,4 +97,3 @@ generic replay semantics. Consumers still decide what to do with that context.
 
 **Lane.** Lane 2 (contract + observability). Depends on #011 and #012, both
 already done. Ships independently.
-contract item can be active at a time.

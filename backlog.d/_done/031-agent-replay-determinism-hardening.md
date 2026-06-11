@@ -1,7 +1,7 @@
 # Agent replay determinism hardening
 
 Priority: high
-Status: ready
+Status: done
 Estimate: M
 
 ## Goal
@@ -14,11 +14,11 @@ Make agent replay and health probing fail explicitly at contract boundaries inst
 - Move repo mutation, issue creation, or downstream repair work into Canary.
 
 ## Oracle
-- [ ] Malformed cursor values on agent-facing pagination endpoints return RFC 9457 `422 validation_error` responses instead of silently falling back to the first page or a legacy hash path. Cover at least `/api/v1/query` with `cargo test -p canary-server malformed_query_cursor --locked`.
-- [ ] Health target creation rejects intervals that cannot safely schedule jittered checks. The lower bound is documented in the target schema/OpenAPI contract, and a controller test proves the invalid interval never spawns a checker.
-- [ ] Persisted target methods cannot crash `Canary.Health.Probe.check/1`; invalid methods are rejected before persistence or converted into an explicit probe error in a focused unit test.
-- [ ] Boot-time migration or seed failure cannot leave `/readyz` reporting healthy against an unverifiable schema. The chosen behavior is either fail-fast startup or readiness-gated failure, covered by a narrow test or release-task assertion.
-- [ ] `./bin/validate --fast` is green on the branch.
+- [x] Malformed cursor values on agent-facing pagination endpoints return RFC 9457 `422 validation_error` responses instead of silently falling back to the first page or a legacy hash path. Covered by the server query route tests and `cargo test -p canary-store --locked errors_by_service_rejects_malformed_cursor`.
+- [x] Health target creation rejects intervals that cannot safely schedule jittered checks. The lower bound is documented in the target schema/OpenAPI contract, and a controller test proves the invalid interval never spawns a checker.
+- [x] Persisted target methods cannot crash Rust target probing; invalid methods are rejected before persistence or converted into an explicit probe error in a focused unit test.
+- [x] Boot-time migration or seed failure cannot leave `/readyz` reporting healthy against an unverifiable schema. The chosen behavior is either fail-fast startup or readiness-gated failure, covered by a narrow test or release-task assertion.
+- [x] `./bin/validate --fast` is green on the branch.
 
 ## Notes
 
@@ -50,3 +50,8 @@ Make agent replay and health probing fail explicitly at contract boundaries inst
 **Responder-boundary check.** This is Canary-side substrate hardening only: ingest/health/query/readiness contracts. Consumers still own triage and repair decisions.
 
 **Lane.** Lane 2 (contract + observability). Pairs with #030: #030 makes the agent contract explicit; #031 makes malformed contract inputs fail deterministically.
+
+**Archived by /groom 2026-06-11.** The Rust production path now carries the
+cursor, target-cadence, invalid-method, and boot-failure guardrails listed
+above. The gate evidence for this archive is the focused store cursor test plus
+the `canary-server` package tests on the grooming branch.
