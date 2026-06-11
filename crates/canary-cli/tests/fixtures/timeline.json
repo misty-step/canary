@@ -1,0 +1,11 @@
+{
+  "service": "chrondle",
+  "window": "24h",
+  "summary": "Returned 2 timeline events for chrondle in the last 24h.",
+  "returned_count": 2,
+  "events": [
+    {"id": "EVT-1", "event": "error.ingested"},
+    {"id": "EVT-2", "event": "incident.opened"}
+  ],
+  "cursor": null
+}

@@ -1,0 +1,4 @@
+{
+  "summary": "1 active incident.",
+  "incidents": [{"id": "INC-1", "service": "chrondle", "state": "investigating", "severity": "high"}]
+}

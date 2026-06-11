@@ -1,0 +1,3 @@
+{
+  "targets": [{"id": "TGT-1", "service": "chrondle", "active": true, "url": "https://chrondle.example/healthz"}]
+}

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "summary": {
+    "covered": 2,
+    "partial": 1,
+    "blocked": 1,
+    "ignored": 0
+  },
+  "services": [],
+  "strict_failures": ["unregistered deployment: example"]
+}
