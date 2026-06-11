@@ -26,3 +26,8 @@ Blocking evidence from the 2026-04-17 operator audit:
 - `https://apollo-app-service.azurewebsites.net/health` resolved, but returned `404`
 - `https://adminifi.app` timed out from the operator environment
 - `https://my-public-adminifi.azurewebsites.net/api/health` did not resolve
+
+2026-06-11 update: the deployed-service registry now carries `adminifi-web` and
+`consumer-portal` as `blocked` entries with owner, platform, URL evidence,
+failure mode, and next action. This ticket remains blocked until canonical
+public health URLs are published or the registry entry is reclassified.

@@ -1,6 +1,6 @@
 # Canary Backlog
 
-`backlog.d/` is the source of truth for active backlog work as of 2026-05-24.
+`backlog.d/` is the source of truth for active backlog work as of 2026-06-11.
 
 ## Priority Order
 
@@ -29,7 +29,14 @@
 | 023 | Incident as atomic agent unit (detail API) | high | done | M |
 | 024 | Signal-agnostic annotations | medium | done | M |
 | 030 | Agent contract safety pass | high | ready | M |
-| 031 | Agent replay determinism hardening | high | ready | M |
+| 031 | Agent replay determinism hardening | high | done | M |
+| 032 | Live Rust write-path evidence | high | ready | L |
+| 034 | Worker lifecycle readiness oracle | high | ready | L |
+| 033 | Deployed service registry lifecycle | high | done | M |
+| 035 | Deployed app Canary coverage | high | ready | XL |
+| 036 | Agent-native inspection surface | high | ready | L |
+| 037 | Watch the watchmen | high | ready | L |
+| 038 | One-command integration agent | high | ready | XL |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
 
@@ -51,7 +58,14 @@
 013 (metrics) — self-observability for dogfooding credibility
 014 (DR) — data durability assurance
 030 (agent contract safety) — depends on 011 + 012; makes scopes, summaries, cold-start guidance, annotation write-back, and webhook delivery replay machine-verifiable
-031 (agent replay determinism) — pairs with 030; malformed cursors, unsafe target cadence, invalid persisted probe methods, and unverifiable boot state fail explicitly before agents trust replay state
+031 (agent replay determinism) — shipped; malformed cursors, unsafe target cadence, invalid persisted probe methods, and unverifiable boot state fail explicitly before agents trust replay state
+032 (live Rust write-path evidence) — follows the Rust production cutover; proves admin/ingest/webhook/monitor/target write paths with replayable evidence packets
+033 (deployed service registry lifecycle) — shipped; owned-service monitoring state is timestamped and actionable, with blocked Adminifi and missing Vercel/Fly coverage captured in the registry
+034 (worker lifecycle readiness oracle) — makes webhook, target, monitor, retention, and TLS workers visible to readiness/gate checks
+035 (deployed app Canary coverage) — ensures every active owned Vercel/Fly deployment is enrolled or explicitly blocked with evidence
+036 (agent-native inspection surface) — gives Codex/Claude a stable CLI/JSON/MCP-shaped way to inspect Canary status, errors, incidents, timelines, targets, and dogfood coverage
+037 (watch the watchmen) — proves Canary itself from outside the Canary process and preserves receipts when Canary is unreachable
+038 (one-command integration agent) — discovers, patches, enrolls, and verifies Canary integration for Vercel/Fly/Next apps
 
 022 (contract hygiene) ──── ships independently; restores summary invariant + supervision-tree collapse
 023 (incident detail API) ──→ Canary-side substrate for bb/011 (and thus 010 ramp pattern)
@@ -62,15 +76,20 @@
 
 **Lane 1 (agent readiness):** 012 (delivery ledger) → bb/011 (triage sprite) → 010 (ramp)
   · **023 (incident detail API) → 024 (signal-agnostic annotations)** land the Canary-side substrate bb/011 consumes
-**Lane 2 (contract + observability):** 011 (OpenAPI) + 013 (metrics) — parallel, no deps · **030 (agent contract safety)** depends on 011 + 012 and tightens the existing contract for autonomous consumers · **031 (agent replay determinism)** hardens malformed replay/query/health inputs so agents fail on explicit contract errors
+**Lane 2 (contract + observability):** 011 (OpenAPI) + 013 (metrics) — parallel, no deps · **030 (agent contract safety)** depends on 011 + 012 and tightens the existing contract for autonomous consumers · **031 (agent replay determinism)** shipped the malformed replay/query/health contract errors · **032 (live Rust write-path evidence)** proves the Rust production surface beyond read-only smoke
 **Lane 3 (structural):** 006 (query split) → 005 (connect-a-service) · **022 (contract hygiene + shallow-module collapse)** — ship first of the active set; unblocks nothing but restores the summary invariant and sheds ~300 LOC of drift
-**Lane 4 (hardening):** 008, 014, 016, 017, 018, 019 (independent, small, can ship anytime)
-**Lane 5 (future):** 020 (Adminifi HTTP surface verification)
+**Lane 4 (hardening):** 008, 014, 016, 017, 018, 019 (independent, small, can ship anytime) · **034 (worker lifecycle readiness oracle)** hardens the Rust background-worker proof surface
+**Lane 5 (dogfood coverage):** 020 (Adminifi HTTP surface verification) · **033 (deployed service registry lifecycle)** shipped the managed registry substrate · **035 (deployed app Canary coverage)** makes every active owned deployment covered or explicitly blocked · **036 (agent-native inspection surface)** gives agents the operating view · **037 (watch the watchmen)** proves Canary externally · **038 (one-command integration agent)** removes setup friction
 
-### Active order (2026-05-24)
+### Active order (2026-06-11)
 
-1. **030** — Agent contract safety pass (scope annotations, summary completeness, cold-start guidance, annotation write-back, delivery-id lookup)
-2. **031** — Agent replay determinism hardening (malformed cursor, unsafe target cadence, invalid probe method, unverifiable boot state)
+1. **035** — Deployed app Canary coverage (make the requested deployed applications covered or explicitly blocked)
+2. **036** — Agent-native inspection surface (CLI/JSON first, MCP after the schema stabilizes)
+3. **037** — Watch the watchmen (external witness for Canary itself)
+4. **038** — One-command integration agent (discover, patch, enroll, verify)
+5. **030** — Agent contract safety pass (scope annotations, summary completeness, cold-start guidance, annotation write-back; delivery-id lookup already shipped)
+6. **032** — Live Rust write-path evidence (prove deployed admin/ingest/webhook/monitor/target paths with sanitized packets)
+7. **034** — Worker lifecycle readiness oracle (make Rust background workers visible to readiness and Dagger smoke)
 
 022 + 023 landed on 2026-04-21. 024 landed on 2026-04-22. 026 landed on
 2026-04-23 — Ramp
@@ -98,6 +117,19 @@ parity backlog items were retired during the Rust scorched-earth migration.
 - 2026-06-07: Retired Elixir-era active backlog items during the Rust
   scorched-earth migration; Rust-owned Dagger, OpenAPI, and cargo tests are now
   the active contract surfaces.
+- 2026-06-11: Groomed the current Rust backlog from `origin/master`, archived
+  031 after verifying the Rust replay/health determinism guardrails, kept 030
+  focused on missing OpenAPI operation-level scope/guidance metadata, and added
+  032-034 for live write-path proof, dogfood registry lifecycle, and worker
+  readiness observability.
+- 2026-06-11: Follow-up dogfood/watchmen design pass from live Vercel, Fly, and
+  Canary evidence. Promoted 033 from static dogfood buckets to a deployed
+  service registry, then added 035-038 for exhaustive owned-app coverage,
+  agent-native inspection, independent Canary witnessing, and one-command
+  integration.
+- 2026-06-11: Delivered 033. `priv/dogfood/owned_services.json` is now a
+  schema-versioned deployed-service registry; `bin/dogfood-audit` validates it,
+  emits text or JSON, and strict-checks active services against live Canary.
 
 ## Status
 

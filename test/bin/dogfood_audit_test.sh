@@ -77,24 +77,75 @@ write_manifest() {
   local path="$1"
   cat > "$path" <<'JSON'
 {
-  "active_services": [
-    {"service": "alpha", "target_url": "https://alpha.example/health"},
-    {"service": "bravo", "target_url": "https://bravo.example/health"}
-  ],
-  "pending_services": [
+  "schema_version": 1,
+  "services": [
+    {
+      "service": "alpha",
+      "state": "active",
+      "platform": "vercel",
+      "production_url": "https://alpha.example",
+      "health_url": "https://alpha.example/health",
+      "last_checked_at": "2026-06-11T00:00:00Z",
+      "failure_mode": "No current blocker.",
+      "owner": "misty-step",
+      "next_action": "Keep enrolled."
+    },
+    {
+      "service": "bravo",
+      "state": "active",
+      "platform": "fly",
+      "production_url": "https://bravo.example",
+      "health_url": "https://bravo.example/health",
+      "last_checked_at": "2026-06-11T00:00:00Z",
+      "failure_mode": "No current blocker.",
+      "owner": "misty-step",
+      "next_action": "Keep enrolled."
+    },
     {
       "service": "charlie",
-      "target_url": "https://charlie.example/health",
-      "reason": "Waiting on a public health surface."
-    }
-  ],
-  "follow_on_services": [
+      "state": "pending",
+      "platform": "vercel",
+      "production_url": "https://charlie.example",
+      "health_url": "https://charlie.example/health",
+      "last_checked_at": "2026-06-11T00:00:00Z",
+      "failure_mode": "Waiting on a public health surface.",
+      "owner": "misty-step",
+      "next_action": "Verify the public health URL."
+    },
     {
       "service": "delta",
-      "reason": "Desktop app."
+      "state": "blocked",
+      "platform": "vercel",
+      "production_url": "https://delta.example",
+      "health_url": null,
+      "last_checked_at": "2026-06-11T00:00:00Z",
+      "failure_mode": "No health route exists.",
+      "owner": "misty-step",
+      "next_action": "Add a health route."
+    },
+    {
+      "service": "echo",
+      "state": "follow_on",
+      "platform": "desktop",
+      "production_url": null,
+      "health_url": null,
+      "last_checked_at": "2026-06-11T00:00:00Z",
+      "failure_mode": "Desktop app.",
+      "owner": "misty-step",
+      "next_action": "Use monitor check-ins."
+    },
+    {
+      "service": "canary-self",
+      "state": "ignored",
+      "platform": "fly",
+      "production_url": "https://canary.example",
+      "health_url": "https://canary.example/healthz",
+      "last_checked_at": "2026-06-11T00:00:00Z",
+      "failure_mode": "Fixture ignores self target.",
+      "owner": "misty-step",
+      "next_action": "No fixture action."
     }
-  ],
-  "ignore_targets": ["canary-self"]
+  ]
 }
 JSON
 }
@@ -103,13 +154,64 @@ write_missing_manifest() {
   local path="$1"
   cat > "$path" <<'JSON'
 {
-  "active_services": [
-    {"service": "alpha", "target_url": "https://alpha.example/health"},
-    {"service": "missing", "target_url": "https://missing.example/health"}
-  ],
-  "pending_services": [],
-  "follow_on_services": [],
-  "ignore_targets": ["canary-self"]
+  "schema_version": 1,
+  "services": [
+    {
+      "service": "alpha",
+      "state": "active",
+      "platform": "vercel",
+      "production_url": "https://alpha.example",
+      "health_url": "https://alpha.example/health",
+      "last_checked_at": "2026-06-11T00:00:00Z",
+      "failure_mode": "No current blocker.",
+      "owner": "misty-step",
+      "next_action": "Keep enrolled."
+    },
+    {
+      "service": "missing",
+      "state": "active",
+      "platform": "vercel",
+      "production_url": "https://missing.example",
+      "health_url": "https://missing.example/health",
+      "last_checked_at": "2026-06-11T00:00:00Z",
+      "failure_mode": "Target is not enrolled.",
+      "owner": "misty-step",
+      "next_action": "Enroll the target."
+    },
+    {
+      "service": "canary-self",
+      "state": "ignored",
+      "platform": "fly",
+      "production_url": "https://canary.example",
+      "health_url": "https://canary.example/healthz",
+      "last_checked_at": "2026-06-11T00:00:00Z",
+      "failure_mode": "Fixture ignores self target.",
+      "owner": "misty-step",
+      "next_action": "No fixture action."
+    }
+  ]
+}
+JSON
+}
+
+write_invalid_manifest() {
+  local path="$1"
+  cat > "$path" <<'JSON'
+{
+  "schema_version": 1,
+  "services": [
+    {
+      "service": "alpha",
+      "state": "active",
+      "platform": "vercel",
+      "production_url": "https://alpha.example",
+      "health_url": null,
+      "last_checked_at": "2026-06-11T00:00:00Z",
+      "failure_mode": "Active services require a health URL.",
+      "owner": "misty-step",
+      "next_action": "Fix schema."
+    }
+  ]
 }
 JSON
 }
@@ -169,28 +271,59 @@ assert_exit_code() {
   fi
 }
 
+assert_json_equals() {
+  local json="$1" filter="$2" expected="$3" test_name="$4"
+  local actual
+  actual="$(jq -r "$filter" <<<"$json")"
+  if [ "$actual" = "$expected" ]; then
+    echo "  PASS: $test_name"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: $test_name"
+    echo "    Expected: $expected"
+    echo "    Got: $actual"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 MANIFEST="$TMPDIR_TEST/manifest.json"
 MISSING_MANIFEST="$TMPDIR_TEST/missing-manifest.json"
+INVALID_MANIFEST="$TMPDIR_TEST/invalid-manifest.json"
 write_manifest "$MANIFEST"
 write_missing_manifest "$MISSING_MANIFEST"
+write_invalid_manifest "$INVALID_MANIFEST"
 
 echo "Test 1: dogfood-audit help"
 OUTPUT=$(run_and_capture "$DOGFOOD_AUDIT" --help)
 assert_contains "$OUTPUT" "Usage: bin/dogfood-audit" "shows dogfood-audit usage"
+assert_contains "$OUTPUT" "--json" "documents json output"
 
-echo "Test 2: dogfood-audit renders active, pending, and follow-on sections"
+echo "Test 2: dogfood-audit renders registry states"
 setup_stubbed_curl
 OUTPUT=$(CANARY_ENDPOINT=https://canary.example CANARY_API_KEY=sk_test run_and_capture "$DOGFOOD_AUDIT" --manifest "$MANIFEST")
 assert_contains "$OUTPUT" "Canary dogfood audit (24h)" "prints report header"
+assert_contains "$OUTPUT" "Active services" "prints active section"
 assert_contains "$OUTPUT" "alpha" "includes first active service"
 assert_contains "$OUTPUT" "bravo" "includes second active service"
+assert_contains "$OUTPUT" "pending services" "prints pending section"
 assert_contains "$OUTPUT" "charlie" "includes pending service"
-assert_contains "$OUTPUT" "delta" "includes follow-on service"
+assert_contains "$OUTPUT" "blocked services" "prints blocked section"
+assert_contains "$OUTPUT" "delta" "includes blocked service"
+assert_contains "$OUTPUT" "follow_on services" "prints follow-on section"
+assert_contains "$OUTPUT" "echo" "includes follow-on service"
 assert_contains "$OUTPUT" "none" "prints empty extra target set"
 assert_file_contains "$CURL_LOG" "https://canary.example/api/v1/targets" "fetches live targets"
 assert_file_contains "$CURL_LOG" "https://canary.example/api/v1/query?service=alpha&window=24h" "fetches per-service query"
 
-echo "Test 3: dogfood-audit strict mode fails when an active target is missing"
+echo "Test 3: dogfood-audit emits machine-readable json"
+setup_stubbed_curl
+OUTPUT=$(CANARY_ENDPOINT=https://canary.example CANARY_API_KEY=sk_test run_and_capture "$DOGFOOD_AUDIT" --manifest "$MANIFEST" --json)
+assert_json_equals "$OUTPUT" ".window" "24h" "json includes window"
+assert_json_equals "$OUTPUT" ".active_services | length" "2" "json includes active service results"
+assert_json_equals "$OUTPUT" ".registry[] | select(.service == \"delta\") | .state" "blocked" "json includes non-active registry states"
+assert_json_equals "$OUTPUT" ".extra_targets | length" "0" "json excludes ignored registry target from extras"
+
+echo "Test 4: dogfood-audit strict mode fails when an active target is missing"
 setup_stubbed_curl
 OUTPUT=$(CANARY_ENDPOINT=https://canary.example CANARY_API_KEY=sk_test run_failure "$DOGFOOD_AUDIT" --manifest "$MISSING_MANIFEST" --strict)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
@@ -199,7 +332,15 @@ assert_exit_code "$STATUS" "1" "strict mode exits non-zero"
 assert_contains "$BODY" "Strict audit failed" "strict mode explains the failure"
 assert_contains "$BODY" "missing" "strict output names the missing service state"
 
-echo "Test 4: dogfood-audit fails cleanly when curl is unavailable"
+echo "Test 5: dogfood-audit rejects invalid registry shape"
+setup_stubbed_curl
+OUTPUT=$(CANARY_ENDPOINT=https://canary.example CANARY_API_KEY=sk_test run_failure "$DOGFOOD_AUDIT" --manifest "$INVALID_MANIFEST")
+STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
+BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
+assert_exit_code "$STATUS" "1" "invalid registry exits non-zero"
+assert_contains "$BODY" "Invalid deployed-service registry" "invalid registry explains the schema failure"
+
+echo "Test 6: dogfood-audit fails cleanly when curl is unavailable"
 setup_path_without_curl
 OUTPUT=$(PATH="$MISSING_CURL_PATH" CANARY_ENDPOINT=https://canary.example CANARY_API_KEY=sk_test run_failure "$BASH_BIN" "$DOGFOOD_AUDIT")
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)

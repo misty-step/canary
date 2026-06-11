@@ -7,23 +7,24 @@ WINDOW="24h"
 ENDPOINT="${CANARY_ENDPOINT:-}"
 API_KEY="${CANARY_API_KEY:-}"
 STRICT=0
+JSON_OUTPUT=0
 
 usage() {
   cat <<'EOF'
-Usage: bin/dogfood-audit [--endpoint <url>] [--api-key <key>] [--window <window>] [--manifest <path>] [--strict] [-h|--help]
+Usage: bin/dogfood-audit [--endpoint <url>] [--api-key <key>] [--window <window>] [--manifest <path>] [--strict] [--json] [-h|--help]
 
-Audit Canary's owned-service dogfood set against the checked-in manifest.
+Audit Canary's deployed-service dogfood registry against a live Canary instance.
 
 By default the command reads `CANARY_ENDPOINT` and `CANARY_API_KEY` from the
-environment, verifies the active HTTP services listed in
-`priv/dogfood/owned_services.json`, and prints:
+environment, validates `priv/dogfood/owned_services.json`, compares active
+HTTP services against live Canary targets, and prints:
 
 - Canary's current summary for the requested window
-- whether each active service target exists under the expected URL
-- current target health state and error totals per service
-- pending and follow-on services that are intentionally not expected yet
-- extra live targets outside the owned-service dogfood set
+- every active service with target presence, URL match, health state, and errors
+- pending, blocked, follow-on, suspended, and ignored services with next action
+- extra live targets outside the deployed-service registry
 
+`--json` emits the same audit as machine-readable JSON.
 `--strict` exits non-zero when any active service target is missing, duplicated,
 or pointed at the wrong URL.
 EOF
@@ -52,6 +53,33 @@ api_get() {
 fail() {
   printf '%s\n' "$1" >&2
   exit 1
+}
+
+validate_manifest() {
+  if ! jq -e '
+    (.schema_version == 1) and
+    (.services | type == "array") and
+    (.services | length > 0) and
+    (([.services[].service] | length) == ([.services[].service] | unique | length)) and
+    all(.services[];
+      (.service | type == "string" and length > 0) and
+      (.state | IN("active", "pending", "blocked", "follow_on", "suspended", "ignored")) and
+      (.platform | type == "string" and length > 0) and
+      (has("production_url") and (.production_url == null or (.production_url | type == "string"))) and
+      (has("health_url") and (.health_url == null or (.health_url | type == "string"))) and
+      (.last_checked_at | type == "string" and length > 0) and
+      (.failure_mode | type == "string" and length > 0) and
+      (.owner | type == "string" and length > 0) and
+      (.next_action | type == "string" and length > 0)
+    ) and
+    all(.services[] | select(.state == "active"); (.health_url | type == "string" and length > 0))
+  ' "$MANIFEST" >/dev/null; then
+    fail "Invalid deployed-service registry: $MANIFEST"
+  fi
+}
+
+service_registry_names() {
+  jq -c '[.services[].service]' "$MANIFEST"
 }
 
 while (($#)); do
@@ -92,6 +120,10 @@ while (($#)); do
       STRICT=1
       shift
       ;;
+    --json)
+      JSON_OUTPUT=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -110,33 +142,26 @@ require_command jq
 [[ -n "$API_KEY" ]] || fail "Missing Canary API key. Set CANARY_API_KEY or pass --api-key."
 [[ -f "$MANIFEST" ]] || fail "Manifest not found: $MANIFEST"
 
-jq -e '
-  (.active_services | type) == "array" and
-  (.pending_services | type) == "array" and
-  (.follow_on_services | type) == "array" and
-  (.ignore_targets | type) == "array"
-' "$MANIFEST" >/dev/null
+validate_manifest
 
 targets_json="$(api_get "/api/v1/targets")"
 report_json="$(api_get "/api/v1/report?window=$(urlencode "$WINDOW")")"
 overall_summary="$(jq -r '.summary' <<<"$report_json")"
 overall_status="$(jq -r '.status' <<<"$report_json")"
 
-printf 'Canary dogfood audit (%s)\n' "$WINDOW"
-printf 'status: %s\n' "$overall_status"
-printf 'summary: %s\n' "$overall_summary"
-printf '\n'
-
-printf 'Active HTTP services\n'
-printf '%-18s %-9s %-8s %-10s %-6s %s\n' "service" "target" "url" "health" "errors" "expected"
-printf '%-18s %-9s %-8s %-10s %-6s %s\n' "-------" "------" "---" "------" "------" "--------"
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+active_results="$tmpdir/active-results.ndjson"
+: > "$active_results"
 
 strict_failures=0
 
 while IFS= read -r service_json; do
   service="$(jq -r '.service' <<<"$service_json")"
-  expected_url="$(jq -r '.target_url' <<<"$service_json")"
-  query_json="$(api_get "/api/v1/query?service=$(urlencode "$service")&window=$(urlencode "$WINDOW")")"
+  expected_url="$(jq -r '.health_url' <<<"$service_json")"
+  encoded_service="$(urlencode "$service")"
+  encoded_window="$(urlencode "$WINDOW")"
+  query_json="$(api_get "/api/v1/query?service=${encoded_service}&window=${encoded_window}")"
 
   target_count="$(
     jq -r --arg service "$service" '
@@ -157,7 +182,7 @@ while IFS= read -r service_json; do
   )"
 
   total_errors="$(jq -r '.total_errors // 0' <<<"$query_json")"
-  summary="$(jq -r '.summary' <<<"$query_json")"
+  summary="$(jq -r '.summary // ""' <<<"$query_json")"
 
   target_state="present"
   url_state="yes"
@@ -175,54 +200,112 @@ while IFS= read -r service_json; do
     strict_failures=$((strict_failures + 1))
   fi
 
-  printf '%-18s %-9s %-8s %-10s %-6s %s\n' \
-    "$service" \
-    "$target_state" \
-    "$url_state" \
-    "$health_state" \
-    "$total_errors" \
-    "$expected_url"
-  printf '  %s\n' "$summary"
-done < <(jq -c '.active_services[]' "$MANIFEST")
-
-printf '\nPending verification\n'
-printf '%-18s %s\n' "service" "reason"
-printf '%-18s %s\n' "-------" "------"
-
-while IFS= read -r service_json; do
-  service="$(jq -r '.service' <<<"$service_json")"
-  expected_url="$(jq -r '.target_url' <<<"$service_json")"
-  reason="$(jq -r '.reason' <<<"$service_json")"
-  printf '%-18s %s\n' "$service" "$reason"
-  printf '  expected: %s\n' "$expected_url"
-done < <(jq -c '.pending_services[]' "$MANIFEST")
-
-printf '\nFollow-on / out of scope\n'
-printf '%-18s %s\n' "service" "reason"
-printf '%-18s %s\n' "-------" "------"
-
-while IFS= read -r service_json; do
-  service="$(jq -r '.service' <<<"$service_json")"
-  reason="$(jq -r '.reason' <<<"$service_json")"
-  printf '%-18s %s\n' "$service" "$reason"
-done < <(jq -c '.follow_on_services[]' "$MANIFEST")
+  jq -cn \
+    --argjson registry "$service_json" \
+    --arg target_state "$target_state" \
+    --arg url_state "$url_state" \
+    --arg actual_url "$actual_url" \
+    --arg health_state "$health_state" \
+    --argjson total_errors "$total_errors" \
+    --arg summary "$summary" \
+    '{
+      service: $registry.service,
+      state: $registry.state,
+      platform: $registry.platform,
+      production_url: $registry.production_url,
+      expected_health_url: $registry.health_url,
+      actual_health_url: $actual_url,
+      target: $target_state,
+      url: $url_state,
+      health: $health_state,
+      total_errors: $total_errors,
+      summary: $summary,
+      owner: $registry.owner,
+      next_action: $registry.next_action
+    }' >> "$active_results"
+done < <(jq -c '.services[] | select(.state == "active")' "$MANIFEST")
 
 extra_targets="$(
   jq -r \
-    --argjson manifest "$(jq -c '[.active_services[].service, .pending_services[].service, .follow_on_services[].service, .ignore_targets[]]' "$MANIFEST")" '
+    --argjson registry "$(service_registry_names)" '
       .targets
-      | map(select((.service as $service | $manifest | index($service)) | not))
+      | map(select((.service as $service | $registry | index($service)) | not))
       | map({service, url})
     ' <<<"$targets_json"
 )"
 
-extra_count="$(jq -r 'length' <<<"$extra_targets")"
-
-printf '\nExtra live targets\n'
-if [[ "$extra_count" == "0" ]]; then
-  printf 'none\n'
+if ((JSON_OUTPUT == 1)); then
+  jq -n \
+    --arg window "$WINDOW" \
+    --arg status "$overall_status" \
+    --arg summary "$overall_summary" \
+    --argjson registry "$(jq '.services' "$MANIFEST")" \
+    --argjson active "$(jq -s '.' "$active_results")" \
+    --argjson extra "$extra_targets" \
+    --argjson strict_failures "$strict_failures" \
+    '{
+      window: $window,
+      status: $status,
+      summary: $summary,
+      strict_failures: $strict_failures,
+      active_services: $active,
+      registry: $registry,
+      extra_targets: $extra
+    }'
 else
-  jq -r '.[] | "  \(.service) -> \(.url)"' <<<"$extra_targets"
+  printf 'Canary dogfood audit (%s)\n' "$WINDOW"
+  printf 'status: %s\n' "$overall_status"
+  printf 'summary: %s\n' "$overall_summary"
+  printf '\n'
+
+  printf 'Active services\n'
+  printf '%-18s %-9s %-8s %-10s %-6s %-8s %s\n' "service" "target" "url" "health" "errors" "platform" "expected"
+  printf '%-18s %-9s %-8s %-10s %-6s %-8s %s\n' "-------" "------" "---" "------" "------" "--------" "--------"
+
+  while IFS= read -r result_json; do
+    printf '%-18s %-9s %-8s %-10s %-6s %-8s %s\n' \
+      "$(jq -r '.service' <<<"$result_json")" \
+      "$(jq -r '.target' <<<"$result_json")" \
+      "$(jq -r '.url' <<<"$result_json")" \
+      "$(jq -r '.health' <<<"$result_json")" \
+      "$(jq -r '.total_errors' <<<"$result_json")" \
+      "$(jq -r '.platform' <<<"$result_json")" \
+      "$(jq -r '.expected_health_url' <<<"$result_json")"
+    printf '  %s\n' "$(jq -r '.summary' <<<"$result_json")"
+  done < "$active_results"
+
+  for state in pending blocked follow_on suspended ignored; do
+    count="$(jq -r --arg state "$state" '[.services[] | select(.state == $state)] | length' "$MANIFEST")"
+    if [[ "$count" == "0" ]]; then
+      continue
+    fi
+
+    printf '\n%s services\n' "$state"
+    printf '%-24s %-10s %-28s %s\n' "service" "platform" "production" "next_action"
+    printf '%-24s %-10s %-28s %s\n' "-------" "--------" "----------" "-----------"
+
+    while IFS= read -r service_json; do
+      printf '%-24s %-10s %-28s %s\n' \
+        "$(jq -r '.service' <<<"$service_json")" \
+        "$(jq -r '.platform' <<<"$service_json")" \
+        "$(jq -r '.production_url // "n/a"' <<<"$service_json")" \
+        "$(jq -r '.next_action' <<<"$service_json")"
+      printf '  %s\n' "$(jq -r '.failure_mode' <<<"$service_json")"
+      health_url="$(jq -r '.health_url // empty' <<<"$service_json")"
+      if [[ -n "$health_url" ]]; then
+        printf '  expected: %s\n' "$health_url"
+      fi
+    done < <(jq -c --arg state "$state" '.services[] | select(.state == $state)' "$MANIFEST")
+  done
+
+  extra_count="$(jq -r 'length' <<<"$extra_targets")"
+
+  printf '\nExtra live targets\n'
+  if [[ "$extra_count" == "0" ]]; then
+    printf 'none\n'
+  else
+    jq -r '.[] | "  \(.service) -> \(.url)"' <<<"$extra_targets"
+  fi
 fi
 
 if ((STRICT == 1 && strict_failures > 0)); then
