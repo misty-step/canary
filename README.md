@@ -316,13 +316,14 @@ The response includes:
 
 ### Owned Service Dogfooding
 
-Use [docs/networked-service-dogfooding.md](/Users/phaedrus/Development/canary/docs/networked-service-dogfooding.md)
-and `bin/dogfood-audit --strict` to verify the checked-in owned HTTP service
-set against a live Canary instance.
+Use [docs/networked-service-dogfooding.md](docs/networked-service-dogfooding.md)
+and `bin/dogfood-audit --strict` to verify the checked-in deployed-service
+registry against a live Canary instance. Add `--json` when an agent or CI job
+needs a machine-readable report.
 
 ### Non-HTTP Runtime Health
 
-Use [docs/non-http-health-semantics.md](/Users/phaedrus/Development/canary/docs/non-http-health-semantics.md)
+Use [docs/non-http-health-semantics.md](docs/non-http-health-semantics.md)
 for the decision record behind Canary's non-HTTP health model. Canary now keeps
 HTTP polling for `Target`s and models desktop apps, cron jobs, and workers as
 check-in monitors managed separately from URL-backed targets.

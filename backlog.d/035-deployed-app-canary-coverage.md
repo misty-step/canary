@@ -28,9 +28,8 @@ Ensure every active owned deployment across Vercel, Fly, and local deployment me
 - `chrondle`: Canary is active, but current 24h signal had a `TypeError` flood that should become an incident or follow-up.
 
 **Children**
-1. Replace the static owned-service manifest shape from #033 with a deployed-surface registry that can express active, pending, blocked, ignored, and suspended surfaces.
-2. Add a platform inventory reader for Vercel and Fly that records names and URLs without reading secret values.
-3. Enroll or explicitly block the requested projects and record one evidence packet per service.
-4. Make strict dogfood audit fail on missing requested coverage unless the registry carries a current blocker.
+1. Add a platform inventory reader for Vercel and Fly that records names and URLs without reading secret values.
+2. Enroll or explicitly block the requested projects and record one evidence packet per service.
+3. Make strict dogfood audit fail on missing requested coverage unless the registry carries a current blocker.
 
-**Related.** #033 is the registry substrate; this item is the coverage outcome.
+**Related.** #033 shipped the registry substrate; this item is the coverage outcome.

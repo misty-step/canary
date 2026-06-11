@@ -1,9 +1,10 @@
 # Networked Service Dogfooding
 
-This repo already had live dogfood traffic before backlog item `007` was picked
-up. The missing piece was a trustworthy operator view: which owned HTTP
-services are actually under Canary right now, which ones are only documented in
-other repos, and how to verify the difference from this repo without guessing.
+Canary keeps a checked-in deployed-service registry at
+[priv/dogfood/owned_services.json](../priv/dogfood/owned_services.json).
+The registry is the operator contract for which owned services Canary should
+monitor, which services are pending or blocked, and what action moves each one
+forward.
 
 ## Audit Command
 
@@ -13,55 +14,57 @@ Run the checked-in audit against a live Canary instance:
 bin/dogfood-audit --strict
 ```
 
-The command reads `CANARY_ENDPOINT` and `CANARY_API_KEY`, compares the live
-target set against [priv/dogfood/owned_services.json](/Users/phaedrus/Development/canary/priv/dogfood/owned_services.json),
-and prints:
+The command reads `CANARY_ENDPOINT` and `CANARY_API_KEY`, validates the registry
+schema, compares active HTTP services against live Canary targets, and prints:
 
 - the unified Canary report summary for the requested window
-- every active owned HTTP service with target presence, URL match, health state,
+- every active service with target presence, URL match, health state, platform,
   and current error totals
-- pending services whose public health surfaces are not yet verified from the
-  operator environment
-- follow-on services that are intentionally out of scope for HTTP dogfooding
+- pending, blocked, follow-on, suspended, and ignored services with failure mode
+  and next action
+- extra live targets outside the registry
 
-Use `--window 1h` or another supported window when you want a tighter read.
+Use `--window 1h` or another supported window when you want a tighter read. Use
+`--json` when an agent or CI job needs a machine-readable report.
 
-## Active Dogfood Set
+## Registry States
 
-The 2026-04-17 audit verified these active owned HTTP services in live Canary:
+Each service entry has:
 
-| Service | Target URL | Live state |
-|---------|------------|------------|
-| `chrondle` | `https://www.chrondle.app/api/health` | `up` |
-| `linejam` | `https://www.linejam.app/api/health` | `up` |
-| `volume` | `https://www.volume.fitness/api/health` | `up` |
-| `vulcan` | `https://adminifi-vulcan-orchestrator.fly.dev/health` | `up` |
+- `service`: Canary service name or intended service name
+- `state`: `active`, `pending`, `blocked`, `follow_on`, `suspended`, or `ignored`
+- `platform`: hosting/runtime platform such as `vercel`, `fly`, `azure`,
+  `desktop`, or `unknown`
+- `production_url`: public production surface when one exists
+- `health_url`: HTTP target URL for active services, or `null` for non-HTTP or
+  not-yet-healthable services
+- `last_checked_at`: evidence timestamp
+- `failure_mode`: current blocker or "no current blocker" style status
+- `owner`: accountable org or owner namespace
+- `next_action`: concrete next step
 
-Observed live summary on 2026-04-17 with `window=24h`:
+`active` services must have a non-empty `health_url`; strict audit fails if the
+live Canary target is missing, duplicated, or pointed at another URL. Other
+states stay visible in the report but do not fail strict mode.
 
-- Canary report: `5 targets monitored. 433 errors across 1 service in the last 24 hours.`
-- Active owned HTTP services all had matching target URLs.
-- `chrondle` showed live error traffic (`433` `TypeError` events in the last 24h).
-- `linejam`, `volume`, and `vulcan` reported `0` errors in the same window.
+## Current Registry
 
-`canary-self` remains a valid extra target, but it is not part of the owned
-service dogfood manifest.
+As of 2026-06-11, active registry services are:
 
-## Pending / Follow-On Inventory
+| Service | Platform | Health URL | Notes |
+|---|---|---|---|
+| `canary-self` | Fly | `https://canary-obs.fly.dev/healthz` | Self HTTP liveness is enrolled; independent witness is tracked separately. |
+| `chrondle` | Vercel | `https://www.chrondle.app/api/health` | Enrolled, but the live 24h audit showed a high-volume `TypeError` group. |
+| `linejam` | Vercel | `https://www.linejam.app/api/health` | Reference integration with Vercel health and Fly responder coverage. |
+| `volume` | unknown | `https://www.volume.fitness/api/health` | Live audit reported the target down; investigate or reclassify. |
+| `vulcan` | Fly | `https://adminifi-vulcan-orchestrator.fly.dev/health` | Active Adminifi orchestrator surface. |
 
-The old backlog note overstated the live set. As of the 2026-04-17 audit:
+Pending or blocked services include `sploot`, `misty-step`, `vanity`,
+`trump-goggles-splash`, `timeismoney-splash`, `adminifi-web`, and
+`consumer-portal`. Follow-on services include desktop/non-HTTP or unpinned
+surfaces such as `time-tracker` and `cerberus`.
 
-- `adminifi-web` is **not** in Canary's live target set. The Azure origin
-  `https://apollo-app-service.azurewebsites.net/health` resolved, but `/health`
-  returned `404`, and the public `adminifi.app` host timed out from the
-  operator environment.
-- `consumer-portal` is **not** in Canary's live target set. Its repo documents
-  `https://my-public-adminifi.azurewebsites.net/api/health`, but that hostname
-  did not resolve from the operator environment.
-- `time-tracker` is intentionally out of scope for this item because it is a
-  desktop app. That work stays with backlog item `009`.
-- `cerberus` has a Canary sink implementation, but this audit did not pin a
-  canonical public HTTP health surface yet.
-
-Keep the manifest current whenever an owned service is added, removed, or
-reclassified. The audit command is the CLI-first source of truth for this wave.
+Keep the registry current whenever an owned deployment is added, removed,
+renamed, or reclassified. A service is not considered covered just because a
+deployment exists or env vars exist; it needs health/monitor enrollment and
+Canary readback evidence.

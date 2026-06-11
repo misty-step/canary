@@ -1,45 +1,159 @@
 {
-  "active_services": [
+  "schema_version": 1,
+  "services": [
+    {
+      "service": "canary-self",
+      "state": "active",
+      "platform": "fly",
+      "production_url": "https://canary-obs.fly.dev",
+      "health_url": "https://canary-obs.fly.dev/healthz",
+      "last_checked_at": "2026-06-11T19:38:19Z",
+      "failure_mode": "Self HTTP liveness is enrolled; independent witness and worker-readiness proof remain separate backlog work.",
+      "owner": "misty-step",
+      "next_action": "Keep as active self-target and complete backlog items 034 and 037 for worker continuity and external witness coverage."
+    },
     {
       "service": "chrondle",
-      "target_url": "https://www.chrondle.app/api/health"
+      "state": "active",
+      "platform": "vercel",
+      "production_url": "https://www.chrondle.app",
+      "health_url": "https://www.chrondle.app/api/health",
+      "last_checked_at": "2026-06-11T19:38:19Z",
+      "failure_mode": "Canary target is up, but the live 24h audit showed a high-volume TypeError group.",
+      "owner": "misty-step",
+      "next_action": "Keep enrolled and triage the TypeError flood through Canary query evidence."
     },
     {
       "service": "linejam",
-      "target_url": "https://www.linejam.app/api/health"
+      "state": "active",
+      "platform": "vercel",
+      "production_url": "https://www.linejam.app",
+      "health_url": "https://www.linejam.app/api/health",
+      "last_checked_at": "2026-06-11T19:38:19Z",
+      "failure_mode": "No current blocker; this is the strongest reference integration with Vercel health and Fly responder coverage.",
+      "owner": "misty-step",
+      "next_action": "Keep as the reference service for webhook/responder coverage."
     },
     {
       "service": "volume",
-      "target_url": "https://www.volume.fitness/api/health"
+      "state": "active",
+      "platform": "unknown",
+      "production_url": "https://www.volume.fitness",
+      "health_url": "https://www.volume.fitness/api/health",
+      "last_checked_at": "2026-06-11T19:38:19Z",
+      "failure_mode": "Live Canary audit reported the target down.",
+      "owner": "misty-step",
+      "next_action": "Investigate the down target or reclassify this service if it is no longer owned or deployed."
     },
     {
       "service": "vulcan",
-      "target_url": "https://adminifi-vulcan-orchestrator.fly.dev/health"
-    }
-  ],
-  "pending_services": [
+      "state": "active",
+      "platform": "fly",
+      "production_url": "https://adminifi-vulcan-orchestrator.fly.dev",
+      "health_url": "https://adminifi-vulcan-orchestrator.fly.dev/health",
+      "last_checked_at": "2026-06-11T19:38:19Z",
+      "failure_mode": "No current blocker in the live dogfood audit.",
+      "owner": "adminifi-growth",
+      "next_action": "Keep enrolled until Adminifi surface ownership is consolidated."
+    },
+    {
+      "service": "sploot",
+      "state": "pending",
+      "platform": "vercel",
+      "production_url": "https://www.sploot.app",
+      "health_url": "https://www.sploot.app/api/health",
+      "last_checked_at": "2026-06-11T19:38:19Z",
+      "failure_mode": "Canary ingest exists as sploot-web and live errors appear in reports, but the health target is not in the checked-in registry as active.",
+      "owner": "misty-step",
+      "next_action": "Enroll the health target or map the existing sploot-web service name into the registry during backlog item 035."
+    },
+    {
+      "service": "misty-step",
+      "state": "pending",
+      "platform": "vercel",
+      "production_url": "https://www.mistystep.io",
+      "health_url": "https://www.mistystep.io/api/health",
+      "last_checked_at": "2026-06-11T19:38:19Z",
+      "failure_mode": "Health route responds, but Vercel env audit showed Sentry variables and no Canary variables.",
+      "owner": "misty-step",
+      "next_action": "Add Canary ingest env vars and target enrollment through backlog item 035 or 038."
+    },
+    {
+      "service": "vanity",
+      "state": "blocked",
+      "platform": "vercel",
+      "production_url": "https://www.phaedrus.io",
+      "health_url": null,
+      "last_checked_at": "2026-06-11T19:38:19Z",
+      "failure_mode": "Vercel env audit showed Sentry variables and no Canary variables; common health routes returned 404.",
+      "owner": "misty-step",
+      "next_action": "Add a health route, Canary ingest, Vercel env names, and target enrollment."
+    },
+    {
+      "service": "trump-goggles-splash",
+      "state": "blocked",
+      "platform": "vercel",
+      "production_url": "https://www.trumpgoggles.com",
+      "health_url": null,
+      "last_checked_at": "2026-06-11T19:38:19Z",
+      "failure_mode": "Vercel project exists, local checkout is not linked to Vercel, no Canary code was found, and common health routes returned 404.",
+      "owner": "misty-step",
+      "next_action": "Link local project metadata, add a minimal health route, add Canary ingest, and enroll the target."
+    },
+    {
+      "service": "timeismoney-splash",
+      "state": "blocked",
+      "platform": "vercel",
+      "production_url": "https://www.timeismoney.works",
+      "health_url": null,
+      "last_checked_at": "2026-06-11T19:38:19Z",
+      "failure_mode": "Vercel project exists, local checkout is not linked to Vercel, no Canary code was found, and common health routes returned 404.",
+      "owner": "misty-step",
+      "next_action": "Link local project metadata, add a minimal health route, add Canary ingest, and enroll the target."
+    },
     {
       "service": "adminifi-web",
-      "target_url": "https://apollo-app-service.azurewebsites.net/health",
-      "reason": "Azure origin resolved during the 2026-04-17 audit, but the documented /health path returned 404 and the public adminifi.app host timed out from the operator environment."
+      "state": "blocked",
+      "platform": "azure",
+      "production_url": "https://adminifi.app",
+      "health_url": "https://apollo-app-service.azurewebsites.net/health",
+      "last_checked_at": "2026-04-17T00:00:00Z",
+      "failure_mode": "Azure origin resolved during the 2026-04-17 audit, but the documented /health path returned 404 and the public adminifi.app host timed out from the operator environment.",
+      "owner": "adminifi-growth",
+      "next_action": "Publish a canonical public health URL, then merge or close backlog item 020 through this registry."
     },
     {
       "service": "consumer-portal",
-      "target_url": "https://my-public-adminifi.azurewebsites.net/api/health",
-      "reason": "The repo README documents this production host and /api/health path, but the hostname did not resolve during the 2026-04-17 operator audit."
-    }
-  ],
-  "follow_on_services": [
+      "state": "blocked",
+      "platform": "azure",
+      "production_url": "https://my-public-adminifi.azurewebsites.net",
+      "health_url": "https://my-public-adminifi.azurewebsites.net/api/health",
+      "last_checked_at": "2026-04-17T00:00:00Z",
+      "failure_mode": "The repo README documents this production host and /api/health path, but the hostname did not resolve during the 2026-04-17 operator audit.",
+      "owner": "adminifi-growth",
+      "next_action": "Publish a canonical public health URL, then merge or close backlog item 020 through this registry."
+    },
     {
       "service": "time-tracker",
-      "reason": "Desktop app with non-HTTP health semantics. Tracked separately in backlog item 009."
+      "state": "follow_on",
+      "platform": "desktop",
+      "production_url": null,
+      "health_url": null,
+      "last_checked_at": "2026-04-17T00:00:00Z",
+      "failure_mode": "Desktop app with non-HTTP health semantics.",
+      "owner": "adminifi-growth",
+      "next_action": "Use Canary check-in monitors instead of HTTP targets."
     },
     {
       "service": "cerberus",
-      "reason": "Has a Canary sink implementation, but no verified public HTTP health surface was pinned during the 2026-04-17 audit."
+      "state": "follow_on",
+      "platform": "unknown",
+      "production_url": null,
+      "health_url": null,
+      "last_checked_at": "2026-04-17T00:00:00Z",
+      "failure_mode": "Has a Canary sink implementation, but no verified public HTTP health surface was pinned during the 2026-04-17 audit.",
+      "owner": "misty-step",
+      "next_action": "Reclassify after a canonical runtime surface exists."
     }
-  ],
-  "ignore_targets": [
-    "canary-self"
   ]
 }
