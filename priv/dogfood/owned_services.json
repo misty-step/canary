@@ -36,14 +36,14 @@
     },
     {
       "service": "volume",
-      "state": "active",
+      "state": "ignored",
       "platform": "unknown",
       "production_url": "https://www.volume.fitness",
       "health_url": "https://www.volume.fitness/api/health",
-      "last_checked_at": "2026-06-11T19:38:19Z",
-      "failure_mode": "Live Canary audit reported the target down.",
+      "last_checked_at": "2026-06-11T20:20:00Z",
+      "failure_mode": "Retired service. Public Vercel surface returns DEPLOYMENT_NOT_FOUND and GitHub repository is archived.",
       "owner": "misty-step",
-      "next_action": "Investigate the down target or reclassify this service if it is no longer owned or deployed."
+      "next_action": "Remove or pause the lingering Canary target TGT-py1c4syjy6op after confirming no replacement runtime should be monitored."
     },
     {
       "service": "vulcan",

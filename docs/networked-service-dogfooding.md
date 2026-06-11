@@ -56,13 +56,14 @@ As of 2026-06-11, active registry services are:
 | `canary-self` | Fly | `https://canary-obs.fly.dev/healthz` | Self HTTP liveness is enrolled; independent witness is tracked separately. |
 | `chrondle` | Vercel | `https://www.chrondle.app/api/health` | Enrolled, but the live 24h audit showed a high-volume `TypeError` group. |
 | `linejam` | Vercel | `https://www.linejam.app/api/health` | Reference integration with Vercel health and Fly responder coverage. |
-| `volume` | unknown | `https://www.volume.fitness/api/health` | Live audit reported the target down; investigate or reclassify. |
 | `vulcan` | Fly | `https://adminifi-vulcan-orchestrator.fly.dev/health` | Active Adminifi orchestrator surface. |
 
 Pending or blocked services include `sploot`, `misty-step`, `vanity`,
 `trump-goggles-splash`, `timeismoney-splash`, `adminifi-web`, and
 `consumer-portal`. Follow-on services include desktop/non-HTTP or unpinned
-surfaces such as `time-tracker` and `cerberus`.
+surfaces such as `time-tracker` and `cerberus`. Ignored services are explicitly
+out of rotation; `volume` is ignored because the product is retired and its
+public Vercel surface now returns `DEPLOYMENT_NOT_FOUND`.
 
 Keep the registry current whenever an owned deployment is added, removed,
 renamed, or reclassified. A service is not considered covered just because a
