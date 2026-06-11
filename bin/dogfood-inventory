@@ -1,0 +1,402 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+MANIFEST="$ROOT/priv/dogfood/owned_services.json"
+DEFAULT_REQUESTED="canary-self,vanity,chrondle,linejam,misty-step,trump-goggles-splash,timeismoney-splash,sploot"
+REQUESTED="$DEFAULT_REQUESTED"
+WINDOW="24h"
+STRICT=false
+JSON_ONLY=false
+VERCEL_SCOPES=("misty-step" "adminifi-growth")
+VERCEL_PROJECT_FILES=()
+LOCAL_ROOTS=()
+FLY_APPS_FILE=""
+
+usage() {
+  cat <<'EOF'
+Usage: bin/dogfood-inventory [--manifest <path>] [--vercel-scope <scope>] [--vercel-projects <scope=path>] [--fly-apps <path>] [--local-root <path>] [--requested <csv>] [--strict] [--json] [-h|--help]
+
+Inventory owned deployments and classify Canary dogfood coverage.
+
+By default this command reads Vercel projects for scopes `misty-step` and
+`adminifi-growth`, Fly apps, local `.vercel/project.json` links under the repo
+parent, and `priv/dogfood/owned_services.json`. Fixture flags replace live CLI
+calls for deterministic tests.
+EOF
+}
+
+die() {
+  printf 'dogfood-inventory: %s\n' "$*" >&2
+  exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --manifest)
+      [[ $# -ge 2 ]] || die "--manifest requires a path"
+      MANIFEST="$2"
+      shift 2
+      ;;
+    --vercel-scope)
+      [[ $# -ge 2 ]] || die "--vercel-scope requires a scope"
+      VERCEL_SCOPES+=("$2")
+      shift 2
+      ;;
+    --vercel-projects)
+      [[ $# -ge 2 ]] || die "--vercel-projects requires scope=path"
+      VERCEL_PROJECT_FILES+=("$2")
+      shift 2
+      ;;
+    --fly-apps)
+      [[ $# -ge 2 ]] || die "--fly-apps requires a path"
+      FLY_APPS_FILE="$2"
+      shift 2
+      ;;
+    --local-root)
+      [[ $# -ge 2 ]] || die "--local-root requires a path"
+      LOCAL_ROOTS+=("$2")
+      shift 2
+      ;;
+    --requested)
+      [[ $# -ge 2 ]] || die "--requested requires a comma-separated list"
+      REQUESTED="$2"
+      shift 2
+      ;;
+    --window)
+      [[ $# -ge 2 ]] || die "--window requires a value"
+      WINDOW="$2"
+      shift 2
+      ;;
+    --strict)
+      STRICT=true
+      shift
+      ;;
+    --json)
+      JSON_ONLY=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+command -v jq >/dev/null 2>&1 || die "jq is required"
+[[ -f "$MANIFEST" ]] || die "manifest not found: $MANIFEST"
+
+if [[ ${#LOCAL_ROOTS[@]} -eq 0 ]]; then
+  LOCAL_ROOTS+=("$(cd "$ROOT/.." && pwd)")
+fi
+
+TMPDIR_INVENTORY="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR_INVENTORY"' EXIT
+
+REGISTRY_JSON="$TMPDIR_INVENTORY/registry.json"
+VERCEL_JSON="$TMPDIR_INVENTORY/vercel.jsonl"
+FLY_JSON="$TMPDIR_INVENTORY/fly.jsonl"
+LOCAL_JSON="$TMPDIR_INVENTORY/local.jsonl"
+ERRORS_JSON="$TMPDIR_INVENTORY/errors.jsonl"
+SUMMARY_JSON="$TMPDIR_INVENTORY/summary.json"
+
+: >"$VERCEL_JSON"
+: >"$FLY_JSON"
+: >"$LOCAL_JSON"
+: >"$ERRORS_JSON"
+
+jq -e '
+  .schema_version == 1
+  and (.services | type == "array")
+  and all(.services[]; (
+    (.service | type == "string" and length > 0)
+    and (.state | IN("active", "pending", "blocked", "follow_on", "suspended", "ignored"))
+    and (.platform | type == "string" and length > 0)
+    and (.owner | type == "string" and length > 0)
+    and (.last_checked_at | type == "string" and length > 0)
+    and (.failure_mode | type == "string" and length > 0)
+    and (.next_action | type == "string" and length > 0)
+    and (.repo_path == null or (.repo_path | type == "string"))
+    and (.platform_project == null or (.platform_project | type == "string" and length > 0))
+    and (.monitor_mode | IN("http", "check_in", "external", "none"))
+    and (.ingest_status | IN("verified", "partial", "missing", "not_applicable", "blocked"))
+    and (if .state == "active" then ((.health_url | type == "string" and length > 0) or .monitor_mode != "http") else true end)
+  ))
+' "$MANIFEST" >/dev/null || die "invalid dogfood registry shape: $MANIFEST"
+
+jq '.services' "$MANIFEST" >"$REGISTRY_JSON"
+
+fixture_for_scope() {
+  local scope="$1" item
+  [[ ${#VERCEL_PROJECT_FILES[@]} -gt 0 ]] || return 1
+  for item in "${VERCEL_PROJECT_FILES[@]}"; do
+    if [[ "$item" == "$scope="* ]]; then
+      printf '%s\n' "${item#*=}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+append_error() {
+  local source="$1" message="$2"
+  jq -cn --arg source "$source" --arg message "$message" '{source:$source,message:$message}' >>"$ERRORS_JSON"
+}
+
+normalize_vercel_projects() {
+  local scope="$1" path="$2"
+  jq -c --arg scope "$scope" '
+    def project_items:
+      if type == "array" then .
+      elif (.projects? | type) == "array" then .projects
+      elif (.data? | type) == "array" then .data
+      else []
+      end;
+    def first_url:
+      .production_url
+      // .productionUrl
+      // .url
+      // .latestDeployment.url
+      // .latestDeployments[0].url
+      // .targets.production.url
+      // .targets.production.alias[0]
+      // null;
+    project_items[]
+    | {
+        source: "vercel",
+        owner: $scope,
+        platform: "vercel",
+        platform_project: (.name // .projectName // .id),
+        production_url: first_url
+      }
+    | select(.platform_project != null)
+    | .production_url = (
+        if .production_url == null then null
+        elif (.production_url | startswith("http://") or startswith("https://")) then .production_url
+        else "https://" + .production_url
+        end
+      )
+  ' "$path" >>"$VERCEL_JSON"
+}
+
+for scope in "${VERCEL_SCOPES[@]}"; do
+  fixture=""
+  if fixture="$(fixture_for_scope "$scope")"; then
+    if [[ -f "$fixture" ]]; then
+      normalize_vercel_projects "$scope" "$fixture"
+    else
+      append_error "vercel:$scope" "fixture not found: $fixture"
+    fi
+  elif command -v vercel >/dev/null 2>&1; then
+    live_file="$TMPDIR_INVENTORY/vercel-$scope.json"
+    if vercel project ls --scope "$scope" --format json >"$live_file" 2>"$TMPDIR_INVENTORY/vercel-$scope.err"; then
+      normalize_vercel_projects "$scope" "$live_file"
+    else
+      append_error "vercel:$scope" "$(tr '\n' ' ' <"$TMPDIR_INVENTORY/vercel-$scope.err" | sed 's/[[:space:]]*$//')"
+    fi
+  else
+    append_error "vercel:$scope" "vercel CLI not found and no fixture supplied"
+  fi
+done
+
+normalize_fly_apps() {
+  local path="$1"
+  jq -c '
+    def app_items:
+      if type == "array" then .
+      elif (.apps? | type) == "array" then .apps
+      else []
+      end;
+    app_items[]
+    | {
+        source: "fly",
+        owner: (.Organization.Slug // .organization.slug // .org // .owner // null),
+        platform: "fly",
+        platform_project: (.Name // .name // .id),
+        production_url: (.Hostname // .hostname // null)
+      }
+    | select(.platform_project != null)
+    | .production_url = (
+        if .production_url == null then "https://" + .platform_project + ".fly.dev"
+        elif (.production_url | startswith("http://") or startswith("https://")) then .production_url
+        else "https://" + .production_url
+        end
+      )
+  ' "$path" >>"$FLY_JSON"
+}
+
+if [[ -n "$FLY_APPS_FILE" ]]; then
+  if [[ -f "$FLY_APPS_FILE" ]]; then
+    normalize_fly_apps "$FLY_APPS_FILE"
+  else
+    append_error "fly" "fixture not found: $FLY_APPS_FILE"
+  fi
+elif command -v flyctl >/dev/null 2>&1; then
+  fly_file="$TMPDIR_INVENTORY/fly.json"
+  if flyctl apps list --json >"$fly_file" 2>"$TMPDIR_INVENTORY/fly.err"; then
+    normalize_fly_apps "$fly_file"
+  else
+    append_error "fly" "$(tr '\n' ' ' <"$TMPDIR_INVENTORY/fly.err" | sed 's/[[:space:]]*$//')"
+  fi
+else
+  append_error "fly" "flyctl CLI not found and no fixture supplied"
+fi
+
+for root in "${LOCAL_ROOTS[@]}"; do
+  if [[ ! -d "$root" ]]; then
+    append_error "local:$root" "local root not found"
+    continue
+  fi
+  while IFS= read -r project_file; do
+    repo_path="$(cd "$(dirname "$project_file")/.." && pwd)"
+    jq -cn \
+      --arg source "local" \
+      --arg repo_path "$repo_path" \
+      --arg platform "vercel" \
+      --arg platform_project "$(jq -r '.projectName // .name // .projectId // empty' "$project_file")" \
+      '{source:$source, repo_path:$repo_path, platform:$platform, platform_project:$platform_project}'
+  done < <(find "$root" -maxdepth 4 -path '*/.vercel/project.json' -type f 2>/dev/null) \
+    | jq -c 'select(.platform_project != null and .platform_project != "")' >>"$LOCAL_JSON"
+done
+
+jq -s \
+  --argjson registry "$(cat "$REGISTRY_JSON")" \
+  --slurpfile vercel "$VERCEL_JSON" \
+  --slurpfile fly "$FLY_JSON" \
+  --slurpfile local "$LOCAL_JSON" \
+  --slurpfile errors "$ERRORS_JSON" \
+  --arg requested "$REQUESTED" \
+  --arg window "$WINDOW" '
+  def coverage_for($svc):
+    if $svc.state == "ignored" or $svc.state == "suspended" then "ignored"
+    elif $svc.state == "blocked" then "blocked"
+    elif $svc.state == "active" and (($svc.ingest_status == "verified" or $svc.ingest_status == "not_applicable") and ($svc.health_url != null or $svc.monitor_mode != "http")) then "covered"
+    elif $svc.state == "active" then "partial"
+    elif $svc.state == "pending" or $svc.state == "follow_on" then "partial"
+    else "blocked"
+    end;
+  def key($x): ($x.platform // "") + "\u0000" + ($x.platform_project // "");
+  def deployment_match($svc):
+    (.deployments[]? | select(.platform == $svc.platform and .platform_project == ($svc.platform_project // $svc.service))) // null;
+  def local_match($svc):
+    (.local_links[]? | select(.platform_project == ($svc.platform_project // $svc.service) or (.repo_path != null and .repo_path == $svc.repo_path))) // null;
+  {
+    window: $window,
+    requested_services: ($requested | split(",") | map(select(length > 0))),
+    registry: $registry,
+    deployments: ($vercel + $fly),
+    local_links: $local,
+    collector_errors: $errors
+  }
+  | .surfaces = [
+      .registry[] as $svc
+      | (deployment_match($svc)) as $deploy
+      | (local_match($svc)) as $local
+      | {
+          service: $svc.service,
+          owner: $svc.owner,
+          platform: $svc.platform,
+          platform_project: ($svc.platform_project // $svc.service),
+          production_url: ($svc.production_url // ($deploy.production_url // null)),
+          repo_path: ($svc.repo_path // ($local.repo_path // null)),
+          health_url: $svc.health_url,
+          monitor_mode: $svc.monitor_mode,
+          ingest_status: $svc.ingest_status,
+          registry_state: $svc.state,
+          coverage: coverage_for($svc),
+          last_checked_at: $svc.last_checked_at,
+          failure_mode: $svc.failure_mode,
+          next_action: $svc.next_action,
+          deployment_seen: ($deploy != null),
+          local_link_seen: ($local != null),
+          reasons: []
+        }
+    ]
+  | .surfaces += [
+      .deployments[] as $deploy
+      | select(
+          [.registry[] | select(.platform == $deploy.platform and (.platform_project // .service) == $deploy.platform_project)] | length == 0
+        )
+      | {
+          service: null,
+          owner: $deploy.owner,
+          platform: $deploy.platform,
+          platform_project: $deploy.platform_project,
+          production_url: $deploy.production_url,
+          repo_path: null,
+          health_url: null,
+          monitor_mode: "none",
+          ingest_status: "missing",
+          registry_state: null,
+          coverage: "partial",
+          last_checked_at: null,
+          failure_mode: "Deployment is live but missing from the Canary dogfood registry.",
+          next_action: "Classify this deployment in priv/dogfood/owned_services.json or ignore it with evidence.",
+          deployment_seen: true,
+          local_link_seen: false,
+          reasons: ["unregistered_deployment"]
+        }
+    ]
+  | .surfaces += [
+      .local_links[] as $local
+      | select(
+          [.registry[] | select((.platform_project // .service) == $local.platform_project or (.repo_path != null and .repo_path == $local.repo_path))] | length == 0
+        )
+      | {
+          service: null,
+          owner: null,
+          platform: $local.platform,
+          platform_project: $local.platform_project,
+          production_url: null,
+          repo_path: $local.repo_path,
+          health_url: null,
+          monitor_mode: "none",
+          ingest_status: "missing",
+          registry_state: null,
+          coverage: "partial",
+          last_checked_at: null,
+          failure_mode: "Local Vercel project link is missing from the Canary dogfood registry.",
+          next_action: "Classify this local deployment link in priv/dogfood/owned_services.json or remove stale metadata.",
+          deployment_seen: false,
+          local_link_seen: true,
+          reasons: ["unregistered_local_link"]
+        }
+    ]
+  | .strict_failures = (
+      ([.collector_errors[]? | {kind:"collector_error", source:.source, message:.message}])
+      + ([.surfaces[] | select(.registry_state == "active" and (.platform == "vercel" or .platform == "fly") and (.deployment_seen | not)) | {kind:"missing_active_deployment", service:.service, platform:.platform, platform_project:.platform_project}])
+      + ([.surfaces[] | select((.reasons // []) | index("unregistered_deployment")) | {kind:"unregistered_deployment", platform:.platform, platform_project:.platform_project, owner:.owner}])
+      + ([.surfaces[] | select((.reasons // []) | index("unregistered_local_link")) | {kind:"unregistered_local_link", platform_project:.platform_project, repo_path:.repo_path}])
+      + ([.requested_services[] as $wanted | select([.registry[].service] | index($wanted) | not) | {kind:"missing_requested_registry_entry", service:$wanted}])
+    )
+  | .summary = {
+      covered: ([.surfaces[] | select(.coverage == "covered")] | length),
+      partial: ([.surfaces[] | select(.coverage == "partial")] | length),
+      blocked: ([.surfaces[] | select(.coverage == "blocked")] | length),
+      ignored: ([.surfaces[] | select(.coverage == "ignored")] | length),
+      strict_failures: (.strict_failures | length)
+    }
+  | del(.deployments, .local_links)
+' /dev/null >"$SUMMARY_JSON"
+
+if [[ "$JSON_ONLY" == true ]]; then
+  cat "$SUMMARY_JSON"
+else
+  jq -r '
+    "Canary deployed-surface inventory (" + .window + ")",
+    ("covered=" + (.summary.covered|tostring) + " partial=" + (.summary.partial|tostring) + " blocked=" + (.summary.blocked|tostring) + " ignored=" + (.summary.ignored|tostring) + " strict_failures=" + (.summary.strict_failures|tostring)),
+    "",
+    (.surfaces[] | "- " + ((.service // .platform_project) | tostring) + " [" + .coverage + "] " + .platform + "/" + .platform_project + " :: " + (.next_action // ""))
+  ' "$SUMMARY_JSON"
+fi
+
+if [[ "$STRICT" == true ]] && [[ "$(jq '.summary.strict_failures' "$SUMMARY_JSON")" -gt 0 ]]; then
+  if [[ "$JSON_ONLY" != true ]]; then
+    printf '\nStrict failures:\n' >&2
+    jq -r '.strict_failures[] | "- " + .kind + ": " + ((.service // .platform_project // .source) | tostring) + " " + (.message // "")' "$SUMMARY_JSON" >&2
+  fi
+  exit 1
+fi

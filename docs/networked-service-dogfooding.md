@@ -27,6 +27,40 @@ schema, compares active HTTP services against live Canary targets, and prints:
 Use `--window 1h` or another supported window when you want a tighter read. Use
 `--json` when an agent or CI job needs a machine-readable report.
 
+## Inventory Command
+
+Run the deployed-surface inventory before changing dogfood coverage:
+
+```bash
+bin/dogfood-inventory --strict --json
+```
+
+The command reads the registry, Vercel projects for scopes `misty-step` and
+`adminifi-growth`, Fly apps, and local `.vercel/project.json` links under the
+workspace parent. It emits one JSON document with each surface classified as:
+
+- `covered`: active service has health or monitor coverage and verified ingest
+- `partial`: service is present but has pending, incomplete, or follow-on
+  Canary coverage
+- `blocked`: service is known and cannot be covered until the documented
+  blocker is resolved
+- `ignored`: service is explicitly out of dogfood rotation
+
+Strict mode fails when a live Vercel/Fly deployment is missing from the
+registry, an active registry service is missing from live deployment inventory,
+a requested service is absent from the registry, or a collector cannot enumerate
+its source. Use fixture inputs in tests or offline audits:
+
+```bash
+bin/dogfood-inventory \
+  --manifest priv/dogfood/owned_services.json \
+  --vercel-projects misty-step=/tmp/vercel-misty-step.json \
+  --fly-apps /tmp/fly-apps.json \
+  --local-root /Users/phaedrus/Development \
+  --requested canary-self,vanity,chrondle,linejam,misty-step,trump-goggles-splash,timeismoney-splash,sploot \
+  --strict --json
+```
+
 ## Registry States
 
 Each service entry has:
@@ -35,9 +69,15 @@ Each service entry has:
 - `state`: `active`, `pending`, `blocked`, `follow_on`, `suspended`, or `ignored`
 - `platform`: hosting/runtime platform such as `vercel`, `fly`, `azure`,
   `desktop`, or `unknown`
+- `platform_project`: platform-native project/app name when it differs from
+  `service`, or `null` when there is no deployment project
 - `production_url`: public production surface when one exists
+- `repo_path`: local checkout path when known, otherwise `null`
 - `health_url`: HTTP target URL for active services, or `null` for non-HTTP or
   not-yet-healthable services
+- `monitor_mode`: `http`, `check_in`, `external`, or `none`
+- `ingest_status`: `verified`, `partial`, `missing`, `not_applicable`, or
+  `blocked`
 - `last_checked_at`: evidence timestamp
 - `failure_mode`: current blocker or "no current blocker" style status
 - `owner`: accountable org or owner namespace
