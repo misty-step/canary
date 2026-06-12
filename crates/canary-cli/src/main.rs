@@ -3,11 +3,13 @@
 use std::{env, path::PathBuf, process::ExitCode};
 
 use canary_cli::{
-    ApiClient, CliError, Config, RenderMode, Result, Window, doctor_report,
-    dogfood_strict_failure_count, encode, find_repo_root, json_envelope, print_json, print_lines,
-    resolve_endpoint_without_config, run_dogfood_inventory, summarize_doctor, summarize_dogfood,
-    summarize_incidents, summarize_monitors, summarize_query, summarize_report, summarize_services,
-    summarize_targets, summarize_timeline, tool_manifest,
+    ApiClient, CliError, Config, IntegrationEnrollRequest, IntegrationInput, RenderMode, Result,
+    Window, doctor_report, dogfood_strict_failure_count, encode, find_repo_root,
+    integration_discover, integration_enroll, integration_patch, integration_plan, json_envelope,
+    print_json, print_lines, resolve_endpoint_without_config, run_dogfood_inventory,
+    summarize_doctor, summarize_dogfood, summarize_incidents, summarize_integration,
+    summarize_monitors, summarize_query, summarize_report, summarize_services, summarize_targets,
+    summarize_timeline, tool_manifest,
 };
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
@@ -46,6 +48,8 @@ enum Commands {
     Monitors,
     /// Inspect dogfood coverage.
     Dogfood(DogfoodArgs),
+    /// Discover, plan, patch, and enroll application integrations.
+    Integrate(IntegrateArgs),
     /// Run an agent-oriented health and coverage diagnostic.
     Doctor,
     /// Emit the CLI-backed MCP tool manifest.
@@ -107,6 +111,49 @@ struct DogfoodAuditArgs {
     strict: bool,
 }
 
+#[derive(Debug, Args)]
+struct IntegrateArgs {
+    #[command(subcommand)]
+    command: IntegrateCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum IntegrateCommand {
+    /// Discover local integration state without reading secret values.
+    Discover(IntegrateProjectArgs),
+    /// Emit a reviewable patch/enrollment plan.
+    Plan(IntegrateProjectArgs),
+    /// Apply safe Next.js integration patches.
+    Patch(IntegrateProjectArgs),
+    /// Enroll a deployed service in Canary.
+    Enroll(IntegrateEnrollArgs),
+}
+
+#[derive(Debug, Args)]
+struct IntegrateProjectArgs {
+    path_or_project: PathBuf,
+    #[arg(long)]
+    service: Option<String>,
+    #[arg(long)]
+    production_url: Option<String>,
+    #[arg(long)]
+    platform_project: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct IntegrateEnrollArgs {
+    #[arg(long)]
+    service: String,
+    #[arg(long)]
+    url: String,
+    #[arg(long, default_value = "production")]
+    environment: String,
+    #[arg(long)]
+    interval_ms: Option<i64>,
+    #[arg(long)]
+    show_secret: bool,
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -157,11 +204,88 @@ fn run() -> Result<()> {
                 Ok(())
             }
         },
+        Commands::Integrate(args) => run_integrate_command(args, endpoint, api_key, config, mode),
         Commands::McpManifest => print_json(&json!({
             "schema_version": 1,
             "tools": tool_manifest()
         })),
         command => run_http_command(command, endpoint, api_key, config, mode),
+    }
+}
+
+fn run_integrate_command(
+    args: IntegrateArgs,
+    endpoint: Option<String>,
+    api_key: Option<String>,
+    config_path: Option<PathBuf>,
+    mode: RenderMode,
+) -> Result<()> {
+    match args.command {
+        IntegrateCommand::Discover(args) => {
+            let endpoint = resolve_endpoint_without_config(endpoint.as_deref());
+            let input = integration_input(args, endpoint.clone());
+            let response = integration_discover(&input)?;
+            render(
+                "integrate discover",
+                &endpoint,
+                response,
+                mode,
+                summarize_integration,
+            )
+        }
+        IntegrateCommand::Plan(args) => {
+            let endpoint = resolve_endpoint_without_config(endpoint.as_deref());
+            let input = integration_input(args, endpoint.clone());
+            let response = integration_plan(&input)?;
+            render(
+                "integrate plan",
+                &endpoint,
+                response,
+                mode,
+                summarize_integration,
+            )
+        }
+        IntegrateCommand::Patch(args) => {
+            let endpoint = resolve_endpoint_without_config(endpoint.as_deref());
+            let input = integration_input(args, endpoint.clone());
+            let response = integration_patch(&input)?;
+            render(
+                "integrate patch",
+                &endpoint,
+                response,
+                mode,
+                summarize_integration,
+            )
+        }
+        IntegrateCommand::Enroll(args) => {
+            let config = Config::resolve(endpoint, api_key, config_path)?;
+            let client = ApiClient::new(config)?;
+            let request = IntegrationEnrollRequest {
+                service: args.service,
+                url: args.url,
+                environment: args.environment,
+                interval_ms: args.interval_ms,
+                redact: !args.show_secret,
+            };
+            let response = integration_enroll(&client, &request)?;
+            render(
+                "integrate enroll",
+                client.endpoint(),
+                response,
+                mode,
+                summarize_integration,
+            )
+        }
+    }
+}
+
+fn integration_input(args: IntegrateProjectArgs, endpoint: String) -> IntegrationInput {
+    IntegrationInput {
+        target: args.path_or_project,
+        service: args.service,
+        production_url: args.production_url,
+        platform_project: args.platform_project,
+        endpoint,
     }
 }
 
@@ -272,7 +396,9 @@ fn run_http_command(
                 summarize_doctor,
             )
         }
-        Commands::Dogfood(_) | Commands::McpManifest => unreachable!("handled before HTTP setup"),
+        Commands::Dogfood(_) | Commands::Integrate(_) | Commands::McpManifest => {
+            unreachable!("handled before HTTP setup")
+        }
     }
 }
 

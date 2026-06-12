@@ -1,7 +1,7 @@
 # Build a one-command Canary integration agent
 
 Priority: high
-Status: ready
+Status: done
 Estimate: XL
 
 ## Goal
