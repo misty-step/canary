@@ -28,7 +28,7 @@
 | 022 | Contract hygiene + shallow-module collapse | high | done | M |
 | 023 | Incident as atomic agent unit (detail API) | high | done | M |
 | 024 | Signal-agnostic annotations | medium | done | M |
-| 030 | Agent contract safety pass | high | ready | M |
+| 030 | Agent contract safety pass | high | done | M |
 | 031 | Agent replay determinism hardening | high | done | M |
 | 032 | Live Rust write-path evidence | high | ready | L |
 | 034 | Worker lifecycle readiness oracle | high | ready | L |
@@ -83,9 +83,8 @@
 
 ### Active order (2026-06-11)
 
-1. **030** — Agent contract safety pass (scope annotations, summary completeness, cold-start guidance, annotation write-back; delivery-id lookup already shipped)
-2. **032** — Live Rust write-path evidence (prove deployed admin/ingest/webhook/monitor/target paths with sanitized packets)
-3. **034** — Worker lifecycle readiness oracle (make Rust background workers visible to readiness and Dagger smoke)
+1. **032** — Live Rust write-path evidence (prove deployed admin/ingest/webhook/monitor/target paths with sanitized packets)
+2. **034** — Worker lifecycle readiness oracle (make Rust background workers visible to readiness and Dagger smoke)
 
 022 + 023 landed on 2026-04-21. 024 landed on 2026-04-22. 026 landed on
 2026-04-23 — Ramp
@@ -139,6 +138,11 @@ parity backlog items were retired during the Rust scorched-earth migration.
   enrollment plans, safely patches Next.js apps, enrolls deployed health
   targets through service onboarding, and exposes the loop through the MCP
   manifest.
+- 2026-06-12: Delivered 030. The checked-in OpenAPI contract now carries
+  machine-readable least-privilege scope metadata on authenticated operations,
+  cold-start and annotation write-back guidance for agents, a documented
+  summary-exception table, and contract tests tying the spec to Rust route
+  operations, summary coverage, primary agent guidance, and delivery lookup.
 
 ## Status
 
