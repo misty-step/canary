@@ -30,7 +30,7 @@
 | 024 | Signal-agnostic annotations | medium | done | M |
 | 030 | Agent contract safety pass | high | done | M |
 | 031 | Agent replay determinism hardening | high | done | M |
-| 032 | Live Rust write-path evidence | high | ready | L |
+| 032 | Live Rust write-path evidence | high | done | L |
 | 034 | Worker lifecycle readiness oracle | high | ready | L |
 | 033 | Deployed service registry lifecycle | high | done | M |
 | 035 | Deployed app Canary coverage | high | done | XL |
@@ -83,8 +83,7 @@
 
 ### Active order (2026-06-11)
 
-1. **032** — Live Rust write-path evidence (prove deployed admin/ingest/webhook/monitor/target paths with sanitized packets)
-2. **034** — Worker lifecycle readiness oracle (make Rust background workers visible to readiness and Dagger smoke)
+1. **034** — Worker lifecycle readiness oracle (make Rust background workers visible to readiness and Dagger smoke)
 
 022 + 023 landed on 2026-04-21. 024 landed on 2026-04-22. 026 landed on
 2026-04-23 — Ramp
@@ -143,6 +142,11 @@ parity backlog items were retired during the Rust scorched-earth migration.
   cold-start and annotation write-back guidance for agents, a documented
   summary-exception table, and contract tests tying the spec to Rust route
   operations, summary coverage, primary agent guidance, and delivery lookup.
+- 2026-06-12: Delivered 032. `bin/canary-write-path-rehearsal` now replays the
+  live Rust admin/ingest/target/monitor/webhook/delivery-ledger/readback/DR
+  write paths with redacted JSON receipts, and
+  `docs/architecture/rust-write-path-evidence-2026-06-12.md` records the first
+  production run plus cleanup proof.
 
 ## Status
 

@@ -1,0 +1,1393 @@
+{
+  "schema_version": 1,
+  "status": "ok",
+  "endpoint": "https://canary-obs.fly.dev",
+  "fly_app": "canary-obs",
+  "prefix": "20260612-live-rust-write-path-final",
+  "started_at": "2026-06-12T21:20:11Z",
+  "finished_at": "2026-06-12T21:20:34Z",
+  "webhook_url": "https://httpbingo.org/status/204?<redacted-query>",
+  "deploy_identity": {
+    "app": "canary-obs",
+    "status": "deployed",
+    "hostname": "canary-obs.fly.dev",
+    "version": 76,
+    "machines": [
+      {
+        "id": "78407d7f515008",
+        "name": "delicate-voice-8599",
+        "state": "started",
+        "region": "iad",
+        "image": "registry.fly.io/canary-obs:deployment-01KTYR1CH63W842CPD6TM775FW",
+        "image_ref": {
+          "registry": "registry.fly.io",
+          "repository": "canary-obs",
+          "tag": "deployment-01KTYR1CH63W842CPD6TM775FW",
+          "digest": "sha256:bf4d29b374f423cdd93e926ea6d2d0a5a8a2c49bfbf2d726bd2c357e9c1c2c65",
+          "commit": "8066373b55108f662bf08158dfd74c25561a9fd4",
+          "repo": "misty-step/canary",
+          "event": "workflow_run"
+        },
+        "release_id": "rel_dg93zlmvqv802jw0",
+        "release_version": "76",
+        "checks": [
+          {
+            "name": "servicecheck-01-http-4000",
+            "status": "passing",
+            "updated_at": "2026-06-12T20:25:30.28Z"
+          },
+          {
+            "name": "servicecheck-00-http-4000",
+            "status": "passing",
+            "updated_at": "2026-06-12T20:25:29.999Z"
+          }
+        ]
+      }
+    ]
+  },
+  "resources": {
+    "service": "canary-write-path-20260612-live-rust-write-path-final",
+    "immutable_error_id": "ERR-kc7o7ryv121g",
+    "cleaned_target_id": "TGT-2cr0ze6iwcfx",
+    "cleaned_monitor_id": "MON-k2843ev95yz9",
+    "cleaned_webhook_id": "WHK-opehar1c54yt",
+    "revoked_key_id": "KEY-vy07y1z3576z",
+    "immutable_webhook_delivery_id": "DLV-stwp8h56qgxd"
+  },
+  "cleanup_note": "Targets, monitors, and webhooks are deleted. The temporary ingest key is revoked and intentionally remains as an inactive audit row. Error and webhook-delivery rows are immutable evidence.",
+  "steps": [
+    {
+      "type": "json",
+      "name": "fly_deploy_identity",
+      "response": {
+        "app": "canary-obs",
+        "status": "deployed",
+        "hostname": "canary-obs.fly.dev",
+        "version": 76,
+        "machines": [
+          {
+            "id": "78407d7f515008",
+            "name": "delicate-voice-8599",
+            "state": "started",
+            "region": "iad",
+            "image": "registry.fly.io/canary-obs:deployment-01KTYR1CH63W842CPD6TM775FW",
+            "image_ref": {
+              "registry": "registry.fly.io",
+              "repository": "canary-obs",
+              "tag": "deployment-01KTYR1CH63W842CPD6TM775FW",
+              "digest": "sha256:bf4d29b374f423cdd93e926ea6d2d0a5a8a2c49bfbf2d726bd2c357e9c1c2c65",
+              "commit": "8066373b55108f662bf08158dfd74c25561a9fd4",
+              "repo": "misty-step/canary",
+              "event": "workflow_run"
+            },
+            "release_id": "rel_dg93zlmvqv802jw0",
+            "release_version": "76",
+            "checks": [
+              {
+                "name": "servicecheck-01-http-4000",
+                "status": "passing",
+                "updated_at": "2026-06-12T20:25:30.28Z"
+              },
+              {
+                "name": "servicecheck-00-http-4000",
+                "status": "passing",
+                "updated_at": "2026-06-12T20:25:29.999Z"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "http",
+      "name": "api_key_create_ingest",
+      "method": "POST",
+      "path": "/api/v1/keys",
+      "status": 201,
+      "response": {
+        "created_at": "2026-06-12T21:20:13.781976835Z",
+        "id": "KEY-vy07y1z3576z",
+        "key": "<redacted>",
+        "key_prefix": "<redacted>",
+        "name": "canary-write-path-20260612-live-rust-write-path-final-ingest",
+        "scope": "ingest-only",
+        "warning": "Store this key securely. It will not be shown again."
+      }
+    },
+    {
+      "type": "http",
+      "name": "ingest_key_cannot_read_targets",
+      "method": "GET",
+      "path": "/api/v1/targets",
+      "status": 403,
+      "response": {
+        "type": "https://canary.dev/problems/insufficient-scope",
+        "title": "Insufficient Scope",
+        "status": 403,
+        "detail": "API key scope `ingest-only` cannot access this admin endpoint. Use an `admin` key.",
+        "code": "insufficient_scope",
+        "request_id": null,
+        "required_scopes": [
+          "admin"
+        ],
+        "scope": "ingest-only"
+      }
+    },
+    {
+      "type": "http",
+      "name": "target_create",
+      "method": "POST",
+      "path": "/api/v1/targets",
+      "status": 201,
+      "response": {
+        "active": true,
+        "created_at": "2026-06-12T21:20:14.933871512Z",
+        "expected_status": "200",
+        "id": "TGT-2cr0ze6iwcfx",
+        "interval_ms": 60000,
+        "method": "GET",
+        "name": "canary-write-path-20260612-live-rust-write-path-final-target",
+        "service": "canary-write-path-20260612-live-rust-write-path-final",
+        "timeout_ms": 5000,
+        "url": "https://canary-obs.fly.dev/healthz"
+      }
+    },
+    {
+      "type": "http",
+      "name": "target_query_after_create",
+      "method": "GET",
+      "path": "/api/v1/targets",
+      "status": 200,
+      "response": {
+        "targets": [
+          {
+            "active": true,
+            "created_at": "2026-03-14T23:03:28.424961Z",
+            "expected_status": "200",
+            "id": "TGT-5gowpivgtuvw",
+            "interval_ms": 60000,
+            "method": "GET",
+            "name": "canary-self",
+            "service": "canary-self",
+            "timeout_ms": 5000,
+            "url": "https://canary-obs.fly.dev/healthz"
+          },
+          {
+            "active": true,
+            "created_at": "2026-06-12T21:20:14.933871512Z",
+            "expected_status": "200",
+            "id": "TGT-2cr0ze6iwcfx",
+            "interval_ms": 60000,
+            "method": "GET",
+            "name": "canary-write-path-20260612-live-rust-write-path-final-target",
+            "service": "canary-write-path-20260612-live-rust-write-path-final",
+            "timeout_ms": 5000,
+            "url": "https://canary-obs.fly.dev/healthz"
+          },
+          {
+            "active": true,
+            "created_at": "2026-03-27T01:36:59.551650Z",
+            "expected_status": "200",
+            "id": "TGT-cjjw9uyj0k41",
+            "interval_ms": 60000,
+            "method": "GET",
+            "name": "chrondle",
+            "service": "chrondle",
+            "timeout_ms": 10000,
+            "url": "https://www.chrondle.app/api/health"
+          },
+          {
+            "active": true,
+            "created_at": "2026-03-27T01:37:00.059891Z",
+            "expected_status": "200",
+            "id": "TGT-l1uqvd03m5tz",
+            "interval_ms": 60000,
+            "method": "GET",
+            "name": "linejam",
+            "service": "linejam",
+            "timeout_ms": 10000,
+            "url": "https://www.linejam.app/api/health"
+          },
+          {
+            "active": true,
+            "created_at": "2026-06-12T02:15:08.789422938Z",
+            "expected_status": "200",
+            "id": "TGT-ifbre1aplmka",
+            "interval_ms": 60000,
+            "method": "GET",
+            "name": "misty-step",
+            "service": "misty-step",
+            "timeout_ms": 10000,
+            "url": "https://www.mistystep.io/api/health"
+          },
+          {
+            "active": true,
+            "created_at": "2026-03-27T01:37:00.472023Z",
+            "expected_status": "200",
+            "id": "TGT-72csit0gquvr",
+            "interval_ms": 60000,
+            "method": "GET",
+            "name": "vulcan",
+            "service": "vulcan",
+            "timeout_ms": 10000,
+            "url": "https://adminifi-vulcan-orchestrator.fly.dev/health"
+          }
+        ]
+      }
+    },
+    {
+      "type": "http",
+      "name": "target_pause",
+      "method": "POST",
+      "path": "/api/v1/targets/TGT-2cr0ze6iwcfx/pause",
+      "status": 200,
+      "response": {
+        "status": "paused"
+      }
+    },
+    {
+      "type": "http",
+      "name": "target_resume",
+      "method": "POST",
+      "path": "/api/v1/targets/TGT-2cr0ze6iwcfx/resume",
+      "status": 200,
+      "response": {
+        "status": "resumed"
+      }
+    },
+    {
+      "type": "http",
+      "name": "monitor_create",
+      "method": "POST",
+      "path": "/api/v1/monitors",
+      "status": 201,
+      "response": {
+        "created_at": "2026-06-12T21:20:17.123686586Z",
+        "expected_every_ms": 600000,
+        "grace_ms": 120000,
+        "id": "MON-k2843ev95yz9",
+        "mode": "ttl",
+        "name": "canary-write-path-20260612-live-rust-write-path-final-monitor",
+        "service": "canary-write-path-20260612-live-rust-write-path-final"
+      }
+    },
+    {
+      "type": "http",
+      "name": "monitor_query_after_create",
+      "method": "GET",
+      "path": "/api/v1/monitors",
+      "status": 200,
+      "response": {
+        "monitors": [
+          {
+            "created_at": "2026-06-12T00:48:07.869103074Z",
+            "expected_every_ms": 600000,
+            "grace_ms": 120000,
+            "id": "MON-5csw7imodfcq",
+            "mode": "ttl",
+            "name": "canary-watchman",
+            "service": "canary"
+          },
+          {
+            "created_at": "2026-06-12T21:20:17.123686586Z",
+            "expected_every_ms": 600000,
+            "grace_ms": 120000,
+            "id": "MON-k2843ev95yz9",
+            "mode": "ttl",
+            "name": "canary-write-path-20260612-live-rust-write-path-final-monitor",
+            "service": "canary-write-path-20260612-live-rust-write-path-final"
+          }
+        ]
+      }
+    },
+    {
+      "type": "http",
+      "name": "monitor_check_in",
+      "method": "POST",
+      "path": "/api/v1/check-ins",
+      "status": 201,
+      "response": {
+        "check_in_id": "CHK-6ghqit7msbxu",
+        "monitor_id": "MON-k2843ev95yz9",
+        "observed_at": "2026-06-12T21:20:18.208144995Z",
+        "sequence": 1,
+        "state": "up"
+      }
+    },
+    {
+      "type": "http",
+      "name": "webhook_create",
+      "method": "POST",
+      "path": "/api/v1/webhooks",
+      "status": 201,
+      "response": {
+        "created_at": "2026-06-12T21:20:19.486681486Z",
+        "events": [
+          "canary.ping",
+          "error.new_class"
+        ],
+        "id": "WHK-opehar1c54yt",
+        "secret": "<redacted>",
+        "url": "<redacted>"
+      }
+    },
+    {
+      "type": "http",
+      "name": "webhook_query_after_create",
+      "method": "GET",
+      "path": "/api/v1/webhooks",
+      "status": 200,
+      "response": {
+        "webhooks": [
+          {
+            "active": true,
+            "created_at": "2026-04-09T01:51:10.814543Z",
+            "events": [
+              "error.new_class",
+              "error.regression",
+              "incident.opened",
+              "incident.updated",
+              "incident.resolved",
+              "health_check.down",
+              "health_check.degraded",
+              "health_check.recovered",
+              "health_check.tls_expiring"
+            ],
+            "id": "WHK-78ro85gmubzy",
+            "url": "https://linejam-canary-responder.fly.dev/canary/webhook"
+          },
+          {
+            "active": true,
+            "created_at": "2026-06-12T21:20:19.486681486Z",
+            "events": [
+              "canary.ping",
+              "error.new_class"
+            ],
+            "id": "WHK-opehar1c54yt",
+            "url": "<redacted>"
+          }
+        ]
+      }
+    },
+    {
+      "type": "http",
+      "name": "webhook_test",
+      "method": "POST",
+      "path": "/api/v1/webhooks/WHK-opehar1c54yt/test",
+      "status": 200,
+      "response": {
+        "status": "delivered"
+      }
+    },
+    {
+      "type": "http",
+      "name": "error_ingest",
+      "method": "POST",
+      "path": "/api/v1/errors",
+      "status": 201,
+      "response": {
+        "group_hash": "<redacted-hash>",
+        "id": "ERR-kc7o7ryv121g",
+        "is_new_class": true
+      }
+    },
+    {
+      "type": "http",
+      "name": "error_query_readback",
+      "method": "GET",
+      "path": "/api/v1/query?service=canary-write-path-20260612-live-rust-write-path-final&window=1h",
+      "status": 200,
+      "response": {
+        "summary": "1 errors in canary-write-path-20260612-live-rust-write-path-final in the last 1h. 1 unique classes. Most frequent: CanaryWritePathRehearsal (1 occurrences).",
+        "service": "canary-write-path-20260612-live-rust-write-path-final",
+        "window": "1h",
+        "total_errors": 1,
+        "groups": [
+          {
+            "group_hash": "<redacted-hash>",
+            "error_class": "CanaryWritePathRehearsal",
+            "service": "canary-write-path-20260612-live-rust-write-path-final",
+            "count": 1,
+            "first_seen": "2026-06-12T21:20:21.261615333Z",
+            "last_seen": "2026-06-12T21:20:21.261615333Z",
+            "sample_message": "canary write path rehearsal <int>-live-rust-write-path-final",
+            "severity": "error",
+            "status": "active",
+            "classification": {
+              "category": "unknown",
+              "persistence": "unknown",
+              "component": "unknown"
+            }
+          }
+        ],
+        "cursor": null
+      }
+    },
+    {
+      "type": "http",
+      "name": "report_readback",
+      "method": "GET",
+      "path": "/api/v1/report?window=1h&q=20260612-live-rust-write-path-final&limit=5",
+      "status": 200,
+      "response": {
+        "cursor": "eyJ0YXJnZXRzX29mZnNldCI6NSwibW9uaXRvcl9vZmZzZXQiOm51bGwsImVycm9yX2dyb3Vwc19vZmZzZXQiOm51bGx9",
+        "error_groups": [
+          {
+            "classification": {
+              "category": "unknown",
+              "component": "unknown",
+              "persistence": "unknown"
+            },
+            "count": 1,
+            "error_class": "CanaryWritePathRehearsal",
+            "first_seen": "2026-06-12T20:41:13.983688657Z",
+            "group_hash": "<redacted-hash>",
+            "last_seen": "2026-06-12T20:41:13.983688657Z",
+            "sample_message": "canary write path rehearsal <int>-live-rust-write-path",
+            "service": "canary-write-path-20260612-live-rust-write-path",
+            "severity": "error",
+            "status": "active"
+          },
+          {
+            "classification": {
+              "category": "unknown",
+              "component": "unknown",
+              "persistence": "unknown"
+            },
+            "count": 1,
+            "error_class": "CanaryWritePathRehearsal",
+            "first_seen": "2026-06-12T21:20:21.261615333Z",
+            "group_hash": "<redacted-hash>",
+            "last_seen": "2026-06-12T21:20:21.261615333Z",
+            "sample_message": "canary write path rehearsal <int>-live-rust-write-path-final",
+            "service": "canary-write-path-20260612-live-rust-write-path-final",
+            "severity": "error",
+            "status": "active"
+          }
+        ],
+        "incidents": [
+          {
+            "id": "INC-nt9suim7lmbm",
+            "opened_at": "2026-06-12T21:20:21.263064114Z",
+            "resolved_at": null,
+            "service": "canary-write-path-20260612-live-rust-write-path-final",
+            "severity": "medium",
+            "signal_count": 1,
+            "signals": [
+              {
+                "attached_at": "2026-06-12T21:20:21.263064114Z",
+                "resolved_at": null,
+                "signal_ref": "<redacted-hash>",
+                "signal_type": "error_group"
+              }
+            ],
+            "state": "investigating",
+            "title": "canary-write-path-20260612-live-rust-write-path-final incident"
+          },
+          {
+            "id": "INC-mektbdthelth",
+            "opened_at": "2026-03-28T19:02:23.577650Z",
+            "resolved_at": null,
+            "service": "canary-triage",
+            "severity": "medium",
+            "signal_count": 1,
+            "signals": [
+              {
+                "attached_at": "2026-03-28T20:03:07.830352Z",
+                "resolved_at": null,
+                "signal_ref": "TGT-gxcg7y84tt52",
+                "signal_type": "health_transition"
+              }
+            ],
+            "state": "investigating",
+            "title": "canary-triage incident"
+          }
+        ],
+        "monitors": [
+          {
+            "deadline_at": "2026-06-12T21:25:16Z",
+            "expected_every_ms": 600000,
+            "grace_ms": 120000,
+            "id": "MON-5csw7imodfcq",
+            "last_check_in_at": "2026-06-12T21:13:16Z",
+            "last_check_in_status": "alive",
+            "last_failure_at": null,
+            "last_success_at": "2026-06-12T21:13:16Z",
+            "mode": "ttl",
+            "name": "canary-watchman",
+            "service": "canary",
+            "state": "up"
+          },
+          {
+            "deadline_at": "2026-06-12T21:32:18.208144995Z",
+            "expected_every_ms": 600000,
+            "grace_ms": 120000,
+            "id": "MON-k2843ev95yz9",
+            "last_check_in_at": "2026-06-12T21:20:18.208144995Z",
+            "last_check_in_status": "alive",
+            "last_failure_at": null,
+            "last_success_at": "2026-06-12T21:20:18.208144995Z",
+            "mode": "ttl",
+            "name": "canary-write-path-20260612-live-rust-write-path-final-monitor",
+            "service": "canary-write-path-20260612-live-rust-write-path-final",
+            "state": "up"
+          }
+        ],
+        "recent_transitions": [
+          {
+            "entity_ref": "MON-k2843ev95yz9",
+            "entity_type": "monitor",
+            "name": "canary-write-path-20260612-live-rust-write-path-final-monitor",
+            "service": "canary-write-path-20260612-live-rust-write-path-final",
+            "state": "up",
+            "transitioned_at": "2026-06-12T21:20:18.208144995Z"
+          },
+          {
+            "entity_ref": "TGT-2cr0ze6iwcfx",
+            "entity_type": "target",
+            "name": "canary-write-path-20260612-live-rust-write-path-final-target",
+            "service": "canary-write-path-20260612-live-rust-write-path-final",
+            "state": "up",
+            "transitioned_at": "2026-06-12T21:20:17.137223325Z"
+          },
+          {
+            "entity_ref": "MON-5csw7imodfcq",
+            "entity_type": "monitor",
+            "name": "canary-watchman",
+            "service": "canary",
+            "state": "up",
+            "transitioned_at": "2026-06-12T21:13:16Z"
+          }
+        ],
+        "search_results": [
+          {
+            "created_at": "2026-06-12T21:20:21.261615333Z",
+            "error_class": "CanaryWritePathRehearsal",
+            "group_hash": "<redacted-hash>",
+            "id": "ERR-kc7o7ryv121g",
+            "message": "canary write path rehearsal 20260612-live-rust-write-path-final",
+            "score": 14.412582779036928,
+            "service": "canary-write-path-20260612-live-rust-write-path-final"
+          }
+        ],
+        "status": "warning",
+        "summary": "8 health surfaces monitored. 2 errors across 2 services in the last hour.",
+        "targets": [
+          {
+            "consecutive_failures": 0,
+            "id": "TGT-5gowpivgtuvw",
+            "last_checked_at": "2026-06-12T21:19:40.983759066Z",
+            "last_success_at": "2026-06-12T21:19:40.983759066Z",
+            "latency_ms": 5,
+            "name": "canary-self",
+            "recent_checks": [
+              {
+                "checked_at": "2026-06-12T21:19:40.983759066Z",
+                "latency_ms": 5,
+                "result": "success",
+                "status_code": 200
+              },
+              {
+                "checked_at": "2026-06-12T21:18:35.959670751Z",
+                "latency_ms": 7,
+                "result": "success",
+                "status_code": 200
+              },
+              {
+                "checked_at": "2026-06-12T21:17:30.940414065Z",
+                "latency_ms": 8,
+                "result": "success",
+                "status_code": 200
+              },
+              {
+                "checked_at": "2026-06-12T21:16:25.915911309Z",
+                "latency_ms": 8,
+                "result": "success",
+                "status_code": 200
+              },
+              {
+                "checked_at": "2026-06-12T21:15:20.994203581Z",
+                "latency_ms": 108,
+                "result": "success",
+                "status_code": 200
+              }
+            ],
+            "service": "canary-self",
+            "state": "up",
+            "tls_expires_at": "2026-07-21T23:23:46Z",
+            "url": "https://canary-obs.fly.dev/healthz"
+          },
+          {
+            "consecutive_failures": 0,
+            "id": "TGT-2cr0ze6iwcfx",
+            "last_checked_at": "2026-06-12T21:20:17.137223325Z",
+            "last_success_at": "2026-06-12T21:20:17.137223325Z",
+            "latency_ms": 8,
+            "name": "canary-write-path-20260612-live-rust-write-path-final-target",
+            "recent_checks": [
+              {
+                "checked_at": "2026-06-12T21:20:17.137223325Z",
+                "latency_ms": 8,
+                "result": "success",
+                "status_code": 200
+              },
+              {
+                "checked_at": "2026-06-12T21:20:15.015795318Z",
+                "latency_ms": 11,
+                "result": "success",
+                "status_code": 200
+              }
+            ],
+            "service": "canary-write-path-20260612-live-rust-write-path-final",
+            "state": "up",
+            "tls_expires_at": "2026-07-21T23:23:46Z",
+            "url": "https://canary-obs.fly.dev/healthz"
+          },
+          {
+            "consecutive_failures": 0,
+            "id": "TGT-cjjw9uyj0k41",
+            "last_checked_at": "2026-06-12T21:19:37.235199892Z",
+            "last_success_at": "2026-06-12T21:19:37.235199892Z",
+            "latency_ms": 254,
+            "name": "chrondle",
+            "recent_checks": [
+              {
+                "checked_at": "2026-06-12T21:19:37.235199892Z",
+                "latency_ms": 254,
+                "result": "success",
+                "status_code": 200
+              },
+              {
+                "checked_at": "2026-06-12T21:18:38.189116823Z",
+                "latency_ms": 228,
+                "result": "success",
+                "status_code": 200
+              },
+              {
+                "checked_at": "2026-06-12T21:17:39.321258003Z",
+                "latency_ms": 380,
+                "result": "success",
+                "status_code": 200
+              },
+              {
+                "checked_at": "2026-06-12T21:16:40.115789157Z",
+                "latency_ms": 198,
+                "result": "success",
+                "status_code": 200
+              },
+              {
+                "checked_at": "2026-06-12T21:15:41.198020171Z",
+                "latency_ms": 302,
+                "result": "success",
+                "status_code": 200
+              }
+            ],
+            "service": "chrondle",
+            "state": "up",
+            "tls_expires_at": "2026-07-27T13:47:41Z",
+            "url": "https://www.chrondle.app/api/health"
+          },
+          {
+            "consecutive_failures": 0,
+            "id": "TGT-l1uqvd03m5tz",
+            "last_checked_at": "2026-06-12T21:19:37.26091391Z",
+            "last_success_at": "2026-06-12T21:19:37.26091391Z",
+            "latency_ms": 280,
+            "name": "linejam",
+            "recent_checks": [
+              {
+                "checked_at": "2026-06-12T21:19:37.26091391Z",
+                "latency_ms": 280,
+                "result": "success",
+                "status_code": 200
+              },
+              {
+                "checked_at": "2026-06-12T21:18:38.172442971Z",
+                "latency_ms": 214,
+                "result": "success",
+                "status_code": 200
+              },
+              {
+                "checked_at": "2026-06-12T21:17:39.121091745Z",
+                "latency_ms": 180,
+                "result": "success",
+                "status_code": 200
+              },
+              {
+                "checked_at": "2026-06-12T21:16:40.165187741Z",
+                "latency_ms": 247,
+                "result": "success",
+                "status_code": 200
+              },
+              {
+                "checked_at": "2026-06-12T21:15:41.170824332Z",
+                "latency_ms": 274,
+                "result": "success",
+                "status_code": 200
+              }
+            ],
+            "service": "linejam",
+            "state": "up",
+            "tls_expires_at": "2026-08-19T14:53:27Z",
+            "url": "https://www.linejam.app/api/health"
+          },
+          {
+            "consecutive_failures": 0,
+            "id": "TGT-ifbre1aplmka",
+            "last_checked_at": "2026-06-12T21:20:10.20466846Z",
+            "last_success_at": "2026-06-12T21:20:10.20466846Z",
+            "latency_ms": 199,
+            "name": "misty-step",
+            "recent_checks": [
+              {
+                "checked_at": "2026-06-12T21:20:10.20466846Z",
+                "latency_ms": 199,
+                "result": "success",
+                "status_code": 200
+              },
+              {
+                "checked_at": "2026-06-12T21:19:07.164642159Z",
+                "latency_ms": 197,
+                "result": "success",
+                "status_code": 200
+              },
+              {
+                "checked_at": "2026-06-12T21:18:04.067540333Z",
+                "latency_ms": 121,
+                "result": "success",
+                "status_code": 200
+              },
+              {
+                "checked_at": "2026-06-12T21:17:01.001458889Z",
+                "latency_ms": 78,
+                "result": "success",
+                "status_code": 200
+              },
+              {
+                "checked_at": "2026-06-12T21:15:57.9799053Z",
+                "latency_ms": 75,
+                "result": "success",
+                "status_code": 200
+              }
+            ],
+            "service": "misty-step",
+            "state": "up",
+            "tls_expires_at": "2026-08-28T04:16:15Z",
+            "url": "https://www.mistystep.io/api/health"
+          }
+        ],
+        "truncated": true
+      }
+    },
+    {
+      "type": "http",
+      "name": "timeline_readback",
+      "method": "GET",
+      "path": "/api/v1/timeline?service=canary-write-path-20260612-live-rust-write-path-final&window=1h&limit=10",
+      "status": 200,
+      "response": {
+        "summary": "Returned 5 timeline events for canary-write-path-20260612-live-rust-write-path-final in the last 1h.",
+        "returned_count": 5,
+        "window": "1h",
+        "service": "canary-write-path-20260612-live-rust-write-path-final",
+        "events": [
+          {
+            "id": "EVT-jz858aha416v",
+            "service": "canary-write-path-20260612-live-rust-write-path-final",
+            "event": "incident.opened",
+            "entity_type": "incident",
+            "entity_ref": "INC-nt9suim7lmbm",
+            "severity": "medium",
+            "summary": "canary-write-path-20260612-live-rust-write-path-final: incident opened",
+            "payload": {
+              "event": "incident.opened",
+              "incident": {
+                "id": "INC-nt9suim7lmbm",
+                "opened_at": "2026-06-12T21:20:21.263064114Z",
+                "resolved_at": null,
+                "service": "canary-write-path-20260612-live-rust-write-path-final",
+                "severity": "medium",
+                "signals": [
+                  {
+                    "attached_at": "2026-06-12T21:20:21.263064114Z",
+                    "resolved_at": null,
+                    "signal_ref": "<redacted-hash>",
+                    "signal_type": "error_group"
+                  }
+                ],
+                "state": "investigating",
+                "title": "canary-write-path-20260612-live-rust-write-path-final incident"
+              },
+              "timestamp": "2026-06-12T21:20:21.263064114Z"
+            },
+            "created_at": "2026-06-12T21:20:21.263064114Z"
+          },
+          {
+            "id": "EVT-fs7rv7xqq5r8",
+            "service": "canary-write-path-20260612-live-rust-write-path-final",
+            "event": "error.new_class",
+            "entity_type": "error_group",
+            "entity_ref": "<redacted-hash>",
+            "severity": "error",
+            "summary": "canary-write-path-20260612-live-rust-write-path-final: new CanaryWritePathRehearsal",
+            "payload": {
+              "error": {
+                "error_class": "CanaryWritePathRehearsal",
+                "group_hash": "<redacted-hash>",
+                "id": "ERR-kc7o7ryv121g",
+                "message": "canary write path rehearsal 20260612-live-rust-write-path-final",
+                "service": "canary-write-path-20260612-live-rust-write-path-final",
+                "severity": "error"
+              },
+              "event": "error.new_class",
+              "timestamp": "2026-06-12T21:20:21.261615333Z"
+            },
+            "created_at": "2026-06-12T21:20:21.261615333Z"
+          },
+          {
+            "id": "EVT-q5dvrqv8wel6",
+            "service": "canary-write-path-20260612-live-rust-write-path-final",
+            "event": "health_check.recovered",
+            "entity_type": "monitor",
+            "entity_ref": "MON-k2843ev95yz9",
+            "severity": "info",
+            "summary": "canary-write-path-20260612-live-rust-write-path-final: canary-write-path-20260612-live-rust-write-path-final-monitor up",
+            "payload": {
+              "deadline_at": "2026-06-12T21:32:18.208144995Z",
+              "event": "health_check.recovered",
+              "last_check_in_at": "2026-06-12T21:20:18.208144995Z",
+              "last_check_in_status": "alive",
+              "monitor": {
+                "expected_every_ms": 600000,
+                "grace_ms": 120000,
+                "mode": "ttl",
+                "name": "canary-write-path-20260612-live-rust-write-path-final-monitor",
+                "service": "canary-write-path-20260612-live-rust-write-path-final"
+              },
+              "previous_state": "unknown",
+              "sequence": 1,
+              "state": "up",
+              "timestamp": "2026-06-12T21:20:18.208144995Z"
+            },
+            "created_at": "2026-06-12T21:20:18.208144995Z"
+          },
+          {
+            "id": "EVT-grzmfyr8azl6",
+            "service": "canary-write-path-20260612-live-rust-write-path-final",
+            "event": "health_check.recovered",
+            "entity_type": "target",
+            "entity_ref": "TGT-2cr0ze6iwcfx",
+            "severity": "info",
+            "summary": "canary-write-path-20260612-live-rust-write-path-final: canary-write-path-20260612-live-rust-write-path-final-target up",
+            "payload": {
+              "consecutive_failures": 0,
+              "event": "health_check.recovered",
+              "last_success_at": "2026-06-12T21:20:17.137223325Z",
+              "previous_state": "unknown",
+              "sequence": 2,
+              "state": "up",
+              "target": {
+                "name": "canary-write-path-20260612-live-rust-write-path-final-target",
+                "service": "canary-write-path-20260612-live-rust-write-path-final",
+                "url": "https://canary-obs.fly.dev/healthz"
+              },
+              "timestamp": "2026-06-12T21:20:17.137223325Z"
+            },
+            "created_at": "2026-06-12T21:20:17.137223325Z"
+          },
+          {
+            "id": "EVT-qki9q94q8pxe",
+            "service": "canary-write-path-20260612-live-rust-write-path-final",
+            "event": "health_check.recovered",
+            "entity_type": "target",
+            "entity_ref": "TGT-2cr0ze6iwcfx",
+            "severity": "info",
+            "summary": "canary-write-path-20260612-live-rust-write-path-final: canary-write-path-20260612-live-rust-write-path-final-target up",
+            "payload": {
+              "consecutive_failures": 0,
+              "event": "health_check.recovered",
+              "last_success_at": "2026-06-12T21:20:15.015795318Z",
+              "previous_state": "unknown",
+              "sequence": 1,
+              "state": "up",
+              "target": {
+                "name": "canary-write-path-20260612-live-rust-write-path-final-target",
+                "service": "canary-write-path-20260612-live-rust-write-path-final",
+                "url": "https://canary-obs.fly.dev/healthz"
+              },
+              "timestamp": "2026-06-12T21:20:15.015795318Z"
+            },
+            "created_at": "2026-06-12T21:20:15.015795318Z"
+          }
+        ],
+        "cursor": null
+      }
+    },
+    {
+      "type": "http",
+      "name": "error_detail_readback",
+      "method": "GET",
+      "path": "/api/v1/errors/ERR-kc7o7ryv121g",
+      "status": 200,
+      "response": {
+        "summary": "CanaryWritePathRehearsal in canary-write-path-20260612-live-rust-write-path-final. Seen 1 times since 2026-06-12T21:20:21.261615333Z. Last occurrence: 2026-06-12T21:20:21.261615333Z.",
+        "id": "ERR-kc7o7ryv121g",
+        "service": "canary-write-path-20260612-live-rust-write-path-final",
+        "error_class": "CanaryWritePathRehearsal",
+        "message": "canary write path rehearsal 20260612-live-rust-write-path-final",
+        "message_template": "canary write path rehearsal <int>-live-rust-write-path-final",
+        "stack_trace": null,
+        "context": {
+          "rehearsal_prefix": "20260612-live-rust-write-path-final"
+        },
+        "severity": "error",
+        "environment": "production",
+        "group_hash": "<redacted-hash>",
+        "created_at": "2026-06-12T21:20:21.261615333Z",
+        "group": {
+          "total_count": 1,
+          "first_seen_at": "2026-06-12T21:20:21.261615333Z",
+          "last_seen_at": "2026-06-12T21:20:21.261615333Z",
+          "status": "active"
+        },
+        "incident_ids": [
+          "INC-nt9suim7lmbm"
+        ]
+      }
+    },
+    {
+      "type": "http",
+      "name": "webhook_delivery_poll",
+      "method": "GET",
+      "path": "/api/v1/webhook-deliveries?webhook_id=WHK-opehar1c54yt&event=error.new_class&limit=5",
+      "status": 200,
+      "response": {
+        "returned_count": 1,
+        "cursor": null,
+        "deliveries": [
+          {
+            "delivery_id": "DLV-stwp8h56qgxd",
+            "webhook_id": "WHK-opehar1c54yt",
+            "event": "error.new_class",
+            "status": "delivered",
+            "attempt_count": 1,
+            "reason": null,
+            "first_attempt_at": "2026-06-12T21:20:22.612764237Z",
+            "last_attempt_at": "2026-06-12T21:20:22.612764237Z",
+            "delivered_at": "2026-06-12T21:20:22.692544432Z",
+            "discarded_at": null,
+            "completed_at": "2026-06-12T21:20:22.692544432Z",
+            "created_at": "2026-06-12T21:20:21.264400255Z",
+            "updated_at": "2026-06-12T21:20:22.692544432Z"
+          }
+        ]
+      }
+    },
+    {
+      "type": "http",
+      "name": "webhook_delivery_lookup",
+      "method": "GET",
+      "path": "/api/v1/webhook-deliveries/DLV-stwp8h56qgxd",
+      "status": 200,
+      "response": {
+        "delivery_id": "DLV-stwp8h56qgxd",
+        "webhook_id": "WHK-opehar1c54yt",
+        "event": "error.new_class",
+        "status": "delivered",
+        "attempt_count": 1,
+        "reason": null,
+        "first_attempt_at": "2026-06-12T21:20:22.612764237Z",
+        "last_attempt_at": "2026-06-12T21:20:22.612764237Z",
+        "delivered_at": "2026-06-12T21:20:22.692544432Z",
+        "discarded_at": null,
+        "completed_at": "2026-06-12T21:20:22.692544432Z",
+        "created_at": "2026-06-12T21:20:21.264400255Z",
+        "updated_at": "2026-06-12T21:20:22.692544432Z"
+      }
+    },
+    {
+      "type": "shell",
+      "name": "dr_status",
+      "command": "NO_COLOR=1 bin/dr-status --app canary-obs",
+      "status": 0,
+      "output": "Connecting to fdaa:45:6cb6:a7b:40a:a6a6:fd3f:2...\ndatabase         status  local txid        wal size\n/data/canary.db  ok      0000000000089857  5.5 MB"
+    },
+    {
+      "type": "http",
+      "name": "target_delete",
+      "method": "DELETE",
+      "path": "/api/v1/targets/TGT-2cr0ze6iwcfx",
+      "status": 204,
+      "response": null
+    },
+    {
+      "type": "http",
+      "name": "monitor_delete",
+      "method": "DELETE",
+      "path": "/api/v1/monitors/MON-k2843ev95yz9",
+      "status": 204,
+      "response": null
+    },
+    {
+      "type": "http",
+      "name": "webhook_delete",
+      "method": "DELETE",
+      "path": "/api/v1/webhooks/WHK-opehar1c54yt",
+      "status": 204,
+      "response": null
+    },
+    {
+      "type": "http",
+      "name": "api_key_revoke_ingest",
+      "method": "POST",
+      "path": "/api/v1/keys/KEY-vy07y1z3576z/revoke",
+      "status": 200,
+      "response": {
+        "status": "revoked"
+      }
+    },
+    {
+      "type": "http",
+      "name": "revoked_ingest_key_rejects_check_in",
+      "method": "POST",
+      "path": "/api/v1/check-ins",
+      "status": 401,
+      "response": {
+        "type": "https://canary.dev/problems/invalid-api-key",
+        "title": "Invalid API Key",
+        "status": 401,
+        "detail": "Invalid or revoked API key.",
+        "code": "invalid_api_key",
+        "request_id": null
+      }
+    },
+    {
+      "type": "http",
+      "name": "post_cleanup_targets",
+      "method": "GET",
+      "path": "/api/v1/targets",
+      "status": 200,
+      "response": {
+        "targets": [
+          {
+            "active": true,
+            "created_at": "2026-03-14T23:03:28.424961Z",
+            "expected_status": "200",
+            "id": "TGT-5gowpivgtuvw",
+            "interval_ms": 60000,
+            "method": "GET",
+            "name": "canary-self",
+            "service": "canary-self",
+            "timeout_ms": 5000,
+            "url": "https://canary-obs.fly.dev/healthz"
+          },
+          {
+            "active": true,
+            "created_at": "2026-03-27T01:36:59.551650Z",
+            "expected_status": "200",
+            "id": "TGT-cjjw9uyj0k41",
+            "interval_ms": 60000,
+            "method": "GET",
+            "name": "chrondle",
+            "service": "chrondle",
+            "timeout_ms": 10000,
+            "url": "https://www.chrondle.app/api/health"
+          },
+          {
+            "active": true,
+            "created_at": "2026-03-27T01:37:00.059891Z",
+            "expected_status": "200",
+            "id": "TGT-l1uqvd03m5tz",
+            "interval_ms": 60000,
+            "method": "GET",
+            "name": "linejam",
+            "service": "linejam",
+            "timeout_ms": 10000,
+            "url": "https://www.linejam.app/api/health"
+          },
+          {
+            "active": true,
+            "created_at": "2026-06-12T02:15:08.789422938Z",
+            "expected_status": "200",
+            "id": "TGT-ifbre1aplmka",
+            "interval_ms": 60000,
+            "method": "GET",
+            "name": "misty-step",
+            "service": "misty-step",
+            "timeout_ms": 10000,
+            "url": "https://www.mistystep.io/api/health"
+          },
+          {
+            "active": true,
+            "created_at": "2026-03-27T01:37:00.472023Z",
+            "expected_status": "200",
+            "id": "TGT-72csit0gquvr",
+            "interval_ms": 60000,
+            "method": "GET",
+            "name": "vulcan",
+            "service": "vulcan",
+            "timeout_ms": 10000,
+            "url": "https://adminifi-vulcan-orchestrator.fly.dev/health"
+          }
+        ]
+      }
+    },
+    {
+      "type": "http",
+      "name": "post_cleanup_monitors",
+      "method": "GET",
+      "path": "/api/v1/monitors",
+      "status": 200,
+      "response": {
+        "monitors": [
+          {
+            "created_at": "2026-06-12T00:48:07.869103074Z",
+            "expected_every_ms": 600000,
+            "grace_ms": 120000,
+            "id": "MON-5csw7imodfcq",
+            "mode": "ttl",
+            "name": "canary-watchman",
+            "service": "canary"
+          }
+        ]
+      }
+    },
+    {
+      "type": "http",
+      "name": "post_cleanup_webhooks",
+      "method": "GET",
+      "path": "/api/v1/webhooks",
+      "status": 200,
+      "response": {
+        "webhooks": [
+          {
+            "active": true,
+            "created_at": "2026-04-09T01:51:10.814543Z",
+            "events": [
+              "error.new_class",
+              "error.regression",
+              "incident.opened",
+              "incident.updated",
+              "incident.resolved",
+              "health_check.down",
+              "health_check.degraded",
+              "health_check.recovered",
+              "health_check.tls_expiring"
+            ],
+            "id": "WHK-78ro85gmubzy",
+            "url": "https://linejam-canary-responder.fly.dev/canary/webhook"
+          }
+        ]
+      }
+    },
+    {
+      "type": "http",
+      "name": "post_cleanup_keys",
+      "method": "GET",
+      "path": "/api/v1/keys",
+      "status": 200,
+      "response": {
+        "keys": [
+          {
+            "active": false,
+            "created_at": "2026-06-12T21:20:13.781976835Z",
+            "id": "KEY-vy07y1z3576z",
+            "key_prefix": "<redacted>",
+            "name": "canary-write-path-20260612-live-rust-write-path-final-ingest",
+            "revoked_at": "2026-06-12T21:20:31.673994618Z",
+            "scope": "ingest-only"
+          },
+          {
+            "active": false,
+            "created_at": "2026-06-12T20:41:07.849869486Z",
+            "id": "KEY-kjqobspbx0yo",
+            "key_prefix": "<redacted>",
+            "name": "canary-write-path-20260612-live-rust-write-path-ingest",
+            "revoked_at": "2026-06-12T20:41:23.183799183Z",
+            "scope": "ingest-only"
+          },
+          {
+            "active": true,
+            "created_at": "2026-06-12T02:15:08.789422938Z",
+            "id": "KEY-ru54cr7zg3lb",
+            "key_prefix": "<redacted>",
+            "name": "misty-step-ingest",
+            "revoked_at": null,
+            "scope": "ingest-only"
+          },
+          {
+            "active": true,
+            "created_at": "2026-06-10T15:44:42.836918744Z",
+            "id": "KEY-o3cn7j1rvswi",
+            "key_prefix": "<redacted>",
+            "name": "linejam-ingest-3",
+            "revoked_at": null,
+            "scope": "ingest-only"
+          },
+          {
+            "active": true,
+            "created_at": "2026-06-10T15:44:27.290789492Z",
+            "id": "KEY-i788wzx41qkz",
+            "key_prefix": "<redacted>",
+            "name": "linejam-ingest-2",
+            "revoked_at": null,
+            "scope": "ingest-only"
+          },
+          {
+            "active": true,
+            "created_at": "2026-06-10T15:44:23.624863041Z",
+            "id": "KEY-7m8fdfsll3zc",
+            "key_prefix": "<redacted>",
+            "name": "chrondle-ingest-2",
+            "revoked_at": null,
+            "scope": "ingest-only"
+          },
+          {
+            "active": true,
+            "created_at": "2026-06-10T15:44:11.900314666Z",
+            "id": "KEY-qm3k2tjer27k",
+            "key_prefix": "<redacted>",
+            "name": "linejam-ingest",
+            "revoked_at": null,
+            "scope": "ingest-only"
+          },
+          {
+            "active": true,
+            "created_at": "2026-06-10T15:44:07.644887554Z",
+            "id": "KEY-qn436id373vr",
+            "key_prefix": "<redacted>",
+            "name": "chrondle-ingest",
+            "revoked_at": null,
+            "scope": "ingest-only"
+          },
+          {
+            "active": true,
+            "created_at": "2026-06-10T15:44:03.146120169Z",
+            "id": "KEY-nsjbzl0ovfpk",
+            "key_prefix": "<redacted>",
+            "name": "ops-read",
+            "revoked_at": null,
+            "scope": "read-only"
+          },
+          {
+            "active": true,
+            "created_at": "2026-06-10T15:43:53.175599276Z",
+            "id": "KEY-eo0fsa0ait09",
+            "key_prefix": "<redacted>",
+            "name": "sploot-web-ingest",
+            "revoked_at": null,
+            "scope": "ingest-only"
+          },
+          {
+            "active": true,
+            "created_at": "2026-04-09T14:01:27.246219Z",
+            "id": "KEY-8dv27qy4yph2",
+            "key_prefix": "<redacted>",
+            "name": "bb-tansy-20260409-090124",
+            "revoked_at": null,
+            "scope": "admin"
+          },
+          {
+            "active": true,
+            "created_at": "2026-04-09T14:01:06.095842Z",
+            "id": "KEY-k93i7gwhslva",
+            "key_prefix": "<redacted>",
+            "name": "bb-tansy-test",
+            "revoked_at": null,
+            "scope": "admin"
+          },
+          {
+            "active": true,
+            "created_at": "2026-04-09T01:37:37.852270Z",
+            "id": "KEY-6u1ea8sf8ayp",
+            "key_prefix": "<redacted>",
+            "name": "linejam-prod",
+            "revoked_at": null,
+            "scope": "admin"
+          },
+          {
+            "active": true,
+            "created_at": "2026-04-06T15:39:58.007028Z",
+            "id": "KEY-29c19q1r0fay",
+            "key_prefix": "<redacted>",
+            "name": "scry-vercel-browser",
+            "revoked_at": null,
+            "scope": "admin"
+          },
+          {
+            "active": true,
+            "created_at": "2026-04-06T15:39:22.904906Z",
+            "id": "KEY-xndxnztxpvlg",
+            "key_prefix": "<redacted>",
+            "name": "scry-vercel",
+            "revoked_at": null,
+            "scope": "admin"
+          },
+          {
+            "active": false,
+            "created_at": "2026-03-27T01:31:11.332486Z",
+            "id": "KEY-pmhakkcnqdbf",
+            "key_prefix": "<redacted>",
+            "name": "deploy-2026-03-26",
+            "revoked_at": "2026-03-27T01:37:58.087976Z",
+            "scope": "admin"
+          },
+          {
+            "active": true,
+            "created_at": "2026-03-27T01:29:59.144517Z",
+            "id": "KEY-jrh8y1axznrn",
+            "key_prefix": "<redacted>",
+            "name": "multi-deploy-2026-03-26",
+            "revoked_at": null,
+            "scope": "admin"
+          },
+          {
+            "active": true,
+            "created_at": "2026-03-25T15:07:12.440690Z",
+            "id": "KEY-36mpkoreql6c",
+            "key_prefix": "<redacted>",
+            "name": "vulcan-prod",
+            "revoked_at": null,
+            "scope": "admin"
+          },
+          {
+            "active": false,
+            "created_at": "2026-03-25T14:57:39.716980Z",
+            "id": "KEY-1bgs6md9oqce",
+            "key_prefix": "<redacted>",
+            "name": "vulcan-pr70-smoke-2",
+            "revoked_at": "2026-03-25T15:00:05.764071Z",
+            "scope": "admin"
+          },
+          {
+            "active": true,
+            "created_at": "2026-03-25T14:57:24.477607Z",
+            "id": "KEY-ropyby059tya",
+            "key_prefix": "<redacted>",
+            "name": "vulcan-pr70-smoke",
+            "revoked_at": null,
+            "scope": "admin"
+          },
+          {
+            "active": true,
+            "created_at": "2026-03-25T14:52:23.988241Z",
+            "id": "KEY-cy1xu2bh0h9e",
+            "key_prefix": "<redacted>",
+            "name": "vulcan-prod",
+            "revoked_at": null,
+            "scope": "admin"
+          },
+          {
+            "active": true,
+            "created_at": "2026-03-14T23:03:11.307102Z",
+            "id": "KEY-89jcjamy1mv7",
+            "key_prefix": "<redacted>",
+            "name": "bootstrap",
+            "revoked_at": null,
+            "scope": "admin"
+          }
+        ]
+      }
+    }
+  ]
+}

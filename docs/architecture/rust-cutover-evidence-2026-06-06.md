@@ -118,8 +118,12 @@ Evidence:
 ## Residual risks
 
 - This proves the Rust server is serving production behind Fly for the checked
-  public and read-only routes. It does not prove every admin, ingest, webhook,
-  retention, target-probe, TLS-scan, and monitor path under production load.
+  public and read-only routes. The live admin, ingest, target, monitor,
+  webhook, delivery-ledger, query/report/timeline, cleanup, and DR-status
+  write-path proof is separate:
+  `docs/architecture/rust-write-path-evidence-2026-06-12.md`. Neither packet
+  proves retention-prune or TLS-expiry workers under long-running production
+  conditions.
 - This packet predates the scorched-earth deletion branch. It proves the first
   Rust production image served Fly, but it does not by itself prove the later
   removal of the executable Elixir service, Elixir SDK, and Mix/Dagger lanes.

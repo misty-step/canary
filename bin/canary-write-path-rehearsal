@@ -1,0 +1,827 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+ENDPOINT="${CANARY_ENDPOINT:-}"
+API_KEY="${CANARY_API_KEY:-}"
+WEBHOOK_URL="${CANARY_REHEARSAL_WEBHOOK_URL:-https://httpbingo.org/status/204}"
+APP="${FLY_APP:-canary-obs}"
+PREFIX=""
+JSON_OUTPUT=0
+RUN_DR_STATUS=1
+POLL_ATTEMPTS="${CANARY_REHEARSAL_POLL_ATTEMPTS:-20}"
+POLL_SLEEP="${CANARY_REHEARSAL_POLL_SLEEP:-2}"
+
+TMPDIR_REHEARSAL=""
+STEPS_FILE=""
+CLEANED_UP=0
+INGEST_KEY=""
+INGEST_KEY_ID=""
+TARGET_ID=""
+MONITOR_ID=""
+WEBHOOK_ID=""
+WEBHOOK_DELIVERY_ID=""
+ERROR_ID=""
+ERROR_GROUP_HASH=""
+DEPLOY_IDENTITY="{}"
+SERVICE=""
+KEY_NAME=""
+TARGET_NAME=""
+MONITOR_NAME=""
+WEBHOOK_RUN_URL=""
+
+usage() {
+  cat <<'EOF'
+Usage: bin/canary-write-path-rehearsal [--endpoint <url>] [--api-key <key>] [--webhook-url <url>] [--prefix <prefix>] [--app <fly-app>] [--poll-attempts <n>] [--poll-sleep <seconds>] [--no-dr-status] [--json] [-h|--help]
+
+Exercise Canary's live write paths with uniquely named disposable resources.
+
+By default the command reads CANARY_ENDPOINT and CANARY_API_KEY from the
+environment, creates a temporary ingest-only key, target, monitor, webhook,
+error, check-in, webhook delivery, and DR-status receipt, then deletes or
+revokes every disposable live resource it can clean up.
+
+The JSON receipt redacts one-time API keys and webhook secrets. Error events
+and webhook-delivery ledger rows are immutable observability records and remain
+as proof of the run.
+EOF
+}
+
+fail() {
+  printf '%s\n' "$1" >&2
+  exit 1
+}
+
+require_command() {
+  local command_name="$1"
+
+  if command -v "$command_name" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  fail "Missing required command: $command_name"
+}
+
+urlencode() {
+  jq -nr --arg value "$1" '$value | @uri'
+}
+
+now_utc() {
+  date -u '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+sanitize_text() {
+  local text="$1"
+  local sensitive_file="/dev/null"
+
+  if [[ -n "${SENSITIVE_VALUES_FILE:-}" && -f "$SENSITIVE_VALUES_FILE" ]]; then
+    sensitive_file="$SENSITIVE_VALUES_FILE"
+  fi
+
+  jq -rn --arg text "$text" --rawfile sensitive_values "$sensitive_file" '
+    def known_sensitive:
+      $sensitive_values
+      | split("\n")
+      | map(select(length > 0));
+	    def redact_patterns:
+	      gsub("sk_(live|test)_[A-Za-z0-9_-]+"; "<redacted-api-key>")
+	      | gsub("[A-Fa-f0-9]{64}"; "<redacted-hash>");
+	    $text
+	    | redact_patterns
+	    | reduce known_sensitive[] as $secret (.; split($secret) | join("<redacted>"))
+  '
+}
+
+sanitize_json() {
+  local raw="$1"
+  local sensitive_file="/dev/null"
+
+  if [[ -z "$raw" ]]; then
+    printf 'null'
+    return
+  fi
+
+  if [[ -n "${SENSITIVE_VALUES_FILE:-}" && -f "$SENSITIVE_VALUES_FILE" ]]; then
+    sensitive_file="$SENSITIVE_VALUES_FILE"
+  fi
+
+  if jq -e . >/dev/null 2>&1 <<<"$raw"; then
+    jq -c --rawfile sensitive_values "$sensitive_file" '
+      def known_sensitive:
+        $sensitive_values
+        | split("\n")
+        | map(select(length > 0));
+	      def redact_string:
+	        gsub("sk_(live|test)_[A-Za-z0-9_-]+"; "<redacted-api-key>")
+	        | gsub("[A-Fa-f0-9]{64}"; "<redacted-hash>")
+	        | reduce known_sensitive[] as $secret (.; split($secret) | join("<redacted>"));
+      def redact:
+        if type == "object" then
+          with_entries(
+	            if (.key == "key" or .key == "key_prefix" or .key == "secret" or .key == "key_hash") then
+	              .value = "<redacted>"
+	            elif .key == "group_hash" then
+	              .value = "<redacted-hash>"
+	            elif .key == "digest" then
+	              .
+	            else
+	              .value |= redact
+            end
+          )
+        elif type == "array" then
+          map(redact)
+        elif type == "string" then
+          redact_string
+        else
+          .
+        end;
+      redact
+    ' <<<"$raw"
+  else
+    jq -cn --arg body "$(sanitize_text "$raw")" '$body'
+  fi
+}
+
+remember_sensitive_values() {
+  local body="$1"
+
+  [[ -n "${SENSITIVE_VALUES_FILE:-}" && -f "$SENSITIVE_VALUES_FILE" ]] || return 0
+  jq -r '
+    .. | objects | to_entries[]?
+    | select(.key == "key" or .key == "key_prefix" or .key == "secret" or .key == "key_hash" or .key == "group_hash")
+    | .value
+    | select(type == "string" and length > 0)
+  ' <<<"$body" >> "$SENSITIVE_VALUES_FILE" 2>/dev/null || true
+  sort -u "$SENSITIVE_VALUES_FILE" -o "$SENSITIVE_VALUES_FILE"
+}
+
+remember_sensitive_literal() {
+  local value="$1"
+
+  [[ -n "${SENSITIVE_VALUES_FILE:-}" && -f "$SENSITIVE_VALUES_FILE" ]] || return 0
+  [[ -n "$value" ]] || return 0
+  printf '%s\n' "$value" >> "$SENSITIVE_VALUES_FILE"
+  sort -u "$SENSITIVE_VALUES_FILE" -o "$SENSITIVE_VALUES_FILE"
+}
+
+capture_cleanup_handle() {
+  local name="$1"
+  local body="$2"
+  local id
+
+  if ! jq -e . >/dev/null 2>&1 <<<"$body"; then
+    return 0
+  fi
+
+  id="$(jq -r '.id // ""' <<<"$body")"
+  if [[ -z "$id" || "$id" == "null" ]]; then
+    return 0
+  fi
+
+  case "$name" in
+    api_key_create_ingest)
+      INGEST_KEY_ID="$id"
+      INGEST_KEY="$(jq -r '.key // ""' <<<"$body")"
+      ;;
+    target_create)
+      TARGET_ID="$id"
+      ;;
+    monitor_create)
+      MONITOR_ID="$id"
+      ;;
+    webhook_create)
+      WEBHOOK_ID="$id"
+      ;;
+  esac
+}
+
+record_http_step() {
+  local name="$1"
+  local method="$2"
+  local path="$3"
+  local status="$4"
+  local body="$5"
+  local sanitized
+
+  sanitized="$(sanitize_json "$body")"
+  jq -cn \
+    --arg type "http" \
+    --arg name "$name" \
+    --arg method "$method" \
+    --arg path "$path" \
+    --argjson status "$status" \
+    --argjson response "$sanitized" \
+    '{type: $type, name: $name, method: $method, path: $path, status: $status, response: $response}' \
+    >> "$STEPS_FILE"
+}
+
+record_shell_step() {
+  local name="$1"
+  local command="$2"
+  local status="$3"
+  local output="$4"
+
+  jq -cn \
+    --arg type "shell" \
+    --arg name "$name" \
+    --arg command "$command" \
+    --argjson status "$status" \
+    --arg output "$(sanitize_text "$output")" \
+    '{type: $type, name: $name, command: $command, status: $status, output: $output}' \
+	    >> "$STEPS_FILE"
+}
+
+record_json_step() {
+  local name="$1"
+  local body="$2"
+  local sanitized
+
+  sanitized="$(sanitize_json "$body")"
+  jq -cn \
+    --arg type "json" \
+    --arg name "$name" \
+    --argjson response "$sanitized" \
+    '{type: $type, name: $name, response: $response}' \
+    >> "$STEPS_FILE"
+}
+
+api_request() {
+  local method="$1"
+  local path="$2"
+  local key="$3"
+  local body="${4:-}"
+  local response_file status
+
+  response_file="$(mktemp "$TMPDIR_REHEARSAL/response.XXXXXX")"
+  local args=(
+    -sS
+    -X "$method"
+    -H "Authorization: Bearer $key"
+    -o "$response_file"
+    -w "%{http_code}"
+  )
+
+  if [[ -n "$body" ]]; then
+    args+=(-H "Content-Type: application/json" --data "$body")
+  fi
+
+  status="$(curl "${args[@]}" "${ENDPOINT%/}$path")"
+  HTTP_STATUS="$status"
+  HTTP_BODY="$(cat "$response_file")"
+}
+
+api_expect() {
+  local name="$1"
+  local method="$2"
+  local path="$3"
+  local key="$4"
+  local body="$5"
+  local expected="$6"
+
+  api_request "$method" "$path" "$key" "$body"
+  remember_sensitive_values "$HTTP_BODY"
+  record_http_step "$name" "$method" "$path" "$HTTP_STATUS" "$HTTP_BODY"
+  capture_cleanup_handle "$name" "$HTTP_BODY"
+
+  if [[ "$HTTP_STATUS" != "$expected" ]]; then
+    fail "$name expected HTTP $expected from $method $path, got $HTTP_STATUS: $(sanitize_json "$HTTP_BODY")"
+  fi
+
+  printf '%s' "$HTTP_BODY"
+}
+
+api_cleanup_get() {
+  local path="$1"
+  local response_file
+
+  response_file="$(mktemp "$TMPDIR_REHEARSAL/cleanup-list.XXXXXX")"
+  curl -sS \
+    -X GET \
+    -H "Authorization: Bearer $API_KEY" \
+    -o "$response_file" \
+    "${ENDPOINT%/}$path" >/dev/null
+  cat "$response_file"
+}
+
+api_cleanup_request() {
+  local method="$1"
+  local path="$2"
+  local body="${3:-}"
+  local response_file
+
+  response_file="$(mktemp "$TMPDIR_REHEARSAL/cleanup.XXXXXX")"
+  local args=(
+    -sS
+    -X "$method"
+    -H "Authorization: Bearer $API_KEY"
+    -o "$response_file"
+    -w "%{http_code}"
+  )
+
+  if [[ -n "$body" ]]; then
+    args+=(-H "Content-Type: application/json" --data "$body")
+  fi
+
+  curl "${args[@]}" "${ENDPOINT%/}$path" >/dev/null
+}
+
+cleanup_targets_by_name() {
+  local list target_id
+
+  list="$(api_cleanup_get "/api/v1/targets")" || return 0
+  while IFS= read -r target_id; do
+    [[ -n "$target_id" ]] || continue
+    api_cleanup_request DELETE "/api/v1/targets/$target_id"
+  done < <(
+    jq -r --arg name "$TARGET_NAME" --arg service "$SERVICE" '
+      .targets[]? | select(.name == $name or .service == $service) | .id
+    ' <<<"$list"
+  )
+}
+
+cleanup_monitors_by_name() {
+  local list monitor_id
+
+  list="$(api_cleanup_get "/api/v1/monitors")" || return 0
+  while IFS= read -r monitor_id; do
+    [[ -n "$monitor_id" ]] || continue
+    api_cleanup_request DELETE "/api/v1/monitors/$monitor_id"
+  done < <(
+    jq -r --arg name "$MONITOR_NAME" --arg service "$SERVICE" '
+      .monitors[]? | select(.name == $name or .service == $service) | .id
+    ' <<<"$list"
+  )
+}
+
+cleanup_webhooks_by_url() {
+  local list webhook_id
+
+  list="$(api_cleanup_get "/api/v1/webhooks")" || return 0
+  while IFS= read -r webhook_id; do
+    [[ -n "$webhook_id" ]] || continue
+    api_cleanup_request DELETE "/api/v1/webhooks/$webhook_id"
+  done < <(
+    jq -r --arg url "$WEBHOOK_RUN_URL" '
+      .webhooks[]? | select(.url == $url) | .id
+    ' <<<"$list"
+  )
+}
+
+cleanup_keys_by_name() {
+  local list key_id
+
+  list="$(api_cleanup_get "/api/v1/keys")" || return 0
+  while IFS= read -r key_id; do
+    [[ -n "$key_id" ]] || continue
+    api_cleanup_request POST "/api/v1/keys/$key_id/revoke" "{}"
+  done < <(
+    jq -r --arg name "$KEY_NAME" '
+      .keys[]? | select(.name == $name and .active == true) | .id
+    ' <<<"$list"
+  )
+}
+
+cleanup_best_effort() {
+  set +e
+  if [[ -n "$TARGET_ID" ]]; then
+    api_cleanup_request DELETE "/api/v1/targets/$TARGET_ID"
+  fi
+  if [[ -n "$MONITOR_ID" ]]; then
+    api_cleanup_request DELETE "/api/v1/monitors/$MONITOR_ID"
+  fi
+  if [[ -n "$WEBHOOK_ID" ]]; then
+    api_cleanup_request DELETE "/api/v1/webhooks/$WEBHOOK_ID"
+  fi
+  if [[ -n "$INGEST_KEY_ID" ]]; then
+    api_cleanup_request POST "/api/v1/keys/$INGEST_KEY_ID/revoke" "{}"
+  fi
+  cleanup_targets_by_name
+  cleanup_monitors_by_name
+  cleanup_webhooks_by_url
+  cleanup_keys_by_name
+  set -e
+}
+
+on_exit() {
+  local status=$?
+
+  if [[ -n "$TMPDIR_REHEARSAL" && -d "$TMPDIR_REHEARSAL" ]]; then
+    if ((status != 0 && CLEANED_UP == 0)); then
+      cleanup_best_effort >/dev/null 2>&1 || true
+    fi
+    rm -rf "$TMPDIR_REHEARSAL"
+  fi
+
+  exit "$status"
+}
+
+append_rehearsal_query() {
+  local url="$1"
+
+  if [[ "$url" == *\?* ]]; then
+    printf '%s&canary_rehearsal=%s' "$url" "$(urlencode "$PREFIX")"
+  else
+    printf '%s?canary_rehearsal=%s' "$url" "$(urlencode "$PREFIX")"
+  fi
+}
+
+assert_json_id_present() {
+  local body="$1"
+  local array_path="$2"
+  local id="$3"
+  local label="$4"
+
+  if ! jq -e --arg id "$id" "$array_path | any(.id == \$id)" >/dev/null <<<"$body"; then
+    fail "$label did not include expected id $id"
+  fi
+}
+
+assert_json_id_absent() {
+  local body="$1"
+  local array_path="$2"
+  local id="$3"
+  local label="$4"
+
+  if ! jq -e --arg id "$id" "$array_path | all(.id != \$id)" >/dev/null <<<"$body"; then
+    fail "$label still includes cleaned-up id $id"
+  fi
+}
+
+wait_for_webhook_delivery() {
+  local encoded_webhook event_path deliveries delivery_id last_delivery_id last_delivery_status lookup_response
+  encoded_webhook="$(urlencode "$WEBHOOK_ID")"
+  event_path="/api/v1/webhook-deliveries?webhook_id=${encoded_webhook}&event=error.new_class&limit=5"
+  last_delivery_id=""
+  last_delivery_status=""
+
+  for _ in $(seq 1 "$POLL_ATTEMPTS"); do
+    deliveries="$(api_expect "webhook_delivery_poll" GET "$event_path" "$API_KEY" "" 200)"
+    delivery_id="$(
+      jq -r '
+        [.deliveries[]? | select(.status == "delivered") | .delivery_id][0] // ""
+      ' <<<"$deliveries"
+    )"
+
+    if [[ -n "$delivery_id" ]]; then
+      WEBHOOK_DELIVERY_ID="$delivery_id"
+      lookup_response="$(api_expect "webhook_delivery_lookup" GET "/api/v1/webhook-deliveries/$WEBHOOK_DELIVERY_ID" "$API_KEY" "" 200)"
+      if ! jq -e \
+        --arg delivery_id "$WEBHOOK_DELIVERY_ID" \
+        --arg webhook_id "$WEBHOOK_ID" \
+        '.delivery_id == $delivery_id and .webhook_id == $webhook_id and .event == "error.new_class" and .status == "delivered"' \
+        >/dev/null <<<"$lookup_response"; then
+        fail "webhook delivery lookup did not return delivered error.new_class row $WEBHOOK_DELIVERY_ID for $WEBHOOK_ID"
+      fi
+      return
+    fi
+
+    last_delivery_id="$(jq -r '[.deliveries[]? | .delivery_id][0] // ""' <<<"$deliveries")"
+    last_delivery_status="$(jq -r '[.deliveries[]? | .status][0] // ""' <<<"$deliveries")"
+
+    sleep "$POLL_SLEEP"
+  done
+
+  fail "timed out waiting for delivered webhook delivery for $WEBHOOK_ID; last delivery ${last_delivery_id:-none} status ${last_delivery_status:-none}"
+}
+
+collect_deploy_identity() {
+  local output status identity
+
+  if ! command -v flyctl >/dev/null 2>&1; then
+    fail "Missing required command: flyctl"
+  fi
+
+  set +e
+  output="$(flyctl status --app "$APP" --json 2>&1)"
+  status=$?
+  set -e
+
+  if ((status != 0)); then
+    record_shell_step "fly_status" "flyctl status --app $APP --json" "$status" "$output"
+    fail "fly status failed for $APP: $(sanitize_text "$output")"
+  fi
+
+  if ! identity="$(jq -c '
+    def image_ref:
+      if .image_ref == null then
+        null
+      else
+        {
+          registry: (.image_ref.registry // null),
+          repository: (.image_ref.repository // null),
+          tag: (.image_ref.tag // null),
+          digest: (.image_ref.digest // null),
+          commit: (.image_ref.labels.GH_SHA // null),
+          repo: (.image_ref.labels.GH_REPO // null),
+          event: (.image_ref.labels.GH_EVENT_NAME // null)
+        }
+      end;
+    def machine:
+      {
+        id: (.id // null),
+        name: (.name // null),
+        state: (.state // null),
+        region: (.region // null),
+        image: (.config.image // null),
+        image_ref: image_ref,
+        release_id: (.config.metadata.fly_release_id // null),
+        release_version: (.config.metadata.fly_release_version // null),
+        checks: ((.checks // []) | map({
+          name: (.name // null),
+          status: (.status // null),
+          updated_at: (.updated_at // null)
+        }))
+      };
+    {
+      app: (.Name // .name // null),
+      status: (.Status // .status // null),
+      hostname: (.Hostname // .hostname // null),
+      version: (.Version // .version // null),
+      machines: ((.Machines // .machines // []) | map(machine))
+    }
+  ' <<<"$output")"; then
+    fail "fly status did not return parseable deployment identity for $APP: $(sanitize_text "$output")"
+  fi
+
+  if ! jq -e '
+    (.machines | length) > 0
+    and all(.machines[]; (.id // "") != "")
+    and all(.machines[]; (.image_ref.tag // "") != "")
+    and all(.machines[]; (.image_ref.digest // "") != "")
+    and all(.machines[]; (.image_ref.commit // "") != "")
+  ' >/dev/null <<<"$identity"; then
+    fail "fly status for $APP did not include machine id, image tag, image digest, and commit label"
+  fi
+
+  DEPLOY_IDENTITY="$identity"
+  record_json_step "fly_deploy_identity" "$identity"
+}
+
+while (($#)); do
+  case "$1" in
+    --endpoint)
+      (($# >= 2)) || { usage >&2; exit 1; }
+      ENDPOINT="$2"
+      shift 2
+      ;;
+    --api-key)
+      (($# >= 2)) || { usage >&2; exit 1; }
+      API_KEY="$2"
+      shift 2
+      ;;
+    --webhook-url)
+      (($# >= 2)) || { usage >&2; exit 1; }
+      WEBHOOK_URL="$2"
+      shift 2
+      ;;
+    --prefix)
+      (($# >= 2)) || { usage >&2; exit 1; }
+      PREFIX="$2"
+      shift 2
+      ;;
+    --app)
+      (($# >= 2)) || { usage >&2; exit 1; }
+      APP="$2"
+      shift 2
+      ;;
+    --poll-attempts)
+      (($# >= 2)) || { usage >&2; exit 1; }
+      POLL_ATTEMPTS="$2"
+      shift 2
+      ;;
+    --poll-sleep)
+      (($# >= 2)) || { usage >&2; exit 1; }
+      POLL_SLEEP="$2"
+      shift 2
+      ;;
+    --no-dr-status)
+      RUN_DR_STATUS=0
+      shift
+      ;;
+    --json)
+      JSON_OUTPUT=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+require_command curl
+require_command jq
+require_command date
+
+[[ -n "$ENDPOINT" ]] || fail "Missing Canary endpoint. Set CANARY_ENDPOINT or pass --endpoint."
+[[ -n "$API_KEY" ]] || fail "Missing Canary API key. Set CANARY_API_KEY or pass --api-key."
+[[ "$POLL_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || fail "--poll-attempts must be a positive integer."
+[[ "$POLL_SLEEP" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail "--poll-sleep must be a non-negative number."
+
+if [[ -z "$PREFIX" ]]; then
+  PREFIX="writepath-$(date -u '+%Y%m%d%H%M%S')-$$"
+fi
+
+TMPDIR_REHEARSAL="$(mktemp -d)"
+STEPS_FILE="$TMPDIR_REHEARSAL/steps.ndjson"
+SENSITIVE_VALUES_FILE="$TMPDIR_REHEARSAL/sensitive-values"
+: > "$STEPS_FILE"
+: > "$SENSITIVE_VALUES_FILE"
+trap on_exit EXIT
+
+RUN_STARTED_AT="$(now_utc)"
+SERVICE="canary-write-path-$PREFIX"
+KEY_NAME="$SERVICE-ingest"
+TARGET_NAME="$SERVICE-target"
+MONITOR_NAME="$SERVICE-monitor"
+TARGET_URL="${ENDPOINT%/}/healthz"
+WEBHOOK_RUN_URL="$(append_rehearsal_query "$WEBHOOK_URL")"
+remember_sensitive_literal "$WEBHOOK_RUN_URL"
+
+if ((RUN_DR_STATUS == 1)); then
+  collect_deploy_identity
+else
+  DEPLOY_IDENTITY="$(jq -cn '{status: "skipped", reason: "--no-dr-status"}')"
+  record_json_step "fly_deploy_identity" "$DEPLOY_IDENTITY"
+fi
+
+key_body="$(jq -cn --arg name "$KEY_NAME" '{name: $name, scope: "ingest-only"}')"
+key_response="$(api_expect "api_key_create_ingest" POST "/api/v1/keys" "$API_KEY" "$key_body" 201)"
+INGEST_KEY="$(jq -r '.key' <<<"$key_response")"
+INGEST_KEY_ID="$(jq -r '.id' <<<"$key_response")"
+api_expect "ingest_key_cannot_read_targets" GET "/api/v1/targets" "$INGEST_KEY" "" 403 >/dev/null
+
+target_body="$(jq -cn \
+  --arg name "$TARGET_NAME" \
+  --arg service "$SERVICE" \
+  --arg url "$TARGET_URL" \
+  '{name: $name, service: $service, url: $url, interval_ms: 60000, timeout_ms: 5000, expected_status: "200"}')"
+target_response="$(api_expect "target_create" POST "/api/v1/targets" "$API_KEY" "$target_body" 201)"
+TARGET_ID="$(jq -r '.id' <<<"$target_response")"
+targets_list="$(api_expect "target_query_after_create" GET "/api/v1/targets" "$API_KEY" "" 200)"
+assert_json_id_present "$targets_list" ".targets" "$TARGET_ID" "target list"
+api_expect "target_pause" POST "/api/v1/targets/$TARGET_ID/pause" "$API_KEY" "" 200 >/dev/null
+api_expect "target_resume" POST "/api/v1/targets/$TARGET_ID/resume" "$API_KEY" "" 200 >/dev/null
+
+monitor_body="$(jq -cn \
+  --arg name "$MONITOR_NAME" \
+  --arg service "$SERVICE" \
+  '{name: $name, service: $service, mode: "ttl", expected_every_ms: 600000, grace_ms: 120000}')"
+monitor_response="$(api_expect "monitor_create" POST "/api/v1/monitors" "$API_KEY" "$monitor_body" 201)"
+MONITOR_ID="$(jq -r '.id' <<<"$monitor_response")"
+monitors_list="$(api_expect "monitor_query_after_create" GET "/api/v1/monitors" "$API_KEY" "" 200)"
+assert_json_id_present "$monitors_list" ".monitors" "$MONITOR_ID" "monitor list"
+
+check_in_body="$(jq -cn \
+  --arg monitor "$MONITOR_NAME" \
+  --arg prefix "$PREFIX" \
+  '{monitor: $monitor, status: "alive", ttl_ms: 600000, context: {rehearsal_prefix: $prefix}}')"
+api_expect "monitor_check_in" POST "/api/v1/check-ins" "$INGEST_KEY" "$check_in_body" 201 >/dev/null
+
+webhook_body="$(jq -cn \
+  --arg url "$WEBHOOK_RUN_URL" \
+  '{url: $url, events: ["canary.ping", "error.new_class"]}')"
+webhook_response="$(api_expect "webhook_create" POST "/api/v1/webhooks" "$API_KEY" "$webhook_body" 201)"
+WEBHOOK_ID="$(jq -r '.id' <<<"$webhook_response")"
+webhooks_list="$(api_expect "webhook_query_after_create" GET "/api/v1/webhooks" "$API_KEY" "" 200)"
+assert_json_id_present "$webhooks_list" ".webhooks" "$WEBHOOK_ID" "webhook list"
+api_expect "webhook_test" POST "/api/v1/webhooks/$WEBHOOK_ID/test" "$API_KEY" "{}" 200 >/dev/null
+
+error_body="$(jq -cn \
+  --arg service "$SERVICE" \
+  --arg prefix "$PREFIX" \
+  '{service: $service, error_class: "CanaryWritePathRehearsal", message: ("canary write path rehearsal " + $prefix), severity: "error", context: {rehearsal_prefix: $prefix}}')"
+error_response="$(api_expect "error_ingest" POST "/api/v1/errors" "$INGEST_KEY" "$error_body" 201)"
+ERROR_ID="$(jq -r '.id' <<<"$error_response")"
+ERROR_GROUP_HASH="$(jq -r '.group_hash' <<<"$error_response")"
+
+encoded_service="$(urlencode "$SERVICE")"
+encoded_prefix="$(urlencode "$PREFIX")"
+query_response="$(api_expect "error_query_readback" GET "/api/v1/query?service=${encoded_service}&window=1h" "$API_KEY" "" 200)"
+if ! jq -e \
+  --arg service "$SERVICE" \
+  --arg group_hash "$ERROR_GROUP_HASH" \
+  '.service == $service and (.groups // [] | any(.group_hash == $group_hash and .service == $service and .error_class == "CanaryWritePathRehearsal"))' \
+  >/dev/null <<<"$query_response"; then
+  fail "query readback did not return error group $ERROR_GROUP_HASH for $SERVICE"
+fi
+report_response="$(api_expect "report_readback" GET "/api/v1/report?window=1h&q=${encoded_prefix}&limit=5" "$API_KEY" "" 200)"
+if ! jq -e \
+  --arg service "$SERVICE" \
+  --arg error_id "$ERROR_ID" \
+  --arg group_hash "$ERROR_GROUP_HASH" \
+  '((.search_results // []) | any(.id == $error_id and .service == $service and .error_class == "CanaryWritePathRehearsal")) and ((.error_groups // []) | any(.group_hash == $group_hash and .service == $service and .error_class == "CanaryWritePathRehearsal"))' \
+  >/dev/null <<<"$report_response"; then
+  fail "report readback did not return error $ERROR_ID and group $ERROR_GROUP_HASH for $SERVICE"
+fi
+timeline_response="$(api_expect "timeline_readback" GET "/api/v1/timeline?service=${encoded_service}&window=1h&limit=10" "$API_KEY" "" 200)"
+if ! jq -e \
+  --arg service "$SERVICE" \
+  --arg error_id "$ERROR_ID" \
+  --arg group_hash "$ERROR_GROUP_HASH" \
+  '(.events // []) | any(.service == $service and .event == "error.new_class" and ((.payload.error.id // "") == $error_id or (.entity_ref // "") == $group_hash))' \
+  >/dev/null <<<"$timeline_response"; then
+  fail "timeline readback did not return error.new_class event for error $ERROR_ID"
+fi
+error_detail_response="$(api_expect "error_detail_readback" GET "/api/v1/errors/$ERROR_ID" "$API_KEY" "" 200)"
+if ! jq -e \
+  --arg service "$SERVICE" \
+  --arg error_id "$ERROR_ID" \
+  '.id == $error_id and .service == $service and .error_class == "CanaryWritePathRehearsal"' \
+  >/dev/null <<<"$error_detail_response"; then
+  fail "error detail readback did not return error $ERROR_ID for $SERVICE"
+fi
+
+wait_for_webhook_delivery
+
+if ((RUN_DR_STATUS == 1)); then
+  set +e
+  dr_output="$(NO_COLOR=1 "$ROOT/bin/dr-status" --app "$APP" 2>&1)"
+  dr_status=$?
+  set -e
+  record_shell_step "dr_status" "NO_COLOR=1 bin/dr-status --app $APP" "$dr_status" "$dr_output"
+  if ((dr_status != 0)); then
+    fail "dr-status failed for $APP: $(sanitize_text "$dr_output")"
+  fi
+fi
+
+api_expect "target_delete" DELETE "/api/v1/targets/$TARGET_ID" "$API_KEY" "" 204 >/dev/null
+api_expect "monitor_delete" DELETE "/api/v1/monitors/$MONITOR_ID" "$API_KEY" "" 204 >/dev/null
+api_expect "webhook_delete" DELETE "/api/v1/webhooks/$WEBHOOK_ID" "$API_KEY" "" 204 >/dev/null
+api_expect "api_key_revoke_ingest" POST "/api/v1/keys/$INGEST_KEY_ID/revoke" "$API_KEY" "{}" 200 >/dev/null
+api_expect "revoked_ingest_key_rejects_check_in" POST "/api/v1/check-ins" "$INGEST_KEY" "$check_in_body" 401 >/dev/null
+
+post_targets="$(api_expect "post_cleanup_targets" GET "/api/v1/targets" "$API_KEY" "" 200)"
+assert_json_id_absent "$post_targets" ".targets" "$TARGET_ID" "post-cleanup target list"
+post_monitors="$(api_expect "post_cleanup_monitors" GET "/api/v1/monitors" "$API_KEY" "" 200)"
+assert_json_id_absent "$post_monitors" ".monitors" "$MONITOR_ID" "post-cleanup monitor list"
+post_webhooks="$(api_expect "post_cleanup_webhooks" GET "/api/v1/webhooks" "$API_KEY" "" 200)"
+assert_json_id_absent "$post_webhooks" ".webhooks" "$WEBHOOK_ID" "post-cleanup webhook list"
+post_keys="$(api_expect "post_cleanup_keys" GET "/api/v1/keys" "$API_KEY" "" 200)"
+if ! jq -e --arg id "$INGEST_KEY_ID" '.keys | any(.id == $id and .active == false)' >/dev/null <<<"$post_keys"; then
+  fail "post-cleanup key list did not show revoked disposable key $INGEST_KEY_ID as inactive"
+fi
+CLEANED_UP=1
+
+finished_at="$(now_utc)"
+steps_json="$(jq -s '.' "$STEPS_FILE")"
+resources_json="$(jq -cn \
+  --arg service "$SERVICE" \
+  --arg error_id "$ERROR_ID" \
+  --arg target_id "$TARGET_ID" \
+  --arg monitor_id "$MONITOR_ID" \
+  --arg webhook_id "$WEBHOOK_ID" \
+  --arg key_id "$INGEST_KEY_ID" \
+	  --arg delivery_id "$WEBHOOK_DELIVERY_ID" \
+  '{
+    service: $service,
+    immutable_error_id: $error_id,
+    cleaned_target_id: $target_id,
+    cleaned_monitor_id: $monitor_id,
+    cleaned_webhook_id: $webhook_id,
+    revoked_key_id: $key_id,
+    immutable_webhook_delivery_id: $delivery_id
+	  }')"
+receipt="$(jq -n \
+  --argjson schema_version 1 \
+  --arg status "ok" \
+  --arg endpoint "${ENDPOINT%/}" \
+  --arg app "$APP" \
+  --arg prefix "$PREFIX" \
+  --arg started_at "$RUN_STARTED_AT" \
+  --arg finished_at "$finished_at" \
+	  --arg webhook_url "$WEBHOOK_RUN_URL" \
+	  --arg cleanup_note "Targets, monitors, and webhooks are deleted. The temporary ingest key is revoked and intentionally remains as an inactive audit row. Error and webhook-delivery rows are immutable evidence." \
+	  --argjson deploy_identity "$DEPLOY_IDENTITY" \
+	  --argjson resources "$resources_json" \
+	  --argjson steps "$steps_json" \
+	  '{
+    schema_version: $schema_version,
+    status: $status,
+    endpoint: $endpoint,
+    fly_app: $app,
+    prefix: $prefix,
+	    started_at: $started_at,
+	    finished_at: $finished_at,
+	    webhook_url: ($webhook_url | gsub("\\?.*$"; "?<redacted-query>")),
+	    deploy_identity: $deploy_identity,
+	    resources: $resources,
+	    cleanup_note: $cleanup_note,
+	    steps: $steps
+  }')"
+
+if ((JSON_OUTPUT == 1)); then
+  jq -c . <<<"$receipt"
+else
+  printf 'Canary write-path rehearsal: ok\n'
+  printf 'prefix: %s\n' "$PREFIX"
+  printf 'service: %s\n' "$SERVICE"
+  printf 'error: %s\n' "$ERROR_ID"
+  printf 'webhook_delivery: %s\n' "$WEBHOOK_DELIVERY_ID"
+  printf 'cleanup: target deleted, monitor deleted, webhook deleted, key revoked\n'
+fi
