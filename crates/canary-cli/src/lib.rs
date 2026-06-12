@@ -16,6 +16,7 @@ use thiserror::Error;
 pub const DEFAULT_ENDPOINT: &str = "https://canary-obs.fly.dev";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const WITNESS_MONITOR_NAME: &str = "canary-watchman";
 
 /// Error returned by the CLI library.
 #[derive(Debug, Error)]
@@ -395,8 +396,11 @@ pub fn doctor_report(client: &ApiClient, repo_root: &Path) -> Value {
     let auth_configured = client.config.has_api_key();
     let report = auth_probe(client, "/api/v1/report?window=1h");
     let status = auth_probe(client, "/api/v1/status?window=1h");
-    let admin = auth_probe(client, "/api/v1/targets");
+    let targets = auth_probe(client, "/api/v1/targets");
+    let monitors = auth_probe(client, "/api/v1/monitors");
     let incidents = auth_probe(client, "/api/v1/incidents");
+    let canary_errors = auth_probe(client, "/api/v1/query?service=canary&window=1h");
+    let witness = witness_monitor_report(&status, &monitors);
     let dogfood = match run_dogfood_inventory(repo_root, false) {
         Ok(value) => json!({"ok": true, "summary": summarize_dogfood(&value), "response": value}),
         Err(error) => json!({"ok": false, "error": error.to_string()}),
@@ -406,7 +410,7 @@ pub fn doctor_report(client: &ApiClient, repo_root: &Path) -> Value {
         "schema_version": 1,
         "endpoint": client.endpoint(),
         "key": client.config.redacted_key(),
-        "key_scope": key_scope(&report, &admin),
+        "key_scope": key_scope(&report, &targets),
         "auth_configured": auth_configured,
         "reachability": {
             "healthz": healthz,
@@ -414,8 +418,11 @@ pub fn doctor_report(client: &ApiClient, repo_root: &Path) -> Value {
         },
         "summary": report,
         "services": status,
-        "admin": admin,
+        "admin": targets,
+        "monitors": monitors,
         "incidents": incidents,
+        "canary_errors": canary_errors,
+        "witness": witness,
         "dogfood": dogfood,
         "worker_readiness": {
             "available": false,
@@ -442,6 +449,14 @@ pub fn summarize_doctor(value: &Value) -> Vec<String> {
     lines.push(format!(
         "services: {}",
         probe_summary(value.get("services"))
+    ));
+    lines.push(format!(
+        "witness: {}",
+        witness_summary(value.get("witness"))
+    ));
+    lines.push(format!(
+        "canary_errors: {}",
+        probe_summary(value.get("canary_errors"))
     ));
     lines.push(format!(
         "incidents: {}",
@@ -612,10 +627,128 @@ fn key_scope(read_probe: &Value, admin_probe: &Value) -> &'static str {
 fn summary_for_probe(value: &Value) -> Vec<String> {
     if value.get("overall").is_some() {
         summarize_services(value, None)
+    } else if value.get("service").is_some() && value.get("total_errors").is_some() {
+        summarize_query(value)
     } else if value.get("incidents").is_some() && value.get("summary").is_some() {
         summarize_incidents(value)
     } else {
         summarize_report(value)
+    }
+}
+
+fn witness_monitor_report(status_probe: &Value, monitors_probe: &Value) -> Value {
+    let status_monitor = find_witness_monitor(status_probe);
+    let configured_monitor = find_witness_monitor(monitors_probe);
+
+    if let Some(monitor) = status_monitor.filter(|monitor| monitor_has_check_in(monitor)) {
+        return json!({
+            "status": "observed",
+            "monitor": monitor_name(monitor),
+            "state": item_state(monitor),
+            "last_check_in_status": string_or_unknown(monitor, "last_check_in_status"),
+            "last_check_in_at": string_or_unknown(monitor, "last_check_in_at"),
+            "config_seen": configured_monitor.is_some(),
+            "mode": configured_monitor
+                .and_then(|item| item.get("mode"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            "expected_every_ms": configured_monitor
+                .and_then(|item| item.get("expected_every_ms"))
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+        });
+    }
+
+    if let Some(monitor) = configured_monitor.or(status_monitor) {
+        return json!({
+            "status": "configured",
+            "monitor": monitor_name(monitor),
+            "state": "unknown",
+            "mode": string_or_unknown(monitor, "mode"),
+            "expected_every_ms": monitor
+                .get("expected_every_ms")
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
+            "reason": "monitor is configured but /api/v1/status did not report check-in state"
+        });
+    }
+
+    let status_ok = probe_ok(status_probe);
+    let monitors_ok = probe_ok(monitors_probe);
+    if status_ok || monitors_ok {
+        json!({
+            "status": "missing",
+            "monitor": WITNESS_MONITOR_NAME,
+            "reason": "no canary-watchman monitor found in status or monitor configuration"
+        })
+    } else {
+        json!({
+            "status": "unavailable",
+            "monitor": WITNESS_MONITOR_NAME,
+            "reason": "could not inspect status or monitor configuration"
+        })
+    }
+}
+
+fn find_witness_monitor(probe: &Value) -> Option<&Value> {
+    probe
+        .get("response")
+        .and_then(|response| response.get("monitors"))
+        .and_then(Value::as_array)
+        .and_then(|items| items.iter().find(|item| monitor_matches(item)))
+}
+
+fn monitor_matches(item: &Value) -> bool {
+    item.get("name")
+        .or_else(|| item.get("service"))
+        .and_then(Value::as_str)
+        .is_some_and(|value| value == WITNESS_MONITOR_NAME)
+}
+
+fn monitor_name(item: &Value) -> &str {
+    item.get("name")
+        .or_else(|| item.get("service"))
+        .and_then(Value::as_str)
+        .unwrap_or(WITNESS_MONITOR_NAME)
+}
+
+fn monitor_has_check_in(item: &Value) -> bool {
+    item.get("last_check_in_at")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+        && item
+            .get("last_check_in_status")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn string_or_unknown<'a>(item: &'a Value, key: &str) -> &'a str {
+    item.get(key).and_then(Value::as_str).unwrap_or("unknown")
+}
+
+fn probe_ok(probe: &Value) -> bool {
+    probe.get("ok").and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn witness_summary(value: Option<&Value>) -> String {
+    let Some(value) = value else {
+        return "missing".to_owned();
+    };
+    match string_field(value, "status").as_str() {
+        "observed" => format!(
+            "{} {} last_check_in={} at {}",
+            string_field(value, "monitor"),
+            string_field(value, "state"),
+            string_field(value, "last_check_in_status"),
+            string_field(value, "last_check_in_at")
+        ),
+        "configured" => format!(
+            "{} configured, status readback pending",
+            string_field(value, "monitor")
+        ),
+        "missing" => format!("{} missing", string_field(value, "monitor")),
+        "unavailable" => format!("{} unavailable", string_field(value, "monitor")),
+        other => other.to_owned(),
     }
 }
 
@@ -691,4 +824,42 @@ pub fn tool_manifest() -> Vec<ToolSpec> {
             input_schema: json!({"type":"object","properties":{}}),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn witness_monitor_report_keeps_never_checked_in_monitor_configured() {
+        let status_probe = json!({
+            "ok": true,
+            "response": {
+                "monitors": [{
+                    "name": "canary-watchman",
+                    "service": "canary",
+                    "state": "unknown",
+                    "last_check_in_status": null,
+                    "last_check_in_at": null
+                }]
+            }
+        });
+        let monitors_probe = json!({
+            "ok": true,
+            "response": {
+                "monitors": [{
+                    "name": "canary-watchman",
+                    "service": "canary",
+                    "mode": "ttl",
+                    "expected_every_ms": 600000
+                }]
+            }
+        });
+
+        let report = witness_monitor_report(&status_probe, &monitors_probe);
+
+        assert_eq!(report["status"], "configured");
+        assert_eq!(report["monitor"], "canary-watchman");
+        assert_eq!(report["mode"], "ttl");
+    }
 }

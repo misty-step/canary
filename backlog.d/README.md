@@ -33,9 +33,9 @@
 | 032 | Live Rust write-path evidence | high | ready | L |
 | 034 | Worker lifecycle readiness oracle | high | ready | L |
 | 033 | Deployed service registry lifecycle | high | done | M |
-| 035 | Deployed app Canary coverage | high | ready | XL |
+| 035 | Deployed app Canary coverage | high | done | XL |
 | 036 | Agent-native inspection surface | high | done | L |
-| 037 | Watch the watchmen | high | ready | L |
+| 037 | Watch the watchmen | high | done | L |
 | 038 | One-command integration agent | high | ready | XL |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
@@ -64,7 +64,7 @@
 034 (worker lifecycle readiness oracle) — makes webhook, target, monitor, retention, and TLS workers visible to readiness/gate checks
 035 (deployed app Canary coverage) — ensures every active owned Vercel/Fly deployment is enrolled or explicitly blocked with evidence
 036 (agent-native inspection surface) — gives Codex/Claude a stable CLI/JSON/MCP-shaped way to inspect Canary status, errors, incidents, timelines, targets, and dogfood coverage
-037 (watch the watchmen) — proves Canary itself from outside the Canary process and preserves receipts when Canary is unreachable
+037 (watch the watchmen) — shipped; proves Canary itself from outside the Canary process, preserves receipts when Canary is unreachable, and surfaces the external witness in `bin/canary doctor`
 038 (one-command integration agent) — discovers, patches, enrolls, and verifies Canary integration for Vercel/Fly/Next apps
 
 022 (contract hygiene) ──── ships independently; restores summary invariant + supervision-tree collapse
@@ -83,12 +83,10 @@
 
 ### Active order (2026-06-11)
 
-1. **035** — Deployed app Canary coverage (make the requested deployed applications covered or explicitly blocked)
-2. **037** — Watch the watchmen (external witness for Canary itself)
-3. **038** — One-command integration agent (discover, patch, enroll, verify)
-4. **030** — Agent contract safety pass (scope annotations, summary completeness, cold-start guidance, annotation write-back; delivery-id lookup already shipped)
-5. **032** — Live Rust write-path evidence (prove deployed admin/ingest/webhook/monitor/target paths with sanitized packets)
-6. **034** — Worker lifecycle readiness oracle (make Rust background workers visible to readiness and Dagger smoke)
+1. **038** — One-command integration agent (discover, patch, enroll, verify)
+2. **030** — Agent contract safety pass (scope annotations, summary completeness, cold-start guidance, annotation write-back; delivery-id lookup already shipped)
+3. **032** — Live Rust write-path evidence (prove deployed admin/ingest/webhook/monitor/target paths with sanitized packets)
+4. **034** — Worker lifecycle readiness oracle (make Rust background workers visible to readiness and Dagger smoke)
 
 022 + 023 landed on 2026-04-21. 024 landed on 2026-04-22. 026 landed on
 2026-04-23 — Ramp
@@ -133,6 +131,10 @@ parity backlog items were retired during the Rust scorched-earth migration.
   inspection surface with text/JSON commands for summary, services, errors,
   incidents, timeline, targets, monitors, dogfood audit, doctor, and MCP tool
   manifest generation.
+- 2026-06-12: Delivered 037. `bin/canary-witness` now checks `/healthz`,
+  `/readyz`, and `service=canary` readback from GitHub Actions, preserves a
+  receipt artifact outside Canary, sends `canary-watchman` check-ins when
+  healthy, and surfaces witness state in `bin/canary doctor`.
 
 ## Status
 
