@@ -1,4 +1,4 @@
-name: Uptime Monitor
+name: Canary Witness
 
 on:
   schedule:
@@ -6,38 +6,67 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: uptime-monitor
+  group: canary-witness
   cancel-in-progress: false
 
 jobs:
-  healthcheck:
+  witness:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       issues: write
     env:
-      TARGET_URL: https://canary-obs.fly.dev/healthz
-      ISSUE_LABEL: canary-down
-      ISSUE_TITLE: "Canary is down"
+      CANARY_WITNESS_ENDPOINT: https://canary-obs.fly.dev
+      CANARY_WITNESS_MONITOR: canary-watchman
+      CANARY_WITNESS_READ_KEY: ${{ secrets.CANARY_WITNESS_READ_KEY }}
+      CANARY_WITNESS_INGEST_KEY: ${{ secrets.CANARY_WITNESS_INGEST_KEY }}
+      ISSUE_LABEL: canary-witness-failed
+      ISSUE_TITLE: "Canary witness failed"
     steps:
-      - name: Check healthz
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run external witness
         id: check
         run: |
           set +e
-          RESPONSE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$TARGET_URL")
-          CURL_EXIT=$?
+          bin/canary-witness \
+            --receipt "$RUNNER_TEMP/canary-witness-receipt.json" \
+            --require-check-in
+          EXIT_CODE=$?
           set -e
 
-          if [ "$RESPONSE" != "200" ]; then
-            echo "First check failed (HTTP $RESPONSE, curl exit $CURL_EXIT), retrying in 15s..."
-            sleep 15
-            set +e
-            RESPONSE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$TARGET_URL")
-            CURL_EXIT=$?
-            set -e
+          if [ ! -f "$RUNNER_TEMP/canary-witness-receipt.json" ]; then
+            jq -n \
+              --arg observed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --arg endpoint "$CANARY_WITNESS_ENDPOINT" \
+              --arg monitor "$CANARY_WITNESS_MONITOR" \
+              --argjson exit_code "$EXIT_CODE" \
+              '{
+                schema_version: 1,
+                witness: $monitor,
+                endpoint: $endpoint,
+                observed_at: $observed_at,
+                status: "witness_failed_before_receipt",
+                exit_code: $exit_code,
+                probes: {},
+                check_in: null
+              }' > "$RUNNER_TEMP/canary-witness-receipt.json"
           fi
 
-          echo "status=$RESPONSE" >> "$GITHUB_OUTPUT"
-          echo "curl_exit=$CURL_EXIT" >> "$GITHUB_OUTPUT"
+          STATUS=$(jq -r '.status // "unknown"' "$RUNNER_TEMP/canary-witness-receipt.json")
+          OBSERVED_AT=$(jq -r '.observed_at // "unknown"' "$RUNNER_TEMP/canary-witness-receipt.json")
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "observed_at=$OBSERVED_AT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload witness receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-witness-${{ github.run_id }}
+          path: ${{ runner.temp }}/canary-witness-receipt.json
+          if-no-files-found: error
 
       - name: Find existing incident issue
         id: find
@@ -53,38 +82,52 @@ jobs:
           echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
 
       - name: Ensure label exists
-        if: steps.check.outputs.status != '200' && steps.find.outputs.issue == ''
+        if: steps.check.outputs.exit_code != '0' && steps.find.outputs.issue == ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh label create "$ISSUE_LABEL" \
             --repo "${{ github.repository }}" \
-            --description "Automated: Canary healthz unreachable" \
+            --description "Automated: external Canary witness failed" \
             --color "B60205" 2>/dev/null || true
 
       - name: Open incident issue
-        if: steps.check.outputs.status != '200' && steps.find.outputs.issue == ''
+        if: steps.check.outputs.exit_code != '0' && steps.find.outputs.issue == ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          DETECTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          RECEIPT_SUMMARY=$(jq -c '{
+            status,
+            observed_at,
+            healthz: .probes.healthz,
+            readyz: .probes.readyz,
+            canary_query: .probes.canary_query,
+            check_in: .check_in
+          }' "$RUNNER_TEMP/canary-witness-receipt.json")
           BODY=$(cat <<EOF
-          ## Canary is unreachable
+          ## Canary witness failed
 
-          The uptime monitor failed to reach \`${TARGET_URL}\`.
+          The external witness could not verify Canary.
 
-          **HTTP status:** ${{ steps.check.outputs.status }}
-          **curl exit code:** ${{ steps.check.outputs.curl_exit }}
-          **Detected at:** ${DETECTED_AT}
+          **Witness status:** ${{ steps.check.outputs.status }}
+          **Observed at:** ${{ steps.check.outputs.observed_at }}
+          **Receipt artifact:** canary-witness-${{ github.run_id }}
+
+          ### Receipt summary
+
+          \`\`\`json
+          ${RECEIPT_SUMMARY}
+          \`\`\`
 
           ### Runbook
 
-          1. Check Fly.io machine status: \`flyctl status --app canary-obs\`
-          2. Check logs: \`flyctl logs --app canary-obs\`
-          3. If machine is stopped: \`flyctl machines start <id> --app canary-obs\`
-          4. If DB corruption: see CLAUDE.md "Nuclear reset" section
+          1. Check the uploaded \`canary-witness-receipt.json\` artifact.
+          2. Check Fly.io machine status: \`flyctl status --app canary-obs\`
+          3. Check logs: \`flyctl logs --app canary-obs\`
+          4. Check recent self-errors: \`bin/canary errors canary --window 1h\`
+          5. If DB corruption is suspected, see \`docs/backup-restore-dr.md\`.
 
-          This issue will auto-close when the monitor detects recovery.
+          This issue will auto-close when the witness detects recovery.
           EOF
           )
           gh issue create \
@@ -94,11 +137,16 @@ jobs:
             --body "$BODY"
 
       - name: Close recovered issue
-        if: steps.check.outputs.status == '200' && steps.find.outputs.issue != ''
+        if: steps.check.outputs.exit_code == '0' && steps.find.outputs.issue != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh issue close "${{ steps.find.outputs.issue }}" \
             --repo "${{ github.repository }}" \
-            --comment "Canary is back up. Recovered at $(date -u +%Y-%m-%dT%H:%M:%SZ)." \
+            --comment "Canary witness recovered at ${{ steps.check.outputs.observed_at }}." \
             || true
+
+      - name: Fail workflow if witness failed
+        if: steps.check.outputs.exit_code != '0'
+        run: |
+          exit "${{ steps.check.outputs.exit_code }}"

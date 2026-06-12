@@ -62,6 +62,22 @@ Text output is deliberately compact for agent transcripts.
 `dogfood audit --strict --json` still prints the JSON report before exiting
 nonzero when coverage gaps remain, so agents can inspect the failure details.
 
+`doctor` is the fastest "who watches Canary?" command. It probes `/healthz`,
+`/readyz`, the global report, service status, incidents, dogfood coverage,
+recent `service=canary` errors, and the external `canary-watchman` monitor
+created by `bin/canary-witness`. The witness line is:
+
+- `observed`: the scheduled witness has checked in; the line includes the last
+  check-in status and timestamp.
+- `configured`: the monitor exists but status readback has not observed a
+  check-in yet.
+- `missing`: the `canary-watchman` monitor is not configured.
+- `unavailable`: the CLI could not inspect monitor/status routes with the
+  supplied key.
+
+The witness runbook and GitHub Actions receipt contract live in
+`docs/canary-witness.md`.
+
 ## MCP Shape
 
 `bin/canary mcp-manifest` emits the generated tool manifest. MCP tools should shell

@@ -1,0 +1,319 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEFAULT_ENDPOINT="https://canary-obs.fly.dev"
+ENDPOINT="${CANARY_WITNESS_ENDPOINT:-${CANARY_ENDPOINT:-$DEFAULT_ENDPOINT}}"
+READ_API_KEY="${CANARY_WITNESS_READ_KEY:-${CANARY_READ_API_KEY:-${CANARY_READ_KEY:-${CANARY_API_KEY:-}}}}"
+INGEST_API_KEY="${CANARY_WITNESS_INGEST_KEY:-${CANARY_INGEST_API_KEY:-${CANARY_API_KEY:-}}}"
+MONITOR="${CANARY_WITNESS_MONITOR:-canary-watchman}"
+WINDOW="${CANARY_WITNESS_WINDOW:-1h}"
+RECEIPT="${CANARY_WITNESS_RECEIPT:-canary-witness-receipt.json}"
+CURL_BIN="${CANARY_WITNESS_CURL:-curl}"
+TIMEOUT_SECONDS="${CANARY_WITNESS_TIMEOUT_SECONDS:-10}"
+REQUIRE_CHECK_IN=0
+JSON_OUTPUT=0
+
+usage() {
+  cat <<'EOF'
+Usage: bin/canary-witness [--endpoint <url>] [--read-api-key <key>] [--ingest-api-key <key>] [--monitor <name>] [--window <window>] [--receipt <path>] [--require-check-in] [--json] [-h|--help]
+
+Check Canary from outside the Fly app and preserve a receipt even when Canary is
+unreachable. The witness verifies:
+
+- GET /healthz returns {"status":"ok"}
+- GET /readyz returns {"status":"ready"} with ready dependency checks
+- GET /api/v1/query?service=canary returns a readable error summary
+
+When all three self-signals are healthy, the witness sends a check-in for the
+configured monitor, defaulting to canary-watchman.
+EOF
+}
+
+fail_usage() {
+  usage >&2
+  exit 2
+}
+
+require_command() {
+  local command_name="$1"
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    printf 'canary-witness: missing required command: %s\n' "$command_name" >&2
+    exit 2
+  fi
+}
+
+urlencode() {
+  jq -nr --arg value "$1" '$value | @uri'
+}
+
+now_utc() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --endpoint)
+      [[ $# -ge 2 ]] || fail_usage
+      ENDPOINT="$2"
+      shift 2
+      ;;
+    --read-api-key)
+      [[ $# -ge 2 ]] || fail_usage
+      READ_API_KEY="$2"
+      shift 2
+      ;;
+    --ingest-api-key)
+      [[ $# -ge 2 ]] || fail_usage
+      INGEST_API_KEY="$2"
+      shift 2
+      ;;
+    --monitor)
+      [[ $# -ge 2 ]] || fail_usage
+      MONITOR="$2"
+      shift 2
+      ;;
+    --window)
+      [[ $# -ge 2 ]] || fail_usage
+      WINDOW="$2"
+      shift 2
+      ;;
+    --receipt)
+      [[ $# -ge 2 ]] || fail_usage
+      RECEIPT="$2"
+      shift 2
+      ;;
+    --require-check-in)
+      REQUIRE_CHECK_IN=1
+      shift
+      ;;
+    --json)
+      JSON_OUTPUT=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      fail_usage
+      ;;
+  esac
+done
+
+require_command jq
+require_command "$CURL_BIN"
+
+ENDPOINT="${ENDPOINT%/}"
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+mkdir -p "$(dirname "$RECEIPT")"
+
+write_skipped_probe() {
+  local name="$1" reason="$2" output="$3"
+  jq -n \
+    --arg name "$name" \
+    --arg reason "$reason" \
+    '{
+      name: $name,
+      ok: false,
+      skipped: true,
+      error: $reason,
+      http_status: 0,
+      curl_exit: 0,
+      latency_ms: null,
+      response: null
+    }' >"$output"
+}
+
+request_json() {
+  local name="$1" method="$2" path="$3" auth="$4" output="$5" data="${6:-}"
+  local key=""
+  local auth_error=""
+
+  case "$auth" in
+    none)
+      ;;
+    read)
+      key="$READ_API_KEY"
+      auth_error="missing read API key"
+      ;;
+    ingest)
+      key="$INGEST_API_KEY"
+      auth_error="missing ingest API key"
+      ;;
+    *)
+      printf 'canary-witness: invalid auth mode: %s\n' "$auth" >&2
+      exit 2
+      ;;
+  esac
+
+  if [[ "$auth" != "none" && -z "$key" ]]; then
+    write_skipped_probe "$name" "$auth_error" "$output"
+    return 0
+  fi
+
+  local body_file="$tmpdir/${name}.body"
+  local meta_file="$tmpdir/${name}.meta"
+  local err_file="$tmpdir/${name}.err"
+  local curl_args=(
+    -sS
+    -o "$body_file"
+    -w "%{http_code} %{time_total}"
+    --max-time "$TIMEOUT_SECONDS"
+    -X "$method"
+  )
+
+  if [[ "$auth" != "none" ]]; then
+    curl_args+=(-H "Authorization: Bearer $key")
+  fi
+  if [[ -n "$data" ]]; then
+    curl_args+=(-H "Content-Type: application/json" --data "$data")
+  fi
+  curl_args+=("$ENDPOINT$path")
+
+  set +e
+  "$CURL_BIN" "${curl_args[@]}" >"$meta_file" 2>"$err_file"
+  local curl_exit=$?
+  set -e
+
+  local http_status="000"
+  local latency="0"
+  if [[ -s "$meta_file" ]]; then
+    read -r http_status latency <"$meta_file" || true
+  fi
+
+  local body=""
+  local error=""
+  body="$(cat "$body_file" 2>/dev/null || true)"
+  error="$(tr '\n' ' ' <"$err_file" | sed 's/[[:space:]]*$//')"
+
+  jq -n \
+    --arg name "$name" \
+    --arg method "$method" \
+    --arg path "$path" \
+    --argjson curl_exit "$curl_exit" \
+    --arg http_status "$http_status" \
+    --arg latency "$latency" \
+    --arg error "$error" \
+    --arg body "$body" \
+    '{
+      name: $name,
+      method: $method,
+      path: $path,
+      ok: (($curl_exit == 0) and (($http_status | tonumber? // 0) >= 200) and (($http_status | tonumber? // 0) < 300)),
+      skipped: false,
+      http_status: ($http_status | tonumber? // 0),
+      curl_exit: $curl_exit,
+      latency_ms: (($latency | tonumber? // 0) * 1000 | floor),
+      error: (if $error == "" then null else $error end),
+      response: (if $body == "" then null else (try ($body | fromjson) catch $body) end)
+    }' >"$output"
+}
+
+health_file="$tmpdir/healthz.json"
+ready_file="$tmpdir/readyz.json"
+query_file="$tmpdir/canary-query.json"
+check_in_file="$tmpdir/check-in.json"
+observed_at="$(now_utc)"
+encoded_window="$(urlencode "$WINDOW")"
+
+request_json "healthz" "GET" "/healthz" "none" "$health_file"
+request_json "readyz" "GET" "/readyz" "none" "$ready_file"
+request_json "canary-query" "GET" "/api/v1/query?service=canary&window=${encoded_window}" "read" "$query_file"
+
+health_ok="$(jq -r 'try (.curl_exit == 0 and .http_status == 200 and (.response | type == "object") and .response.status == "ok") catch false' "$health_file")"
+ready_ok="$(jq -r 'try (.curl_exit == 0 and .http_status == 200 and (.response | type == "object") and .response.status == "ready" and ([.response.checks[]?] | all(. == "ok"))) catch false' "$ready_file")"
+query_ok="$(jq -r 'try (.curl_exit == 0 and .http_status == 200 and (.response | type == "object") and .response.service == "canary" and (.response.total_errors | type == "number")) catch false' "$query_file")"
+transport_failures="$(jq -s '[.[] | select((.skipped // false | not) and (.curl_exit != 0))] | length' "$health_file" "$ready_file" "$query_file")"
+
+if [[ "$health_ok" == "true" && "$ready_ok" == "true" && "$query_ok" == "true" ]]; then
+  status="healthy"
+elif [[ "$transport_failures" != "0" ]]; then
+  status="unreachable"
+else
+  status="degraded"
+fi
+
+if [[ "$status" == "healthy" ]]; then
+  total_errors="$(jq -r '.response.total_errors // 0' "$query_file")"
+  context="$(
+    jq -n \
+      --arg endpoint "$ENDPOINT" \
+      --arg window "$WINDOW" \
+      --slurpfile health "$health_file" \
+      --slurpfile ready "$ready_file" \
+      --slurpfile query "$query_file" \
+      '{
+        endpoint: $endpoint,
+        window: $window,
+        healthz_latency_ms: $health[0].latency_ms,
+        readyz_latency_ms: $ready[0].latency_ms,
+        query_latency_ms: $query[0].latency_ms,
+        canary_total_errors: ($query[0].response.total_errors // 0)
+      }'
+  )"
+  check_in_payload="$(
+    jq -cn \
+      --arg monitor "$MONITOR" \
+      --arg observed_at "$observed_at" \
+      --arg summary "Canary witness saw healthy self-signals and ${total_errors} recent canary errors." \
+      --argjson context "$context" \
+      '{
+        monitor: $monitor,
+        status: "alive",
+        observed_at: $observed_at,
+        summary: $summary,
+        context: $context
+      }'
+  )"
+  request_json "check-in" "POST" "/api/v1/check-ins" "ingest" "$check_in_file" "$check_in_payload"
+else
+  write_skipped_probe "check-in" "self signals were not healthy" "$check_in_file"
+fi
+
+check_in_ok="$(jq -r '.curl_exit == 0 and (.http_status >= 200 and .http_status < 300)' "$check_in_file")"
+if [[ "$REQUIRE_CHECK_IN" == "1" && "$status" == "healthy" && "$check_in_ok" != "true" ]]; then
+  status="degraded"
+fi
+
+jq -n \
+  --argjson schema_version 1 \
+  --arg witness "$MONITOR" \
+  --arg endpoint "$ENDPOINT" \
+  --arg observed_at "$observed_at" \
+  --arg window "$WINDOW" \
+  --arg status "$status" \
+  --argjson require_check_in "$REQUIRE_CHECK_IN" \
+  --slurpfile health "$health_file" \
+  --slurpfile ready "$ready_file" \
+  --slurpfile query "$query_file" \
+  --slurpfile check_in "$check_in_file" \
+  '{
+    schema_version: $schema_version,
+    witness: $witness,
+    endpoint: $endpoint,
+    observed_at: $observed_at,
+    window: $window,
+    status: $status,
+    require_check_in: ($require_check_in == 1),
+    probes: {
+      healthz: $health[0],
+      readyz: $ready[0],
+      canary_query: $query[0]
+    },
+    check_in: $check_in[0]
+  }' >"$RECEIPT"
+
+if [[ "$JSON_OUTPUT" == "1" ]]; then
+  cat "$RECEIPT"
+else
+  printf 'status: %s\n' "$status"
+  printf 'receipt: %s\n' "$RECEIPT"
+  jq -r '"healthz: \(.probes.healthz.http_status) \(.probes.healthz.latency_ms)ms", "readyz: \(.probes.readyz.http_status) \(.probes.readyz.latency_ms)ms", "canary_errors: \((if (.probes.canary_query.response | type) == "object" then .probes.canary_query.response.total_errors else null end) // "unknown")", "check_in: \(.check_in.http_status) \(.check_in.latency_ms // "n/a")ms"' "$RECEIPT"
+fi
+
+if [[ "$status" == "healthy" ]]; then
+  exit 0
+fi
+
+exit 1

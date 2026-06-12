@@ -1,10 +1,10 @@
 //! Fixture-backed parser tests for the Canary CLI.
 
 use canary_cli::{
-    dogfood_strict_failure_count, summarize_dogfood, summarize_incidents, summarize_monitors,
-    summarize_query, summarize_report, summarize_targets, summarize_timeline,
+    dogfood_strict_failure_count, summarize_doctor, summarize_dogfood, summarize_incidents,
+    summarize_monitors, summarize_query, summarize_report, summarize_targets, summarize_timeline,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn fixture(body: &str) -> Result<Value, serde_json::Error> {
     serde_json::from_str(body)
@@ -68,4 +68,41 @@ fn parses_dogfood_inventory_fixture() -> Result<(), Box<dyn std::error::Error>> 
     assert!(lines.iter().any(|line| line == "strict_failures: 1"));
     assert_eq!(dogfood_strict_failure_count(&value), 1);
     Ok(())
+}
+
+#[test]
+fn doctor_summary_includes_watchman_and_self_errors() {
+    let value = json!({
+        "endpoint": "https://canary.example",
+        "key": "CANARY_API_KEY: redacted",
+        "key_scope": "admin",
+        "reachability": {
+            "healthz": {"ok": true, "response": {"status": "ok"}},
+            "readyz": {"ok": true, "response": {"status": "ready"}}
+        },
+        "summary": {"ok": true, "summary": ["summary: Canary healthy"]},
+        "services": {"ok": true, "summary": ["summary: all surfaces healthy"]},
+        "witness": {
+            "status": "observed",
+            "monitor": "canary-watchman",
+            "state": "up",
+            "last_check_in_status": "alive",
+            "last_check_in_at": "2026-06-12T00:00:00Z"
+        },
+        "canary_errors": {"ok": true, "summary": ["summary: 0 errors in canary in the last 1h."]},
+        "incidents": {"ok": true, "summary": ["summary: 0 open incidents"]},
+        "dogfood": {"ok": true, "summary": ["covered: 4"]},
+        "worker_readiness": {"available": false}
+    });
+
+    let lines = summarize_doctor(&value);
+    assert!(
+        lines.iter().any(|line| line
+            == "witness: canary-watchman up last_check_in=alive at 2026-06-12T00:00:00Z")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "canary_errors: summary: 0 errors in canary in the last 1h.")
+    );
 }
