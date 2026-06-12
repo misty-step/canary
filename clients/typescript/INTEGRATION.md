@@ -1,5 +1,18 @@
 # Integrating Canary into a Next.js app
 
+Agents should prefer the reviewable setup loop before hand-editing snippets:
+
+```bash
+bin/canary integrate discover /path/to/app --production-url https://app.example.com --json
+bin/canary integrate plan /path/to/app --service my-app --production-url https://app.example.com --json
+bin/canary integrate patch /path/to/app --service my-app --json
+bin/canary integrate enroll --service my-app --url https://app.example.com/api/health --json
+```
+
+The `discover` and `plan` phases report env var names only. `enroll` redacts the
+one-time ingest key by default; use `--show-secret` only for a secure secret
+handoff.
+
 ## Step 1: Install
 
 ```bash

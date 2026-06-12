@@ -52,6 +52,107 @@
         "type": "object"
       },
       "name": "canary_doctor"
+    },
+    {
+      "description": "Discover local project integration state without reading secret values.",
+      "input_schema": {
+        "properties": {
+          "path_or_project": {
+            "type": "string"
+          },
+          "platform_project": {
+            "type": "string"
+          },
+          "production_url": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path_or_project"
+        ],
+        "type": "object"
+      },
+      "name": "canary_integrate_discover"
+    },
+    {
+      "description": "Emit a reviewable Canary integration patch and enrollment plan.",
+      "input_schema": {
+        "properties": {
+          "path_or_project": {
+            "type": "string"
+          },
+          "platform_project": {
+            "type": "string"
+          },
+          "production_url": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path_or_project"
+        ],
+        "type": "object"
+      },
+      "name": "canary_integrate_plan"
+    },
+    {
+      "description": "Apply safe Next.js Canary integration patches after reviewing the plan.",
+      "input_schema": {
+        "properties": {
+          "path_or_project": {
+            "type": "string"
+          },
+          "platform_project": {
+            "type": "string"
+          },
+          "production_url": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path_or_project"
+        ],
+        "type": "object"
+      },
+      "name": "canary_integrate_patch"
+    },
+    {
+      "description": "Create a Canary health target and scoped ingest key for a deployed service; redacts the one-time key by default.",
+      "input_schema": {
+        "properties": {
+          "environment": {
+            "type": "string"
+          },
+          "interval_ms": {
+            "type": "integer"
+          },
+          "service": {
+            "type": "string"
+          },
+          "show_secret": {
+            "default": false,
+            "type": "boolean"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "service",
+          "url"
+        ],
+        "type": "object"
+      },
+      "name": "canary_integrate_enroll"
     }
   ]
 }

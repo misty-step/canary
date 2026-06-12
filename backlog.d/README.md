@@ -36,7 +36,7 @@
 | 035 | Deployed app Canary coverage | high | done | XL |
 | 036 | Agent-native inspection surface | high | done | L |
 | 037 | Watch the watchmen | high | done | L |
-| 038 | One-command integration agent | high | ready | XL |
+| 038 | One-command integration agent | high | done | XL |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
 
@@ -83,10 +83,9 @@
 
 ### Active order (2026-06-11)
 
-1. **038** — One-command integration agent (discover, patch, enroll, verify)
-2. **030** — Agent contract safety pass (scope annotations, summary completeness, cold-start guidance, annotation write-back; delivery-id lookup already shipped)
-3. **032** — Live Rust write-path evidence (prove deployed admin/ingest/webhook/monitor/target paths with sanitized packets)
-4. **034** — Worker lifecycle readiness oracle (make Rust background workers visible to readiness and Dagger smoke)
+1. **030** — Agent contract safety pass (scope annotations, summary completeness, cold-start guidance, annotation write-back; delivery-id lookup already shipped)
+2. **032** — Live Rust write-path evidence (prove deployed admin/ingest/webhook/monitor/target paths with sanitized packets)
+3. **034** — Worker lifecycle readiness oracle (make Rust background workers visible to readiness and Dagger smoke)
 
 022 + 023 landed on 2026-04-21. 024 landed on 2026-04-22. 026 landed on
 2026-04-23 — Ramp
@@ -135,6 +134,11 @@ parity backlog items were retired during the Rust scorched-earth migration.
   `/readyz`, and `service=canary` readback from GitHub Actions, preserves a
   receipt artifact outside Canary, sends `canary-watchman` check-ins when
   healthy, and surfaces witness state in `bin/canary doctor`.
+- 2026-06-12: Delivered 038. `bin/canary integrate` now discovers local
+  project coverage without reading secret values, emits reviewable patch and
+  enrollment plans, safely patches Next.js apps, enrolls deployed health
+  targets through service onboarding, and exposes the loop through the MCP
+  manifest.
 
 ## Status
 
