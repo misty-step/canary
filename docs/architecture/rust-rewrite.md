@@ -1131,6 +1131,17 @@ the Rust server accepts production traffic:
     surface. The Axum route maps that boundary to the standard RFC 9457
     `422 validation_error` cursor problem, preserving legacy group-hash
     cursors while making bad agent replay state fail explicitly.
+93. The Rust production write-path evidence packet now lives at
+    `docs/architecture/rust-write-path-evidence-2026-06-12.md`. It records a
+    replayable `bin/canary-write-path-rehearsal --json` run against the
+    deployed Fly image labeled with commit
+    `8066373b55108f662bf08158dfd74c25561a9fd4`. The run mints and revokes an
+    ingest key, creates/pauses/resumes/deletes a target, creates/checks
+    in/deletes a monitor, creates/tests/deletes a webhook, ingests an error,
+    verifies query/report/timeline/error-detail readback, observes a delivered
+    webhook-delivery ledger row, and records `bin/dr-status` output. This is
+    the write-path companion to the 2026-06-06 read/public cutover packet; it
+    does not claim long-running retention-prune or TLS-expiry worker proof.
 
 This slice is deliberately small but aligned with the full rewrite: it moves
 existing contracts into Rust types and tests. The server crate is allowed

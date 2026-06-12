@@ -188,8 +188,10 @@ export class Ci {
       .withExec(["bash", "test/bin/dogfood_audit_test.sh"])
       .withExec(["bash", "test/bin/dogfood_inventory_test.sh"])
       .withExec(["bash", "test/bin/canary_witness_test.sh"])
+      .withExec(["bash", "test/bin/canary_write_path_rehearsal_test.sh"])
       .withExec(["bash", "-n", "bin/canary"])
       .withExec(["bash", "-n", "bin/canary-witness"])
+      .withExec(["bash", "-n", "bin/canary-write-path-rehearsal"])
   }
 
   private async typescriptQualityContainer(source: Directory): Promise<Container> {

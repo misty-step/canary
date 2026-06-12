@@ -57,6 +57,21 @@ surface.
 The production Dockerfile builds the Rust `canary-server` binary, and CI uses
 the same pinned toolchain versions.
 
+### Production Evidence
+
+Rust production claims are evidence-scoped:
+
+- [docs/architecture/rust-cutover-evidence-2026-06-06.md](docs/architecture/rust-cutover-evidence-2026-06-06.md)
+  proves the first Fly Rust cutover plus public/read-route smoke.
+- [docs/architecture/rust-write-path-evidence-2026-06-12.md](docs/architecture/rust-write-path-evidence-2026-06-12.md)
+  proves the live admin, ingest, target, monitor, webhook, delivery-ledger,
+  query/report/timeline, cleanup, and DR-status write-path rehearsal.
+
+Replay the write-path proof with `bin/canary-write-path-rehearsal --json`
+against a live Canary instance; it creates uniquely named disposable resources,
+redacts credentials in the receipt, then deletes or revokes the live resources
+it created.
+
 ### Bootstrap
 
 From the repo root:
