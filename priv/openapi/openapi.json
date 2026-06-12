@@ -16,7 +16,90 @@
       "webhook_contract": "Deduplicate deliveries by x-delivery-id. For disputed or failed deliveries, read `GET /api/v1/webhook-deliveries/{delivery_id}` for diagnostics, then replay durable state through `GET /api/v1/timeline` before acting. Webhooks are non-authoritative wake-up hints; the timeline is the durable event log and must be replayed for correctness.",
       "crash_recovery": "After a crash or restart, resume from the last persisted cursor, replay missed timeline events, and continue polling until the API returns no further cursor.",
       "cursor_precedence": "When both `after` and `cursor` are provided on timeline-style pagination endpoints, Canary resolves `after` first and ignores `cursor` for that request.",
-      "incident_entrypoint": "On an `incident.opened` webhook, call `GET /api/v1/incidents/{id}` once — the response carries summary, the full incident metadata, a deterministic action brief, up to 25 correlated signals with per-type context, up to 20 newest annotations, and up to 5 most recent timeline events. Only fall through to /query, /timeline, or /errors/{id} when `signals_truncated` or `annotations_truncated` is true, or the agent needs raw stack traces."
+      "incident_entrypoint": "On an `incident.opened` webhook, call `GET /api/v1/incidents/{id}` once — the response carries summary, the full incident metadata, a deterministic action brief, up to 25 correlated signals with per-type context, up to 20 newest annotations, and up to 5 most recent timeline events. Only fall through to /query, /timeline, or /errors/{id} when `signals_truncated` or `annotations_truncated` is true, or the agent needs raw stack traces.",
+      "scope_semantics": "`x-canary-required-scope` names the least-privilege key scope to provision for the operation. Admin keys may also satisfy read-only and ingest-only route permissions at runtime, but agents should request the narrow scope unless they are managing Canary configuration.",
+      "cold_start": {
+        "entrypoint": "When an agent has no saved cursor, call GET /api/v1/report?window=1h first. The report is the bounded current-state snapshot for targets, monitors, active incidents, and active error groups.",
+        "pagination": "If report.truncated is true or report.cursor is non-null, keep calling /api/v1/report with that report cursor until the response is no longer truncated. Report cursors are only for report pagination and are not timeline cursors.",
+        "handoff": "After the bounded report snapshot is exhausted, switch to GET /api/v1/timeline for durable replay. Do not pass report.cursor to timeline; start timeline with an agent-chosen after timestamp for the report window boundary, or omit cursor/after to read the default timeline window, then persist the returned timeline cursor."
+      },
+      "annotation_write_back": {
+        "summary": "Annotations are coordination records on incident, error_group, target, or monitor subjects. Canary stores and emits them; downstream responders decide what the metadata means.",
+        "stable_actions": [
+          "triaged",
+          "fix-proposed",
+          "fix-verified",
+          "noise-dismissed"
+        ],
+        "metadata_keys": [
+          "external_url",
+          "external_id",
+          "repository",
+          "commit",
+          "pr",
+          "run_id",
+          "reason"
+        ],
+        "subject_policy": "Prefer the most specific durable subject: incident for incident-level decisions, error_group for code fixes, target/monitor for health remediation. Do not use annotations as commands to mutate repos from Canary."
+      },
+      "summary_exceptions": [
+        {
+          "category": "public_probe_and_contract_responses",
+          "reason": "Public liveness/readiness and the OpenAPI document are self-describing infrastructure probes or the contract itself; agents do not need a triage summary for these responses.",
+          "schemas": [
+            "HealthzResponse",
+            "ReadyzResponse"
+          ],
+          "operations": [
+            {
+              "method": "GET",
+              "path": "/api/v1/openapi.json"
+            }
+          ]
+        },
+        {
+          "category": "write_receipts",
+          "reason": "Creation/update responses are deterministic receipts with ids, state, or one-time secret material; agents should persist the fields and then replay report or timeline when they need synthesized state.",
+          "schemas": [
+            "ErrorIngestResponse",
+            "CheckInResponse",
+            "Annotation",
+            "ServiceOnboardingResponse",
+            "Target",
+            "Monitor",
+            "WebhookCreateResponse",
+            "ApiKeyCreateResponse",
+            "SimpleStatusResponse"
+          ]
+        },
+        {
+          "category": "admin_collections",
+          "reason": "Admin collection responses are configuration inventories. Their item arrays are already the complete machine-readable state and are not agent triage summaries.",
+          "schemas": [
+            "TargetsResponse",
+            "MonitorsResponse",
+            "WebhooksResponse",
+            "ApiKeysResponse"
+          ]
+        },
+        {
+          "category": "diagnostic_rows",
+          "reason": "Diagnostic row/page responses expose canonical ledger or check fields for reconciliation; agents inspect status, attempts, ids, and timestamps directly rather than trusting prose synthesis.",
+          "schemas": [
+            "WebhookDeliveriesResponse",
+            "WebhookDelivery",
+            "TargetChecksResponse",
+            "AnnotationsResponse"
+          ]
+        },
+        {
+          "category": "problem_details",
+          "reason": "RFC 9457 Problem Details responses are structured error contracts with status, code, and detail; agents handle them through error branching rather than triage summaries.",
+          "schemas": [
+            "ProblemDetails"
+          ]
+        }
+      ]
     }
   },
   "servers": [
@@ -167,7 +250,8 @@
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "admin"
       }
     },
     "/api/v1/errors": {
@@ -215,7 +299,8 @@
           "500": {
             "$ref": "#/components/responses/InternalProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "ingest-only"
       }
     },
     "/api/v1/check-ins": {
@@ -260,6 +345,12 @@
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
+        },
+        "x-canary-required-scope": "ingest-only",
+        "x-agent-guidance": {
+          "when_to_call": "Use from non-HTTP runtimes to report a configured monitor heartbeat, progress marker, success, or error without creating an HTTP target.",
+          "trust": "The response is a committed write receipt: monitor_id, check_in_id, state, observed_at, and sequence are durable store values.",
+          "next": "For synthesized health state, read GET /api/v1/status or replay GET /api/v1/timeline; do not infer incidents from the receipt alone."
         }
       }
     },
@@ -354,7 +445,8 @@
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "read-only"
       }
     },
     "/api/v1/errors/{id}": {
@@ -396,7 +488,8 @@
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "read-only"
       }
     },
     "/api/v1/report": {
@@ -460,6 +553,12 @@
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
+        },
+        "x-canary-required-scope": "read-only",
+        "x-agent-guidance": {
+          "when_to_call": "Use for cold start or periodic full-state inspection when the agent lacks a saved cursor or needs a bounded current snapshot.",
+          "trust": "The deterministic summary, cursor, truncated flag, and returned targets/monitors/incidents/error_groups describe the current bounded window.",
+          "next": "Follow report.cursor until truncated is false, persist the checkpoint, then switch to timeline replay for durable incremental state."
         }
       }
     },
@@ -522,6 +621,12 @@
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
+        },
+        "x-canary-required-scope": "read-only",
+        "x-agent-guidance": {
+          "when_to_call": "Use after cold start and whenever a webhook wakes the agent; pass the saved cursor/after value to replay durable events.",
+          "trust": "Timeline events are the durable source of truth for ordered state replay; webhooks are hints and may be duplicated or delayed.",
+          "next": "Process events in order, persist the returned cursor before going idle, and fetch detail endpoints only when an event is truncated or needs raw context."
         }
       }
     },
@@ -594,7 +699,8 @@
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "read-only"
       }
     },
     "/api/v1/webhook-deliveries/{delivery_id}": {
@@ -637,7 +743,8 @@
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "read-only"
       }
     },
     "/api/v1/status": {
@@ -674,7 +781,8 @@
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "read-only"
       }
     },
     "/api/v1/health-status": {
@@ -703,7 +811,8 @@
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "read-only"
       }
     },
     "/api/v1/targets/{id}/checks": {
@@ -748,7 +857,8 @@
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "read-only"
       }
     },
     "/api/v1/incidents": {
@@ -793,7 +903,8 @@
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "read-only"
       }
     },
     "/api/v1/incidents/{id}": {
@@ -836,6 +947,12 @@
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
+        },
+        "x-canary-required-scope": "read-only",
+        "x-agent-guidance": {
+          "when_to_call": "Use as the first detail call after an incident.opened or incident.updated event references an incident id.",
+          "trust": "The response summary, action_brief, signals, annotations, and recent timeline are deterministic and bounded; truncation booleans identify when to fetch more.",
+          "next": "If signals_truncated or annotations_truncated is true, fetch timeline, query, or annotations pages before acting; otherwise write back an annotation when follow-up completes."
         }
       }
     },
@@ -878,7 +995,8 @@
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "read-only"
       },
       "post": {
         "tags": [
@@ -931,6 +1049,12 @@
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
+        },
+        "x-canary-required-scope": "admin",
+        "x-agent-guidance": {
+          "when_to_call": "Use to record incident-level triage, fix proposal, verification, or dismissal once downstream work has produced evidence.",
+          "trust": "The response is the stored annotation row and the annotation.added webhook is a wake-up hint for other consumers.",
+          "next": "Persist any external references in metadata, then replay timeline or incident detail to confirm the coordination record is visible."
         }
       }
     },
@@ -973,7 +1097,8 @@
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "read-only"
       },
       "post": {
         "tags": [
@@ -1026,6 +1151,12 @@
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
+        },
+        "x-canary-required-scope": "admin",
+        "x-agent-guidance": {
+          "when_to_call": "Use to record code-fix or classification work against a stable error_group when the same issue may appear in multiple incidents.",
+          "trust": "The response is the stored annotation row; Canary does not interpret metadata beyond preserving and emitting it.",
+          "next": "Query the group or incident detail before duplicate remediation, and replay timeline after write-back if another agent may act on it."
         }
       }
     },
@@ -1106,7 +1237,8 @@
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "read-only"
       },
       "post": {
         "tags": [
@@ -1150,6 +1282,12 @@
           "429": {
             "$ref": "#/components/responses/RateLimitedProblem"
           }
+        },
+        "x-canary-required-scope": "admin",
+        "x-agent-guidance": {
+          "when_to_call": "Use for generic write-back to incident, error_group, target, or monitor subjects when subject_type and subject_id are already known.",
+          "trust": "The response is the stored annotation row with opaque metadata preserved exactly as submitted.",
+          "next": "Use stable action values where possible, keep metadata opaque, and rely on consumers rather than Canary for remediation behavior."
         }
       }
     },
@@ -1192,7 +1330,8 @@
           "500": {
             "$ref": "#/components/responses/InternalProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "admin"
       }
     },
     "/api/v1/targets": {
@@ -1218,7 +1357,8 @@
           "403": {
             "$ref": "#/components/responses/ForbiddenProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "admin"
       },
       "post": {
         "tags": [
@@ -1255,7 +1395,8 @@
           "422": {
             "$ref": "#/components/responses/ValidationProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "admin"
       }
     },
     "/api/v1/targets/{id}": {
@@ -1307,7 +1448,8 @@
           "422": {
             "$ref": "#/components/responses/ValidationProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "admin"
       },
       "delete": {
         "tags": [
@@ -1337,7 +1479,8 @@
           "404": {
             "$ref": "#/components/responses/NotFoundProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "admin"
       }
     },
     "/api/v1/targets/{id}/pause": {
@@ -1376,7 +1519,8 @@
           "404": {
             "$ref": "#/components/responses/NotFoundProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "admin"
       }
     },
     "/api/v1/targets/{id}/resume": {
@@ -1415,7 +1559,8 @@
           "404": {
             "$ref": "#/components/responses/NotFoundProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "admin"
       }
     },
     "/api/v1/monitors": {
@@ -1441,7 +1586,8 @@
           "403": {
             "$ref": "#/components/responses/ForbiddenProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "admin"
       },
       "post": {
         "tags": [
@@ -1478,7 +1624,8 @@
           "422": {
             "$ref": "#/components/responses/ValidationProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "admin"
       }
     },
     "/api/v1/monitors/{id}": {
@@ -1510,7 +1657,8 @@
           "404": {
             "$ref": "#/components/responses/NotFoundProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "admin"
       }
     },
     "/api/v1/webhooks": {
@@ -1536,7 +1684,8 @@
           "403": {
             "$ref": "#/components/responses/ForbiddenProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "admin"
       },
       "post": {
         "tags": [
@@ -1573,7 +1722,8 @@
           "422": {
             "$ref": "#/components/responses/ValidationProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "admin"
       }
     },
     "/api/v1/webhooks/{id}": {
@@ -1605,7 +1755,8 @@
           "404": {
             "$ref": "#/components/responses/NotFoundProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "admin"
       }
     },
     "/api/v1/webhooks/{id}/test": {
@@ -1647,7 +1798,8 @@
           "502": {
             "$ref": "#/components/responses/WebhookDeliveryFailedProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "admin"
       }
     },
     "/api/v1/keys": {
@@ -1673,7 +1825,8 @@
           "403": {
             "$ref": "#/components/responses/ForbiddenProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "admin"
       },
       "post": {
         "tags": [
@@ -1713,7 +1866,8 @@
           "500": {
             "$ref": "#/components/responses/InternalProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "admin"
       }
     },
     "/api/v1/keys/{id}/revoke": {
@@ -1752,7 +1906,8 @@
           "404": {
             "$ref": "#/components/responses/NotFoundProblem"
           }
-        }
+        },
+        "x-canary-required-scope": "admin"
       }
     }
   },
@@ -3351,7 +3506,14 @@
             "type": "string"
           },
           "action": {
-            "type": "string"
+            "type": "string",
+            "description": "Opaque action label. Canary guarantees the x-canary-stable-values labels for cross-agent coordination but still stores other strings for consumer-owned workflows.",
+            "x-canary-stable-values": [
+              "triaged",
+              "fix-proposed",
+              "fix-verified",
+              "noise-dismissed"
+            ]
           },
           "metadata": {
             "oneOf": [
@@ -3364,6 +3526,16 @@
               {
                 "type": "null"
               }
+            ],
+            "description": "Opaque metadata preserved by Canary. Expected keys are optional coordination hints, not Canary behavior switches.",
+            "x-canary-expected-keys": [
+              "external_url",
+              "external_id",
+              "repository",
+              "commit",
+              "pr",
+              "run_id",
+              "reason"
             ]
           },
           "created_at": {
@@ -3398,10 +3570,27 @@
             "type": "string"
           },
           "action": {
-            "type": "string"
+            "type": "string",
+            "description": "Opaque action label. Canary guarantees the x-canary-stable-values labels for cross-agent coordination but still stores other strings for consumer-owned workflows.",
+            "x-canary-stable-values": [
+              "triaged",
+              "fix-proposed",
+              "fix-verified",
+              "noise-dismissed"
+            ]
           },
           "metadata": {
-            "$ref": "#/components/schemas/JsonObject"
+            "$ref": "#/components/schemas/JsonObject",
+            "description": "Opaque JSON object preserved by Canary. Expected keys are optional coordination hints, not Canary behavior switches.",
+            "x-canary-expected-keys": [
+              "external_url",
+              "external_id",
+              "repository",
+              "commit",
+              "pr",
+              "run_id",
+              "reason"
+            ]
           }
         }
       },
@@ -3460,10 +3649,27 @@
             "type": "string"
           },
           "action": {
-            "type": "string"
+            "type": "string",
+            "description": "Opaque action label. Canary guarantees the x-canary-stable-values labels for cross-agent coordination but still stores other strings for consumer-owned workflows.",
+            "x-canary-stable-values": [
+              "triaged",
+              "fix-proposed",
+              "fix-verified",
+              "noise-dismissed"
+            ]
           },
           "metadata": {
-            "$ref": "#/components/schemas/JsonObject"
+            "$ref": "#/components/schemas/JsonObject",
+            "description": "Opaque JSON object preserved by Canary. Expected keys are optional coordination hints, not Canary behavior switches.",
+            "x-canary-expected-keys": [
+              "external_url",
+              "external_id",
+              "repository",
+              "commit",
+              "pr",
+              "run_id",
+              "reason"
+            ]
           }
         }
       },

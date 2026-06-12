@@ -1,7 +1,7 @@
 # Agent contract safety pass
 
 Priority: high
-Status: ready
+Status: done
 Estimate: M
 
 ## Goal
@@ -20,14 +20,14 @@ replay webhook delivery context without out-of-band human interpretation.
 
 ## Oracle
 
-- [ ] Every authenticated OpenAPI operation declares the required Canary API
+- [x] Every authenticated OpenAPI operation declares the required Canary API
       key scope in a machine-readable field, and a contract test fails when
       `crates/canary-server/src/lib.rs` route wiring and `priv/openapi/openapi.json`
       drift.
-- [ ] Every JSON response schema either includes a deterministic `summary`
+- [x] Every JSON response schema either includes a deterministic `summary`
       field or is listed in a small documented exception table with the reason
       an agent does not need synthesis for that response.
-- [ ] Primary agent entrypoints (`/api/v1/report`, `/api/v1/timeline`,
+- [x] Primary agent entrypoints (`/api/v1/report`, `/api/v1/timeline`,
       `/api/v1/incidents/{id}`, `/api/v1/check-ins`, and annotation writes)
       have operation-level descriptions or `x-agent-guidance` metadata that
       says when to call them, what to trust in the response, and what to do
@@ -39,18 +39,18 @@ replay webhook delivery context without out-of-band human interpretation.
 - [x] `info.x-agent-guide.webhook_contract` documents the canonical recovery
       path: dedupe by `X-Delivery-Id`, read the delivery row for diagnostics,
       and replay durable state through `/api/v1/timeline` before acting.
-- [ ] `info.x-agent-guide` includes a `cold_start` path for agents with no
+- [x] `info.x-agent-guide` includes a `cold_start` path for agents with no
       saved cursor: start at `/api/v1/report`, follow truncation/cursor hints,
       then switch to timeline replay for durable state.
-- [ ] The annotation write-back convention is documented and typed without
+- [x] The annotation write-back convention is documented and typed without
       prescribing downstream behavior: OpenAPI exposes stable `action` values
       for `triaged`, `fix-proposed`, `fix-verified`, and `noise-dismissed`,
       plus expected opaque `metadata` keys for consumers that choose to use
       them.
-- [ ] `cargo test -p canary-server openapi --locked`
+- [x] `cargo test -p canary-server openapi --locked`
       covers scope annotations, summary completeness, and the new delivery-id
       lookup contract.
-- [ ] `./bin/validate --fast` green on the branch that introduces the pass.
+- [x] `./bin/validate --fast` green on the branch that introduces the pass.
 
 ## Notes
 

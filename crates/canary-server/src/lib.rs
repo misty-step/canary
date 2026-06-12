@@ -239,7 +239,212 @@ mod tests {
     const INGEST_KEY: &str = "sk_live_ingest_secret";
     const READ_KEY: &str = "sk_live_read_secret";
     const REVOKED_KEY: &str = "sk_live_revoked_secret";
+    static ADMIN_ACCEPTED_KEYS: &[&str] = &[ADMIN_KEY];
+    static INGEST_ACCEPTED_KEYS: &[&str] = &[ADMIN_KEY, INGEST_KEY];
+    static READ_ACCEPTED_KEYS: &[&str] = &[ADMIN_KEY, READ_KEY];
+    static ADMIN_REJECTED_KEYS: &[&str] = &[INGEST_KEY, READ_KEY];
+    static INGEST_REJECTED_KEYS: &[&str] = &[READ_KEY];
+    static READ_REJECTED_KEYS: &[&str] = &[INGEST_KEY];
+    const TEST_BCRYPT_COST: u32 = 4;
     static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[derive(Clone, Copy)]
+    struct AuthenticatedRouteSpec {
+        method: &'static str,
+        openapi_path: &'static str,
+        sample_path: &'static str,
+        required_scope: &'static str,
+    }
+
+    const fn auth_route(
+        method: &'static str,
+        openapi_path: &'static str,
+        sample_path: &'static str,
+        required_scope: &'static str,
+    ) -> AuthenticatedRouteSpec {
+        AuthenticatedRouteSpec {
+            method,
+            openapi_path,
+            sample_path,
+            required_scope,
+        }
+    }
+
+    static AUTHENTICATED_ROUTE_SPECS: &[AuthenticatedRouteSpec] = &[
+        auth_route("GET", "/metrics", "/metrics", "admin"),
+        auth_route("POST", "/api/v1/errors", "/api/v1/errors", "ingest-only"),
+        auth_route(
+            "POST",
+            "/api/v1/check-ins",
+            "/api/v1/check-ins",
+            "ingest-only",
+        ),
+        auth_route("GET", "/api/v1/query", "/api/v1/query", "read-only"),
+        auth_route("GET", "/api/v1/report", "/api/v1/report", "read-only"),
+        auth_route("GET", "/api/v1/timeline", "/api/v1/timeline", "read-only"),
+        auth_route(
+            "GET",
+            "/api/v1/webhook-deliveries",
+            "/api/v1/webhook-deliveries",
+            "read-only",
+        ),
+        auth_route(
+            "GET",
+            "/api/v1/webhook-deliveries/{delivery_id}",
+            "/api/v1/webhook-deliveries/DLV-route",
+            "read-only",
+        ),
+        auth_route("GET", "/api/v1/status", "/api/v1/status", "read-only"),
+        auth_route(
+            "GET",
+            "/api/v1/health-status",
+            "/api/v1/health-status",
+            "read-only",
+        ),
+        auth_route(
+            "GET",
+            "/api/v1/targets/{id}/checks",
+            "/api/v1/targets/TGT-route/checks",
+            "read-only",
+        ),
+        auth_route("GET", "/api/v1/incidents", "/api/v1/incidents", "read-only"),
+        auth_route(
+            "GET",
+            "/api/v1/incidents/{id}",
+            "/api/v1/incidents/INC-route",
+            "read-only",
+        ),
+        auth_route(
+            "GET",
+            "/api/v1/incidents/{incident_id}/annotations",
+            "/api/v1/incidents/INC-route/annotations",
+            "read-only",
+        ),
+        auth_route(
+            "POST",
+            "/api/v1/incidents/{incident_id}/annotations",
+            "/api/v1/incidents/INC-route/annotations",
+            "admin",
+        ),
+        auth_route(
+            "GET",
+            "/api/v1/groups/{group_hash}/annotations",
+            "/api/v1/groups/group-route/annotations",
+            "read-only",
+        ),
+        auth_route(
+            "POST",
+            "/api/v1/groups/{group_hash}/annotations",
+            "/api/v1/groups/group-route/annotations",
+            "admin",
+        ),
+        auth_route(
+            "GET",
+            "/api/v1/annotations",
+            "/api/v1/annotations",
+            "read-only",
+        ),
+        auth_route(
+            "POST",
+            "/api/v1/annotations",
+            "/api/v1/annotations",
+            "admin",
+        ),
+        auth_route(
+            "GET",
+            "/api/v1/errors/{id}",
+            "/api/v1/errors/ERR-route",
+            "read-only",
+        ),
+        auth_route("GET", "/api/v1/monitors", "/api/v1/monitors", "admin"),
+        auth_route("POST", "/api/v1/monitors", "/api/v1/monitors", "admin"),
+        auth_route(
+            "DELETE",
+            "/api/v1/monitors/{id}",
+            "/api/v1/monitors/MON-route",
+            "admin",
+        ),
+        auth_route("GET", "/api/v1/webhooks", "/api/v1/webhooks", "admin"),
+        auth_route("POST", "/api/v1/webhooks", "/api/v1/webhooks", "admin"),
+        auth_route(
+            "DELETE",
+            "/api/v1/webhooks/{id}",
+            "/api/v1/webhooks/WHK-route",
+            "admin",
+        ),
+        auth_route(
+            "POST",
+            "/api/v1/webhooks/{id}/test",
+            "/api/v1/webhooks/WHK-route/test",
+            "admin",
+        ),
+        auth_route("GET", "/api/v1/keys", "/api/v1/keys", "admin"),
+        auth_route("POST", "/api/v1/keys", "/api/v1/keys", "admin"),
+        auth_route(
+            "POST",
+            "/api/v1/keys/{id}/revoke",
+            "/api/v1/keys/KEY-route/revoke",
+            "admin",
+        ),
+        auth_route(
+            "POST",
+            "/api/v1/service-onboarding",
+            "/api/v1/service-onboarding",
+            "admin",
+        ),
+        auth_route("GET", "/api/v1/targets", "/api/v1/targets", "admin"),
+        auth_route("POST", "/api/v1/targets", "/api/v1/targets", "admin"),
+        auth_route(
+            "PATCH",
+            "/api/v1/targets/{id}",
+            "/api/v1/targets/TGT-route",
+            "admin",
+        ),
+        auth_route(
+            "DELETE",
+            "/api/v1/targets/{id}",
+            "/api/v1/targets/TGT-route",
+            "admin",
+        ),
+        auth_route(
+            "POST",
+            "/api/v1/targets/{id}/pause",
+            "/api/v1/targets/TGT-route/pause",
+            "admin",
+        ),
+        auth_route(
+            "POST",
+            "/api/v1/targets/{id}/resume",
+            "/api/v1/targets/TGT-route/resume",
+            "admin",
+        ),
+    ];
+
+    fn authenticated_route_specs() -> &'static [AuthenticatedRouteSpec] {
+        AUTHENTICATED_ROUTE_SPECS
+    }
+
+    fn accepted_scope_keys(
+        required_scope: &str,
+    ) -> Result<&'static [&'static str], Box<dyn Error>> {
+        match required_scope {
+            "admin" => Ok(ADMIN_ACCEPTED_KEYS),
+            "ingest-only" => Ok(INGEST_ACCEPTED_KEYS),
+            "read-only" => Ok(READ_ACCEPTED_KEYS),
+            scope => Err(format!("unknown scope in route spec: {scope}").into()),
+        }
+    }
+
+    fn rejected_scope_keys(
+        required_scope: &str,
+    ) -> Result<&'static [&'static str], Box<dyn Error>> {
+        match required_scope {
+            "admin" => Ok(ADMIN_REJECTED_KEYS),
+            "ingest-only" => Ok(INGEST_REJECTED_KEYS),
+            "read-only" => Ok(READ_REJECTED_KEYS),
+            scope => Err(format!("unknown scope in route spec: {scope}").into()),
+        }
+    }
 
     #[tokio::test]
     async fn healthz_adapts_the_public_contract() -> Result<(), Box<dyn Error>> {
@@ -395,53 +600,14 @@ mod tests {
     #[tokio::test]
     async fn ingest_router_mounts_authenticated_route_matrix() -> Result<(), Box<dyn Error>> {
         let router = ingest_router(test_ingest_state()?);
-        let routes = [
-            (Method::GET, "/metrics"),
-            (Method::POST, "/api/v1/errors"),
-            (Method::POST, "/api/v1/check-ins"),
-            (Method::GET, "/api/v1/query"),
-            (Method::GET, "/api/v1/report"),
-            (Method::GET, "/api/v1/timeline"),
-            (Method::GET, "/api/v1/webhook-deliveries"),
-            (Method::GET, "/api/v1/webhook-deliveries/DLV-route"),
-            (Method::GET, "/api/v1/status"),
-            (Method::GET, "/api/v1/health-status"),
-            (Method::GET, "/api/v1/targets/TGT-route/checks"),
-            (Method::GET, "/api/v1/incidents"),
-            (Method::GET, "/api/v1/incidents/INC-route"),
-            (Method::GET, "/api/v1/incidents/INC-route/annotations"),
-            (Method::POST, "/api/v1/incidents/INC-route/annotations"),
-            (Method::GET, "/api/v1/groups/group-route/annotations"),
-            (Method::POST, "/api/v1/groups/group-route/annotations"),
-            (Method::GET, "/api/v1/annotations"),
-            (Method::POST, "/api/v1/annotations"),
-            (Method::GET, "/api/v1/errors/ERR-route"),
-            (Method::GET, "/api/v1/monitors"),
-            (Method::POST, "/api/v1/monitors"),
-            (Method::DELETE, "/api/v1/monitors/MON-route"),
-            (Method::GET, "/api/v1/webhooks"),
-            (Method::POST, "/api/v1/webhooks"),
-            (Method::DELETE, "/api/v1/webhooks/WHK-route"),
-            (Method::POST, "/api/v1/webhooks/WHK-route/test"),
-            (Method::GET, "/api/v1/keys"),
-            (Method::POST, "/api/v1/keys"),
-            (Method::POST, "/api/v1/keys/KEY-route/revoke"),
-            (Method::POST, "/api/v1/service-onboarding"),
-            (Method::GET, "/api/v1/targets"),
-            (Method::POST, "/api/v1/targets"),
-            (Method::PATCH, "/api/v1/targets/TGT-route"),
-            (Method::DELETE, "/api/v1/targets/TGT-route"),
-            (Method::POST, "/api/v1/targets/TGT-route/pause"),
-            (Method::POST, "/api/v1/targets/TGT-route/resume"),
-        ];
-
-        for (method, path) in routes {
+        for spec in authenticated_route_specs() {
+            let method = Method::from_bytes(spec.method.as_bytes())?;
             let response = router
                 .clone()
                 .oneshot(
                     Request::builder()
                         .method(method.clone())
-                        .uri(path)
+                        .uri(spec.sample_path)
                         .body(Body::empty())?,
                 )
                 .await?;
@@ -449,10 +615,71 @@ mod tests {
             assert_eq!(
                 response.status(),
                 StatusCode::UNAUTHORIZED,
-                "{method} {path}"
+                "{} {}",
+                spec.method,
+                spec.sample_path
             );
             let body = json_body(response).await?;
-            assert_eq!(body["code"], "invalid_api_key", "{method} {path}");
+            assert_eq!(
+                body["code"], "invalid_api_key",
+                "{} {}",
+                spec.method, spec.sample_path
+            );
+
+            for accepted_scope_key in accepted_scope_keys(spec.required_scope)? {
+                let response = router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method.clone())
+                            .uri(spec.sample_path)
+                            .header("authorization", format!("Bearer {accepted_scope_key}"))
+                            .body(Body::empty())?,
+                    )
+                    .await?;
+
+                assert!(
+                    !matches!(
+                        response.status(),
+                        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+                    ),
+                    "{} {} should accept {} for {}, got {}",
+                    spec.method,
+                    spec.sample_path,
+                    accepted_scope_key,
+                    spec.required_scope,
+                    response.status()
+                );
+            }
+
+            for wrong_scope_key in rejected_scope_keys(spec.required_scope)? {
+                let response = router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method.clone())
+                            .uri(spec.sample_path)
+                            .header("authorization", format!("Bearer {wrong_scope_key}"))
+                            .body(Body::empty())?,
+                    )
+                    .await?;
+
+                assert_eq!(
+                    response.status(),
+                    StatusCode::FORBIDDEN,
+                    "{} {} should reject {} for {}",
+                    spec.method,
+                    spec.sample_path,
+                    wrong_scope_key,
+                    spec.required_scope
+                );
+                let body = json_body(response).await?;
+                assert_eq!(
+                    body["code"], "insufficient_scope",
+                    "{} {}",
+                    spec.method, spec.sample_path
+                );
+            }
         }
 
         Ok(())
@@ -782,6 +1009,246 @@ mod tests {
             Some(HeaderValue::from_static(APPLICATION_JSON))
         );
         assert_eq!(body.as_ref(), OPENAPI_JSON.as_bytes());
+
+        Ok(())
+    }
+
+    #[test]
+    fn openapi_authenticated_operations_match_route_scope_contract() -> Result<(), Box<dyn Error>> {
+        let document: Value = serde_json::from_str(OPENAPI_JSON)?;
+        let expected = authenticated_route_specs()
+            .iter()
+            .map(|spec| (spec.method.to_owned(), spec.openapi_path.to_owned()))
+            .collect::<std::collections::BTreeSet<_>>();
+        let documented = openapi_authenticated_operations(&document)?;
+
+        assert_eq!(documented, expected);
+
+        for spec in authenticated_route_specs() {
+            let operation = openapi_operation(&document, spec.openapi_path, spec.method)?;
+            assert_eq!(
+                operation["x-canary-required-scope"], spec.required_scope,
+                "{} {}",
+                spec.method, spec.openapi_path
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn openapi_authenticated_route_operations_match_ingest_router_literals()
+    -> Result<(), Box<dyn Error>> {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("pub fn ingest_router")
+            .ok_or("missing ingest_router source")?;
+        let router_source = &source[start..];
+        let end = router_source
+            .find(".with_state(state)")
+            .ok_or("missing ingest_router terminator")?;
+        let mounted_operations = route_operations_from_source(&router_source[..end])?;
+        let expected_operations = authenticated_route_specs()
+            .iter()
+            .map(|spec| (spec.method.to_owned(), spec.openapi_path.to_owned()))
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(mounted_operations, expected_operations);
+
+        Ok(())
+    }
+
+    #[test]
+    fn openapi_webhook_delivery_lookup_contract_is_agent_addressable() -> Result<(), Box<dyn Error>>
+    {
+        let document: Value = serde_json::from_str(OPENAPI_JSON)?;
+        let guide = document
+            .pointer("/info/x-agent-guide/webhook_contract")
+            .and_then(Value::as_str)
+            .ok_or("missing webhook_contract guide")?;
+        assert!(guide.contains("GET /api/v1/webhook-deliveries/{delivery_id}"));
+        assert!(guide.to_ascii_lowercase().contains("x-delivery-id"));
+
+        let operation =
+            openapi_operation(&document, "/api/v1/webhook-deliveries/{delivery_id}", "GET")?;
+        assert_eq!(operation["x-canary-required-scope"], "read-only");
+        assert!(
+            operation
+                .get("parameters")
+                .and_then(Value::as_array)
+                .is_some_and(|parameters| parameters.iter().any(|parameter| {
+                    parameter.get("name").and_then(Value::as_str) == Some("delivery_id")
+                        && parameter.get("in").and_then(Value::as_str) == Some("path")
+                        && parameter.get("required").and_then(Value::as_bool) == Some(true)
+                })),
+            "delivery lookup must require a delivery_id path parameter"
+        );
+        let schema = operation
+            .pointer("/responses/200/content/application~1json/schema")
+            .ok_or("missing delivery lookup 200 JSON schema")?;
+        assert_eq!(schema_ref_name(schema), Some("WebhookDelivery"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn openapi_json_responses_have_summaries_or_documented_exceptions() -> Result<(), Box<dyn Error>>
+    {
+        let document: Value = serde_json::from_str(OPENAPI_JSON)?;
+        let exceptions = openapi_summary_exceptions(&document)?;
+        let mut missing = Vec::new();
+
+        for (method, path, operation) in openapi_operations(&document)? {
+            for (status, response) in operation["responses"]
+                .as_object()
+                .ok_or("operation responses must be an object")?
+            {
+                let Some(schema) = json_response_schema(&document, response)? else {
+                    continue;
+                };
+                if schema_has_summary(&document, schema, &mut Vec::new()) {
+                    continue;
+                }
+                if exceptions
+                    .operations
+                    .contains(&(method.clone(), path.clone()))
+                {
+                    continue;
+                }
+                let Some(schema_name) = schema_ref_name(schema) else {
+                    missing.push(format!("{method} {path} {status}: inline schema"));
+                    continue;
+                };
+                if !exceptions.schemas.contains(schema_name) {
+                    missing.push(format!("{method} {path} {status}: {schema_name}"));
+                }
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "missing deterministic summary or summary exception:\n{}",
+            missing.join("\n")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn openapi_agent_guide_covers_cold_start_and_write_back() -> Result<(), Box<dyn Error>> {
+        let document: Value = serde_json::from_str(OPENAPI_JSON)?;
+        let guide = document
+            .pointer("/info/x-agent-guide")
+            .and_then(Value::as_object)
+            .ok_or("missing info.x-agent-guide")?;
+
+        let cold_start = guide
+            .get("cold_start")
+            .and_then(Value::as_object)
+            .ok_or("missing cold_start guide")?;
+        for key in ["entrypoint", "pagination", "handoff"] {
+            assert!(
+                cold_start
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.is_empty()),
+                "cold_start.{key} must be a non-empty string"
+            );
+        }
+        let handoff = cold_start
+            .get("handoff")
+            .and_then(Value::as_str)
+            .ok_or("missing cold_start.handoff")?;
+        assert!(
+            handoff.contains("Do not pass report.cursor"),
+            "cold_start.handoff must reject report cursor reuse"
+        );
+
+        let annotation = guide
+            .get("annotation_write_back")
+            .and_then(Value::as_object)
+            .ok_or("missing annotation_write_back guide")?;
+        let actions = annotation
+            .get("stable_actions")
+            .and_then(Value::as_array)
+            .ok_or("missing annotation stable_actions")?
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            actions,
+            ["fix-proposed", "fix-verified", "noise-dismissed", "triaged"]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+        assert!(
+            annotation
+                .get("metadata_keys")
+                .and_then(Value::as_array)
+                .is_some_and(|values| values.iter().all(Value::is_string) && !values.is_empty())
+        );
+
+        for schema_name in ["Annotation", "AnnotationRequest", "AnnotationCreateRequest"] {
+            let action = document
+                .pointer(&format!(
+                    "/components/schemas/{schema_name}/properties/action"
+                ))
+                .and_then(Value::as_object)
+                .ok_or_else(|| format!("missing {schema_name}.action"))?;
+            let stable_values = action
+                .get("x-canary-stable-values")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("missing {schema_name}.action stable values"))?
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(stable_values, actions, "{schema_name}.action");
+
+            let metadata = document
+                .pointer(&format!(
+                    "/components/schemas/{schema_name}/properties/metadata"
+                ))
+                .and_then(Value::as_object)
+                .ok_or_else(|| format!("missing {schema_name}.metadata"))?;
+            assert!(
+                metadata
+                    .get("x-canary-expected-keys")
+                    .and_then(Value::as_array)
+                    .is_some_and(|values| values.iter().all(Value::is_string) && !values.is_empty()),
+                "{schema_name}.metadata must document expected keys"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn openapi_primary_agent_entrypoints_have_operation_guidance() -> Result<(), Box<dyn Error>> {
+        let document: Value = serde_json::from_str(OPENAPI_JSON)?;
+        for (method, path) in [
+            ("GET", "/api/v1/report"),
+            ("GET", "/api/v1/timeline"),
+            ("GET", "/api/v1/incidents/{id}"),
+            ("POST", "/api/v1/check-ins"),
+            ("POST", "/api/v1/incidents/{incident_id}/annotations"),
+            ("POST", "/api/v1/groups/{group_hash}/annotations"),
+            ("POST", "/api/v1/annotations"),
+        ] {
+            let operation = openapi_operation(&document, path, method)?;
+            let guidance = operation
+                .get("x-agent-guidance")
+                .and_then(Value::as_object)
+                .ok_or_else(|| format!("missing x-agent-guidance for {method} {path}"))?;
+            for key in ["when_to_call", "trust", "next"] {
+                assert!(
+                    guidance
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.is_empty()),
+                    "{method} {path} guidance.{key} must be a non-empty string"
+                );
+            }
+        }
 
         Ok(())
     }
@@ -6026,6 +6493,287 @@ mod tests {
         Ok(String::from_utf8(bytes.to_vec())?)
     }
 
+    type OpenApiOperation<'a> = (String, String, &'a Value);
+
+    fn openapi_operations(document: &Value) -> Result<Vec<OpenApiOperation<'_>>, Box<dyn Error>> {
+        let paths = document["paths"]
+            .as_object()
+            .ok_or("OpenAPI paths must be an object")?;
+        let mut operations = Vec::new();
+
+        for (path, path_item) in paths {
+            let path_item = path_item
+                .as_object()
+                .ok_or("OpenAPI path item must be an object")?;
+            for (method, operation) in path_item {
+                if !matches!(method.as_str(), "get" | "post" | "put" | "patch" | "delete") {
+                    continue;
+                }
+                operations.push((method.to_uppercase(), path.clone(), operation));
+            }
+        }
+
+        Ok(operations)
+    }
+
+    fn openapi_authenticated_operations(
+        document: &Value,
+    ) -> Result<std::collections::BTreeSet<(String, String)>, Box<dyn Error>> {
+        Ok(openapi_operations(document)?
+            .into_iter()
+            .filter(|(_, _, operation)| !openapi_operation_is_public(operation))
+            .map(|(method, path, _)| (method, path))
+            .collect())
+    }
+
+    fn openapi_operation<'a>(
+        document: &'a Value,
+        path: &str,
+        method: &str,
+    ) -> Result<&'a Value, Box<dyn Error>> {
+        document
+            .pointer(&format!(
+                "/paths/{}/{}",
+                escape_json_pointer(path),
+                method.to_lowercase()
+            ))
+            .ok_or_else(|| format!("missing OpenAPI operation {method} {path}").into())
+    }
+
+    fn openapi_operation_is_public(operation: &Value) -> bool {
+        operation
+            .get("security")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+    }
+
+    fn route_operations_from_source(
+        source: &str,
+    ) -> Result<std::collections::BTreeSet<(String, String)>, Box<dyn Error>> {
+        let mut operations = std::collections::BTreeSet::new();
+        let mut offset = 0;
+
+        while let Some(relative_start) = source[offset..].find(".route(") {
+            let start = offset + relative_start;
+            let next_route = source[start + 1..]
+                .find(".route(")
+                .map(|relative| start + 1 + relative);
+            let next_state = source[start..]
+                .find(".with_state(")
+                .map(|relative| start + relative);
+            let end = match (next_route, next_state) {
+                (Some(route), Some(state)) => route.min(state),
+                (Some(route), None) => route,
+                (None, Some(state)) => state,
+                (None, None) => source.len(),
+            };
+            let route_call = &source[start..end];
+            let path = route_call
+                .split_once('"')
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .map(|(path, _)| path)
+                .ok_or("route call missing path literal")?;
+
+            for (needle, method) in [
+                ("delete(", "DELETE"),
+                ("get(", "GET"),
+                ("patch(", "PATCH"),
+                ("post(", "POST"),
+                ("put(", "PUT"),
+            ] {
+                if route_call.contains(needle) {
+                    operations.insert((method.to_owned(), path.to_owned()));
+                }
+            }
+
+            offset = end;
+        }
+
+        Ok(operations)
+    }
+
+    fn json_response_schema<'a>(
+        document: &'a Value,
+        response: &'a Value,
+    ) -> Result<Option<&'a Value>, Box<dyn Error>> {
+        let response = match response.get("$ref").and_then(Value::as_str) {
+            Some(reference) => resolve_openapi_ref(document, reference)
+                .ok_or_else(|| format!("unresolved response ref: {reference}"))?,
+            None => response,
+        };
+
+        Ok(["application/json", "application/problem+json"]
+            .iter()
+            .find_map(|content_type| {
+                response
+                    .pointer(&format!(
+                        "/content/{}/schema",
+                        escape_json_pointer(content_type)
+                    ))
+                    .filter(|schema| schema.is_object())
+            }))
+    }
+
+    struct SummaryExceptions<'a> {
+        schemas: std::collections::BTreeSet<&'a str>,
+        operations: std::collections::BTreeSet<(String, String)>,
+    }
+
+    fn openapi_summary_exceptions(
+        document: &Value,
+    ) -> Result<SummaryExceptions<'_>, Box<dyn Error>> {
+        let entries = document
+            .pointer("/info/x-agent-guide/summary_exceptions")
+            .and_then(Value::as_array)
+            .ok_or("missing info.x-agent-guide.summary_exceptions")?;
+        let mut schemas = std::collections::BTreeSet::new();
+        let mut operations = std::collections::BTreeSet::new();
+
+        for entry in entries {
+            let reason = entry
+                .get("reason")
+                .and_then(Value::as_str)
+                .ok_or("summary exception entry missing reason")?;
+            assert!(!reason.is_empty(), "summary exception reason is empty");
+            for schema in entry
+                .get("schemas")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let schema = schema
+                    .as_str()
+                    .ok_or("summary exception schema must be a string")?;
+                schemas.insert(schema);
+            }
+            for operation in entry
+                .get("operations")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let operation = operation
+                    .as_object()
+                    .ok_or("summary exception operation must be an object")?;
+                let method = operation
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .ok_or("summary exception operation missing method")?;
+                let path = operation
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .ok_or("summary exception operation missing path")?;
+                operations.insert((method.to_owned(), path.to_owned()));
+            }
+        }
+
+        assert!(
+            !schemas.is_empty() || !operations.is_empty(),
+            "summary exception table must list at least one schema or operation"
+        );
+        let component_schemas = document
+            .pointer("/components/schemas")
+            .and_then(Value::as_object)
+            .ok_or("missing components.schemas")?;
+        for schema in &schemas {
+            assert!(
+                component_schemas.contains_key(*schema),
+                "summary exception references missing schema: {schema}"
+            );
+        }
+        let operation_set = openapi_operations(document)?
+            .into_iter()
+            .map(|(method, path, _)| (method, path))
+            .collect::<std::collections::BTreeSet<_>>();
+        for operation in &operations {
+            assert!(
+                operation_set.contains(operation),
+                "summary exception references missing operation: {} {}",
+                operation.0,
+                operation.1
+            );
+        }
+
+        Ok(SummaryExceptions {
+            schemas,
+            operations,
+        })
+    }
+
+    fn schema_has_summary(document: &Value, schema: &Value, seen: &mut Vec<String>) -> bool {
+        if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+            if seen.iter().any(|seen| seen == reference) {
+                return false;
+            }
+            let Some(resolved) = resolve_openapi_ref(document, reference) else {
+                return false;
+            };
+            seen.push(reference.to_owned());
+            let has_summary = schema_has_summary(document, resolved, seen);
+            seen.pop();
+            return has_summary;
+        }
+
+        if schema_has_required_string_summary(schema) {
+            return true;
+        }
+
+        if schema
+            .get("allOf")
+            .and_then(Value::as_array)
+            .is_some_and(|schemas| {
+                !schemas.is_empty()
+                    && schemas
+                        .iter()
+                        .any(|schema| schema_has_summary(document, schema, seen))
+            })
+        {
+            return true;
+        }
+
+        for keyword in ["anyOf", "oneOf"] {
+            if let Some(schemas) = schema.get(keyword).and_then(Value::as_array) {
+                return !schemas.is_empty()
+                    && schemas
+                        .iter()
+                        .all(|schema| schema_has_summary(document, schema, seen));
+            }
+        }
+
+        schema
+            .get("items")
+            .is_some_and(|items| schema_has_summary(document, items, seen))
+    }
+
+    fn schema_has_required_string_summary(schema: &Value) -> bool {
+        let summary = schema
+            .get("properties")
+            .and_then(|properties| properties.get("summary"));
+        let required = schema.get("required").and_then(Value::as_array);
+
+        summary.is_some_and(|summary| summary.get("type").and_then(Value::as_str) == Some("string"))
+            && required.is_some_and(|required| {
+                required
+                    .iter()
+                    .any(|field| field.as_str() == Some("summary"))
+            })
+    }
+
+    fn resolve_openapi_ref<'a>(document: &'a Value, reference: &str) -> Option<&'a Value> {
+        document.pointer(reference.strip_prefix('#')?)
+    }
+
+    fn schema_ref_name(schema: &Value) -> Option<&str> {
+        schema
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|reference| reference.rsplit('/').next())
+    }
+
+    fn escape_json_pointer(value: &str) -> String {
+        value.replace('~', "~0").replace('/', "~1")
+    }
+
     fn test_ingest_state() -> Result<IngestState, Box<dyn Error>> {
         test_ingest_state_with_sink(Arc::new(TestNoopIngestEffectSink))
     }
@@ -6226,7 +6974,7 @@ mod tests {
             id: id.to_owned(),
             name: format!("key {id}"),
             key_prefix: raw_key.chars().take(API_KEY_PREFIX_LEN).collect(),
-            key_hash: bcrypt::hash(raw_key, bcrypt::DEFAULT_COST)?,
+            key_hash: bcrypt::hash(raw_key, TEST_BCRYPT_COST)?,
             created_at: "2026-05-28T20:00:00Z".to_owned(),
             revoked_at: revoked_at.map(str::to_owned),
             scope: scope.to_owned(),
