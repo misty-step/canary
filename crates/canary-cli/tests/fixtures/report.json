@@ -1,0 +1,11 @@
+{
+  "status": "warning",
+  "summary": "1 target monitored. 1 up. 7 errors across 1 service in the last 24 hours.",
+  "targets": [{"service": "chrondle", "state": "up"}],
+  "monitors": [],
+  "incidents": [{"id": "INC-1", "service": "chrondle"}],
+  "error_groups": [{"group_hash": "abc", "service": "chrondle", "count": 7}],
+  "recent_transitions": [],
+  "cursor": null,
+  "truncated": false
+}

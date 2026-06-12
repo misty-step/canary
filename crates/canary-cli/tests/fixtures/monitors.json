@@ -1,0 +1,3 @@
+{
+  "monitors": [{"id": "MON-2", "service": "linejam-worker", "last_check_in_status": "alive"}]
+}

@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "tools": [
+    {
+      "description": "Inspect global Canary status for a query window.",
+      "input_schema": {
+        "properties": {
+          "window": {
+            "enum": [
+              "1h",
+              "6h",
+              "24h",
+              "7d",
+              "30d"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "canary_summary"
+    },
+    {
+      "description": "Inspect recent error groups for one service.",
+      "input_schema": {
+        "properties": {
+          "service": {
+            "type": "string"
+          },
+          "window": {
+            "enum": [
+              "1h",
+              "6h",
+              "24h",
+              "7d",
+              "30d"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "service"
+        ],
+        "type": "object"
+      },
+      "name": "canary_errors"
+    },
+    {
+      "description": "Run the agent-oriented Canary doctor check.",
+      "input_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "canary_doctor"
+    }
+  ]
+}

@@ -34,7 +34,7 @@
 | 034 | Worker lifecycle readiness oracle | high | ready | L |
 | 033 | Deployed service registry lifecycle | high | done | M |
 | 035 | Deployed app Canary coverage | high | ready | XL |
-| 036 | Agent-native inspection surface | high | ready | L |
+| 036 | Agent-native inspection surface | high | done | L |
 | 037 | Watch the watchmen | high | ready | L |
 | 038 | One-command integration agent | high | ready | XL |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
@@ -84,12 +84,11 @@
 ### Active order (2026-06-11)
 
 1. **035** — Deployed app Canary coverage (make the requested deployed applications covered or explicitly blocked)
-2. **036** — Agent-native inspection surface (CLI/JSON first, MCP after the schema stabilizes)
-3. **037** — Watch the watchmen (external witness for Canary itself)
-4. **038** — One-command integration agent (discover, patch, enroll, verify)
-5. **030** — Agent contract safety pass (scope annotations, summary completeness, cold-start guidance, annotation write-back; delivery-id lookup already shipped)
-6. **032** — Live Rust write-path evidence (prove deployed admin/ingest/webhook/monitor/target paths with sanitized packets)
-7. **034** — Worker lifecycle readiness oracle (make Rust background workers visible to readiness and Dagger smoke)
+2. **037** — Watch the watchmen (external witness for Canary itself)
+3. **038** — One-command integration agent (discover, patch, enroll, verify)
+4. **030** — Agent contract safety pass (scope annotations, summary completeness, cold-start guidance, annotation write-back; delivery-id lookup already shipped)
+5. **032** — Live Rust write-path evidence (prove deployed admin/ingest/webhook/monitor/target paths with sanitized packets)
+6. **034** — Worker lifecycle readiness oracle (make Rust background workers visible to readiness and Dagger smoke)
 
 022 + 023 landed on 2026-04-21. 024 landed on 2026-04-22. 026 landed on
 2026-04-23 — Ramp
@@ -130,6 +129,10 @@ parity backlog items were retired during the Rust scorched-earth migration.
 - 2026-06-11: Delivered 033. `priv/dogfood/owned_services.json` is now a
   schema-versioned deployed-service registry; `bin/dogfood-audit` validates it,
   emits text or JSON, and strict-checks active services against live Canary.
+- 2026-06-11: Delivered 036. `bin/canary` now wraps the Rust `canary-cli`
+  inspection surface with text/JSON commands for summary, services, errors,
+  incidents, timeline, targets, monitors, dogfood audit, doctor, and MCP tool
+  manifest generation.
 
 ## Status
 

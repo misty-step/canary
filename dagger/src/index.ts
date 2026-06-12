@@ -187,6 +187,7 @@ export class Ci {
       .withExec(["bash", "test/bin/dr_test.sh"])
       .withExec(["bash", "test/bin/dogfood_audit_test.sh"])
       .withExec(["bash", "test/bin/dogfood_inventory_test.sh"])
+      .withExec(["bash", "-n", "bin/canary"])
   }
 
   private async typescriptQualityContainer(source: Directory): Promise<Container> {

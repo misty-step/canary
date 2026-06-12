@@ -1,0 +1,7 @@
+{
+  "service": "chrondle",
+  "window": "24h",
+  "summary": "7 errors for chrondle in the last 24h.",
+  "total_errors": 7,
+  "groups": [{"group_hash": "abc", "status": "open", "count": 7}]
+}

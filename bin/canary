@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec cargo run -q -p canary-cli --manifest-path "$ROOT/Cargo.toml" -- "$@"

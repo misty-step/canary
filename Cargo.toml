@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+  "crates/canary-cli",
   "crates/canary-core",
   "crates/canary-http",
   "crates/canary-ingest",
