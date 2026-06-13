@@ -37,6 +37,12 @@
 | 036 | Agent-native inspection surface | high | done | L |
 | 037 | Watch the watchmen | high | done | L |
 | 038 | One-command integration agent | high | done | XL |
+| 039 | External-user security and privacy foundation | P0 | ready | XL |
+| 041 | Live integration verification harness | P0 | ready | L |
+| 042 | Runtime pressure and freshness operations | P0 | ready | L |
+| 040 | Universal integration and enrollment engine | P0 | ready | XL |
+| 043 | Agentic remediation claim protocol | P1 | ready | L |
+| 044 | Telemetry and analytics signal model | P1 | ready | XL |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
 
@@ -66,6 +72,12 @@
 036 (agent-native inspection surface) — gives Codex/Claude a stable CLI/JSON/MCP-shaped way to inspect Canary status, errors, incidents, timelines, targets, and dogfood coverage
 037 (watch the watchmen) — shipped; proves Canary itself from outside the Canary process, preserves receipts when Canary is unreachable, and surfaces the external witness in `bin/canary doctor`
 038 (one-command integration agent) — discovers, patches, enrolls, and verifies Canary integration for Vercel/Fly/Next apps
+039 (external-user security/privacy foundation) — must precede arbitrary-user hosted claims; adds tenant/project ownership, public-ingest constraints, privacy defaults, webhook scoping, and quotas
+041 (live integration verification harness) — makes strict prove the production-image write/readback path before integration coverage claims scale beyond dogfood
+042 (runtime pressure/freshness ops) — hardens worker/job/readiness/backup/dogfood freshness so arbitrary-app scale fails loudly instead of silently aging
+040 (universal integration/enrollment engine) — builds on 039/041/042 to make arbitrary app onboarding state-aware, framework-neutral, and receipt-backed
+044 (telemetry/analytics signal model) — defines what analytics/log/metric/event signals Canary owns or bridges before adding broad ingest surfaces
+043 (agentic remediation claim protocol) — builds on annotations and 039 to add deterministic ownership/claim state for downstream triage agents
 
 022 (contract hygiene) ──── ships independently; restores summary invariant + supervision-tree collapse
 023 (incident detail API) ──→ Canary-side substrate for bb/011 (and thus 010 ramp pattern)
@@ -80,11 +92,23 @@
 **Lane 3 (structural):** 006 (query split) → 005 (connect-a-service) · **022 (contract hygiene + shallow-module collapse)** — ship first of the active set; unblocks nothing but restores the summary invariant and sheds ~300 LOC of drift
 **Lane 4 (hardening):** 008, 014, 016, 017, 018, 019 (independent, small, can ship anytime) · **034 (worker lifecycle readiness oracle)** hardens the Rust background-worker proof surface
 **Lane 5 (dogfood coverage):** 020 (Adminifi HTTP surface verification) · **033 (deployed service registry lifecycle)** shipped the managed registry substrate · **035 (deployed app Canary coverage)** makes every active owned deployment covered or explicitly blocked · **036 (agent-native inspection surface)** gives agents the operating view · **037 (watch the watchmen)** proves Canary externally · **038 (one-command integration agent)** removes setup friction
+**Lane 6 (arbitrary-app productization):** 039 (external-user security/privacy foundation) → 041 (live integration verification harness) + 042 (runtime pressure/freshness ops) → 040 (universal integration/enrollment engine) → 044 (telemetry/analytics signal model) + 043 (agentic remediation claim protocol) → 010 (Ramp pattern, once downstream triage sprite exists)
 
-### Active order (2026-06-11)
+### Active order (2026-06-13)
 
-No ready active items remain. 020 stays blocked on Adminifi URLs; 010 stays
-blocked on the downstream bitterblossom triage sprite.
+039 is the first pickup: arbitrary-user/app onboarding cannot safely expand
+while the data model is still single-org, read scopes are global, browser ingest
+keys can report arbitrary service names, and server-side privacy defaults are
+not enforced. 041 and 042 are the next parallel foundations: strict must prove
+SDK to server to query/webhook/doctor behavior, and runtime readiness must
+reflect freshness/pressure rather than thread liveness. 040 follows once those
+foundations can make integration receipts trustworthy. 043 and 044 are P1
+product-shaping epics that should not block the P0 foundation, but they define
+the agentic-remediation and analytics direction.
+
+020 stays blocked on Adminifi URLs; 010 stays blocked on the downstream
+bitterblossom triage sprite, but the new Lane 6 foundations now precede any
+claim that Canary is ready for arbitrary external users.
 
 022 + 023 landed on 2026-04-21. 024 landed on 2026-04-22. 026 landed on
 2026-04-23 — Ramp
@@ -153,6 +177,13 @@ parity backlog items were retired during the Rust scorched-earth migration.
   retention pruning, and TLS scanning; worker loops record visible sanitized
   failure counters, and Dagger production smoke asserts all five workers are
   present and started.
+- 2026-06-13: Mega-groomed the arbitrary-app product direction. Added 039-044:
+  external-user security/privacy foundation, live integration verification
+  harness, runtime pressure/freshness ops, universal integration/enrollment,
+  typed remediation claims, and telemetry/analytics signal modeling. Evidence
+  came from live `bin/canary doctor`, `bin/dogfood-inventory --strict`,
+  integration discovery false negatives against LineJam/Chrondle/Misty/Vanity,
+  source inspection, external exemplar docs, and read-only swarm lanes.
 
 ## Status
 
