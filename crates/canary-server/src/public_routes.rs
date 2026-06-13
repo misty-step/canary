@@ -6,17 +6,21 @@
 use std::sync::Arc;
 
 use axum::{Router, body::Body, extract::State, http::Response, routing::get};
-use canary_http::public::{DependencyStatus, healthz_response, openapi_response, readyz_response};
+use canary_http::public::{
+    DependencyStatus, WorkerReadyzCheck, healthz_response, openapi_response, readyz_response,
+};
 
 use crate::http_contract::{json_response, text_response};
 
 /// Snapshot of dependency readiness for the public readiness endpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicReadinessSnapshot {
     /// Writable SQLite dependency status.
     pub database: DependencyStatus,
     /// Runtime supervisor dependency status.
     pub supervisor: DependencyStatus,
+    /// Background worker lifecycle statuses.
+    pub workers: Vec<WorkerReadyzCheck>,
 }
 
 /// Live readiness source for the public readiness endpoint.
@@ -35,10 +39,7 @@ impl PublicReadiness {
     /// Build readiness from explicit dependency statuses.
     pub fn new(database: DependencyStatus, supervisor: DependencyStatus) -> Self {
         Self::from_probe(Arc::new(StaticPublicReadiness {
-            snapshot: PublicReadinessSnapshot {
-                database,
-                supervisor,
-            },
+            snapshot: PublicReadinessSnapshot::new(database, supervisor),
         }))
     }
 
@@ -63,21 +64,35 @@ struct StaticPublicReadiness {
 
 impl PublicReadinessProbe for StaticPublicReadiness {
     fn snapshot(&self) -> PublicReadinessSnapshot {
-        self.snapshot
+        self.snapshot.clone()
     }
 }
 
 impl PublicReadinessSnapshot {
     /// Build a readiness snapshot from explicit dependency statuses.
-    pub const fn new(database: DependencyStatus, supervisor: DependencyStatus) -> Self {
+    pub fn new(database: DependencyStatus, supervisor: DependencyStatus) -> Self {
         Self {
             database,
             supervisor,
+            workers: Vec::new(),
+        }
+    }
+
+    /// Build a readiness snapshot with explicit worker statuses.
+    pub fn with_workers(
+        database: DependencyStatus,
+        supervisor: DependencyStatus,
+        workers: Vec<WorkerReadyzCheck>,
+    ) -> Self {
+        Self {
+            database,
+            supervisor,
+            workers,
         }
     }
 
     /// Convenience constructor for a fully ready process.
-    pub const fn ready() -> Self {
+    pub fn ready() -> Self {
         Self::new(DependencyStatus::Ok, DependencyStatus::Ok)
     }
 }
@@ -97,7 +112,11 @@ async fn healthz() -> Response<Body> {
 
 async fn readyz(State(readiness): State<PublicReadiness>) -> Response<Body> {
     let snapshot = readiness.snapshot();
-    json_response(readyz_response(snapshot.database, snapshot.supervisor))
+    json_response(readyz_response(
+        snapshot.database,
+        snapshot.supervisor,
+        snapshot.workers,
+    ))
 }
 
 async fn openapi() -> Response<Body> {

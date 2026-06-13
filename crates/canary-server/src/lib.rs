@@ -44,6 +44,7 @@ mod tls_scan;
 mod webhook_delivery;
 mod webhook_delivery_routes;
 mod webhooks;
+mod worker_health;
 
 use admin_keys::{create_api_key, list_api_keys, revoke_api_key};
 use admin_monitors::{create_monitor, delete_monitor, list_monitors};
@@ -112,6 +113,7 @@ pub use webhooks::{
     HttpWebhookTransport, InMemoryWebhookCooldown, StoreWebhookScheduler, WebhookCooldown,
     WebhookEnqueueEffectSink, WebhookScheduler, WebhookTransport,
 };
+pub(crate) use worker_health::{WorkerHealthHandle, WorkerHealthRegistry, WorkerName};
 
 /// Router for Canary's authenticated ingest endpoints.
 pub fn ingest_router(state: IngestState) -> Router {
@@ -195,7 +197,10 @@ mod tests {
         ingest::classification::{Category, Classification, Component, Persistence},
     };
     use canary_http::{
-        public::{APPLICATION_JSON, DependencyStatus, OPENAPI_JSON},
+        public::{
+            APPLICATION_JSON, DependencyStatus, OPENAPI_JSON, WorkerLifecycleState,
+            WorkerReadyzCheck,
+        },
         request::MAX_JSON_BODY_BYTES,
     };
     use canary_ingest::{IngestConfig, IngestEffect};
@@ -232,6 +237,16 @@ mod tests {
                 DependencyStatus::Error
             };
             PublicReadinessSnapshot::new(database, DependencyStatus::Ok)
+        }
+    }
+
+    struct StaticSnapshotProbe {
+        snapshot: PublicReadinessSnapshot,
+    }
+
+    impl PublicReadinessProbe for StaticSnapshotProbe {
+        fn snapshot(&self) -> PublicReadinessSnapshot {
+            self.snapshot.clone()
         }
     }
 
@@ -475,10 +490,58 @@ mod tests {
                 "status": "ready",
                 "checks": {
                     "database": "ok",
-                    "supervisor": "ok"
+                    "supervisor": "ok",
+                    "workers": []
                 }
             })
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn readyz_returns_worker_lifecycle_snapshot() -> Result<(), Box<dyn Error>> {
+        let readiness = PublicReadiness::from_probe(Arc::new(StaticSnapshotProbe {
+            snapshot: PublicReadinessSnapshot::with_workers(
+                DependencyStatus::Ok,
+                DependencyStatus::Ok,
+                vec![
+                    WorkerReadyzCheck {
+                        name: "webhook_delivery".to_owned(),
+                        state: WorkerLifecycleState::Started,
+                        last_success_at: Some("2026-06-12T20:00:00Z".to_owned()),
+                        failure_count: 0,
+                        last_error_class: None,
+                    },
+                    WorkerReadyzCheck {
+                        name: "target_probe".to_owned(),
+                        state: WorkerLifecycleState::Stopped,
+                        last_success_at: None,
+                        failure_count: 1,
+                        last_error_class: Some("panic".to_owned()),
+                    },
+                ],
+            ),
+        }));
+
+        let response = public_router(readiness)
+            .oneshot(Request::get("/readyz").body(Body::empty())?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["status"], "not_ready");
+        assert_eq!(body["checks"]["workers"][0]["name"], "webhook_delivery");
+        assert_eq!(body["checks"]["workers"][0]["state"], "started");
+        assert_eq!(
+            body["checks"]["workers"][0]["last_success_at"],
+            "2026-06-12T20:00:00Z"
+        );
+        assert_eq!(body["checks"]["workers"][1]["name"], "target_probe");
+        assert_eq!(body["checks"]["workers"][1]["state"], "stopped");
+        assert_eq!(body["checks"]["workers"][1]["failure_count"], 1);
+        assert_eq!(body["checks"]["workers"][1]["last_error_class"], "panic");
 
         Ok(())
     }
@@ -555,6 +618,53 @@ mod tests {
         assert!(server.enqueue_failure_snapshot().is_empty());
         assert_eq!(server.retention_prune_failure_count(), 0);
         assert_eq!(server.tls_expiry_scan_failure_count(), 0);
+        let started = Instant::now();
+        let workers = loop {
+            let workers = server.worker_health_snapshot();
+            if workers.len() == 5
+                && workers.iter().all(|worker| {
+                    worker.state == WorkerLifecycleState::Started
+                        && worker.last_success_at.is_some()
+                        && worker.failure_count == 0
+                })
+            {
+                break workers;
+            }
+            if started.elapsed() > StdDuration::from_secs(1) {
+                return Err(format!("timed out waiting for worker health: {workers:?}").into());
+            }
+            thread::sleep(StdDuration::from_millis(10));
+        };
+        assert_eq!(
+            workers
+                .iter()
+                .map(|worker| worker.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "webhook_delivery",
+                "target_probe",
+                "monitor_overdue",
+                "retention_prune",
+                "tls_scan"
+            ]
+        );
+
+        let ready = server
+            .router()
+            .oneshot(Request::get("/readyz").body(Body::empty())?)
+            .await?;
+        let ready_status = ready.status();
+        let ready_body = json_body(ready).await?;
+        assert_eq!(ready_status, StatusCode::OK);
+        assert_eq!(
+            ready_body["checks"]["workers"].as_array().map(Vec::len),
+            Some(5)
+        );
+        assert_eq!(
+            ready_body["checks"]["workers"][0]["name"],
+            "webhook_delivery"
+        );
+        assert_eq!(ready_body["checks"]["workers"][0]["state"], "started");
 
         drop_server(server).await?;
         let store = {
@@ -566,6 +676,58 @@ mod tests {
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].name, "bootstrap");
         assert_eq!(keys[0].scope, "admin");
+        fs::remove_file(path)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canary_server_readyz_reports_stopped_worker() -> Result<(), Box<dyn Error>> {
+        let path = temp_db_path("readyz-stopped-worker");
+        let config = ServerConfig {
+            webhook_drain_interval: StdDuration::from_secs(60),
+            ..ServerConfig::new(path.clone())
+        };
+        let server = CanaryServer::boot(config)?;
+        let router = server.router();
+
+        let ready = router
+            .clone()
+            .oneshot(Request::get("/readyz").body(Body::empty())?)
+            .await?;
+        assert_eq!(ready.status(), StatusCode::OK);
+
+        server.stop_webhook_delivery_worker_for_test();
+        let started = Instant::now();
+        loop {
+            let workers = server.worker_health_snapshot();
+            if workers.iter().any(|worker| {
+                worker.name == "webhook_delivery" && worker.state == WorkerLifecycleState::Stopped
+            }) {
+                break;
+            }
+            if started.elapsed() > StdDuration::from_secs(1) {
+                drop_server(server).await?;
+                return Err(format!("timed out waiting for stopped worker: {workers:?}").into());
+            }
+            thread::sleep(StdDuration::from_millis(10));
+        }
+
+        let not_ready = router
+            .oneshot(Request::get("/readyz").body(Body::empty())?)
+            .await?;
+        let not_ready_status = not_ready.status();
+        let not_ready_body = json_body(not_ready).await?;
+
+        assert_eq!(not_ready_status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(not_ready_body["status"], "not_ready");
+        assert_eq!(
+            not_ready_body["checks"]["workers"][0]["name"],
+            "webhook_delivery"
+        );
+        assert_eq!(not_ready_body["checks"]["workers"][0]["state"], "stopped");
+
+        drop_server(server).await?;
         fs::remove_file(path)?;
 
         Ok(())

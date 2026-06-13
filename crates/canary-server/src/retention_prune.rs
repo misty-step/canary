@@ -18,7 +18,10 @@ use canary_store::{RetentionPruneBatch, RetentionPruneTable, Store};
 use canary_workers::retention::{RetentionPolicy, plan_retention_prune};
 use time::OffsetDateTime;
 
-use crate::server_time::current_utc;
+use crate::{
+    WorkerHealthHandle, WorkerName,
+    server_time::{current_utc, format_rfc3339},
+};
 
 /// Configuration for the retention prune lifecycle worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +150,7 @@ impl RetentionPruneLifecycle {
 /// Dedicated OS-thread runner for retention prune lifecycle passes.
 pub struct RetentionPruneLifecycleWorker {
     control: Arc<LifecycleControl>,
+    health: WorkerHealthHandle,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -156,6 +160,19 @@ impl RetentionPruneLifecycleWorker {
         lifecycle: RetentionPruneLifecycle,
         config: RetentionPruneLifecycleConfig,
     ) -> Result<Self, String> {
+        Self::spawn_with_health(
+            lifecycle,
+            config,
+            WorkerHealthHandle::new(WorkerName::RetentionPrune),
+        )
+    }
+
+    /// Spawn one named background thread with an explicit health recorder.
+    pub(crate) fn spawn_with_health(
+        lifecycle: RetentionPruneLifecycle,
+        config: RetentionPruneLifecycleConfig,
+        health: WorkerHealthHandle,
+    ) -> Result<Self, String> {
         if config.tick_interval.is_zero() {
             return Err(
                 "retention prune lifecycle tick interval must be greater than zero".to_owned(),
@@ -164,13 +181,23 @@ impl RetentionPruneLifecycleWorker {
 
         let control = Arc::new(LifecycleControl::default());
         let thread_control = control.clone();
+        health.mark_started();
+        let thread_health = health.clone();
         let handle = thread::Builder::new()
             .name("canary-retention-prune".to_owned())
-            .spawn(move || run_lifecycle_worker(lifecycle, config.tick_interval, thread_control))
+            .spawn(move || {
+                run_lifecycle_worker(
+                    lifecycle,
+                    config.tick_interval,
+                    thread_control,
+                    thread_health,
+                )
+            })
             .map_err(|error| format!("failed to spawn retention prune worker: {error}"))?;
 
         Ok(Self {
             control,
+            health,
             handle: Some(handle),
         })
     }
@@ -187,7 +214,14 @@ impl RetentionPruneLifecycleWorker {
 
     /// Return lifecycle failures observed by this process.
     pub fn failure_count(&self) -> u64 {
-        self.control.failure_count()
+        self.control
+            .failure_count()
+            .max(self.health.snapshot().failure_count)
+    }
+
+    /// Return the readiness-visible worker health snapshot.
+    pub fn health_snapshot(&self) -> canary_http::public::WorkerReadyzCheck {
+        self.health.snapshot()
     }
 
     /// Request shutdown without waiting for an in-flight prune pass to finish.
@@ -279,20 +313,30 @@ fn run_lifecycle_worker(
     lifecycle: RetentionPruneLifecycle,
     interval: StdDuration,
     control: Arc<LifecycleControl>,
+    health: WorkerHealthHandle,
 ) {
     while !control.is_stopping() {
         if !control.is_paused() {
+            let now = current_utc();
             match catch_unwind(AssertUnwindSafe(|| {
-                lifecycle.run_due_until(current_utc(), || control.is_stopping())
+                lifecycle.run_due_until(now, || control.is_stopping())
             })) {
-                Ok(Ok(_)) => {}
-                Ok(Err(_)) | Err(_) => control.record_failure(),
+                Ok(Ok(_)) => health.record_success(format_rfc3339(now)),
+                Ok(Err(_)) => {
+                    control.record_failure();
+                    health.record_failure("runtime_error");
+                }
+                Err(_) => {
+                    control.record_failure();
+                    health.record_failure("panic");
+                }
             }
         }
         if control.wait(interval) {
             break;
         }
     }
+    health.mark_stopped();
 }
 
 #[cfg(test)]
@@ -397,6 +441,10 @@ mod tests {
             }
             thread::sleep(StdDuration::from_millis(10));
         }
+        let snapshot = worker.health_snapshot();
+        assert_eq!(snapshot.name, "retention_prune");
+        assert!(snapshot.failure_count >= 1);
+        assert_eq!(snapshot.last_error_class.as_deref(), Some("runtime_error"));
 
         worker.join()?;
 

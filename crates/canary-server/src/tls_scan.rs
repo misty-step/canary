@@ -20,7 +20,7 @@ use canary_workers::tls_scan::{TlsExpiryScanInput, plan_tls_expiry_event};
 use time::OffsetDateTime;
 
 use crate::{
-    EventSink,
+    EventSink, WorkerHealthHandle, WorkerName,
     server_time::{current_utc, format_rfc3339},
 };
 
@@ -132,6 +132,7 @@ impl TlsExpiryScanLifecycle {
 /// Dedicated OS-thread runner for TLS-expiry scan lifecycle passes.
 pub struct TlsExpiryScanLifecycleWorker {
     control: Arc<LifecycleControl>,
+    health: WorkerHealthHandle,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -141,6 +142,19 @@ impl TlsExpiryScanLifecycleWorker {
         lifecycle: TlsExpiryScanLifecycle,
         config: TlsExpiryScanLifecycleConfig,
     ) -> Result<Self, String> {
+        Self::spawn_with_health(
+            lifecycle,
+            config,
+            WorkerHealthHandle::new(WorkerName::TlsExpiryScan),
+        )
+    }
+
+    /// Spawn one named background thread with an explicit health recorder.
+    pub(crate) fn spawn_with_health(
+        lifecycle: TlsExpiryScanLifecycle,
+        config: TlsExpiryScanLifecycleConfig,
+        health: WorkerHealthHandle,
+    ) -> Result<Self, String> {
         if config.tick_interval.is_zero() {
             return Err(
                 "tls expiry scan lifecycle tick interval must be greater than zero".to_owned(),
@@ -149,13 +163,23 @@ impl TlsExpiryScanLifecycleWorker {
 
         let control = Arc::new(LifecycleControl::default());
         let thread_control = control.clone();
+        health.mark_started();
+        let thread_health = health.clone();
         let handle = thread::Builder::new()
             .name("canary-tls-expiry-scan".to_owned())
-            .spawn(move || run_lifecycle_worker(lifecycle, config.tick_interval, thread_control))
+            .spawn(move || {
+                run_lifecycle_worker(
+                    lifecycle,
+                    config.tick_interval,
+                    thread_control,
+                    thread_health,
+                )
+            })
             .map_err(|error| format!("failed to spawn tls expiry scan worker: {error}"))?;
 
         Ok(Self {
             control,
+            health,
             handle: Some(handle),
         })
     }
@@ -172,7 +196,14 @@ impl TlsExpiryScanLifecycleWorker {
 
     /// Return lifecycle failures observed by this process.
     pub fn failure_count(&self) -> u64 {
-        self.control.failure_count()
+        self.control
+            .failure_count()
+            .max(self.health.snapshot().failure_count)
+    }
+
+    /// Return the readiness-visible worker health snapshot.
+    pub fn health_snapshot(&self) -> canary_http::public::WorkerReadyzCheck {
+        self.health.snapshot()
     }
 
     /// Request shutdown without waiting for an in-flight pass to finish.
@@ -321,28 +352,39 @@ fn run_lifecycle_worker(
     lifecycle: TlsExpiryScanLifecycle,
     interval: StdDuration,
     control: Arc<LifecycleControl>,
+    health: WorkerHealthHandle,
 ) {
     while !control.is_stopping() {
         if !control.is_paused() {
+            let now = current_utc();
+            let now_string = format_rfc3339(now);
             match catch_unwind(AssertUnwindSafe(|| {
-                let now = current_utc();
-                let now_string = format_rfc3339(now);
-                lifecycle.run_due_until(now, now_string, || control.is_stopping())
+                lifecycle.run_due_until(now, now_string.clone(), || control.is_stopping())
             })) {
-                Ok(Ok(_)) => {}
-                Ok(Err(_)) | Err(_) => control.record_failure(),
+                Ok(Ok(_)) => health.record_success(now_string),
+                Ok(Err(_)) => {
+                    control.record_failure();
+                    health.record_failure("runtime_error");
+                }
+                Err(_) => {
+                    control.record_failure();
+                    health.record_failure("panic");
+                }
             }
         }
         if control.wait(interval) {
             break;
         }
     }
+    health.mark_stopped();
 }
 
 #[cfg(test)]
 mod tests {
     use std::error::Error;
     use std::sync::Mutex as StdMutex;
+    use std::thread;
+    use std::time::{Duration as StdDuration, Instant};
 
     use canary_store::{
         TargetCheckObservation, TargetInsert, TargetProbeCommit, TimelineQueryOptions,
@@ -434,6 +476,33 @@ mod tests {
         let timeline = store.timeline("30d", TimelineQueryOptions::default())?;
         assert_eq!(timeline.events.len(), 1);
         assert_eq!(timeline.events[0].event, "health_check.tls_expiring");
+        Ok(())
+    }
+
+    #[test]
+    fn worker_records_lifecycle_failures() -> Result<(), Box<dyn Error>> {
+        let store = Arc::new(Mutex::new(Store::open_in_memory()?));
+        let worker = TlsExpiryScanLifecycleWorker::spawn(
+            TlsExpiryScanLifecycle::new(store, Arc::new(RecordingSink::default())),
+            TlsExpiryScanLifecycleConfig {
+                tick_interval: StdDuration::from_millis(10),
+            },
+        )?;
+
+        let deadline = Instant::now() + StdDuration::from_secs(1);
+        while worker.failure_count() == 0 {
+            if Instant::now() >= deadline {
+                return Err("timed out waiting for tls scan failure count".into());
+            }
+            thread::sleep(StdDuration::from_millis(10));
+        }
+        let snapshot = worker.health_snapshot();
+        assert_eq!(snapshot.name, "tls_scan");
+        assert!(snapshot.failure_count >= 1);
+        assert_eq!(snapshot.last_error_class.as_deref(), Some("runtime_error"));
+
+        worker.join()?;
+
         Ok(())
     }
 

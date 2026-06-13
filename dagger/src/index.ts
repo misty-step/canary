@@ -279,7 +279,7 @@ export class Ci {
       .container()
       .from(RUST_IMAGE)
       .withExec(["apt-get", "update", "-q"])
-      .withExec(["apt-get", "install", "-yq", "--no-install-recommends", "curl"])
+      .withExec(["apt-get", "install", "-yq", "--no-install-recommends", "curl", "jq"])
       .withServiceBinding("canary", service)
       .withExec([
         "bash",
@@ -287,9 +287,14 @@ export class Ci {
         [
           "for _ in {1..60}; do",
           "  if curl --fail --silent --show-error http://canary:4000/healthz >/tmp/healthz.json &&",
-          "     curl --fail --silent --show-error http://canary:4000/readyz >/tmp/readyz.json; then",
-          "    grep -F '\"status\":\"ok\"' /tmp/healthz.json",
-          "    grep -F '\"status\":\"ready\"' /tmp/readyz.json",
+          "     curl --fail --silent --show-error http://canary:4000/readyz >/tmp/readyz.json &&",
+          "     grep -F '\"status\":\"ok\"' /tmp/healthz.json &&",
+          "     grep -F '\"status\":\"ready\"' /tmp/readyz.json &&",
+          "     jq -e '",
+          "      (.checks.workers | length) == 5 and",
+          "      ([.checks.workers[].name] | sort) == [\"monitor_overdue\", \"retention_prune\", \"target_probe\", \"tls_scan\", \"webhook_delivery\"] and",
+          "      all(.checks.workers[]; .state == \"started\" and .failure_count == 0 and (.last_success_at | type) == \"string\")",
+          "    ' /tmp/readyz.json; then",
           "    exit 0",
           "  fi",
           "  sleep 1",

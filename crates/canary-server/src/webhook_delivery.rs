@@ -24,6 +24,7 @@ use serde_json::Value;
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
+    WorkerHealthHandle, WorkerName,
     server_time::current_rfc3339,
     webhooks::{WebhookTransport, delivery_insert, endpoint_from_subscription},
 };
@@ -269,25 +270,42 @@ pub struct WebhookDeliveryDrainReport {
 /// instead of introducing a generic job framework.
 pub struct WebhookDeliveryDrainWorker {
     stop: Arc<DrainStop>,
+    health: WorkerHealthHandle,
     handle: Option<JoinHandle<()>>,
 }
 
 impl WebhookDeliveryDrainWorker {
     /// Spawn one named background thread that drains immediately, then on the interval.
     pub fn spawn(drain: WebhookDeliveryDrain, interval: StdDuration) -> Result<Self, String> {
+        Self::spawn_with_health(
+            drain,
+            interval,
+            WorkerHealthHandle::new(WorkerName::WebhookDelivery),
+        )
+    }
+
+    /// Spawn one named background thread with an explicit health recorder.
+    pub(crate) fn spawn_with_health(
+        drain: WebhookDeliveryDrain,
+        interval: StdDuration,
+        health: WorkerHealthHandle,
+    ) -> Result<Self, String> {
         if interval.is_zero() {
             return Err("webhook drain interval must be greater than zero".to_owned());
         }
 
         let stop = Arc::new(DrainStop::default());
         let thread_stop = stop.clone();
+        health.mark_started();
+        let thread_health = health.clone();
         let handle = thread::Builder::new()
             .name("canary-webhook-drain".to_owned())
-            .spawn(move || run_drain_worker(drain, interval, thread_stop))
+            .spawn(move || run_drain_worker(drain, interval, thread_stop, thread_health))
             .map_err(|error| format!("failed to spawn webhook drain worker: {error}"))?;
 
         Ok(Self {
             stop,
+            health,
             handle: Some(handle),
         })
     }
@@ -295,6 +313,16 @@ impl WebhookDeliveryDrainWorker {
     /// Request shutdown without waiting for an in-flight drain pass to finish.
     pub fn stop(&self) {
         self.stop.request();
+    }
+
+    /// Return the visible runtime failure count.
+    pub fn failure_count(&self) -> u64 {
+        self.health.snapshot().failure_count
+    }
+
+    /// Return the readiness-visible worker health snapshot.
+    pub fn health_snapshot(&self) -> canary_http::public::WorkerReadyzCheck {
+        self.health.snapshot()
     }
 
     /// Request shutdown and wait for the worker thread to exit.
@@ -477,13 +505,24 @@ impl DrainStop {
     }
 }
 
-fn run_drain_worker(drain: WebhookDeliveryDrain, interval: StdDuration, stop: Arc<DrainStop>) {
+fn run_drain_worker(
+    drain: WebhookDeliveryDrain,
+    interval: StdDuration,
+    stop: Arc<DrainStop>,
+    health: WorkerHealthHandle,
+) {
     while !stop.is_requested() {
-        let _ = catch_unwind(AssertUnwindSafe(|| drain.drain_due(&current_rfc3339())));
+        let now = current_rfc3339();
+        match catch_unwind(AssertUnwindSafe(|| drain.drain_due(&now))) {
+            Ok(Ok(_)) => health.record_success(now),
+            Ok(Err(_)) => health.record_failure("runtime_error"),
+            Err(_) => health.record_failure("panic"),
+        }
         if stop.wait(interval) {
             break;
         }
     }
+    health.mark_stopped();
 }
 
 enum DrainCompletion {
@@ -578,7 +617,17 @@ fn parse_drain_timestamp(now: &str) -> Result<OffsetDateTime, String> {
 mod tests {
     use std::{thread, time::Duration as StdDuration};
 
+    use canary_workers::webhooks::{TransportResult, WebhookRequest};
+
     use super::*;
+
+    struct NoopTransport;
+
+    impl WebhookTransport for NoopTransport {
+        fn send(&self, _request: &WebhookRequest) -> TransportResult {
+            TransportResult::HttpStatus(204)
+        }
+    }
 
     #[test]
     fn in_memory_circuit_opens_probes_and_resets_on_success() {
@@ -607,5 +656,30 @@ mod tests {
 
         circuit.record_failure("WHK-a");
         assert_eq!(circuit.decision("WHK-a"), CircuitDecision::Open);
+    }
+
+    #[test]
+    fn worker_records_lifecycle_failures() -> Result<(), Box<dyn std::error::Error>> {
+        let store = Arc::new(Mutex::new(Store::open_in_memory()?));
+        let runtime =
+            WebhookDeliveryRuntime::new_without_circuit(store.clone(), Arc::new(NoopTransport));
+        let drain = WebhookDeliveryDrain::new(store, runtime, 1);
+        let worker = WebhookDeliveryDrainWorker::spawn(drain, StdDuration::from_millis(10))?;
+
+        let deadline = std::time::Instant::now() + StdDuration::from_secs(1);
+        while worker.failure_count() == 0 {
+            if std::time::Instant::now() >= deadline {
+                return Err("timed out waiting for webhook failure count".into());
+            }
+            thread::sleep(StdDuration::from_millis(10));
+        }
+        let snapshot = worker.health_snapshot();
+        assert_eq!(snapshot.name, "webhook_delivery");
+        assert!(snapshot.failure_count >= 1);
+        assert_eq!(snapshot.last_error_class.as_deref(), Some("runtime_error"));
+
+        worker.join()?;
+
+        Ok(())
     }
 }

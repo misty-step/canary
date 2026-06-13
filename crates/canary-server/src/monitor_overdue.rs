@@ -21,7 +21,7 @@ use canary_workers::health::{
 };
 
 use crate::{
-    EventFanoutReport, HealthEventFanout, HealthEventSource,
+    EventFanoutReport, HealthEventFanout, HealthEventSource, WorkerHealthHandle, WorkerName,
     server_time::{current_rfc3339, current_unix_millis},
 };
 
@@ -183,6 +183,7 @@ impl MonitorOverdueLifecycle {
 /// Dedicated OS-thread runner for monitor overdue lifecycle passes.
 pub struct MonitorOverdueLifecycleWorker {
     control: Arc<LifecycleControl>,
+    health: WorkerHealthHandle,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -192,6 +193,19 @@ impl MonitorOverdueLifecycleWorker {
         lifecycle: MonitorOverdueLifecycle,
         config: MonitorOverdueLifecycleConfig,
     ) -> Result<Self, String> {
+        Self::spawn_with_health(
+            lifecycle,
+            config,
+            WorkerHealthHandle::new(WorkerName::MonitorOverdue),
+        )
+    }
+
+    /// Spawn one named background thread with an explicit health recorder.
+    pub(crate) fn spawn_with_health(
+        lifecycle: MonitorOverdueLifecycle,
+        config: MonitorOverdueLifecycleConfig,
+        health: WorkerHealthHandle,
+    ) -> Result<Self, String> {
         if config.tick_interval.is_zero() {
             return Err(
                 "monitor overdue lifecycle tick interval must be greater than zero".to_owned(),
@@ -200,13 +214,23 @@ impl MonitorOverdueLifecycleWorker {
 
         let control = Arc::new(LifecycleControl::default());
         let thread_control = control.clone();
+        health.mark_started();
+        let thread_health = health.clone();
         let handle = thread::Builder::new()
             .name("canary-monitor-overdue".to_owned())
-            .spawn(move || run_lifecycle_worker(lifecycle, config.tick_interval, thread_control))
+            .spawn(move || {
+                run_lifecycle_worker(
+                    lifecycle,
+                    config.tick_interval,
+                    thread_control,
+                    thread_health,
+                )
+            })
             .map_err(|error| format!("failed to spawn monitor overdue worker: {error}"))?;
 
         Ok(Self {
             control,
+            health,
             handle: Some(handle),
         })
     }
@@ -223,7 +247,14 @@ impl MonitorOverdueLifecycleWorker {
 
     /// Return lifecycle failures observed by this process.
     pub fn failure_count(&self) -> u64 {
-        self.control.failure_count()
+        self.control
+            .failure_count()
+            .max(self.health.snapshot().failure_count)
+    }
+
+    /// Return the readiness-visible worker health snapshot.
+    pub fn health_snapshot(&self) -> canary_http::public::WorkerReadyzCheck {
+        self.health.snapshot()
     }
 
     /// Request shutdown without waiting for an in-flight pass to finish.
@@ -357,20 +388,30 @@ fn run_lifecycle_worker(
     lifecycle: MonitorOverdueLifecycle,
     interval: StdDuration,
     control: Arc<LifecycleControl>,
+    health: WorkerHealthHandle,
 ) {
     while !control.is_stopping() {
         if !control.is_paused() {
+            let now = current_rfc3339();
             match catch_unwind(AssertUnwindSafe(|| {
-                lifecycle.run_due(current_rfc3339(), current_unix_millis())
+                lifecycle.run_due(now.clone(), current_unix_millis())
             })) {
-                Ok(Ok(_)) => {}
-                Ok(Err(_)) | Err(_) => control.record_failure(),
+                Ok(Ok(_)) => health.record_success(now),
+                Ok(Err(_)) => {
+                    control.record_failure();
+                    health.record_failure("runtime_error");
+                }
+                Err(_) => {
+                    control.record_failure();
+                    health.record_failure("panic");
+                }
             }
         }
         if control.wait(interval) {
             break;
         }
     }
+    health.mark_stopped();
 }
 
 fn monitor_overdue_snapshot(candidate: MonitorOverdueCandidate) -> Option<MonitorOverdueSnapshot> {
@@ -635,6 +676,10 @@ mod tests {
             }
             thread::sleep(StdDuration::from_millis(10));
         }
+        let snapshot = worker.health_snapshot();
+        assert_eq!(snapshot.name, "monitor_overdue");
+        assert!(snapshot.failure_count >= 1);
+        assert_eq!(snapshot.last_error_class.as_deref(), Some("runtime_error"));
 
         worker.join()?;
 

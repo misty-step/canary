@@ -31,8 +31,8 @@ use crate::{
     TargetProbeLifecycle, TargetProbeLifecycleConfig, TargetProbeLifecycleWorker,
     TargetProbeOptions, TargetProbeRuntime, TlsExpiryScanLifecycle, TlsExpiryScanLifecycleConfig,
     TlsExpiryScanLifecycleWorker, WebhookDeliveryDrain, WebhookDeliveryDrainWorker,
-    WebhookDeliveryRuntime, WebhookEnqueueEffectSink, WebhookTransport, ingest_router,
-    public_router, server_time::current_rfc3339,
+    WebhookDeliveryRuntime, WebhookEnqueueEffectSink, WebhookTransport, WorkerHealthRegistry,
+    ingest_router, public_router, server_time::current_rfc3339,
 };
 
 const DEFAULT_WEBHOOK_DRAIN_INTERVAL: StdDuration = StdDuration::from_secs(5);
@@ -105,6 +105,7 @@ pub struct CanaryServer {
     retention_prune_worker: RetentionPruneLifecycleWorker,
     tls_expiry_scan_worker: TlsExpiryScanLifecycleWorker,
     enqueue_failure_sink: Arc<EnqueueFailureRecorder>,
+    worker_health: WorkerHealthRegistry,
 }
 
 impl CanaryServer {
@@ -150,6 +151,7 @@ impl CanaryServer {
             }
         }
         let store = Arc::new(Mutex::new(store));
+        let worker_health = WorkerHealthRegistry::new();
 
         let scheduler = Arc::new(StoreWebhookScheduler::new(store.clone()));
         let webhook_cooldown = Arc::new(InMemoryWebhookCooldown::default());
@@ -180,9 +182,12 @@ impl CanaryServer {
         let runtime = WebhookDeliveryRuntime::new(store.clone(), transport, webhook_circuit);
         let drain =
             WebhookDeliveryDrain::new(store.clone(), runtime, config.webhook_drain_max_jobs);
-        let webhook_worker =
-            WebhookDeliveryDrainWorker::spawn(drain, config.webhook_drain_interval)
-                .map_err(ServerBootError::WebhookWorker)?;
+        let webhook_worker = WebhookDeliveryDrainWorker::spawn_with_health(
+            drain,
+            config.webhook_drain_interval,
+            worker_health.webhook_delivery(),
+        )
+        .map_err(ServerBootError::WebhookWorker)?;
         let allow_private_targets = config.target_probe_options.allow_private_targets;
         let target_transport = Arc::new(ReqwestProbeTransport);
         let target_runtime = TargetProbeRuntime::new(
@@ -191,14 +196,15 @@ impl CanaryServer {
             target_transport,
             config.target_probe_options,
         );
-        let target_probe_worker = TargetProbeLifecycleWorker::spawn(
+        let target_probe_worker = TargetProbeLifecycleWorker::spawn_with_health(
             TargetProbeLifecycle::new(store.clone(), target_runtime),
             TargetProbeLifecycleConfig {
                 tick_interval: config.target_probe_interval,
             },
+            worker_health.target_probe(),
         )
         .map_err(ServerBootError::TargetProbeWorker)?;
-        let monitor_overdue_worker = MonitorOverdueLifecycleWorker::spawn(
+        let monitor_overdue_worker = MonitorOverdueLifecycleWorker::spawn_with_health(
             MonitorOverdueLifecycle::new(
                 store.clone(),
                 MonitorOverdueRuntime::new(store.clone(), health_fanout),
@@ -206,20 +212,23 @@ impl CanaryServer {
             MonitorOverdueLifecycleConfig {
                 tick_interval: config.monitor_overdue_interval,
             },
+            worker_health.monitor_overdue(),
         )
         .map_err(ServerBootError::MonitorOverdueWorker)?;
-        let retention_prune_worker = RetentionPruneLifecycleWorker::spawn(
+        let retention_prune_worker = RetentionPruneLifecycleWorker::spawn_with_health(
             RetentionPruneLifecycle::new(store.clone(), config.retention_policy),
             RetentionPruneLifecycleConfig {
                 tick_interval: config.retention_prune_interval,
             },
+            worker_health.retention_prune(),
         )
         .map_err(ServerBootError::RetentionPruneWorker)?;
-        let tls_expiry_scan_worker = TlsExpiryScanLifecycleWorker::spawn(
+        let tls_expiry_scan_worker = TlsExpiryScanLifecycleWorker::spawn_with_health(
             TlsExpiryScanLifecycle::new(store.clone(), webhook_sink),
             TlsExpiryScanLifecycleConfig {
                 tick_interval: config.tls_expiry_scan_interval,
             },
+            worker_health.tls_expiry_scan(),
         )
         .map_err(ServerBootError::TlsExpiryScanWorker)?;
         let ingest_state = ingest_state
@@ -228,6 +237,7 @@ impl CanaryServer {
             .with_allow_private_targets(allow_private_targets);
         let readiness = PublicReadiness::from_probe(Arc::new(StoreReadinessProbe {
             store: store.clone(),
+            workers: worker_health.clone(),
         }));
         let router = public_router(readiness).merge(ingest_router(ingest_state));
 
@@ -239,6 +249,7 @@ impl CanaryServer {
             retention_prune_worker,
             tls_expiry_scan_worker,
             enqueue_failure_sink,
+            worker_health,
         })
     }
 
@@ -260,6 +271,16 @@ impl CanaryServer {
     /// Return TLS-expiry scan lifecycle failures observed by this process.
     pub fn tls_expiry_scan_failure_count(&self) -> u64 {
         self.tls_expiry_scan_worker.failure_count()
+    }
+
+    /// Return background worker lifecycle readiness snapshots.
+    pub fn worker_health_snapshot(&self) -> Vec<canary_http::public::WorkerReadyzCheck> {
+        self.worker_health.snapshot()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stop_webhook_delivery_worker_for_test(&self) {
+        self.webhook_worker.stop();
     }
 
     /// Serve the composed router until `shutdown` resolves, then stop the worker.
@@ -363,6 +384,7 @@ impl Error for ServerRunError {}
 
 struct StoreReadinessProbe {
     store: Arc<Mutex<Store>>,
+    workers: WorkerHealthRegistry,
 }
 
 impl PublicReadinessProbe for StoreReadinessProbe {
@@ -376,7 +398,11 @@ impl PublicReadinessProbe for StoreReadinessProbe {
             Ok(()) => DependencyStatus::Ok,
             Err(()) => DependencyStatus::Error,
         };
-        PublicReadinessSnapshot::new(database, DependencyStatus::Ok)
+        PublicReadinessSnapshot::with_workers(
+            database,
+            DependencyStatus::Ok,
+            self.workers.snapshot(),
+        )
     }
 }
 
