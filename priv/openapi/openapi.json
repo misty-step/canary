@@ -2189,7 +2189,8 @@
             "additionalProperties": false,
             "required": [
               "database",
-              "supervisor"
+              "supervisor",
+              "workers"
             ],
             "properties": {
               "database": {
@@ -2205,8 +2206,62 @@
                   "ok",
                   "error"
                 ]
+              },
+              "workers": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/WorkerReadyzCheck"
+                }
               }
             }
+          }
+        }
+      },
+      "WorkerReadyzCheck": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "state",
+          "last_success_at",
+          "failure_count",
+          "last_error_class"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "webhook_delivery",
+              "target_probe",
+              "monitor_overdue",
+              "retention_prune",
+              "tls_scan"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "started",
+              "stopped"
+            ]
+          },
+          "last_success_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "failure_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "last_error_class": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Sanitized failure class such as runtime_error or panic; never a raw error message."
           }
         }
       },

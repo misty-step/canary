@@ -31,7 +31,7 @@
 | 030 | Agent contract safety pass | high | done | M |
 | 031 | Agent replay determinism hardening | high | done | M |
 | 032 | Live Rust write-path evidence | high | done | L |
-| 034 | Worker lifecycle readiness oracle | high | ready | L |
+| 034 | Worker lifecycle readiness oracle | high | done | L |
 | 033 | Deployed service registry lifecycle | high | done | M |
 | 035 | Deployed app Canary coverage | high | done | XL |
 | 036 | Agent-native inspection surface | high | done | L |
@@ -61,7 +61,7 @@
 031 (agent replay determinism) — shipped; malformed cursors, unsafe target cadence, invalid persisted probe methods, and unverifiable boot state fail explicitly before agents trust replay state
 032 (live Rust write-path evidence) — follows the Rust production cutover; proves admin/ingest/webhook/monitor/target write paths with replayable evidence packets
 033 (deployed service registry lifecycle) — shipped; owned-service monitoring state is timestamped and actionable, with blocked Adminifi and missing Vercel/Fly coverage captured in the registry
-034 (worker lifecycle readiness oracle) — makes webhook, target, monitor, retention, and TLS workers visible to readiness/gate checks
+034 (worker lifecycle readiness oracle) — shipped; makes webhook, target, monitor, retention, and TLS workers visible to readiness/gate checks
 035 (deployed app Canary coverage) — ensures every active owned Vercel/Fly deployment is enrolled or explicitly blocked with evidence
 036 (agent-native inspection surface) — gives Codex/Claude a stable CLI/JSON/MCP-shaped way to inspect Canary status, errors, incidents, timelines, targets, and dogfood coverage
 037 (watch the watchmen) — shipped; proves Canary itself from outside the Canary process, preserves receipts when Canary is unreachable, and surfaces the external witness in `bin/canary doctor`
@@ -83,7 +83,8 @@
 
 ### Active order (2026-06-11)
 
-1. **034** — Worker lifecycle readiness oracle (make Rust background workers visible to readiness and Dagger smoke)
+No ready active items remain. 020 stays blocked on Adminifi URLs; 010 stays
+blocked on the downstream bitterblossom triage sprite.
 
 022 + 023 landed on 2026-04-21. 024 landed on 2026-04-22. 026 landed on
 2026-04-23 — Ramp
@@ -147,6 +148,11 @@ parity backlog items were retired during the Rust scorched-earth migration.
   write paths with redacted JSON receipts, and
   `docs/architecture/rust-write-path-evidence-2026-06-12.md` records the first
   production run plus cleanup proof.
+- 2026-06-13: Delivered 034. `/readyz` now exposes process-local lifecycle
+  snapshots for webhook delivery, target probes, monitor overdue evaluation,
+  retention pruning, and TLS scanning; worker loops record visible sanitized
+  failure counters, and Dagger production smoke asserts all five workers are
+  present and started.
 
 ## Status
 

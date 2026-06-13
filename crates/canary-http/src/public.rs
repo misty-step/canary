@@ -75,7 +75,7 @@ pub enum HealthzStatus {
 }
 
 /// Readiness response body.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadyzResponse {
     /// Overall readiness status.
     pub status: ReadyzStatus,
@@ -94,12 +94,14 @@ pub enum ReadyzStatus {
 }
 
 /// Public readiness dependency checks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadyzChecks {
     /// Database check result.
     pub database: DependencyStatus,
     /// Supervisor check result.
     pub supervisor: DependencyStatus,
+    /// Background worker lifecycle checks.
+    pub workers: Vec<WorkerReadyzCheck>,
 }
 
 /// Dependency check status.
@@ -110,6 +112,31 @@ pub enum DependencyStatus {
     Ok,
     /// Dependency check failed.
     Error,
+}
+
+/// Background worker lifecycle readiness check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerReadyzCheck {
+    /// Stable worker name.
+    pub name: String,
+    /// Whether the worker thread is currently running.
+    pub state: WorkerLifecycleState,
+    /// Last successful lifecycle pass timestamp.
+    pub last_success_at: Option<String>,
+    /// Count of runtime errors or panics observed by the worker loop.
+    pub failure_count: u64,
+    /// Last non-secret failure class observed by the worker loop.
+    pub last_error_class: Option<String>,
+}
+
+/// Background worker lifecycle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerLifecycleState {
+    /// Worker thread is running.
+    Started,
+    /// Worker thread has stopped.
+    Stopped,
 }
 
 /// Build the Phoenix-compatible `GET /healthz` response.
@@ -124,12 +151,16 @@ pub const fn healthz_response() -> PublicResponse<HealthzResponse> {
 }
 
 /// Build the Phoenix-compatible `GET /readyz` response.
-pub const fn readyz_response(
+pub fn readyz_response(
     database: DependencyStatus,
     supervisor: DependencyStatus,
+    workers: Vec<WorkerReadyzCheck>,
 ) -> PublicResponse<ReadyzResponse> {
-    let all_ok =
-        matches!(database, DependencyStatus::Ok) && matches!(supervisor, DependencyStatus::Ok);
+    let all_ok = matches!(database, DependencyStatus::Ok)
+        && matches!(supervisor, DependencyStatus::Ok)
+        && workers
+            .iter()
+            .all(|worker| matches!(worker.state, WorkerLifecycleState::Started));
     let status = if all_ok { 200 } else { 503 };
     let body_status = if all_ok {
         ReadyzStatus::Ready
@@ -145,6 +176,7 @@ pub const fn readyz_response(
             checks: ReadyzChecks {
                 database,
                 supervisor,
+                workers,
             },
         },
     }
@@ -179,7 +211,7 @@ mod tests {
 
     #[test]
     fn readyz_matches_phoenix_body_for_healthy_dependencies() {
-        let response = readyz_response(DependencyStatus::Ok, DependencyStatus::Ok);
+        let response = readyz_response(DependencyStatus::Ok, DependencyStatus::Ok, Vec::new());
 
         assert_eq!(response.status, 200);
         assert_eq!(response.content_type, APPLICATION_JSON);
@@ -189,7 +221,8 @@ mod tests {
                 "status": "ready",
                 "checks": {
                     "database": "ok",
-                    "supervisor": "ok"
+                    "supervisor": "ok",
+                    "workers": []
                 }
             })
         );
@@ -204,12 +237,45 @@ mod tests {
         ];
 
         for (database, supervisor) in cases {
-            let response = readyz_response(database, supervisor);
+            let response = readyz_response(database, supervisor, Vec::new());
             let body = serde_json::to_value(response.body).unwrap_or(Value::Null);
 
             assert_eq!(response.status, 503);
             assert_eq!(body["status"], "not_ready");
         }
+    }
+
+    #[test]
+    fn readyz_marks_stopped_workers_not_ready_without_error_details() {
+        let response = readyz_response(
+            DependencyStatus::Ok,
+            DependencyStatus::Ok,
+            vec![
+                WorkerReadyzCheck {
+                    name: "webhook_delivery".to_owned(),
+                    state: WorkerLifecycleState::Started,
+                    last_success_at: Some("2026-06-12T20:00:00Z".to_owned()),
+                    failure_count: 0,
+                    last_error_class: None,
+                },
+                WorkerReadyzCheck {
+                    name: "target_probe".to_owned(),
+                    state: WorkerLifecycleState::Stopped,
+                    last_success_at: None,
+                    failure_count: 2,
+                    last_error_class: Some("panic".to_owned()),
+                },
+            ],
+        );
+        let body = serde_json::to_value(response.body).unwrap_or(Value::Null);
+
+        assert_eq!(response.status, 503);
+        assert_eq!(body["status"], "not_ready");
+        assert_eq!(body["checks"]["workers"][0]["name"], "webhook_delivery");
+        assert_eq!(body["checks"]["workers"][0]["state"], "started");
+        assert_eq!(body["checks"]["workers"][1]["state"], "stopped");
+        assert_eq!(body["checks"]["workers"][1]["last_error_class"], "panic");
+        assert_eq!(body["checks"]["workers"][1].get("last_error"), None);
     }
 
     #[test]
@@ -230,6 +296,10 @@ mod tests {
         assert_eq!(
             document["components"]["schemas"]["ReadyzResponse"]["required"],
             json!(["status", "checks"])
+        );
+        assert_eq!(
+            document["components"]["schemas"]["ReadyzResponse"]["properties"]["checks"]["required"],
+            json!(["database", "supervisor", "workers"])
         );
     }
 

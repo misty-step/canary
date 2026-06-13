@@ -34,7 +34,7 @@ use time::format_description::well_known::Rfc3339;
 use x509_parser::prelude::FromDer;
 
 use crate::{
-    EventFanoutReport, HealthEventFanout, HealthEventSource,
+    EventFanoutReport, HealthEventFanout, HealthEventSource, WorkerHealthHandle, WorkerName,
     server_time::{current_rfc3339, current_unix_millis},
     target_request::{parse_headers, validate_method, validate_url},
 };
@@ -539,6 +539,7 @@ impl TargetProbeLifecycle {
 /// Dedicated OS-thread runner for target probe lifecycle passes.
 pub struct TargetProbeLifecycleWorker {
     controller: TargetProbeLifecycleController,
+    health: WorkerHealthHandle,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -552,8 +553,21 @@ pub struct TargetProbeLifecycleController {
 impl TargetProbeLifecycleWorker {
     /// Spawn one named background thread that coordinates bounded target probes.
     pub fn spawn(
+        lifecycle: TargetProbeLifecycle,
+        config: TargetProbeLifecycleConfig,
+    ) -> Result<Self, String> {
+        Self::spawn_with_health(
+            lifecycle,
+            config,
+            WorkerHealthHandle::new(WorkerName::TargetProbe),
+        )
+    }
+
+    /// Spawn one named background thread with an explicit health recorder.
+    pub(crate) fn spawn_with_health(
         mut lifecycle: TargetProbeLifecycle,
         config: TargetProbeLifecycleConfig,
+        health: WorkerHealthHandle,
     ) -> Result<Self, String> {
         if config.tick_interval.is_zero() {
             return Err(
@@ -565,9 +579,18 @@ impl TargetProbeLifecycleWorker {
         let (command_sender, command_receiver) = mpsc::channel();
         lifecycle.set_command_receiver(command_receiver);
         let thread_control = control.clone();
+        health.mark_started();
+        let thread_health = health.clone();
         let handle = thread::Builder::new()
             .name("canary-target-probes".to_owned())
-            .spawn(move || run_lifecycle_worker(lifecycle, config.tick_interval, thread_control))
+            .spawn(move || {
+                run_lifecycle_worker(
+                    lifecycle,
+                    config.tick_interval,
+                    thread_control,
+                    thread_health,
+                )
+            })
             .map_err(|error| format!("failed to spawn target probe worker: {error}"))?;
 
         Ok(Self {
@@ -575,6 +598,7 @@ impl TargetProbeLifecycleWorker {
                 control,
                 command_sender,
             },
+            health,
             handle: Some(handle),
         })
     }
@@ -602,6 +626,16 @@ impl TargetProbeLifecycleWorker {
     /// Request shutdown without waiting for an in-flight probe to finish.
     pub fn stop(&self) {
         self.controller.control.stop();
+    }
+
+    /// Return the visible runtime failure count.
+    pub fn failure_count(&self) -> u64 {
+        self.health.snapshot().failure_count
+    }
+
+    /// Return the readiness-visible worker health snapshot.
+    pub fn health_snapshot(&self) -> canary_http::public::WorkerReadyzCheck {
+        self.health.snapshot()
     }
 
     /// Request shutdown and wait for the worker thread to exit.
@@ -808,17 +842,24 @@ fn run_lifecycle_worker(
     mut lifecycle: TargetProbeLifecycle,
     interval: StdDuration,
     control: Arc<LifecycleControl>,
+    health: WorkerHealthHandle,
 ) {
     while !control.is_stopping() {
         if !control.is_paused() {
-            let _ = catch_unwind(AssertUnwindSafe(|| {
+            let now = current_rfc3339();
+            match catch_unwind(AssertUnwindSafe(|| {
                 lifecycle.run_due_until(current_unix_millis(), || control.is_stopping())
-            }));
+            })) {
+                Ok(Ok(_)) => health.record_success(now),
+                Ok(Err(_)) => health.record_failure("runtime_error"),
+                Err(_) => health.record_failure("panic"),
+            }
         }
         if control.wait(interval) {
             break;
         }
     }
+    health.mark_stopped();
 }
 
 impl ProbeTransport for ReqwestProbeTransport {
@@ -2480,6 +2521,44 @@ mod tests {
             error,
             "target probe lifecycle tick interval must be greater than zero"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn worker_records_lifecycle_failures() -> Result<(), Box<dyn Error>> {
+        let store = Arc::new(Mutex::new(Store::open_in_memory()?));
+        let sink = Arc::new(RecordingSink::default());
+        let runtime = TargetProbeRuntime::new(
+            store.clone(),
+            HealthEventFanout::new_without_failure_sink(sink),
+            Arc::new(StaticTransport::ok(200, "ok")),
+            TargetProbeOptions {
+                allow_private_targets: true,
+                region: None,
+            },
+        );
+        let lifecycle = TargetProbeLifecycle::new(store, runtime);
+        let worker = TargetProbeLifecycleWorker::spawn(
+            lifecycle,
+            TargetProbeLifecycleConfig {
+                tick_interval: StdDuration::from_millis(10),
+            },
+        )?;
+
+        let deadline = Instant::now() + StdDuration::from_secs(1);
+        while worker.failure_count() == 0 {
+            if Instant::now() >= deadline {
+                return Err("timed out waiting for target probe failure count".into());
+            }
+            thread::sleep(StdDuration::from_millis(10));
+        }
+        let snapshot = worker.health_snapshot();
+        assert_eq!(snapshot.name, "target_probe");
+        assert!(snapshot.failure_count >= 1);
+        assert_eq!(snapshot.last_error_class.as_deref(), Some("runtime_error"));
+
+        worker.join()?;
+
         Ok(())
     }
 
