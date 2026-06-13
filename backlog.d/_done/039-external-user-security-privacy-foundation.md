@@ -1,7 +1,7 @@
 # Build the external-user security and privacy foundation
 
 Priority: P0
-Status: ready
+Status: done
 Estimate: XL
 
 ## Goal
@@ -28,3 +28,4 @@ Make Canary safe for arbitrary users and applications by adding tenant/project i
 - Evidence: `AGENTS.md` describes v1 as single org; `crates/canary-http/src/auth.rs` models only operation scopes; `crates/canary-store/src/schema.rs` stores service strings without tenant/project columns; `crates/canary-ingest/src/lib.rs` accepts caller-supplied `service`; `clients/typescript/src/index.ts` defaults `scrubPii` to false.
 - Security lane found this is the gating boundary before external arbitrary-app onboarding.
 - This is a foundation epic, not a hardening grab bag. Tenancy, privacy defaults, scoped browser ingest, webhook scoping, and quotas must land as one coherent product boundary.
+- Delivered 2026-06-13 on `feat/external-user-security-privacy-foundation`: tenant/project/service ownership, service-bound ingest/read paths, server-side redaction defaults, timestamped webhook signatures, scoped webhook delivery visibility, durable rate limits, and OpenAPI authority guidance.

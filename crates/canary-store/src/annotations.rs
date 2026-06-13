@@ -37,6 +37,12 @@ pub enum AnnotationError {
 pub struct AnnotationInsert {
     /// Stable annotation id.
     pub id: String,
+    /// Tenant namespace.
+    pub tenant_id: String,
+    /// Project namespace.
+    pub project_id: String,
+    /// Optional service scope resolved from the subject.
+    pub service: Option<String>,
     /// Subject type.
     pub subject_type: String,
     /// Subject id.
@@ -54,6 +60,12 @@ pub struct AnnotationInsert {
 /// Options for `GET /api/v1/annotations`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AnnotationPageOptions {
+    /// Tenant namespace.
+    pub tenant_id: Option<String>,
+    /// Project namespace.
+    pub project_id: Option<String>,
+    /// Optional service authority boundary.
+    pub service: Option<String>,
     /// Subject type.
     pub subject_type: String,
     /// Subject id.
@@ -98,15 +110,6 @@ impl AnnotationSubjectType {
             Self::Monitor => "monitor",
         }
     }
-
-    fn exists_sql(self) -> &'static str {
-        match self {
-            Self::Incident => "SELECT 1 FROM incidents WHERE id = ?1 LIMIT 1",
-            Self::ErrorGroup => "SELECT 1 FROM error_groups WHERE group_hash = ?1 LIMIT 1",
-            Self::Target => "SELECT 1 FROM targets WHERE id = ?1 LIMIT 1",
-            Self::Monitor => "SELECT 1 FROM monitors WHERE id = ?1 LIMIT 1",
-        }
-    }
 }
 
 /// Return Phoenix's accepted annotation subject types in wire order.
@@ -119,17 +122,27 @@ pub(crate) fn create(
     insert: AnnotationInsert,
 ) -> AnnotationResult<Annotation> {
     let subject_type = parse_subject_type(&insert.subject_type)?;
-    require_subject(connection, subject_type, &insert.subject_id)?;
+    let subject_service = require_subject(
+        connection,
+        subject_type,
+        &insert.subject_id,
+        Some((&insert.tenant_id, &insert.project_id)),
+        None,
+    )?;
+    let service = insert.service.or(subject_service);
 
     let (incident_id, group_hash) = legacy_keys(subject_type, &insert.subject_id);
     let metadata_json = metadata_to_storage(insert.metadata)?;
 
     connection.execute(
         "INSERT INTO annotations (
-             id, incident_id, group_hash, agent, action, metadata, created_at, subject_type, subject_id
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             id, tenant_id, project_id, service, incident_id, group_hash, agent, action, metadata, created_at, subject_type, subject_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             insert.id,
+            insert.tenant_id,
+            insert.project_id,
+            service,
             incident_id,
             group_hash,
             insert.agent,
@@ -151,9 +164,41 @@ pub(crate) fn list(
     subject_id: &str,
 ) -> AnnotationResult<AnnotationListResponse> {
     let subject_type = parse_subject_type(subject_type)?;
-    require_subject(connection, subject_type, subject_id)?;
-    let rows = rows_for_subject(connection, subject_type, subject_id, None)?;
+    require_subject(connection, subject_type, subject_id, None, None)?;
+    let rows = rows_for_subject(connection, subject_type, subject_id, None, None)?;
     Ok(annotation_list_response(rows))
+}
+
+pub(crate) fn list_scoped(
+    connection: &Connection,
+    subject_type: &str,
+    subject_id: &str,
+    tenant_id: &str,
+    project_id: &str,
+    service: Option<&str>,
+) -> AnnotationResult<AnnotationListResponse> {
+    let subject_type = parse_subject_type(subject_type)?;
+    let owner = Some((tenant_id, project_id));
+    require_subject(connection, subject_type, subject_id, owner, service)?;
+    let rows = rows_for_subject(connection, subject_type, subject_id, owner, None)?;
+    Ok(annotation_list_response(rows))
+}
+
+pub(crate) fn subject_service_scoped(
+    connection: &Connection,
+    subject_type: &str,
+    subject_id: &str,
+    tenant_id: &str,
+    project_id: &str,
+) -> AnnotationResult<Option<String>> {
+    let subject_type = parse_subject_type(subject_type)?;
+    require_subject(
+        connection,
+        subject_type,
+        subject_id,
+        Some((tenant_id, project_id)),
+        None,
+    )
 }
 
 pub(crate) fn page(
@@ -161,17 +206,28 @@ pub(crate) fn page(
     options: AnnotationPageOptions,
 ) -> AnnotationResult<AnnotationPageResponse> {
     let subject_type = parse_subject_type(&options.subject_type)?;
-    require_subject(connection, subject_type, &options.subject_id)?;
+    let owner = options
+        .tenant_id
+        .as_deref()
+        .zip(options.project_id.as_deref());
+    require_subject(
+        connection,
+        subject_type,
+        &options.subject_id,
+        owner,
+        options.service.as_deref(),
+    )?;
     let limit = parse_limit(options.limit.as_deref())?;
     let cursor = parse_cursor(options.cursor.as_deref())?;
     let rows = rows_for_subject(
         connection,
         subject_type,
         &options.subject_id,
+        owner,
         Some((limit, cursor)),
     )?;
-    let total_count = count_for_subject(connection, subject_type, &options.subject_id)?;
-    let latest = latest_for_summary(connection, subject_type, &options.subject_id)?;
+    let total_count = count_for_subject(connection, subject_type, &options.subject_id, owner)?;
+    let latest = latest_for_summary(connection, subject_type, &options.subject_id, owner)?;
 
     let (page, next_cursor) = paginate(rows, limit);
     Ok(annotation_page_response(
@@ -194,19 +250,60 @@ fn require_subject(
     connection: &Connection,
     subject_type: AnnotationSubjectType,
     subject_id: &str,
-) -> AnnotationResult<()> {
-    let found = connection
-        .query_row(subject_type.exists_sql(), params![subject_id], |row| {
-            row.get::<_, i64>(0)
+    owner: Option<(&str, &str)>,
+    service: Option<&str>,
+) -> AnnotationResult<Option<String>> {
+    let mut where_clause = match subject_type {
+        AnnotationSubjectType::ErrorGroup => " WHERE group_hash = ?".to_owned(),
+        AnnotationSubjectType::Incident
+        | AnnotationSubjectType::Target
+        | AnnotationSubjectType::Monitor => " WHERE id = ?".to_owned(),
+    };
+    let mut filters = vec![subject_id.to_owned()];
+    if let Some((tenant_id, project_id)) = owner {
+        where_clause.push_str(" AND tenant_id = ? AND project_id = ?");
+        filters.push(tenant_id.to_owned());
+        filters.push(project_id.to_owned());
+    }
+    if let Some(service) = service {
+        match subject_type {
+            AnnotationSubjectType::Incident | AnnotationSubjectType::ErrorGroup => {
+                where_clause.push_str(" AND service = ?");
+            }
+            AnnotationSubjectType::Target | AnnotationSubjectType::Monitor => {
+                where_clause.push_str(" AND COALESCE(NULLIF(service, ''), name) = ?");
+            }
+        }
+        filters.push(service.to_owned());
+    }
+
+    let service_expr = match subject_type {
+        AnnotationSubjectType::Incident | AnnotationSubjectType::ErrorGroup => "service",
+        AnnotationSubjectType::Target | AnnotationSubjectType::Monitor => {
+            "COALESCE(NULLIF(service, ''), name)"
+        }
+    };
+    let sql = match subject_type {
+        AnnotationSubjectType::Incident => {
+            format!("SELECT {service_expr} FROM incidents{where_clause} LIMIT 1")
+        }
+        AnnotationSubjectType::ErrorGroup => {
+            format!("SELECT {service_expr} FROM error_groups{where_clause} LIMIT 1")
+        }
+        AnnotationSubjectType::Target => {
+            format!("SELECT {service_expr} FROM targets{where_clause} LIMIT 1")
+        }
+        AnnotationSubjectType::Monitor => {
+            format!("SELECT {service_expr} FROM monitors{where_clause} LIMIT 1")
+        }
+    };
+    let mut statement = connection.prepare(&sql)?;
+    statement
+        .query_row(rusqlite::params_from_iter(filters), |row| {
+            row.get::<_, Option<String>>(0)
         })
         .optional()?
-        .is_some();
-
-    if found {
-        Ok(())
-    } else {
-        Err(AnnotationError::NotFound)
-    }
+        .ok_or(AnnotationError::NotFound)
 }
 
 fn legacy_keys(
@@ -254,44 +351,97 @@ fn rows_for_subject(
     connection: &Connection,
     subject_type: AnnotationSubjectType,
     subject_id: &str,
+    owner: Option<(&str, &str)>,
     page: Option<(usize, Option<AnnotationCursor>)>,
 ) -> AnnotationResult<Vec<Annotation>> {
     let (limit, cursor) = page.unwrap_or((usize::MAX - 1, None));
+    let owner_clause = if owner.is_some() {
+        " AND tenant_id = ?3 AND project_id = ?4"
+    } else {
+        ""
+    };
     match cursor {
         Some(cursor) => {
-            let mut statement = connection.prepare(
+            let mut statement = connection.prepare(&format!(
                 "SELECT id, subject_type, subject_id, incident_id, group_hash, agent, action,
                         metadata, created_at
                  FROM annotations
                  WHERE subject_type = ?1 AND subject_id = ?2
-                   AND (created_at < ?3 OR (created_at = ?3 AND id < ?4))
+                   {owner_clause}
+                   AND (created_at < ?5 OR (created_at = ?5 AND id < ?6))
                  ORDER BY created_at DESC, id DESC
-                 LIMIT ?5",
-            )?;
-            collect_annotations(statement.query_map(
-                params![
-                    subject_type.as_str(),
-                    subject_id,
-                    cursor.created_at,
-                    cursor.id,
-                    (limit + 1) as i64
-                ],
-                annotation_from_row,
-            )?)
+                 LIMIT ?7",
+            ))?;
+            if let Some((tenant_id, project_id)) = owner {
+                collect_annotations(statement.query_map(
+                    params![
+                        subject_type.as_str(),
+                        subject_id,
+                        tenant_id,
+                        project_id,
+                        cursor.created_at,
+                        cursor.id,
+                        (limit + 1) as i64
+                    ],
+                    annotation_from_row,
+                )?)
+            } else {
+                let mut statement = connection.prepare(
+                    "SELECT id, subject_type, subject_id, incident_id, group_hash, agent, action,
+                            metadata, created_at
+                     FROM annotations
+                     WHERE subject_type = ?1 AND subject_id = ?2
+                       AND (created_at < ?3 OR (created_at = ?3 AND id < ?4))
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT ?5",
+                )?;
+                collect_annotations(statement.query_map(
+                    params![
+                        subject_type.as_str(),
+                        subject_id,
+                        cursor.created_at,
+                        cursor.id,
+                        (limit + 1) as i64
+                    ],
+                    annotation_from_row,
+                )?)
+            }
         }
         None => {
-            let mut statement = connection.prepare(
+            let mut statement = connection.prepare(&format!(
                 "SELECT id, subject_type, subject_id, incident_id, group_hash, agent, action,
                         metadata, created_at
                  FROM annotations
                  WHERE subject_type = ?1 AND subject_id = ?2
+                 {owner_clause}
                  ORDER BY created_at DESC, id DESC
-                 LIMIT ?3",
-            )?;
-            collect_annotations(statement.query_map(
-                params![subject_type.as_str(), subject_id, (limit + 1) as i64],
-                annotation_from_row,
-            )?)
+                 LIMIT ?5",
+            ))?;
+            if let Some((tenant_id, project_id)) = owner {
+                collect_annotations(statement.query_map(
+                    params![
+                        subject_type.as_str(),
+                        subject_id,
+                        tenant_id,
+                        project_id,
+                        (limit + 1) as i64
+                    ],
+                    annotation_from_row,
+                )?)
+            } else {
+                let mut statement = connection.prepare(
+                    "SELECT id, subject_type, subject_id, incident_id, group_hash, agent, action,
+                            metadata, created_at
+                     FROM annotations
+                     WHERE subject_type = ?1 AND subject_id = ?2
+                     ORDER BY created_at DESC, id DESC
+                     LIMIT ?3",
+                )?;
+                collect_annotations(statement.query_map(
+                    params![subject_type.as_str(), subject_id, (limit + 1) as i64],
+                    annotation_from_row,
+                )?)
+            }
         }
     }
 }
@@ -341,14 +491,27 @@ fn count_for_subject(
     connection: &Connection,
     subject_type: AnnotationSubjectType,
     subject_id: &str,
+    owner: Option<(&str, &str)>,
 ) -> AnnotationResult<u64> {
-    connection
-        .query_row(
-            "SELECT count(*) FROM annotations WHERE subject_type = ?1 AND subject_id = ?2",
-            params![subject_type.as_str(), subject_id],
+    let owner_clause = if owner.is_some() {
+        " AND tenant_id = ?3 AND project_id = ?4"
+    } else {
+        ""
+    };
+    let mut statement = connection.prepare(&format!(
+        "SELECT count(*) FROM annotations WHERE subject_type = ?1 AND subject_id = ?2{owner_clause}"
+    ))?;
+    let count = if let Some((tenant_id, project_id)) = owner {
+        statement.query_row(
+            params![subject_type.as_str(), subject_id, tenant_id, project_id],
             |row| row.get::<_, u64>(0),
-        )
-        .map_err(AnnotationError::from)
+        )?
+    } else {
+        statement.query_row(params![subject_type.as_str(), subject_id], |row| {
+            row.get::<_, u64>(0)
+        })?
+    };
+    Ok(count)
 }
 
 struct LatestAnnotationSummary {
@@ -360,23 +523,41 @@ fn latest_for_summary(
     connection: &Connection,
     subject_type: AnnotationSubjectType,
     subject_id: &str,
+    owner: Option<(&str, &str)>,
 ) -> AnnotationResult<Option<LatestAnnotationSummary>> {
-    connection
-        .query_row(
-            "SELECT agent, created_at FROM annotations
+    let owner_clause = if owner.is_some() {
+        " AND tenant_id = ?3 AND project_id = ?4"
+    } else {
+        ""
+    };
+    let mut statement = connection.prepare(&format!(
+        "SELECT agent, created_at FROM annotations
              WHERE subject_type = ?1 AND subject_id = ?2
+             {owner_clause}
              ORDER BY created_at DESC, id DESC
              LIMIT 1",
-            params![subject_type.as_str(), subject_id],
-            |row| {
-                Ok(LatestAnnotationSummary {
-                    agent: row.get(0)?,
-                    created_at: row.get(1)?,
-                })
-            },
+    ))?;
+    let row = if let Some((tenant_id, project_id)) = owner {
+        statement.query_row(
+            params![subject_type.as_str(), subject_id, tenant_id, project_id],
+            latest_annotation_summary_row,
         )
-        .optional()
-        .map_err(AnnotationError::from)
+    } else {
+        statement.query_row(
+            params![subject_type.as_str(), subject_id],
+            latest_annotation_summary_row,
+        )
+    };
+    row.optional().map_err(AnnotationError::from)
+}
+
+fn latest_annotation_summary_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<LatestAnnotationSummary> {
+    Ok(LatestAnnotationSummary {
+        agent: row.get(0)?,
+        created_at: row.get(1)?,
+    })
 }
 
 fn paginate(mut rows: Vec<Annotation>, limit: usize) -> (Vec<Annotation>, Option<String>) {

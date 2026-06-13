@@ -15,16 +15,16 @@ use canary_core::{
     ingest::classification::{Category, Classification, Component, Persistence},
 };
 use canary_store::{
-    ErrorIngest, ErrorIngestIds, ErrorIngestPayload, IncidentCorrelation, IncidentListOptions,
-    ServiceQueryOptions, Store, WebhookDeliveryInsert, WebhookDeliveryListOptions,
-    WebhookDeliveryStatus, fixtures,
+    BOOTSTRAP_PROJECT_ID, BOOTSTRAP_TENANT_ID, ErrorIngest, ErrorIngestIds, ErrorIngestPayload,
+    IncidentCorrelation, IncidentListOptions, ServiceQueryOptions, Store, WebhookDeliveryInsert,
+    WebhookDeliveryListOptions, WebhookDeliveryStatus, fixtures,
 };
 use rusqlite::{Connection, OpenFlags, params};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const LEGACY_FIXTURE: &str = "tests/fixtures/legacy_schema.db";
 const POPULATED_LEGACY_FIXTURE: &str = "tests/fixtures/legacy_read_models.db";
-const RUST_SCHEMA_VERSION: u32 = 2026042200;
+const RUST_SCHEMA_VERSION: u32 = 2026061304;
 
 const LEGACY_MIGRATIONS: &[&str] = &[
     "20260314000001",
@@ -105,6 +105,15 @@ struct Column {
     primary_key_position: i64,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ColumnShape {
+    name: String,
+    data_type: String,
+    not_null: bool,
+    default_value: Option<String>,
+    primary_key_position: i64,
+}
+
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct IndexSql {
     table: String,
@@ -144,30 +153,44 @@ fn legacy_fixture_has_the_tables_rust_expects() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn legacy_fixture_columns_match_rust_schema() -> Result<(), Box<dyn Error>> {
-    let fixture = open_fixture_read_only()?;
+    let (dir, path) = copy_fixture("columns")?;
+    let mut store = Store::open(&path)?;
+    store.migrate()?;
+    drop(store);
+    let fixture = Connection::open(&path)?;
     let (rust_dir, rust) = rust_schema_connection()?;
 
     for table in PRODUCT_TABLES {
         assert_eq!(
-            columns(&fixture, table)?,
-            columns(&rust, table)?,
+            column_shapes(&fixture, table)?,
+            column_shapes(&rust, table)?,
             "column drift in {table}; regenerate Rust fixtures with bin/regenerate-rust-fixtures and audit the frozen legacy fixture"
         );
     }
 
     fs::remove_dir_all(rust_dir)?;
+    fs::remove_dir_all(dir)?;
     Ok(())
 }
 
 #[test]
 fn legacy_fixture_indexes_and_foreign_keys_match_rust_schema() -> Result<(), Box<dyn Error>> {
-    let fixture = open_fixture_read_only()?;
+    let (dir, path) = copy_fixture("indexes")?;
+    let mut store = Store::open(&path)?;
+    store.migrate()?;
+    drop(store);
+    let fixture = Connection::open(&path)?;
     let (rust_dir, rust) = rust_schema_connection()?;
 
     assert_eq!(index_sql(&fixture)?, index_sql(&rust)?);
     assert!(index_sql(&fixture)?.iter().any(|index| {
-        index.name == "incidents_open_service_unique_index"
+        index.name == "incidents_open_owner_service_unique_index"
+            && index.sql.contains("tenant_id, project_id, service")
             && index.sql.contains("WHERE state != 'resolved'")
+    }));
+    assert!(index_sql(&fixture)?.iter().any(|index| {
+        index.name == "monitors_owner_name_index"
+            && index.sql.contains("tenant_id, project_id, name")
     }));
 
     for table in FOREIGN_KEY_TABLES {
@@ -179,6 +202,7 @@ fn legacy_fixture_indexes_and_foreign_keys_match_rust_schema() -> Result<(), Box
     }
 
     fs::remove_dir_all(rust_dir)?;
+    fs::remove_dir_all(dir)?;
     Ok(())
 }
 
@@ -189,7 +213,9 @@ fn rust_migrate_restamps_a_legacy_fixture_without_schema_drift() -> Result<(), B
     let mut before_tables = table_names(&before)?;
     assert!(before_tables.remove("schema_migrations"));
     let (rust_dir, rust) = rust_schema_connection()?;
-    assert_eq!(before_tables, table_names(&rust)?);
+    let mut rust_tables = table_names(&rust)?;
+    assert!(rust_tables.remove("rate_limit_buckets"));
+    assert_eq!(before_tables, rust_tables);
     fs::remove_dir_all(rust_dir)?;
     assert_eq!(user_version(&before)?, 0);
     drop(before);
@@ -221,6 +247,7 @@ fn rust_migrate_restamps_a_legacy_fixture_without_schema_drift() -> Result<(), B
 fn rust_store_writes_work_against_a_legacy_fixture() -> Result<(), Box<dyn Error>> {
     let (dir, path) = copy_fixture("write")?;
     let mut store = Store::open(&path)?;
+    store.migrate()?;
 
     let ingest = error_ingest(
         "ERR-123456789abc",
@@ -239,6 +266,8 @@ fn rust_store_writes_work_against_a_legacy_fixture() -> Result<(), Box<dyn Error
     );
 
     let incident = store.correlate_incident(IncidentCorrelation {
+        tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+        project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
         signal_type: "error_group".to_owned(),
         signal_ref: "group-legacy-fixture".to_owned(),
         service: "cadence".to_owned(),
@@ -330,6 +359,7 @@ fn rust_fixture_generator_writes_read_model_artifact() -> Result<(), Box<dyn Err
 fn webhook_delivery_queries_keep_order_on_a_legacy_fixture() -> Result<(), Box<dyn Error>> {
     let (dir, path) = copy_fixture("webhook-order")?;
     let mut store = Store::open(&path)?;
+    store.migrate()?;
 
     for (delivery_id, now) in [
         ("DLV-222222222222", "2026-05-28T20:00:02Z"),
@@ -339,6 +369,9 @@ fn webhook_delivery_queries_keep_order_on_a_legacy_fixture() -> Result<(), Box<d
         store.create_pending_webhook_delivery(WebhookDeliveryInsert {
             delivery_id: delivery_id.to_owned(),
             webhook_id: "WHK-123456789abc".to_owned(),
+            tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: None,
             event: "error.new_class".to_owned(),
             now: now.to_owned(),
         })?;
@@ -434,6 +467,7 @@ fn rust_now_relative_queries_read_populated_legacy_rows_at_fixed_time() -> Resul
         IncidentListOptions {
             with_annotation: Some("acknowledged".to_owned()),
             without_annotation: None,
+            ..IncidentListOptions::default()
         },
         as_of,
     )?;
@@ -443,6 +477,7 @@ fn rust_now_relative_queries_read_populated_legacy_rows_at_fixed_time() -> Resul
         IncidentListOptions {
             with_annotation: None,
             without_annotation: Some("acknowledged".to_owned()),
+            ..IncidentListOptions::default()
         },
         as_of,
     )?;
@@ -692,6 +727,27 @@ fn columns(
         .collect::<rusqlite::Result<BTreeMap<_, _>>>()?)
 }
 
+fn column_shapes(
+    connection: &Connection,
+    table: &str,
+) -> Result<BTreeMap<String, ColumnShape>, Box<dyn Error>> {
+    Ok(columns(connection, table)?
+        .into_iter()
+        .map(|(name, column)| {
+            (
+                name,
+                ColumnShape {
+                    name: column.name,
+                    data_type: column.data_type,
+                    not_null: column.not_null,
+                    default_value: column.default_value,
+                    primary_key_position: column.primary_key_position,
+                },
+            )
+        })
+        .collect())
+}
+
 fn index_sql(connection: &Connection) -> Result<BTreeSet<IndexSql>, Box<dyn Error>> {
     let mut statement = connection.prepare(
         "SELECT tbl_name, name, sql
@@ -846,6 +902,8 @@ fn error_ingest(
             event_id: EventId::from_str(event_id)?,
         },
         payload: ErrorIngestPayload {
+            tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
             service: "cadence".to_owned(),
             error_class: "DBConnection.ConnectionError".to_owned(),
             message: "worker pool timed out".to_owned(),

@@ -38,9 +38,10 @@ pub(crate) async fn webhook_deliveries(
     RawQuery(raw_query): RawQuery,
     Query(params): Query<WebhookDeliveryParams>,
 ) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
+    let key = match require_read_scope(&state, &headers) {
+        Ok(key) => key,
+        Err(problem) => return problem_response(*problem),
+    };
 
     if query_param_is_array(raw_query.as_deref(), "webhook_id") {
         return problem_response(invalid_string_param_problem("webhook_id"));
@@ -54,6 +55,7 @@ pub(crate) async fn webhook_deliveries(
 
     let cursor = params.after.or(params.cursor);
     let options = WebhookDeliveryPageOptions {
+        service: key.service.clone(),
         webhook_id: params.webhook_id,
         event: params.event,
         status: params.status,
@@ -65,7 +67,7 @@ pub(crate) async fn webhook_deliveries(
         Err(_) => return problem_response(internal_problem()),
     };
 
-    match store.webhook_delivery_page(options) {
+    match store.webhook_delivery_page_scoped(options, &key.tenant_id, &key.project_id) {
         Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
         Err(WebhookDeliveryPageError::InvalidLimit) => problem_response(invalid_limit_problem()),
         Err(WebhookDeliveryPageError::InvalidCursor) => problem_response(invalid_cursor_problem()),
@@ -81,16 +83,22 @@ pub(crate) async fn webhook_delivery(
     headers: HeaderMap,
     Path(delivery_id): Path<String>,
 ) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
+    let key = match require_read_scope(&state, &headers) {
+        Ok(key) => key,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
 
-    match store.webhook_delivery(&delivery_id) {
+    match store.webhook_delivery_scoped(
+        &delivery_id,
+        &key.tenant_id,
+        &key.project_id,
+        key.service.as_deref(),
+    ) {
         Ok(Some(delivery)) => json_status_response(StatusCode::OK.as_u16(), delivery),
         Ok(None) => problem_response(not_found_problem(format!(
             "Webhook delivery {delivery_id} not found."

@@ -44,6 +44,8 @@ fn grouping_matches_phoenix_fixtures() {
         });
 
         let actual = compute(GroupingInput {
+            tenant_id: "TENANT-bootstrap",
+            project_id: "PROJECT-bootstrap",
             service: case.service,
             error_class: case.error_class,
             message: case.message,

@@ -8,7 +8,9 @@
 
 use std::path::Path;
 
-use canary_store::{API_KEY_PREFIX_LEN, ApiKeyInsert, Store};
+use canary_store::{
+    API_KEY_PREFIX_LEN, ApiKeyInsert, BOOTSTRAP_PROJECT_ID, BOOTSTRAP_TENANT_ID, Store,
+};
 
 use crate::server_time::current_rfc3339;
 
@@ -66,6 +68,9 @@ pub fn mint_key(db_path: &Path, scope: &str, name: &str) -> Result<String, MintK
             created_at: current_rfc3339(),
             revoked_at: None,
             scope: scope.to_owned(),
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: None,
         })
         .map_err(MintKeyError::Store)?;
 

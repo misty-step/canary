@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const MAX_STACK_FRAMES: usize = 5;
+const BOOTSTRAP_TENANT_ID: &str = "TENANT-bootstrap";
+const BOOTSTRAP_PROJECT_ID: &str = "PROJECT-bootstrap";
 
 static NORMALIZATION_RULES: LazyLock<Result<Vec<(Regex, &'static str)>, regex::Error>> =
     LazyLock::new(build_normalization_rules);
@@ -37,6 +39,10 @@ fn build_normalization_rules() -> Result<Vec<(Regex, &'static str)>, regex::Erro
 /// Input fields needed to compute an error group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupingInput<'a> {
+    /// Tenant namespace for the group identity.
+    pub tenant_id: &'a str,
+    /// Project namespace for the group identity.
+    pub project_id: &'a str,
     /// Service name.
     pub service: &'a str,
     /// Error class.
@@ -83,7 +89,12 @@ pub fn compute(input: GroupingInput<'_>) -> Grouping {
 
     if let Some(fingerprint) = input.fingerprint {
         return Grouping {
-            group_hash: fingerprint_hash(input.service, fingerprint),
+            group_hash: fingerprint_hash(
+                input.tenant_id,
+                input.project_id,
+                input.service,
+                fingerprint,
+            ),
             message_template,
             strategy: GroupingStrategy::ClientFingerprint,
         };
@@ -98,7 +109,13 @@ pub fn compute(input: GroupingInput<'_>) -> Grouping {
     }
 
     Grouping {
-        group_hash: template_hash(input.service, input.error_class, &message_template),
+        group_hash: template_hash(
+            input.tenant_id,
+            input.project_id,
+            input.service,
+            input.error_class,
+            &message_template,
+        ),
         message_template,
         strategy: GroupingStrategy::MessageTemplate,
     }
@@ -118,8 +135,13 @@ pub fn strip_template(message: &str) -> String {
     normalized.trim().to_owned()
 }
 
-fn fingerprint_hash(service: &str, fingerprint: &[String]) -> String {
-    let mut input = String::from(service);
+fn fingerprint_hash(
+    tenant_id: &str,
+    project_id: &str,
+    service: &str,
+    fingerprint: &[String],
+) -> String {
+    let mut input = namespace(tenant_id, project_id, service);
     input.push_str(&fingerprint.join(":"));
     sha256_hex(input.as_bytes())
 }
@@ -139,12 +161,38 @@ fn stack_trace_hash(input: &GroupingInput<'_>) -> Option<String> {
         .join("|");
 
     Some(sha256_hex(
-        format!("{}{}{}", input.service, input.error_class, frame_key).as_bytes(),
+        format!(
+            "{}{}{}",
+            namespace(input.tenant_id, input.project_id, input.service),
+            input.error_class,
+            frame_key
+        )
+        .as_bytes(),
     ))
 }
 
-fn template_hash(service: &str, error_class: &str, template: &str) -> String {
-    sha256_hex(format!("{service}{error_class}{template}").as_bytes())
+fn template_hash(
+    tenant_id: &str,
+    project_id: &str,
+    service: &str,
+    error_class: &str,
+    template: &str,
+) -> String {
+    sha256_hex(
+        format!(
+            "{}{error_class}{template}",
+            namespace(tenant_id, project_id, service)
+        )
+        .as_bytes(),
+    )
+}
+
+fn namespace(tenant_id: &str, project_id: &str, service: &str) -> String {
+    if tenant_id == BOOTSTRAP_TENANT_ID && project_id == BOOTSTRAP_PROJECT_ID {
+        return service.to_owned();
+    }
+
+    format!("{tenant_id}\0{project_id}\0{service}\0")
 }
 
 fn extract_in_project_frames(
@@ -197,6 +245,8 @@ mod tests {
 
     fn input<'a>(message: &'a str) -> GroupingInput<'a> {
         GroupingInput {
+            tenant_id: "TENANT-bootstrap",
+            project_id: "PROJECT-bootstrap",
             service: "svc",
             error_class: "RuntimeError",
             message,
@@ -252,6 +302,29 @@ mod tests {
         assert_eq!(first.strategy, GroupingStrategy::MessageTemplate);
         assert_eq!(first.message_template, "failed for user <int>");
         assert_eq!(first.group_hash, second.group_hash);
+    }
+
+    #[test]
+    fn tenant_and_project_namespace_group_identity() {
+        let first = compute(GroupingInput {
+            tenant_id: "TENANT-alpha",
+            project_id: "PROJECT-web",
+            ..input("failed for user 1234")
+        });
+        let second = compute(GroupingInput {
+            tenant_id: "TENANT-beta",
+            project_id: "PROJECT-web",
+            ..input("failed for user 1234")
+        });
+        let third = compute(GroupingInput {
+            tenant_id: "TENANT-alpha",
+            project_id: "PROJECT-api",
+            ..input("failed for user 1234")
+        });
+
+        assert_ne!(first.group_hash, second.group_hash);
+        assert_ne!(first.group_hash, third.group_hash);
+        assert_eq!(first.group_hash.len(), 64);
     }
 
     #[test]

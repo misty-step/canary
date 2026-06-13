@@ -13,7 +13,7 @@
         "Process the returned events in order, then persist the response cursor before going idle again.",
         "Write incident or error-group annotations back to Canary when the agent completes follow-up work."
       ],
-      "webhook_contract": "Deduplicate deliveries by x-delivery-id. For disputed or failed deliveries, read `GET /api/v1/webhook-deliveries/{delivery_id}` for diagnostics, then replay durable state through `GET /api/v1/timeline` before acting. Webhooks are non-authoritative wake-up hints; the timeline is the durable event log and must be replayed for correctness.",
+      "webhook_contract": "Verify x-canary-signature with the secret selected by x-webhook-id over `x-timestamp.x-delivery-id.body`, reject stale x-timestamp values in the receiver, and deduplicate deliveries by x-delivery-id. Canary also sends legacy x-signature over the body for older consumers. For disputed or failed deliveries, read `GET /api/v1/webhook-deliveries/{delivery_id}` for diagnostics, then replay durable state through `GET /api/v1/timeline` before acting. Webhooks are non-authoritative wake-up hints; the timeline is the durable event log and must be replayed for correctness.",
       "crash_recovery": "After a crash or restart, resume from the last persisted cursor, replay missed timeline events, and continue polling until the API returns no further cursor.",
       "cursor_precedence": "When both `after` and `cursor` are provided on timeline-style pagination endpoints, Canary resolves `after` first and ignores `cursor` for that request.",
       "incident_entrypoint": "On an `incident.opened` webhook, call `GET /api/v1/incidents/{id}` once — the response carries summary, the full incident metadata, a deterministic action brief, up to 25 correlated signals with per-type context, up to 20 newest annotations, and up to 5 most recent timeline events. Only fall through to /query, /timeline, or /errors/{id} when `signals_truncated` or `annotations_truncated` is true, or the agent needs raw stack traces.",
@@ -3983,6 +3983,9 @@
         "additionalProperties": false,
         "required": [
           "id",
+          "tenant_id",
+          "project_id",
+          "service",
           "url",
           "events",
           "active",
@@ -3991,6 +3994,19 @@
         "properties": {
           "id": {
             "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "service": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional service binding. When set, Canary only sends events for matching service payloads."
           },
           "url": {
             "type": "string",
@@ -4043,6 +4059,10 @@
             "items": {
               "$ref": "#/components/schemas/WebhookEvent"
             }
+          },
+          "service": {
+            "type": "string",
+            "description": "Optional service binding. Service-scoped webhooks receive only matching service events."
           }
         }
       },
@@ -4051,6 +4071,9 @@
         "additionalProperties": false,
         "required": [
           "id",
+          "tenant_id",
+          "project_id",
+          "service",
           "url",
           "events",
           "secret",
@@ -4059,6 +4082,19 @@
         "properties": {
           "id": {
             "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "service": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional service binding. When set, Canary only sends events for matching service payloads."
           },
           "url": {
             "type": "string",
@@ -4085,6 +4121,9 @@
         "required": [
           "delivery_id",
           "webhook_id",
+          "tenant_id",
+          "project_id",
+          "service",
           "event",
           "status",
           "attempt_count",
@@ -4103,6 +4142,19 @@
           },
           "webhook_id": {
             "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "service": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Service scope copied from the event payload at enqueue time."
           },
           "event": {
             "$ref": "#/components/schemas/WebhookEvent"
@@ -4628,7 +4680,10 @@
           "key_prefix",
           "active",
           "created_at",
-          "revoked_at"
+          "revoked_at",
+          "tenant_id",
+          "project_id",
+          "service"
         ],
         "properties": {
           "id": {
@@ -4653,6 +4708,18 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "service": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "scope": {
             "$ref": "#/components/schemas/ApiKeyScope"
@@ -4684,6 +4751,10 @@
           },
           "scope": {
             "$ref": "#/components/schemas/ApiKeyScope"
+          },
+          "service": {
+            "type": "string",
+            "description": "Optional service binding for non-admin ingest/read keys. Service-bound keys cannot access or ingest for other services."
           }
         }
       },
@@ -4697,6 +4768,9 @@
           "key",
           "key_prefix",
           "created_at",
+          "tenant_id",
+          "project_id",
+          "service",
           "warning"
         ],
         "properties": {
@@ -4715,6 +4789,18 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "service": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "warning": {
             "type": "string"

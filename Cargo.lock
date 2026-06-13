@@ -322,6 +322,7 @@ version = "0.1.0"
 dependencies = [
  "canary-core",
  "canary-store",
+ "regex",
  "serde_json",
  "thiserror",
  "time",

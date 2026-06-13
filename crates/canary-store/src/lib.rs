@@ -17,6 +17,7 @@ mod ingest;
 mod metrics;
 mod oban_jobs;
 mod query;
+mod rate_limits;
 mod retention;
 mod schema;
 mod seeds;
@@ -26,7 +27,10 @@ pub use annotations::{
     AnnotationError, AnnotationInsert, AnnotationPageOptions, AnnotationResult,
     AnnotationSubjectType, subject_types as annotation_subject_types,
 };
-pub use api_keys::{API_KEY_PREFIX_LEN, ApiKeyInsert, ApiKeyRecord, VerifiedApiKey};
+pub use api_keys::{
+    API_KEY_PREFIX_LEN, ApiKeyInsert, ApiKeyRecord, BOOTSTRAP_PROJECT_ID, BOOTSTRAP_TENANT_ID,
+    VerifiedApiKey,
+};
 pub use canary_core::metrics::MetricsSnapshot;
 pub use health::{
     ActiveTargetProbeSchedule, HealthCheckSummary, HealthMonitorStatus, HealthTargetStatus,
@@ -50,6 +54,7 @@ pub use query::{
     QueryResult, RecentTransition, SearchResult, ServiceQueryOptions, TimelineQueryError,
     TimelineQueryOptions, TimelineQueryResult,
 };
+pub use rate_limits::DurableRateLimitDecision;
 pub use retention::{
     RetentionPrune, RetentionPruneBatch, RetentionPruneBatchReport, RetentionPruneReport,
     RetentionPruneTable,
@@ -150,18 +155,53 @@ impl Store {
         health::insert_target(&self.connection, target)
     }
 
+    /// Insert a new HTTP target for one tenant/project.
+    pub fn insert_target_scoped(
+        &mut self,
+        target: TargetInsert,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> Result<()> {
+        health::insert_target_scoped(&self.connection, target, tenant_id, project_id)
+    }
+
     /// Create one service-onboarding target and ingest key as one product unit.
     pub fn commit_service_onboarding_target_and_key(
         &mut self,
         target: TargetInsert,
         key: ApiKeyInsert,
     ) -> Result<()> {
+        self.commit_service_onboarding_target_and_key_scoped(
+            target,
+            key,
+            BOOTSTRAP_TENANT_ID,
+            BOOTSTRAP_PROJECT_ID,
+        )
+    }
+
+    /// Create one service-onboarding target and ingest key for one tenant/project.
+    pub fn commit_service_onboarding_target_and_key_scoped(
+        &mut self,
+        target: TargetInsert,
+        key: ApiKeyInsert,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> Result<()> {
         let transaction = self.connection.transaction()?;
-        let conflict = health::target_conflict(&transaction, &target.service, &target.url)?;
+        let conflict = health::target_conflict_scoped(
+            &transaction,
+            &target.service,
+            &target.url,
+            tenant_id,
+            project_id,
+        )?;
         if conflict.service || conflict.url {
             return Err(StoreError::TargetConflict(conflict));
         }
-        health::insert_target(&transaction, target)?;
+        health::insert_target_scoped(&transaction, target, tenant_id, project_id)?;
+        let mut key = key;
+        key.tenant_id = tenant_id.to_owned();
+        key.project_id = project_id.to_owned();
         api_keys::insert(&transaction, key)?;
         transaction.commit()?;
         Ok(())
@@ -172,9 +212,27 @@ impl Store {
         health::list_targets(&self.connection)
     }
 
+    /// Return admin target rows for one tenant/project.
+    pub fn list_targets_scoped(
+        &self,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<TargetRecord>> {
+        health::list_targets_scoped(&self.connection, tenant_id, project_id)
+    }
+
     /// Return read-model target rows for health-status endpoints.
     pub fn health_targets(&self) -> Result<Vec<HealthTargetStatus>> {
         health::health_targets(&self.connection)
+    }
+
+    /// Return target health rows for one tenant/project.
+    pub fn health_targets_scoped(
+        &self,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<HealthTargetStatus>> {
+        health::health_targets_scoped(&self.connection, tenant_id, project_id)
     }
 
     /// Query recent target checks for one target.
@@ -186,14 +244,71 @@ impl Store {
         health::target_checks(&self.connection, target_id, window)
     }
 
+    /// Query recent target checks when the target belongs to one tenant/project.
+    pub fn target_checks_scoped(
+        &self,
+        target_id: &str,
+        window: &str,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> QueryResult<Vec<TargetCheckRead>> {
+        health::target_checks_scoped(&self.connection, target_id, window, tenant_id, project_id)
+    }
+
+    /// Query recent target checks when the target belongs to one service authority.
+    pub fn target_checks_scoped_for_service(
+        &self,
+        target_id: &str,
+        window: &str,
+        tenant_id: &str,
+        project_id: &str,
+        service: &str,
+    ) -> QueryResult<Vec<TargetCheckRead>> {
+        health::target_checks_scoped_for_service(
+            &self.connection,
+            target_id,
+            window,
+            tenant_id,
+            project_id,
+            service,
+        )
+    }
+
     /// Delete one target row.
     pub fn delete_target(&mut self, target_id: &str) -> Result<bool> {
         health::delete_target(&mut self.connection, target_id)
     }
 
+    /// Delete one target owned by the supplied tenant/project.
+    pub fn delete_target_scoped(
+        &mut self,
+        target_id: &str,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> Result<bool> {
+        health::delete_target_scoped(&mut self.connection, target_id, tenant_id, project_id)
+    }
+
     /// Update one target's active flag.
     pub fn update_target_active(&mut self, target_id: &str, active: bool) -> Result<bool> {
         health::update_target_active(&mut self.connection, target_id, active)
+    }
+
+    /// Set target active state when the target is owned by the supplied tenant/project.
+    pub fn update_target_active_scoped(
+        &mut self,
+        target_id: &str,
+        active: bool,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> Result<bool> {
+        health::update_target_active_scoped(
+            &mut self.connection,
+            target_id,
+            active,
+            tenant_id,
+            project_id,
+        )
     }
 
     /// Update one target's probe interval and return the previous cadence context.
@@ -203,6 +318,23 @@ impl Store {
         interval_ms: i64,
     ) -> Result<Option<TargetIntervalUpdate>> {
         health::update_target_interval(&mut self.connection, target_id, interval_ms)
+    }
+
+    /// Update target interval when the target is owned by the supplied tenant/project.
+    pub fn update_target_interval_scoped(
+        &mut self,
+        target_id: &str,
+        interval_ms: i64,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> Result<Option<TargetIntervalUpdate>> {
+        health::update_target_interval_scoped(
+            &mut self.connection,
+            target_id,
+            interval_ms,
+            tenant_id,
+            project_id,
+        )
     }
 
     /// Return one active target configuration and state snapshot by id.
@@ -243,9 +375,29 @@ impl Store {
         health::insert_monitor(&self.connection, monitor)
     }
 
+    /// Insert a non-HTTP monitor for one tenant/project.
+    pub fn insert_monitor_scoped(
+        &mut self,
+        monitor: MonitorInsert,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> Result<()> {
+        health::insert_monitor_scoped(&self.connection, monitor, tenant_id, project_id)
+    }
+
     /// Create one non-HTTP monitor and its initial unknown state row.
     pub fn create_monitor(&mut self, monitor: MonitorInsert) -> Result<bool> {
         health::create_monitor(&mut self.connection, monitor)
+    }
+
+    /// Create a non-HTTP monitor and initial state for one tenant/project.
+    pub fn create_monitor_scoped(
+        &mut self,
+        monitor: MonitorInsert,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> Result<bool> {
+        health::create_monitor_scoped(&mut self.connection, monitor, tenant_id, project_id)
     }
 
     /// Return admin-visible monitor rows ordered by name.
@@ -253,14 +405,42 @@ impl Store {
         health::list_monitors(&self.connection)
     }
 
+    /// Return admin monitor rows for one tenant/project.
+    pub fn list_monitors_scoped(
+        &self,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<MonitorRecord>> {
+        health::list_monitors_scoped(&self.connection, tenant_id, project_id)
+    }
+
     /// Return read-model monitor rows for health-status endpoints.
     pub fn health_monitors(&self) -> Result<Vec<HealthMonitorStatus>> {
         health::health_monitors(&self.connection)
     }
 
+    /// Return monitor health rows for one tenant/project.
+    pub fn health_monitors_scoped(
+        &self,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<HealthMonitorStatus>> {
+        health::health_monitors_scoped(&self.connection, tenant_id, project_id)
+    }
+
     /// Delete one non-HTTP monitor row.
     pub fn delete_monitor(&mut self, monitor_id: &str) -> Result<bool> {
         health::delete_monitor(&mut self.connection, monitor_id)
+    }
+
+    /// Delete one monitor owned by the supplied tenant/project.
+    pub fn delete_monitor_scoped(
+        &mut self,
+        monitor_id: &str,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> Result<bool> {
+        health::delete_monitor_scoped(&mut self.connection, monitor_id, tenant_id, project_id)
     }
 
     /// Return one monitor configuration and state snapshot by check-in name.
@@ -273,6 +453,21 @@ impl Store {
         name: &str,
     ) -> Result<Option<MonitorCheckInSnapshot>> {
         health::monitor_check_in_snapshot_by_name(&mut self.connection, name)
+    }
+
+    /// Return one monitor check-in planning snapshot by tenant/project/name.
+    pub fn monitor_check_in_snapshot_by_name_scoped(
+        &mut self,
+        name: &str,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> Result<Option<MonitorCheckInSnapshot>> {
+        health::monitor_check_in_snapshot_by_name_scoped(
+            &mut self.connection,
+            name,
+            tenant_id,
+            project_id,
+        )
     }
 
     /// Return monitor state rows that have deadlines eligible for overdue evaluation.
@@ -303,9 +498,29 @@ impl Store {
         api_keys::list(&self.connection)
     }
 
+    /// Return admin-visible API keys for one tenant/project.
+    pub fn list_api_keys_scoped(
+        &self,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<ApiKeyRecord>> {
+        api_keys::list_scoped(&self.connection, tenant_id, project_id)
+    }
+
     /// Revoke one API key by id.
     pub fn revoke_api_key(&mut self, key_id: &str, revoked_at: &str) -> Result<bool> {
         api_keys::revoke(&self.connection, key_id, revoked_at)
+    }
+
+    /// Revoke one API key owned by the supplied tenant/project.
+    pub fn revoke_api_key_scoped(
+        &mut self,
+        key_id: &str,
+        revoked_at: &str,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> Result<bool> {
+        api_keys::revoke_scoped(&self.connection, key_id, revoked_at, tenant_id, project_id)
     }
 
     /// Verify a raw bearer token against active bcrypt-hashed API-key rows.
@@ -316,6 +531,25 @@ impl Store {
     /// Return whether a raw bearer token has any active row with the same prefix.
     pub fn active_api_key_prefix_exists(&self, raw_key: &str) -> Result<bool> {
         api_keys::active_key_prefix_exists(&self.connection, raw_key)
+    }
+
+    /// Consume one durable fixed-window rate-limit bucket.
+    pub fn check_rate_limit(
+        &mut self,
+        kind: &str,
+        identity: &str,
+        limit: u32,
+        window_ms: u64,
+        now_ms: i64,
+    ) -> Result<DurableRateLimitDecision> {
+        rate_limits::check(
+            &mut self.connection,
+            kind,
+            identity,
+            limit,
+            window_ms,
+            now_ms,
+        )
     }
 
     /// Query recent error groups for a service.
@@ -374,9 +608,29 @@ impl Store {
         query::errors_by_class(&self.connection, window)
     }
 
+    /// Query recent error counts grouped by error class for one tenant/project.
+    pub fn errors_by_class_scoped(
+        &self,
+        window: &str,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> QueryResult<canary_core::query::ErrorsByClass> {
+        query::errors_by_class_scoped(&self.connection, window, tenant_id, project_id)
+    }
+
     /// Query active error counts grouped by service for combined status.
     pub fn error_summary(&self, window: &str) -> QueryResult<Vec<ErrorSummaryItem>> {
         query::error_summary(&self.connection, window)
+    }
+
+    /// Query active error counts grouped by service for one tenant/project.
+    pub fn error_summary_scoped(
+        &self,
+        window: &str,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> QueryResult<Vec<ErrorSummaryItem>> {
+        query::error_summary_scoped(&self.connection, window, tenant_id, project_id)
     }
 
     /// Query active error groups for the unified report.
@@ -385,6 +639,16 @@ impl Store {
         window: &str,
     ) -> QueryResult<Vec<canary_core::query::ErrorGroupSummary>> {
         query::report_error_groups(&self.connection, window)
+    }
+
+    /// Query active error groups for one tenant/project.
+    pub fn report_error_groups_scoped(
+        &self,
+        window: &str,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> QueryResult<Vec<canary_core::query::ErrorGroupSummary>> {
+        query::report_error_groups_scoped(&self.connection, window, tenant_id, project_id)
     }
 
     /// Query active error groups for the unified report at a deterministic time.
@@ -401,9 +665,30 @@ impl Store {
         query::recent_transitions(&self.connection, window)
     }
 
+    /// Query recent target and monitor transitions for one tenant/project.
+    pub fn recent_transitions_scoped(
+        &self,
+        window: &str,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> QueryResult<Vec<RecentTransition>> {
+        query::recent_transitions_scoped(&self.connection, window, tenant_id, project_id)
+    }
+
     /// Search recent errors for the unified report.
     pub fn search_errors(&self, query: &str, window: &str) -> QueryResult<Vec<SearchResult>> {
         query::search_errors(&self.connection, query, window)
+    }
+
+    /// Search recent errors for one tenant/project.
+    pub fn search_errors_scoped(
+        &self,
+        query: &str,
+        window: &str,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> QueryResult<Vec<SearchResult>> {
+        query::search_errors_scoped(&self.connection, query, window, tenant_id, project_id)
     }
 
     /// Query the durable service-event timeline.
@@ -449,12 +734,32 @@ impl Store {
         query::incident_detail(&self.connection, incident_id)
     }
 
+    /// Return one incident detail read model for one tenant/project.
+    pub fn incident_detail_scoped(
+        &self,
+        incident_id: &str,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> QueryResult<Option<canary_core::query::IncidentDetail>> {
+        query::incident_detail_scoped(&self.connection, incident_id, tenant_id, project_id)
+    }
+
     /// Return one error detail read model.
     pub fn error_detail(
         &self,
         error_id: &str,
     ) -> QueryResult<Option<canary_core::query::ErrorDetail>> {
         query::error_detail(&self.connection, error_id)
+    }
+
+    /// Return one error detail read model for one tenant/project.
+    pub fn error_detail_scoped(
+        &self,
+        error_id: &str,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> QueryResult<Option<canary_core::query::ErrorDetail>> {
+        query::error_detail_scoped(&self.connection, error_id, tenant_id, project_id)
     }
 
     /// Create one annotation after verifying the target subject exists.
@@ -474,12 +779,48 @@ impl Store {
         annotations::list(&self.connection, subject_type, subject_id)
     }
 
+    /// List annotations for legacy routes within one tenant/project.
+    pub fn annotations_scoped(
+        &self,
+        subject_type: &str,
+        subject_id: &str,
+        tenant_id: &str,
+        project_id: &str,
+        service: Option<&str>,
+    ) -> AnnotationResult<canary_core::query::AnnotationListResponse> {
+        annotations::list_scoped(
+            &self.connection,
+            subject_type,
+            subject_id,
+            tenant_id,
+            project_id,
+            service,
+        )
+    }
+
     /// Page annotations for the unified read route.
     pub fn annotation_page(
         &self,
         options: AnnotationPageOptions,
     ) -> AnnotationResult<canary_core::query::AnnotationPageResponse> {
         annotations::page(&self.connection, options)
+    }
+
+    /// Resolve one annotation subject's service under a tenant/project boundary.
+    pub fn annotation_subject_service_scoped(
+        &self,
+        subject_type: &str,
+        subject_id: &str,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> AnnotationResult<Option<String>> {
+        annotations::subject_service_scoped(
+            &self.connection,
+            subject_type,
+            subject_id,
+            tenant_id,
+            project_id,
+        )
     }
 
     /// Insert a pending webhook delivery ledger row.
@@ -535,12 +876,39 @@ impl Store {
         webhook_deliveries::page(&self.connection, options)
     }
 
+    /// Page through webhook delivery ledger rows for one tenant/project.
+    pub fn webhook_delivery_page_scoped(
+        &self,
+        options: WebhookDeliveryPageOptions,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> WebhookDeliveryPageResult<canary_core::query::WebhookDeliveriesResponse> {
+        webhook_deliveries::page_scoped(&self.connection, options, tenant_id, project_id)
+    }
+
     /// Return one webhook delivery ledger row by stable delivery id.
     pub fn webhook_delivery(
         &self,
         delivery_id: &str,
     ) -> Result<Option<canary_core::query::WebhookDelivery>> {
         webhook_deliveries::get(&self.connection, delivery_id)
+    }
+
+    /// Return one webhook delivery ledger row by id for one tenant/project.
+    pub fn webhook_delivery_scoped(
+        &self,
+        delivery_id: &str,
+        tenant_id: &str,
+        project_id: &str,
+        service: Option<&str>,
+    ) -> Result<Option<canary_core::query::WebhookDelivery>> {
+        webhook_deliveries::get_scoped(
+            &self.connection,
+            delivery_id,
+            tenant_id,
+            project_id,
+            service,
+        )
     }
 
     /// Return active webhook subscriptions for one event.
@@ -551,6 +919,23 @@ impl Store {
         webhook_deliveries::active_subscriptions_for_event(&self.connection, event)
     }
 
+    /// Return active webhook subscriptions for one event and authority scope.
+    pub fn active_webhook_subscriptions_for_event_scoped(
+        &self,
+        event: &str,
+        tenant_id: &str,
+        project_id: &str,
+        service: Option<&str>,
+    ) -> Result<Vec<WebhookSubscription>> {
+        webhook_deliveries::active_subscriptions_for_event_scoped(
+            &self.connection,
+            event,
+            tenant_id,
+            project_id,
+            service,
+        )
+    }
+
     /// Return one webhook subscription by id, including inactive rows.
     pub fn webhook_subscription(&self, webhook_id: &str) -> Result<Option<WebhookSubscription>> {
         webhook_deliveries::subscription_by_id(&self.connection, webhook_id)
@@ -559,6 +944,15 @@ impl Store {
     /// Return all webhook subscriptions in admin list order.
     pub fn webhook_subscriptions(&self) -> Result<Vec<WebhookSubscription>> {
         webhook_deliveries::list_subscriptions(&self.connection)
+    }
+
+    /// Return webhook subscriptions owned by one tenant/project.
+    pub fn webhook_subscriptions_scoped(
+        &self,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<WebhookSubscription>> {
+        webhook_deliveries::list_subscriptions_scoped(&self.connection, tenant_id, project_id)
     }
 
     /// Insert one webhook subscription row.
@@ -572,6 +966,21 @@ impl Store {
     /// Delete one webhook subscription row.
     pub fn delete_webhook_subscription(&mut self, webhook_id: &str) -> Result<bool> {
         webhook_deliveries::delete_subscription(&mut self.connection, webhook_id)
+    }
+
+    /// Delete one webhook subscription owned by the supplied tenant/project.
+    pub fn delete_webhook_subscription_scoped(
+        &mut self,
+        webhook_id: &str,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> Result<bool> {
+        webhook_deliveries::delete_subscription_scoped(
+            &mut self.connection,
+            webhook_id,
+            tenant_id,
+            project_id,
+        )
     }
 
     /// Insert one scheduled webhook delivery job.
@@ -685,6 +1094,7 @@ mod tests {
                 "monitor_state".to_owned(),
                 "monitors".to_owned(),
                 "oban_jobs".to_owned(),
+                "rate_limit_buckets".to_owned(),
                 "seed_runs".to_owned(),
                 "service_events".to_owned(),
                 "target_checks".to_owned(),
@@ -698,6 +1108,133 @@ mod tests {
 
         store.migrate()?;
         assert_eq!(store.schema_version()?, schema::SCHEMA_VERSION);
+
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_backfills_service_scope_columns() -> Result<()> {
+        let mut store = migrated_store()?;
+        store.insert_target(TargetInsert {
+            id: "TGT-billing".to_owned(),
+            url: "https://billing.example.com/health".to_owned(),
+            name: "billing".to_owned(),
+            service: "billing".to_owned(),
+            method: "GET".to_owned(),
+            headers: None,
+            interval_ms: 60_000,
+            timeout_ms: 10_000,
+            expected_status: "200".to_owned(),
+            body_contains: None,
+            degraded_after: 1,
+            down_after: 3,
+            up_after: 1,
+            active: true,
+            created_at: "2026-05-28T19:00:00Z".to_owned(),
+        })?;
+        store.connection.execute(
+            "INSERT INTO annotations (
+                id, tenant_id, project_id, service, agent, action, created_at, subject_type, subject_id
+             ) VALUES (
+                'ANN-null-service', ?1, ?2, NULL, 'agent', 'triaged',
+                '2026-05-28T20:00:00Z', 'target', 'TGT-billing'
+            )",
+            params![BOOTSTRAP_TENANT_ID, BOOTSTRAP_PROJECT_ID],
+        )?;
+        store.connection.execute(
+            "INSERT INTO monitors (
+                id, tenant_id, project_id, name, service, mode, expected_every_ms, grace_ms, created_at
+             ) VALUES (
+                'MON-blank-service', ?1, ?2, 'desktop-worker', '', 'ttl', 60000, 0,
+                '2026-05-28T20:00:00Z'
+             )",
+            params![BOOTSTRAP_TENANT_ID, BOOTSTRAP_PROJECT_ID],
+        )?;
+        store.connection.execute(
+            "INSERT INTO annotations (
+                id, tenant_id, project_id, service, agent, action, created_at, subject_type, subject_id
+             ) VALUES (
+                'ANN-monitor-blank-service', ?1, ?2, NULL, 'agent', 'triaged',
+                '2026-05-28T20:00:00Z', 'monitor', 'MON-blank-service'
+             )",
+            params![BOOTSTRAP_TENANT_ID, BOOTSTRAP_PROJECT_ID],
+        )?;
+        store.connection.execute(
+            "INSERT INTO webhooks (
+                id, tenant_id, project_id, service, url, events, secret, active, created_at
+             ) VALUES (
+                'WHK-service', ?1, ?2, 'billing', 'https://example.test/hook',
+                '[\"error.new_class\"]', 'secret', 1, '2026-05-28T20:00:00Z'
+             )",
+            params![BOOTSTRAP_TENANT_ID, BOOTSTRAP_PROJECT_ID],
+        )?;
+        for (delivery_id, webhook_id) in [
+            ("DLV-job-payload", "WHK-payload"),
+            ("DLV-service-webhook", "WHK-service"),
+        ] {
+            store.connection.execute(
+                "INSERT INTO webhook_deliveries (
+                    delivery_id, tenant_id, project_id, service, webhook_id, event, status,
+                    created_at, updated_at
+                 ) VALUES (
+                    ?1, ?2, ?3, NULL, ?4, 'error.new_class', 'pending',
+                    '2026-05-28T20:00:00Z', '2026-05-28T20:00:00Z'
+                 )",
+                params![
+                    delivery_id,
+                    BOOTSTRAP_TENANT_ID,
+                    BOOTSTRAP_PROJECT_ID,
+                    webhook_id
+                ],
+            )?;
+        }
+        store.connection.execute(
+            "INSERT INTO oban_jobs (queue, worker, args)
+             VALUES ('webhooks', 'Canary.Workers.Webhooks', ?1)",
+            [json!({
+                "delivery_id": "DLV-job-payload",
+                "payload": {"target": {"service": "billing"}}
+            })
+            .to_string()],
+        )?;
+        store.connection.execute(
+            "INSERT INTO oban_jobs (queue, worker, args)
+             VALUES ('webhooks', 'Canary.Workers.Webhooks', ?1)",
+            [json!({
+                "delivery_id": "DLV-job-payload",
+                "payload": {"target": {"name": "billing"}}
+            })
+            .to_string()],
+        )?;
+
+        store.migrate()?;
+
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT service FROM annotations WHERE id = 'ANN-null-service'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?,
+            "billing"
+        );
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT service FROM annotations WHERE id = 'ANN-monitor-blank-service'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?,
+            "desktop-worker"
+        );
+        for delivery_id in ["DLV-job-payload", "DLV-service-webhook"] {
+            assert_eq!(
+                store.connection.query_row(
+                    "SELECT service FROM webhook_deliveries WHERE delivery_id = ?1",
+                    [delivery_id],
+                    |row| row.get::<_, String>(0),
+                )?,
+                "billing"
+            );
+        }
 
         Ok(())
     }
@@ -776,6 +1313,190 @@ mod tests {
                 "errors_group_hash_created_at_index",
             ],
         )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn durable_rate_limit_buckets_survive_store_reopen_and_reset_after_window() -> Result<()> {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let path = std::env::temp_dir().join(format!(
+            "canary-store-rate-limit-{}-{suffix}.db",
+            std::process::id()
+        ));
+
+        {
+            let mut store = Store::open(&path)?;
+            store.migrate()?;
+            assert_eq!(
+                store.check_rate_limit("query", "KEY-read", 2, 60_000, 1_000)?,
+                DurableRateLimitDecision::Allowed
+            );
+            assert_eq!(
+                store.check_rate_limit("query", "KEY-read", 2, 60_000, 2_000)?,
+                DurableRateLimitDecision::Allowed
+            );
+        }
+
+        {
+            let mut store = Store::open(&path)?;
+            assert_eq!(
+                store.check_rate_limit("query", "KEY-read", 2, 60_000, 3_000)?,
+                DurableRateLimitDecision::Limited {
+                    retry_after_seconds: 59
+                }
+            );
+            assert_eq!(
+                store.check_rate_limit("query", "KEY-other", 2, 60_000, 3_000)?,
+                DurableRateLimitDecision::Allowed
+            );
+            assert_eq!(
+                store.check_rate_limit("query", "KEY-read", 2, 60_000, 61_000)?,
+                DurableRateLimitDecision::Allowed
+            );
+        }
+
+        let _ = std::fs::remove_file(path);
+
+        Ok(())
+    }
+
+    #[test]
+    fn durable_rate_limit_rejects_zero_sized_policy() -> Result<()> {
+        let mut store = migrated_store()?;
+
+        assert_eq!(
+            store.check_rate_limit("query", "KEY-read", 0, 60_000, 1_000)?,
+            DurableRateLimitDecision::Limited {
+                retry_after_seconds: 1
+            }
+        );
+        assert_eq!(
+            store.check_rate_limit("query", "KEY-read", 2, 0, 1_000)?,
+            DurableRateLimitDecision::Limited {
+                retry_after_seconds: 1
+            }
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn service_onboarding_scoped_commit_derives_key_owner_from_authority()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        let raw_key = "sk_live_onboarding_scoped_secret";
+
+        store.commit_service_onboarding_target_and_key_scoped(
+            TargetInsert {
+                id: "TGT-onboard-owner".to_owned(),
+                url: "https://example.com/onboard/health".to_owned(),
+                name: "onboard".to_owned(),
+                service: "onboard".to_owned(),
+                method: "GET".to_owned(),
+                headers: None,
+                interval_ms: 60_000,
+                timeout_ms: 10_000,
+                expected_status: "200".to_owned(),
+                body_contains: None,
+                degraded_after: 1,
+                down_after: 3,
+                up_after: 1,
+                active: true,
+                created_at: "2026-05-28T20:00:00Z".to_owned(),
+            },
+            ApiKeyInsert {
+                id: "KEY-onboard-owner".to_owned(),
+                name: "onboard-ingest".to_owned(),
+                key_prefix: api_keys::key_prefix(raw_key),
+                key_hash: bcrypt::hash(raw_key, bcrypt::DEFAULT_COST)?,
+                created_at: "2026-05-28T20:00:00Z".to_owned(),
+                revoked_at: None,
+                scope: "ingest-only".to_owned(),
+                tenant_id: "TENANT-wrong".to_owned(),
+                project_id: "PROJECT-wrong".to_owned(),
+                service: Some("onboard".to_owned()),
+            },
+            "TENANT-right",
+            "PROJECT-right",
+        )?;
+
+        let verified = store
+            .verify_api_key(raw_key)?
+            .ok_or("onboarding key should verify")?;
+        assert_eq!(verified.tenant_id, "TENANT-right");
+        assert_eq!(verified.project_id, "PROJECT-right");
+        assert_eq!(verified.service.as_deref(), Some("onboard"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn schema_carries_bootstrap_ownership_columns() -> Result<()> {
+        let store = migrated_store()?;
+
+        for table in [
+            "api_keys",
+            "errors",
+            "error_groups",
+            "targets",
+            "webhooks",
+            "incidents",
+            "service_events",
+            "annotations",
+            "webhook_deliveries",
+            "monitors",
+        ] {
+            let columns = columns(&store.connection, table)?;
+            let tenant_primary_key_position = if table == "error_groups" { 1 } else { 0 };
+            let project_primary_key_position = if table == "error_groups" { 2 } else { 0 };
+            assert_column(
+                &columns,
+                "tenant_id",
+                ColumnSpec::new("TEXT")
+                    .not_null()
+                    .default_value("'TENANT-bootstrap'")
+                    .primary_key_position(tenant_primary_key_position),
+            );
+            assert_column(
+                &columns,
+                "project_id",
+                ColumnSpec::new("TEXT")
+                    .not_null()
+                    .default_value("'PROJECT-bootstrap'")
+                    .primary_key_position(project_primary_key_position),
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn api_key_verification_returns_bootstrap_authority() -> Result<()> {
+        let mut store = migrated_store()?;
+        let raw_key = "sk_live_owned_secret";
+        store.insert_api_key(ApiKeyInsert {
+            id: "KEY-owned".to_owned(),
+            name: "owned".to_owned(),
+            key_prefix: raw_key.chars().take(API_KEY_PREFIX_LEN).collect(),
+            key_hash: bcrypt::hash(raw_key, 4)?,
+            created_at: "2026-05-28T20:00:00Z".to_owned(),
+            revoked_at: None,
+            scope: "read-only".to_owned(),
+            tenant_id: "TENANT-alpha".to_owned(),
+            project_id: "PROJECT-api".to_owned(),
+            service: Some("linejam".to_owned()),
+        })?;
+
+        let verified = store
+            .verify_api_key(raw_key)?
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+        assert_eq!(verified.tenant_id, "TENANT-alpha");
+        assert_eq!(verified.project_id, "PROJECT-api");
+        assert_eq!(verified.service.as_deref(), Some("linejam"));
 
         Ok(())
     }
@@ -876,12 +1597,12 @@ mod tests {
     fn webhook_delivery_ledger_tracks_attempt_success_and_final_discard() -> Result<()> {
         let mut store = migrated_store()?;
 
-        store.create_pending_webhook_delivery(WebhookDeliveryInsert {
-            delivery_id: "DLV-123456789abc".to_owned(),
-            webhook_id: "WHK-123456789abc".to_owned(),
-            event: "error.new_class".to_owned(),
-            now: "2026-05-28T20:00:00Z".to_owned(),
-        })?;
+        store.create_pending_webhook_delivery(webhook_delivery_insert(
+            "DLV-123456789abc",
+            "WHK-123456789abc",
+            "error.new_class",
+            "2026-05-28T20:00:00Z",
+        ))?;
         store.mark_webhook_delivery_attempt("DLV-123456789abc", "2026-05-28T20:00:01Z")?;
         store.mark_webhook_delivery_attempt("DLV-123456789abc", "2026-05-28T20:00:02Z")?;
 
@@ -912,12 +1633,12 @@ mod tests {
             Some("2026-05-28T20:00:03Z")
         );
 
-        store.create_pending_webhook_delivery(WebhookDeliveryInsert {
-            delivery_id: "DLV-abcdefghijkl".to_owned(),
-            webhook_id: "WHK-123456789abc".to_owned(),
-            event: "error.new_class".to_owned(),
-            now: "2026-05-28T20:01:00Z".to_owned(),
-        })?;
+        store.create_pending_webhook_delivery(webhook_delivery_insert(
+            "DLV-abcdefghijkl",
+            "WHK-123456789abc",
+            "error.new_class",
+            "2026-05-28T20:01:00Z",
+        ))?;
         store.mark_webhook_delivery_attempt("DLV-abcdefghijkl", "2026-05-28T20:01:01Z")?;
         store.mark_webhook_delivery_discarded(
             "DLV-abcdefghijkl",
@@ -942,19 +1663,19 @@ mod tests {
     fn webhook_delivery_suppression_is_idempotent_and_queryable() -> Result<()> {
         let mut store = migrated_store()?;
 
-        store.create_pending_webhook_delivery(WebhookDeliveryInsert {
-            delivery_id: "DLV-123456789abc".to_owned(),
-            webhook_id: "WHK-123456789abc".to_owned(),
-            event: "error.new_class".to_owned(),
-            now: "2026-05-28T20:00:00Z".to_owned(),
-        })?;
+        store.create_pending_webhook_delivery(webhook_delivery_insert(
+            "DLV-123456789abc",
+            "WHK-123456789abc",
+            "error.new_class",
+            "2026-05-28T20:00:00Z",
+        ))?;
         store.create_suppressed_webhook_delivery(
-            WebhookDeliveryInsert {
-                delivery_id: "DLV-123456789abc".to_owned(),
-                webhook_id: "WHK-123456789abc".to_owned(),
-                event: "error.new_class".to_owned(),
-                now: "2026-05-28T20:00:05Z".to_owned(),
-            },
+            webhook_delivery_insert(
+                "DLV-123456789abc",
+                "WHK-123456789abc",
+                "error.new_class",
+                "2026-05-28T20:00:05Z",
+            ),
             "cooldown",
         )?;
 
@@ -1003,12 +1724,7 @@ mod tests {
             ),
         ] {
             store.create_suppressed_webhook_delivery(
-                WebhookDeliveryInsert {
-                    delivery_id: delivery_id.to_owned(),
-                    webhook_id: webhook_id.to_owned(),
-                    event: event.to_owned(),
-                    now: now.to_owned(),
-                },
+                webhook_delivery_insert(delivery_id, webhook_id, event, now),
                 "cooldown",
             )?;
         }
@@ -1090,12 +1806,12 @@ mod tests {
     fn webhook_delivery_returns_one_formatted_row_by_delivery_id()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut store = migrated_store()?;
-        store.create_pending_webhook_delivery(WebhookDeliveryInsert {
-            delivery_id: "DLV-diagnostic".to_owned(),
-            webhook_id: "WHK-diagnostic".to_owned(),
-            event: "incident.updated".to_owned(),
-            now: "2026-05-28T20:00:00Z".to_owned(),
-        })?;
+        store.create_pending_webhook_delivery(webhook_delivery_insert(
+            "DLV-diagnostic",
+            "WHK-diagnostic",
+            "incident.updated",
+            "2026-05-28T20:00:00Z",
+        ))?;
         store.mark_webhook_delivery_attempt("DLV-diagnostic", "2026-05-28T20:00:01Z")?;
         store.mark_webhook_delivery_delivered("DLV-diagnostic", "2026-05-28T20:00:02Z")?;
 
@@ -1145,6 +1861,9 @@ mod tests {
         ] {
             store.create_annotation(AnnotationInsert {
                 id: id.to_owned(),
+                tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+                project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+                service: None,
                 subject_type: "target".to_owned(),
                 subject_id: "TGT-api".to_owned(),
                 agent: agent.to_owned(),
@@ -1155,6 +1874,9 @@ mod tests {
         }
 
         let first = store.annotation_page(AnnotationPageOptions {
+            tenant_id: None,
+            project_id: None,
+            service: None,
             subject_type: "target".to_owned(),
             subject_id: "TGT-api".to_owned(),
             limit: Some("2".to_owned()),
@@ -1177,6 +1899,9 @@ mod tests {
         let cursor = first.cursor.ok_or("expected annotation cursor")?;
 
         let second = store.annotation_page(AnnotationPageOptions {
+            tenant_id: None,
+            project_id: None,
+            service: None,
             subject_type: "target".to_owned(),
             subject_id: "TGT-api".to_owned(),
             limit: Some("2".to_owned()),
@@ -1200,6 +1925,9 @@ mod tests {
 
         assert!(matches!(
             store.annotation_page(AnnotationPageOptions {
+                tenant_id: None,
+                project_id: None,
+                service: None,
                 subject_type: "target".to_owned(),
                 subject_id: "TGT-api".to_owned(),
                 limit: Some("0".to_owned()),
@@ -1209,6 +1937,9 @@ mod tests {
         ));
         assert!(matches!(
             store.annotation_page(AnnotationPageOptions {
+                tenant_id: None,
+                project_id: None,
+                service: None,
                 subject_type: "target".to_owned(),
                 subject_id: "TGT-api".to_owned(),
                 limit: Some("51".to_owned()),
@@ -1218,6 +1949,9 @@ mod tests {
         ));
         assert!(matches!(
             store.annotation_page(AnnotationPageOptions {
+                tenant_id: None,
+                project_id: None,
+                service: None,
                 subject_type: "target".to_owned(),
                 subject_id: "TGT-api".to_owned(),
                 limit: None,
@@ -1227,6 +1961,9 @@ mod tests {
         ));
         assert!(matches!(
             store.annotation_page(AnnotationPageOptions {
+                tenant_id: None,
+                project_id: None,
+                service: None,
                 subject_type: "spaceship".to_owned(),
                 subject_id: "X-1".to_owned(),
                 limit: None,
@@ -1236,6 +1973,9 @@ mod tests {
         ));
         assert!(matches!(
             store.annotation_page(AnnotationPageOptions {
+                tenant_id: None,
+                project_id: None,
+                service: None,
                 subject_type: "target".to_owned(),
                 subject_id: "TGT-missing".to_owned(),
                 limit: None,
@@ -1409,6 +2149,71 @@ mod tests {
     }
 
     #[test]
+    fn active_webhook_subscriptions_filter_by_owner_and_service_scope() -> Result<()> {
+        let mut store = migrated_store()?;
+
+        store.insert_webhook_subscription(webhook_subscription_insert(
+            "WHK-unscoped",
+            "https://example.test/unscoped",
+            vec!["error.new_class".to_owned()],
+            true,
+            "2026-05-28T20:00:00Z",
+        ))?;
+        let mut linejam = webhook_subscription_insert(
+            "WHK-linejam",
+            "https://example.test/linejam",
+            vec!["error.new_class".to_owned()],
+            true,
+            "2026-05-28T20:01:00Z",
+        );
+        linejam.service = Some("linejam".to_owned());
+        store.insert_webhook_subscription(linejam)?;
+        let mut vanity = webhook_subscription_insert(
+            "WHK-vanity",
+            "https://example.test/vanity",
+            vec!["error.new_class".to_owned()],
+            true,
+            "2026-05-28T20:02:00Z",
+        );
+        vanity.service = Some("vanity".to_owned());
+        store.insert_webhook_subscription(vanity)?;
+        let mut other_project = webhook_subscription_insert(
+            "WHK-other-project",
+            "https://example.test/other",
+            vec!["error.new_class".to_owned()],
+            true,
+            "2026-05-28T20:03:00Z",
+        );
+        other_project.project_id = "PROJECT-other".to_owned();
+        store.insert_webhook_subscription(other_project)?;
+
+        let linejam_matches = store.active_webhook_subscriptions_for_event_scoped(
+            "error.new_class",
+            BOOTSTRAP_TENANT_ID,
+            BOOTSTRAP_PROJECT_ID,
+            Some("linejam"),
+        )?;
+        assert_eq!(
+            linejam_matches
+                .iter()
+                .map(|subscription| subscription.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["WHK-unscoped", "WHK-linejam"]
+        );
+
+        let generic_matches = store.active_webhook_subscriptions_for_event_scoped(
+            "error.new_class",
+            BOOTSTRAP_TENANT_ID,
+            BOOTSTRAP_PROJECT_ID,
+            None,
+        )?;
+        assert_eq!(generic_matches.len(), 1);
+        assert_eq!(generic_matches[0].id, "WHK-unscoped");
+
+        Ok(())
+    }
+
+    #[test]
     fn admin_webhook_subscriptions_list_insert_and_delete_rows() -> Result<()> {
         let mut store = migrated_store()?;
         insert_webhook(
@@ -1418,14 +2223,13 @@ mod tests {
             1,
             "2026-05-28T20:02:00Z",
         )?;
-        store.insert_webhook_subscription(WebhookSubscriptionInsert {
-            id: "WHK-alpha".to_owned(),
-            url: "https://example.test/alpha".to_owned(),
-            events: vec!["error.new_class".to_owned(), "canary.ping".to_owned()],
-            secret: "generated-secret".to_owned(),
-            active: true,
-            created_at: "2026-05-28T20:00:00Z".to_owned(),
-        })?;
+        store.insert_webhook_subscription(webhook_subscription_insert(
+            "WHK-alpha",
+            "https://example.test/alpha",
+            vec!["error.new_class".to_owned(), "canary.ping".to_owned()],
+            true,
+            "2026-05-28T20:00:00Z",
+        ))?;
 
         let subscriptions = store.webhook_subscriptions()?;
         assert_eq!(subscriptions.len(), 2);
@@ -1523,6 +2327,69 @@ mod tests {
             service_event_count(&store.connection, "INC-123456789abc", "incident.opened")?,
             1
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn correlate_incident_scopes_open_incidents_by_owner_and_service() -> Result<()> {
+        let mut store = migrated_store()?;
+        let mut bootstrap = error_ingest(
+            "ERR-scopeinc0001",
+            "EVT-scopeinc0001",
+            "group-scope-shared",
+            "2026-05-28T20:00:00Z",
+        );
+        bootstrap.payload.service = "shared-api".to_owned();
+        let mut other = error_ingest(
+            "ERR-scopeinc0002",
+            "EVT-scopeinc0002",
+            "group-scope-shared",
+            "2026-05-28T20:00:01Z",
+        );
+        other.payload.tenant_id = "TENANT-other".to_owned();
+        other.payload.project_id = "PROJECT-other".to_owned();
+        other.payload.service = "shared-api".to_owned();
+        store.commit_error_ingest(bootstrap)?;
+        store.commit_error_ingest(other)?;
+
+        let bootstrap_event = store
+            .correlate_incident(incident_correlation(
+                "INC-scopeinc0001",
+                "EVT-scopeinc0003",
+                "error_group",
+                "group-scope-shared",
+                "shared-api",
+                "2026-05-28T20:00:05Z",
+            ))?
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        let other_event = store
+            .correlate_incident(IncidentCorrelation {
+                tenant_id: "TENANT-other".to_owned(),
+                project_id: "PROJECT-other".to_owned(),
+                signal_type: "error_group".to_owned(),
+                signal_ref: "group-scope-shared".to_owned(),
+                service: "shared-api".to_owned(),
+                incident_id: IncidentId::from_str("INC-scopeinc0002")
+                    .unwrap_or_else(|_| IncidentId::generate()),
+                event_id: EventId::from_str("EVT-scopeinc0004")
+                    .unwrap_or_else(|_| EventId::generate()),
+                now: "2026-05-28T20:00:06Z".to_owned(),
+            })?
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+        assert_eq!(bootstrap_event.event, "incident.opened");
+        assert_eq!(other_event.event, "incident.opened");
+        let count = store.connection.query_row(
+            "SELECT COUNT(*) FROM incidents WHERE service = 'shared-api' AND state != 'resolved'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        assert_eq!(count, 2);
+        let other_payload: Value = serde_json::from_str(&other_event.payload_json)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        assert_eq!(other_payload["tenant_id"], "TENANT-other");
+        assert_eq!(other_payload["project_id"], "PROJECT-other");
 
         Ok(())
     }
@@ -1894,6 +2761,9 @@ mod tests {
             created_at: "2026-05-28T21:00:00Z".to_owned(),
             revoked_at: None,
             scope: "admin".to_owned(),
+            tenant_id: api_keys::BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: api_keys::BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: None,
         })?;
 
         let keys = store.list_api_keys()?;
@@ -2323,7 +3193,7 @@ mod tests {
             )?;
         }
 
-        let checks = health::target_checks_at(&store.connection, "TGT-api", "24h", now)?;
+        let checks = health::target_checks_at(&store.connection, "TGT-api", "24h", None, now)?;
 
         assert_eq!(checks.len(), 500);
         assert_eq!(checks[0].latency_ms, Some(0));
@@ -2338,7 +3208,7 @@ mod tests {
                 .any(|check| check.error_detail.as_deref() == Some("too old"))
         );
         assert!(matches!(
-            health::target_checks_at(&store.connection, "TGT-api", "99h", now),
+            health::target_checks_at(&store.connection, "TGT-api", "99h", None, now),
             Err(QueryError::InvalidWindow)
         ));
 
@@ -2643,6 +3513,7 @@ mod tests {
                 limit: Some("1".to_owned()),
                 cursor: None,
                 event_type: None,
+                ..TimelineQueryOptions::default()
             },
             now,
         )?;
@@ -2661,6 +3532,7 @@ mod tests {
                 limit: Some("1".to_owned()),
                 cursor: first.cursor,
                 event_type: None,
+                ..TimelineQueryOptions::default()
             },
             now,
         )?;
@@ -2676,6 +3548,7 @@ mod tests {
                 limit: None,
                 cursor: None,
                 event_type: Some("incident.opened, error.new_class".to_owned()),
+                ..TimelineQueryOptions::default()
             },
             now,
         )?;
@@ -2792,12 +3665,14 @@ mod tests {
         let with = store.active_incidents(IncidentListOptions {
             with_annotation: Some("acknowledged".to_owned()),
             without_annotation: None,
+            ..IncidentListOptions::default()
         })?;
         assert_eq!(with.incidents.len(), 1);
 
         let without = store.active_incidents(IncidentListOptions {
             with_annotation: None,
             without_annotation: Some("acknowledged".to_owned()),
+            ..IncidentListOptions::default()
         })?;
         assert_eq!(without.incidents, Vec::new());
         assert_eq!(without.summary, "No active incidents.");
@@ -3198,6 +4073,78 @@ mod tests {
                 .map(|annotation| annotation.action.as_str()),
             Some("acknowledged")
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn incident_detail_scoped_counts_annotations_only_for_incident_owner()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let store = migrated_store()?;
+        for (tenant_id, incident_id, annotation_id) in [
+            ("TENANT-alpha", "INC-alpha", "ANN-alpha"),
+            ("TENANT-beta", "INC-beta", "ANN-beta"),
+        ] {
+            let error_id = format!("ERR-{annotation_id}");
+            store.connection.execute(
+                "INSERT INTO incidents (
+                    id, tenant_id, project_id, service, state, severity, title, opened_at
+                 ) VALUES (
+                    ?1, ?2, 'PROJECT-api', 'api', 'investigating', 'medium',
+                    'api incident', '2026-05-28T20:00:00Z'
+                 )",
+                params![incident_id, tenant_id],
+            )?;
+            store.connection.execute(
+                "INSERT INTO errors (
+                    id, tenant_id, project_id, service, error_class, message, group_hash,
+                    created_at, classification_category, classification_persistence,
+                    classification_component
+                 ) VALUES (
+                    ?1, ?2, 'PROJECT-api', 'api', 'SharedError', 'boom', 'shared-hash',
+                    '2026-05-28T20:00:00Z', 'application', 'persistent', 'runtime'
+                 )",
+                params![error_id, tenant_id],
+            )?;
+            store.connection.execute(
+                "INSERT INTO error_groups (
+                    tenant_id, project_id, group_hash, service, error_class, severity,
+                    first_seen_at, last_seen_at, total_count, last_error_id, status
+                 ) VALUES (
+                    ?1, 'PROJECT-api', 'shared-hash', 'api', 'SharedError', 'error',
+                    '2026-05-28T19:55:00Z', '2026-05-28T20:00:00Z', 1, ?2, 'active'
+                 )",
+                params![tenant_id, error_id],
+            )?;
+            insert_incident_signal(
+                &store,
+                incident_id,
+                "error_group",
+                "shared-hash",
+                "2026-05-28T20:01:00Z",
+                None,
+            )?;
+            store.connection.execute(
+                "INSERT INTO annotations (
+                    id, tenant_id, project_id, agent, action, created_at, subject_type, subject_id
+                 ) VALUES (
+                    ?1, ?2, 'PROJECT-api', 'agent', 'triaged',
+                    '2026-05-28T20:02:00Z', 'error_group', 'shared-hash'
+                 )",
+                params![annotation_id, tenant_id],
+            )?;
+        }
+
+        let detail = store
+            .incident_detail_scoped("INC-alpha", "TENANT-alpha", "PROJECT-api")?
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+        let signal = detail
+            .signals
+            .iter()
+            .find(|signal| signal.group_hash.as_deref() == Some("shared-hash"))
+            .ok_or("missing shared group signal")?;
+        assert_eq!(signal.annotation_count, 1);
 
         Ok(())
     }
@@ -3656,6 +4603,7 @@ mod tests {
     fn target_health_transition_updates_state_timeline_and_incident_in_one_commit()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut store = migrated_store()?;
+        seed_api_target(&mut store)?;
         let commit = store
             .commit_target_probe(TargetProbeCommit {
                 target_id: "TGT-api".to_owned(),
@@ -3789,6 +4737,7 @@ mod tests {
     fn target_recovery_transition_resolves_the_health_incident_atomically()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut store = migrated_store()?;
+        seed_api_target(&mut store)?;
         store.commit_target_probe(TargetProbeCommit {
             target_id: "TGT-api".to_owned(),
             state: "down".to_owned(),
@@ -4315,6 +5264,7 @@ mod tests {
     fn record_tls_expiring_event_inserts_warning_timeline_payload()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut store = migrated_store()?;
+        seed_api_target(&mut store)?;
 
         let commit = store.record_tls_expiring_event(TlsExpiryEventInsert {
             event_id: EventId::generate(),
@@ -4492,12 +5442,14 @@ mod tests {
     #[test]
     fn commit_error_ingest_creates_error_group_and_timeline_event() -> Result<()> {
         let mut store = migrated_store()?;
-        let ingest = error_ingest(
+        let mut ingest = error_ingest(
             "ERR-123456789abc",
             "EVT-123456789abc",
             "group-new",
             "2026-05-28T20:00:00Z",
         );
+        ingest.payload.tenant_id = "TENANT-alpha".to_owned();
+        ingest.payload.project_id = "PROJECT-api".to_owned();
 
         let commit = store.commit_error_ingest(ingest)?;
 
@@ -4514,6 +5466,35 @@ mod tests {
         );
 
         assert_eq!(row_count(&store.connection, "errors")?, 1);
+        let ownership = store.connection.query_row(
+            "SELECT e.tenant_id, e.project_id, g.tenant_id, g.project_id, s.tenant_id, s.project_id
+             FROM errors e
+             JOIN error_groups g ON g.group_hash = e.group_hash
+             JOIN service_events s ON s.entity_ref = e.group_hash
+             WHERE e.id = 'ERR-123456789abc'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )?;
+        assert_eq!(
+            ownership,
+            (
+                "TENANT-alpha".to_owned(),
+                "PROJECT-api".to_owned(),
+                "TENANT-alpha".to_owned(),
+                "PROJECT-api".to_owned(),
+                "TENANT-alpha".to_owned(),
+                "PROJECT-api".to_owned(),
+            )
+        );
         let group_count = store.connection.query_row(
             "SELECT total_count FROM error_groups WHERE group_hash = 'group-new'",
             [],
@@ -4593,6 +5574,51 @@ mod tests {
     }
 
     #[test]
+    fn commit_error_ingest_scopes_group_hash_identity_by_owner() -> Result<()> {
+        let mut store = migrated_store()?;
+        let first = error_ingest(
+            "ERR-samegroup001",
+            "EVT-samegroup001",
+            "group-same-owner-boundary",
+            "2026-05-28T20:00:00Z",
+        );
+        let mut second = error_ingest(
+            "ERR-samegroup002",
+            "EVT-samegroup002",
+            "group-same-owner-boundary",
+            "2026-05-28T20:01:00Z",
+        );
+        second.payload.tenant_id = "TENANT-other".to_owned();
+        second.payload.project_id = "PROJECT-other".to_owned();
+
+        let first_commit = store.commit_error_ingest(first)?;
+        let second_commit = store.commit_error_ingest(second)?;
+
+        assert!(first_commit.is_new_class);
+        assert!(second_commit.is_new_class);
+        let groups = store.connection.query_row(
+            "SELECT COUNT(*), SUM(total_count)
+             FROM error_groups
+             WHERE group_hash = 'group-same-owner-boundary'",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        assert_eq!(groups, (2, 2));
+        let other_count = store.connection.query_row(
+            "SELECT total_count
+             FROM error_groups
+             WHERE tenant_id = 'TENANT-other'
+               AND project_id = 'PROJECT-other'
+               AND group_hash = 'group-same-owner-boundary'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        assert_eq!(other_count, 1);
+
+        Ok(())
+    }
+
+    #[test]
     fn commit_error_ingest_records_regression_after_twenty_four_hours() -> Result<()> {
         let mut store = migrated_store()?;
         store.commit_error_ingest(error_ingest(
@@ -4631,6 +5657,63 @@ mod tests {
         Ok(store)
     }
 
+    fn seed_api_target(store: &mut Store) -> Result<()> {
+        store.insert_target(TargetInsert {
+            id: "TGT-api".to_owned(),
+            url: "https://api.example.com/health".to_owned(),
+            name: "API".to_owned(),
+            service: "api".to_owned(),
+            method: "GET".to_owned(),
+            headers: None,
+            interval_ms: 60_000,
+            timeout_ms: 10_000,
+            expected_status: "200".to_owned(),
+            body_contains: None,
+            degraded_after: 1,
+            down_after: 3,
+            up_after: 1,
+            active: true,
+            created_at: "2026-05-28T19:00:00Z".to_owned(),
+        })
+    }
+
+    fn webhook_delivery_insert(
+        delivery_id: &str,
+        webhook_id: &str,
+        event: &str,
+        now: &str,
+    ) -> WebhookDeliveryInsert {
+        WebhookDeliveryInsert {
+            delivery_id: delivery_id.to_owned(),
+            webhook_id: webhook_id.to_owned(),
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: None,
+            event: event.to_owned(),
+            now: now.to_owned(),
+        }
+    }
+
+    fn webhook_subscription_insert(
+        id: &str,
+        url: &str,
+        events: Vec<String>,
+        active: bool,
+        created_at: &str,
+    ) -> WebhookSubscriptionInsert {
+        WebhookSubscriptionInsert {
+            id: id.to_owned(),
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: None,
+            url: url.to_owned(),
+            events,
+            secret: "generated-secret".to_owned(),
+            active,
+            created_at: created_at.to_owned(),
+        }
+    }
+
     fn insert_webhook(
         store: &Store,
         id: &str,
@@ -4659,6 +5742,8 @@ mod tests {
                 event_id: EventId::from_str(event_id).unwrap_or_else(|_| EventId::generate()),
             },
             payload: ErrorIngestPayload {
+                tenant_id: api_keys::BOOTSTRAP_TENANT_ID.to_owned(),
+                project_id: api_keys::BOOTSTRAP_PROJECT_ID.to_owned(),
                 service: "cadence".to_owned(),
                 error_class: "DBConnection.ConnectionError".to_owned(),
                 message: "pool timed out".to_owned(),
@@ -4689,6 +5774,8 @@ mod tests {
         now: &str,
     ) -> IncidentCorrelation {
         IncidentCorrelation {
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
             signal_type: signal_type.to_owned(),
             signal_ref: signal_ref.to_owned(),
             service: service.to_owned(),
@@ -4805,6 +5892,9 @@ mod tests {
             created_at: "2026-05-28T20:00:00Z".to_owned(),
             revoked_at: revoked_at.map(str::to_owned),
             scope: scope.to_owned(),
+            tenant_id: api_keys::BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: api_keys::BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: None,
         })?;
         Ok(())
     }

@@ -19,12 +19,12 @@ export interface CaptureOptions {
 }
 
 let client: CanaryClient | null = null;
-let scrubPii = false;
+let scrubPii = true;
 let scrubRules: ScrubRule[] = [];
 
 export function initCanary(opts: InitOptions): void {
   client = createClient(opts);
-  scrubPii = opts.scrubPii ?? false;
+  scrubPii = opts.scrubPii ?? true;
   scrubRules = opts.scrubRules ?? [];
 }
 

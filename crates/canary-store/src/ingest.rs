@@ -26,6 +26,10 @@ pub struct ErrorIngestIds {
 /// Already-normalized payload fields for one error row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ErrorIngestPayload {
+    /// Tenant that owns this error row.
+    pub tenant_id: String,
+    /// Project that owns this error row.
+    pub project_id: String,
     /// Service name.
     pub service: String,
     /// Error class.
@@ -79,6 +83,10 @@ pub struct ErrorServiceEvent {
 pub struct ErrorIngestCommit {
     /// Error row id.
     pub id: String,
+    /// Tenant namespace.
+    pub tenant_id: String,
+    /// Project namespace.
+    pub project_id: String,
     /// Service name.
     pub service: String,
     /// Stable group hash.
@@ -96,7 +104,12 @@ pub(crate) fn commit(
     let transaction = connection.transaction()?;
     insert_error(&transaction, &ingest)?;
 
-    let group = load_group(&transaction, &ingest.payload.group_hash)?;
+    let group = load_group(
+        &transaction,
+        &ingest.payload.tenant_id,
+        &ingest.payload.project_id,
+        &ingest.payload.group_hash,
+    )?;
     let (is_new_class, event) = match group {
         None => {
             insert_group(&transaction, &ingest)?;
@@ -120,6 +133,8 @@ pub(crate) fn commit(
 
     Ok(ErrorIngestCommit {
         id: ingest.ids.error_id.into_string(),
+        tenant_id: ingest.payload.tenant_id,
+        project_id: ingest.payload.project_id,
         service: ingest.payload.service,
         group_hash: ingest.payload.group_hash,
         is_new_class,
@@ -131,15 +146,17 @@ fn insert_error(transaction: &rusqlite::Transaction<'_>, ingest: &ErrorIngest) -
     let classification = ingest.payload.classification;
     transaction.execute(
         "INSERT INTO errors (
-            id, service, error_class, message, message_template, stack_trace, context,
+            id, tenant_id, project_id, service, error_class, message, message_template, stack_trace, context,
             severity, environment, group_hash, fingerprint, region,
             classification_category, classification_persistence, classification_component,
             created_at
          ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
          )",
         params![
             ingest.ids.error_id.as_str(),
+            ingest.payload.tenant_id,
+            ingest.payload.project_id,
             ingest.payload.service,
             ingest.payload.error_class,
             ingest.payload.message,
@@ -168,12 +185,16 @@ struct ExistingGroup {
 
 fn load_group(
     transaction: &rusqlite::Transaction<'_>,
+    tenant_id: &str,
+    project_id: &str,
     group_hash: &str,
 ) -> Result<Option<ExistingGroup>> {
     let group = transaction
         .query_row(
-            "SELECT last_seen_at, total_count FROM error_groups WHERE group_hash = ?1",
-            [group_hash],
+            "SELECT last_seen_at, total_count
+             FROM error_groups
+             WHERE tenant_id = ?1 AND project_id = ?2 AND group_hash = ?3",
+            params![tenant_id, project_id, group_hash],
             |row| {
                 Ok(ExistingGroup {
                     last_seen_at: row.get(0)?,
@@ -188,11 +209,13 @@ fn load_group(
 fn insert_group(transaction: &rusqlite::Transaction<'_>, ingest: &ErrorIngest) -> Result<()> {
     transaction.execute(
         "INSERT INTO error_groups (
-            group_hash, service, error_class, message_template, severity,
+            group_hash, tenant_id, project_id, service, error_class, message_template, severity,
             first_seen_at, last_seen_at, total_count, last_error_id
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10)",
         params![
             ingest.payload.group_hash,
+            ingest.payload.tenant_id,
+            ingest.payload.project_id,
             ingest.payload.service,
             ingest.payload.error_class,
             ingest.payload.message_template,
@@ -213,11 +236,13 @@ fn update_group(
     transaction.execute(
         "UPDATE error_groups
          SET last_seen_at = ?1, total_count = ?2, last_error_id = ?3, status = 'active'
-         WHERE group_hash = ?4",
+         WHERE tenant_id = ?4 AND project_id = ?5 AND group_hash = ?6",
         params![
             ingest.payload.created_at,
             total_count + 1,
             ingest.ids.error_id.as_str(),
+            ingest.payload.tenant_id,
+            ingest.payload.project_id,
             ingest.payload.group_hash,
         ],
     )?;
@@ -240,6 +265,8 @@ fn insert_service_event(
 ) -> Result<ErrorServiceEvent> {
     let payload = json!({
         "event": event,
+        "tenant_id": ingest.payload.tenant_id,
+        "project_id": ingest.payload.project_id,
         "error": {
             "id": ingest.ids.error_id.as_str(),
             "service": ingest.payload.service,
@@ -265,10 +292,12 @@ fn insert_service_event(
 
     transaction.execute(
         "INSERT INTO service_events (
-            id, service, event, entity_type, entity_ref, severity, summary, payload, created_at
-         ) VALUES (?1, ?2, ?3, 'error_group', ?4, ?5, ?6, ?7, ?8)",
+            id, tenant_id, project_id, service, event, entity_type, entity_ref, severity, summary, payload, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 'error_group', ?6, ?7, ?8, ?9, ?10)",
         params![
             ingest.ids.event_id.as_str(),
+            ingest.payload.tenant_id,
+            ingest.payload.project_id,
             ingest.payload.service,
             event,
             ingest.payload.group_hash,

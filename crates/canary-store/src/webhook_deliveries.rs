@@ -7,7 +7,7 @@ use canary_core::query::{
 };
 use rusqlite::{Connection, params};
 
-use crate::Result;
+use crate::{BOOTSTRAP_PROJECT_ID, BOOTSTRAP_TENANT_ID, Result};
 
 /// Result type returned by webhook delivery read models.
 pub type WebhookDeliveryPageResult<T> = std::result::Result<T, WebhookDeliveryPageError>;
@@ -97,6 +97,12 @@ pub struct WebhookDeliveryInsert {
     pub delivery_id: String,
     /// Webhook subscription id.
     pub webhook_id: String,
+    /// Tenant that owns this delivery.
+    pub tenant_id: String,
+    /// Project that owns this delivery.
+    pub project_id: String,
+    /// Optional service scope for this delivery.
+    pub service: Option<String>,
     /// Event name.
     pub event: String,
     /// RFC3339 timestamp.
@@ -110,6 +116,12 @@ pub struct WebhookDeliveryRow {
     pub delivery_id: String,
     /// Webhook subscription id.
     pub webhook_id: String,
+    /// Tenant that owns this delivery.
+    pub tenant_id: String,
+    /// Project that owns this delivery.
+    pub project_id: String,
+    /// Optional service scope for this delivery.
+    pub service: Option<String>,
     /// Event name.
     pub event: String,
     /// Current status.
@@ -150,6 +162,8 @@ pub struct WebhookDeliveryListOptions {
 /// Optional filters for the public webhook delivery page route.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WebhookDeliveryPageOptions {
+    /// Optional service authority boundary.
+    pub service: Option<String>,
     /// Optional webhook id filter.
     pub webhook_id: Option<String>,
     /// Optional event filter.
@@ -167,6 +181,12 @@ pub struct WebhookDeliveryPageOptions {
 pub struct WebhookSubscription {
     /// Webhook id.
     pub id: String,
+    /// Tenant that owns this subscription.
+    pub tenant_id: String,
+    /// Project that owns this subscription.
+    pub project_id: String,
+    /// Optional service scope for this subscription.
+    pub service: Option<String>,
     /// Destination URL.
     pub url: String,
     /// JSON-encoded subscribed event names.
@@ -184,6 +204,12 @@ pub struct WebhookSubscription {
 pub struct WebhookSubscriptionInsert {
     /// Webhook id.
     pub id: String,
+    /// Tenant that owns this subscription.
+    pub tenant_id: String,
+    /// Project that owns this subscription.
+    pub project_id: String,
+    /// Optional service scope for this subscription.
+    pub service: Option<String>,
     /// Destination URL.
     pub url: String,
     /// Subscribed events.
@@ -209,10 +235,14 @@ pub(crate) fn insert_subscription(
     subscription: WebhookSubscriptionInsert,
 ) -> Result<()> {
     connection.execute(
-        "INSERT INTO webhooks (id, url, events, secret, active, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO webhooks (
+            id, tenant_id, project_id, service, url, events, secret, active, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             subscription.id,
+            subscription.tenant_id,
+            subscription.project_id,
+            subscription.service,
             subscription.url,
             serde_json::to_string(&subscription.events)
                 .map_err(|_| rusqlite::Error::InvalidQuery)?,
@@ -226,7 +256,7 @@ pub(crate) fn insert_subscription(
 
 pub(crate) fn list_subscriptions(connection: &Connection) -> Result<Vec<WebhookSubscription>> {
     let mut statement = connection.prepare(
-        "SELECT id, url, events, secret, active, created_at
+        "SELECT id, tenant_id, project_id, service, url, events, secret, active, created_at
          FROM webhooks
          ORDER BY created_at, id",
     )?;
@@ -235,8 +265,37 @@ pub(crate) fn list_subscriptions(connection: &Connection) -> Result<Vec<WebhookS
         .map_err(Into::into)
 }
 
+pub(crate) fn list_subscriptions_scoped(
+    connection: &Connection,
+    tenant_id: &str,
+    project_id: &str,
+) -> Result<Vec<WebhookSubscription>> {
+    let mut statement = connection.prepare(
+        "SELECT id, tenant_id, project_id, service, url, events, secret, active, created_at
+         FROM webhooks
+         WHERE tenant_id = ?1 AND project_id = ?2
+         ORDER BY created_at, id",
+    )?;
+    let rows = statement.query_map(params![tenant_id, project_id], subscription_row)?;
+    let subscriptions = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(subscriptions)
+}
+
 pub(crate) fn delete_subscription(connection: &mut Connection, webhook_id: &str) -> Result<bool> {
     let changed = connection.execute("DELETE FROM webhooks WHERE id = ?1", [webhook_id])?;
+    Ok(changed > 0)
+}
+
+pub(crate) fn delete_subscription_scoped(
+    connection: &mut Connection,
+    webhook_id: &str,
+    tenant_id: &str,
+    project_id: &str,
+) -> Result<bool> {
+    let changed = connection.execute(
+        "DELETE FROM webhooks WHERE id = ?1 AND tenant_id = ?2 AND project_id = ?3",
+        params![webhook_id, tenant_id, project_id],
+    )?;
     Ok(changed > 0)
 }
 
@@ -246,11 +305,15 @@ pub(crate) fn create_pending(
 ) -> Result<()> {
     connection.execute(
         "INSERT OR IGNORE INTO webhook_deliveries (
-            delivery_id, webhook_id, event, status, attempt_count, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, 'pending', 0, ?4, ?4)",
+            delivery_id, webhook_id, tenant_id, project_id, service, event, status,
+            attempt_count, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', 0, ?7, ?7)",
         params![
             delivery.delivery_id,
             delivery.webhook_id,
+            delivery.tenant_id,
+            delivery.project_id,
+            delivery.service,
             delivery.event,
             delivery.now,
         ],
@@ -265,8 +328,9 @@ pub(crate) fn create_suppressed(
 ) -> Result<()> {
     connection.execute(
         "INSERT INTO webhook_deliveries (
-            delivery_id, webhook_id, event, status, attempt_count, reason, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, 'suppressed', 0, ?4, ?5, ?5)
+            delivery_id, webhook_id, tenant_id, project_id, service, event, status,
+            attempt_count, reason, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'suppressed', 0, ?7, ?8, ?8)
          ON CONFLICT(delivery_id) DO UPDATE SET
             status = 'suppressed',
             reason = excluded.reason,
@@ -274,6 +338,9 @@ pub(crate) fn create_suppressed(
         params![
             delivery.delivery_id,
             delivery.webhook_id,
+            delivery.tenant_id,
+            delivery.project_id,
+            delivery.service,
             delivery.event,
             reason,
             delivery.now,
@@ -338,6 +405,7 @@ pub(crate) fn list(
 ) -> Result<Vec<WebhookDeliveryRow>> {
     let mut sql = String::from(
         "SELECT delivery_id, webhook_id, event, status, attempt_count, reason,
+                tenant_id, project_id, service,
                 first_attempt_at, last_attempt_at, delivered_at, discarded_at,
                 created_at, updated_at
          FROM webhook_deliveries WHERE 1 = 1",
@@ -374,18 +442,45 @@ pub(crate) fn page(
     connection: &Connection,
     options: WebhookDeliveryPageOptions,
 ) -> WebhookDeliveryPageResult<WebhookDeliveriesResponse> {
+    page_for_owner(connection, options, None)
+}
+
+pub(crate) fn page_scoped(
+    connection: &Connection,
+    options: WebhookDeliveryPageOptions,
+    tenant_id: &str,
+    project_id: &str,
+) -> WebhookDeliveryPageResult<WebhookDeliveriesResponse> {
+    page_for_owner(connection, options, Some((tenant_id, project_id)))
+}
+
+fn page_for_owner(
+    connection: &Connection,
+    options: WebhookDeliveryPageOptions,
+    owner: Option<(&str, &str)>,
+) -> WebhookDeliveryPageResult<WebhookDeliveriesResponse> {
     let limit = parse_page_limit(options.limit.as_deref())?;
     let cursor = parse_page_cursor(options.cursor.as_deref())?;
     let status = parse_page_status(options.status.as_deref())?;
 
     let mut sql = String::from(
         "SELECT delivery_id, webhook_id, event, status, attempt_count, reason,
+                tenant_id, project_id, service,
                 first_attempt_at, last_attempt_at, delivered_at, discarded_at,
                 created_at, updated_at
          FROM webhook_deliveries WHERE 1 = 1",
     );
     let mut filters = Vec::new();
 
+    if let Some((tenant_id, project_id)) = owner {
+        sql.push_str(" AND tenant_id = ? AND project_id = ?");
+        filters.push(tenant_id.to_owned());
+        filters.push(project_id.to_owned());
+    }
+    if let Some(service) = options.service.filter(|value| !value.is_empty()) {
+        sql.push_str(" AND service = ?");
+        filters.push(service);
+    }
     if let Some(webhook_id) = options.webhook_id.filter(|value| !value.is_empty()) {
         sql.push_str(" AND webhook_id = ?");
         filters.push(webhook_id);
@@ -428,14 +523,46 @@ pub(crate) fn page(
 }
 
 pub(crate) fn get(connection: &Connection, delivery_id: &str) -> Result<Option<WebhookDelivery>> {
-    let mut statement = connection.prepare(
+    get_for_owner(connection, delivery_id, None)
+}
+
+pub(crate) fn get_scoped(
+    connection: &Connection,
+    delivery_id: &str,
+    tenant_id: &str,
+    project_id: &str,
+    service: Option<&str>,
+) -> Result<Option<WebhookDelivery>> {
+    get_for_owner(
+        connection,
+        delivery_id,
+        Some((tenant_id, project_id, service)),
+    )
+}
+
+fn get_for_owner(
+    connection: &Connection,
+    delivery_id: &str,
+    owner: Option<(&str, &str, Option<&str>)>,
+) -> Result<Option<WebhookDelivery>> {
+    let owner_clause = if owner.is_some() {
+        " AND tenant_id = ?2 AND project_id = ?3 AND (?4 IS NULL OR service = ?4)"
+    } else {
+        ""
+    };
+    let mut statement = connection.prepare(&format!(
         "SELECT delivery_id, webhook_id, event, status, attempt_count, reason,
+                tenant_id, project_id, service,
                 first_attempt_at, last_attempt_at, delivered_at, discarded_at,
                 created_at, updated_at
          FROM webhook_deliveries
-         WHERE delivery_id = ?1",
-    )?;
-    let result = statement.query_row([delivery_id], row);
+         WHERE delivery_id = ?1{owner_clause}",
+    ))?;
+    let result = if let Some((tenant_id, project_id, service)) = owner {
+        statement.query_row(params![delivery_id, tenant_id, project_id, service], row)
+    } else {
+        statement.query_row([delivery_id], row)
+    };
 
     match result {
         Ok(row) => Ok(Some(format_delivery(row))),
@@ -448,18 +575,41 @@ pub(crate) fn active_subscriptions_for_event(
     connection: &Connection,
     event: &str,
 ) -> Result<Vec<WebhookSubscription>> {
+    active_subscriptions_for_event_scoped(
+        connection,
+        event,
+        BOOTSTRAP_TENANT_ID,
+        BOOTSTRAP_PROJECT_ID,
+        None,
+    )
+}
+
+pub(crate) fn active_subscriptions_for_event_scoped(
+    connection: &Connection,
+    event: &str,
+    tenant_id: &str,
+    project_id: &str,
+    service: Option<&str>,
+) -> Result<Vec<WebhookSubscription>> {
     let mut statement = connection.prepare(
-        "SELECT id, url, events, secret, active, created_at
+        "SELECT id, tenant_id, project_id, service, url, events, secret, active, created_at
          FROM webhooks
-         WHERE active = 1
+         WHERE active = 1 AND tenant_id = ?1 AND project_id = ?2
          ORDER BY created_at, id",
     )?;
-    let rows = statement.query_map([], subscription_row)?;
+    let rows = statement.query_map(params![tenant_id, project_id], subscription_row)?;
 
     let subscriptions = rows
         .collect::<std::result::Result<Vec<_>, _>>()?
         .into_iter()
         .filter(|subscription| subscription.subscribes_to(event))
+        .filter(
+            |subscription| match (subscription.service.as_deref(), service) {
+                (Some(expected), Some(actual)) => expected == actual,
+                (Some(_), None) => false,
+                (None, _) => true,
+            },
+        )
         .collect();
     Ok(subscriptions)
 }
@@ -469,7 +619,7 @@ pub(crate) fn subscription_by_id(
     webhook_id: &str,
 ) -> Result<Option<WebhookSubscription>> {
     let mut statement = connection.prepare(
-        "SELECT id, url, events, secret, active, created_at
+        "SELECT id, tenant_id, project_id, service, url, events, secret, active, created_at
          FROM webhooks
          WHERE id = ?1",
     )?;
@@ -485,11 +635,14 @@ pub(crate) fn subscription_by_id(
 fn subscription_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WebhookSubscription> {
     Ok(WebhookSubscription {
         id: row.get(0)?,
-        url: row.get(1)?,
-        events: row.get(2)?,
-        secret: row.get(3)?,
-        active: row.get::<_, i64>(4)? == 1,
-        created_at: row.get(5)?,
+        tenant_id: row.get(1)?,
+        project_id: row.get(2)?,
+        service: row.get(3)?,
+        url: row.get(4)?,
+        events: row.get(5)?,
+        secret: row.get(6)?,
+        active: row.get::<_, i64>(7)? == 1,
+        created_at: row.get(8)?,
     })
 }
 
@@ -502,12 +655,15 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WebhookDeliveryRow> {
         status: WebhookDeliveryStatus::from_str(&status),
         attempt_count: row.get(4)?,
         reason: row.get(5)?,
-        first_attempt_at: row.get(6)?,
-        last_attempt_at: row.get(7)?,
-        delivered_at: row.get(8)?,
-        discarded_at: row.get(9)?,
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
+        tenant_id: row.get(6)?,
+        project_id: row.get(7)?,
+        service: row.get(8)?,
+        first_attempt_at: row.get(9)?,
+        last_attempt_at: row.get(10)?,
+        delivered_at: row.get(11)?,
+        discarded_at: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
     })
 }
 
@@ -564,6 +720,9 @@ fn format_delivery(row: WebhookDeliveryRow) -> WebhookDelivery {
     WebhookDelivery {
         delivery_id: row.delivery_id,
         webhook_id: row.webhook_id,
+        tenant_id: row.tenant_id,
+        project_id: row.project_id,
+        service: row.service,
         event: row.event,
         status: row.status.as_str().to_owned(),
         attempt_count: row.attempt_count,

@@ -5,18 +5,20 @@
 //! lookup, scoped route authorization, route-family rate limits, and silent
 //! invalid-key accounting.
 
-use axum::http::{HeaderMap, HeaderName, HeaderValue, header::AUTHORIZATION};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::AUTHORIZATION};
 use canary_http::{
     auth::{
         ApiKeyScope, BearerToken, Permission, extract_bearer, insufficient_scope_problem,
         invalid_api_key_problem, missing_authorization_problem,
     },
-    problem_details::{ProblemDetails, internal_problem},
+    problem_details::{ProblemCode, ProblemDetails, internal_problem},
     rate_limit::{RateLimitKind, rate_limited_problem},
 };
-use canary_store::VerifiedApiKey;
+use canary_store::{DurableRateLimitDecision, VerifiedApiKey};
+use serde_json::json;
 
 use crate::rate_limit::RateLimitDecision;
+use crate::server_time::current_unix_millis;
 use crate::{AuthFailIdentityConfig, IngestState};
 
 pub(crate) const UNKNOWN_AUTH_FAIL_IDENTITY: &str = "unknown";
@@ -24,25 +26,28 @@ pub(crate) const UNKNOWN_AUTH_FAIL_IDENTITY: &str = "unknown";
 pub(crate) fn require_ingest_scope(
     state: &IngestState,
     headers: &HeaderMap,
-) -> Result<(), Box<ProblemDetails>> {
+) -> Result<VerifiedApiKey, Box<ProblemDetails>> {
     let key = require_scope(state, headers, Permission::Ingest)?;
-    enforce_rate_limit(state, RateLimitKind::Ingest, &key.id)
+    enforce_rate_limit(state, RateLimitKind::Ingest, &key.id)?;
+    Ok(key)
 }
 
 pub(crate) fn require_read_scope(
     state: &IngestState,
     headers: &HeaderMap,
-) -> Result<(), Box<ProblemDetails>> {
+) -> Result<VerifiedApiKey, Box<ProblemDetails>> {
     let key = require_scope(state, headers, Permission::Read)?;
-    enforce_rate_limit(state, RateLimitKind::Query, &key.id)
+    enforce_rate_limit(state, RateLimitKind::Query, &key.id)?;
+    Ok(key)
 }
 
 pub(crate) fn require_query_limited_admin_scope(
     state: &IngestState,
     headers: &HeaderMap,
-) -> Result<(), Box<ProblemDetails>> {
+) -> Result<VerifiedApiKey, Box<ProblemDetails>> {
     let key = require_scope(state, headers, Permission::Admin)?;
-    enforce_rate_limit(state, RateLimitKind::Query, &key.id)
+    enforce_rate_limit(state, RateLimitKind::Query, &key.id)?;
+    Ok(key)
 }
 
 pub(crate) fn require_scope(
@@ -62,22 +67,28 @@ pub(crate) fn require_scope(
     };
     let auth_fail_identity = reject_limited_unknown_prefix(state, headers, token)?;
 
-    let store = state
-        .lock_store()
-        .map_err(|_| Box::new(internal_problem()))?;
-    let Some(key) = store
-        .verify_api_key(token)
-        .map_err(|_| Box::new(internal_problem()))?
-    else {
+    let key = {
+        let store = state
+            .lock_store()
+            .map_err(|_| Box::new(internal_problem()))?;
+        store
+            .verify_api_key(token)
+            .map_err(|_| Box::new(internal_problem()))?
+    };
+    let Some(key) = key else {
         account_auth_fail_identity(state, &auth_fail_identity)?;
         return Err(Box::new(invalid_api_key_problem(None)));
     };
-    drop(store);
 
     let Some(scope) = ApiKeyScope::parse(&key.scope) else {
         account_auth_fail_identity(state, &auth_fail_identity)?;
         return Err(Box::new(invalid_api_key_problem(None)));
     };
+    if scope == ApiKeyScope::Admin
+        && let Some(bound_service) = key.service.as_deref()
+    {
+        return Err(Box::new(service_authority_problem(bound_service, "*")));
+    }
     if scope.allows(permission) {
         Ok(key)
     } else {
@@ -85,6 +96,39 @@ pub(crate) fn require_scope(
             scope, permission, None,
         )))
     }
+}
+
+pub(crate) fn enforce_service_authority(
+    key: &VerifiedApiKey,
+    requested_service: &str,
+) -> Result<(), Box<ProblemDetails>> {
+    let Some(bound_service) = key.service.as_deref() else {
+        return Ok(());
+    };
+    if requested_service == bound_service {
+        return Ok(());
+    }
+
+    Err(Box::new(service_authority_problem(
+        bound_service,
+        requested_service,
+    )))
+}
+
+pub(crate) fn service_authority_problem(
+    bound_service: &str,
+    requested_service: &str,
+) -> ProblemDetails {
+    ProblemDetails::new(
+        StatusCode::FORBIDDEN.as_u16(),
+        ProblemCode::InsufficientScope,
+        format!(
+            "API key is bound to service `{bound_service}` and cannot access `{requested_service}`."
+        ),
+        None,
+    )
+    .with_extra("bound_service", json!(bound_service))
+    .with_extra("requested_service", json!(requested_service))
 }
 
 fn reject_limited_unknown_prefix(
@@ -201,15 +245,46 @@ fn enforce_rate_limit(
     kind: RateLimitKind,
     identity: &str,
 ) -> Result<(), Box<ProblemDetails>> {
-    let mut limiter = state
-        .rate_limiter()
-        .lock()
-        .map_err(|_| Box::new(internal_problem()))?;
+    {
+        let mut limiter = state
+            .rate_limiter()
+            .lock()
+            .map_err(|_| Box::new(internal_problem()))?;
 
-    match limiter.check(kind, identity) {
-        RateLimitDecision::Allowed => Ok(()),
-        RateLimitDecision::Limited {
+        match limiter.check(kind, identity) {
+            RateLimitDecision::Allowed => {}
+            RateLimitDecision::Limited {
+                retry_after_seconds,
+            } => return Err(Box::new(rate_limited_problem(retry_after_seconds))),
+        }
+    }
+
+    let policy = kind.policy();
+    let mut store = state
+        .lock_store()
+        .map_err(|_| Box::new(internal_problem()))?;
+    match store
+        .check_rate_limit(
+            rate_limit_kind_name(kind),
+            identity,
+            policy.limit,
+            policy.window_ms,
+            current_unix_millis(),
+        )
+        .map_err(|_| Box::new(internal_problem()))?
+    {
+        DurableRateLimitDecision::Allowed => Ok(()),
+        DurableRateLimitDecision::Limited {
             retry_after_seconds,
         } => Err(Box::new(rate_limited_problem(retry_after_seconds))),
+    }
+}
+
+fn rate_limit_kind_name(kind: RateLimitKind) -> &'static str {
+    match kind {
+        RateLimitKind::Ingest => "ingest",
+        RateLimitKind::Query => "query",
+        RateLimitKind::AuthFail => "auth_fail",
+        RateLimitKind::Burst => "burst",
     }
 }

@@ -43,6 +43,8 @@ pub struct WebhookJob {
     pub attempt: u32,
     /// Maximum attempts before final discard.
     pub max_attempts: u32,
+    /// RFC3339 timestamp for this delivery attempt, supplied by runtimes with clocks.
+    pub attempt_timestamp: Option<String>,
 }
 
 impl WebhookJob {
@@ -233,6 +235,10 @@ pub fn build_request(endpoint: &WebhookEndpoint, job: &WebhookJob) -> Option<Web
         &endpoint.secret,
         job.event.clone(),
         delivery_id,
+        endpoint.id.clone(),
+        job.attempt_timestamp
+            .clone()
+            .or_else(|| timestamp(&job.payload)),
         sequence(&job.payload),
     );
 
@@ -438,6 +444,7 @@ where
                         legacy_job_id: None,
                         attempt: 1,
                         max_attempts: MAX_ATTEMPTS,
+                        attempt_timestamp: None,
                     },
                     cooldown_key,
                 }
@@ -506,6 +513,13 @@ fn discard_reason(reason: &str) -> String {
 
 fn sequence(payload: &Value) -> Option<u64> {
     payload.get("sequence").and_then(Value::as_u64)
+}
+
+fn timestamp(payload: &Value) -> Option<String> {
+    payload
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 fn payload_identity(payload: &Value) -> Option<String> {
@@ -601,7 +615,9 @@ fn encode_hex_lower(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use canary_http::webhooks::{HEADER_DELIVERY_ID, HEADER_EVENT, HEADER_SEQUENCE};
+    use canary_http::webhooks::{
+        HEADER_DELIVERY_ID, HEADER_EVENT, HEADER_SEQUENCE, HEADER_TIMESTAMP, HEADER_WEBHOOK_ID,
+    };
     use serde_json::json;
 
     use super::*;
@@ -616,18 +632,26 @@ mod tests {
         let request = request.unwrap_or_else(|| WebhookRequest {
             url: String::new(),
             body: String::new(),
-            headers: canary_http::webhooks::headers_for_body("", "", "", "", None),
+            headers: canary_http::webhooks::headers_for_body("", "", "", "", "", None, None),
         });
         assert_eq!(request.url, "https://example.test/hook");
         assert_eq!(
-            request.headers.as_pairs()[2],
+            request.headers.as_pairs()[3],
             (HEADER_EVENT, "error.new_class")
         );
         assert_eq!(
-            request.headers.as_pairs()[3],
+            request.headers.as_pairs()[4],
             (HEADER_DELIVERY_ID, "DLV-stable")
         );
-        assert_eq!(request.headers.as_pairs()[5], (HEADER_SEQUENCE, "7"));
+        assert_eq!(
+            request.headers.as_pairs()[5],
+            (HEADER_WEBHOOK_ID, "WHK-123456789abc")
+        );
+        assert_eq!(
+            request.headers.as_pairs()[6],
+            (HEADER_TIMESTAMP, "2026-05-28T20:00:00Z")
+        );
+        assert_eq!(request.headers.as_pairs()[8], (HEADER_SEQUENCE, "7"));
     }
 
     #[test]
@@ -1006,6 +1030,7 @@ mod tests {
             webhook_id: "WHK-123456789abc".to_owned(),
             payload: json!({
                 "event": "error.new_class",
+                "timestamp": "2026-05-28T20:00:00Z",
                 "sequence": 7,
                 "error": {"group_hash": "grp-stable"}
             }),
@@ -1014,6 +1039,7 @@ mod tests {
             legacy_job_id: None,
             attempt,
             max_attempts,
+            attempt_timestamp: None,
         }
     }
 }

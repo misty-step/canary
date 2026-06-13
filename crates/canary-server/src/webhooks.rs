@@ -5,7 +5,10 @@ use std::{
 };
 
 use canary_ingest::IngestEffect;
-use canary_store::{Store, WebhookDeliveryInsert, WebhookDeliveryJobInsert, WebhookSubscription};
+use canary_store::{
+    BOOTSTRAP_PROJECT_ID, BOOTSTRAP_TENANT_ID, Store, WebhookDeliveryInsert,
+    WebhookDeliveryJobInsert, WebhookSubscription,
+};
 use canary_workers::webhooks::{
     TransportResult, WebhookEndpoint, WebhookEnqueueDecision, WebhookJob, WebhookRequest,
     plan_enqueue_for_event,
@@ -273,6 +276,7 @@ impl WebhookEnqueueEffectSink {
     pub fn enqueue_event(&self, event: &str, payload_json: &str) -> Result<(), String> {
         let payload = serde_json::from_str(payload_json)
             .map_err(|error| format!("invalid webhook payload: {error}"))?;
+        let authority = WebhookEventAuthority::from_payload(&payload);
         let now = current_rfc3339();
         let subscriptions = {
             let store = self
@@ -280,7 +284,12 @@ impl WebhookEnqueueEffectSink {
                 .lock()
                 .map_err(|_| "store lock poisoned".to_owned())?;
             store
-                .active_webhook_subscriptions_for_event(event)
+                .active_webhook_subscriptions_for_event_scoped(
+                    event,
+                    &authority.tenant_id,
+                    &authority.project_id,
+                    authority.service.as_deref(),
+                )
                 .map_err(|error| error.to_string())?
         };
         let endpoints = subscriptions.into_iter().map(endpoint_from_subscription);
@@ -299,7 +308,7 @@ impl WebhookEnqueueEffectSink {
                     job,
                     cooldown_key,
                 } => {
-                    self.create_pending(delivery, &now)?;
+                    self.create_pending(delivery, &authority, &now)?;
                     match self.scheduler.schedule(&job) {
                         Ok(()) => self.cooldown.mark(&cooldown_key),
                         Err(error) => {
@@ -309,7 +318,7 @@ impl WebhookEnqueueEffectSink {
                     }
                 }
                 WebhookEnqueueDecision::Suppress { delivery, reason } => {
-                    self.create_suppressed(delivery, &reason, &now)?;
+                    self.create_suppressed(delivery, &authority, &reason, &now)?;
                 }
             }
         }
@@ -320,6 +329,7 @@ impl WebhookEnqueueEffectSink {
     fn create_pending(
         &self,
         delivery: canary_workers::webhooks::PlannedWebhookDelivery,
+        authority: &WebhookEventAuthority,
         now: &str,
     ) -> Result<(), String> {
         let mut store = self
@@ -327,13 +337,14 @@ impl WebhookEnqueueEffectSink {
             .lock()
             .map_err(|_| "store lock poisoned".to_owned())?;
         store
-            .create_pending_webhook_delivery(delivery_insert(delivery, now))
+            .create_pending_webhook_delivery(delivery_insert(delivery, authority, now))
             .map_err(|error| error.to_string())
     }
 
     fn create_suppressed(
         &self,
         delivery: canary_workers::webhooks::PlannedWebhookDelivery,
+        authority: &WebhookEventAuthority,
         reason: &str,
         now: &str,
     ) -> Result<(), String> {
@@ -342,7 +353,7 @@ impl WebhookEnqueueEffectSink {
             .lock()
             .map_err(|_| "store lock poisoned".to_owned())?;
         store
-            .create_suppressed_webhook_delivery(delivery_insert(delivery, now), reason)
+            .create_suppressed_webhook_delivery(delivery_insert(delivery, authority, now), reason)
             .map_err(|error| error.to_string())
     }
 
@@ -360,6 +371,63 @@ impl WebhookEnqueueEffectSink {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WebhookEventAuthority {
+    tenant_id: String,
+    project_id: String,
+    service: Option<String>,
+}
+
+impl WebhookEventAuthority {
+    pub(crate) fn from_payload(payload: &Value) -> Self {
+        Self {
+            tenant_id: payload
+                .get("tenant_id")
+                .and_then(Value::as_str)
+                .unwrap_or(BOOTSTRAP_TENANT_ID)
+                .to_owned(),
+            project_id: payload
+                .get("project_id")
+                .and_then(Value::as_str)
+                .unwrap_or(BOOTSTRAP_PROJECT_ID)
+                .to_owned(),
+            service: payload_service(payload).map(ToOwned::to_owned),
+        }
+    }
+}
+
+fn payload_service(payload: &Value) -> Option<&str> {
+    payload
+        .get("error")
+        .and_then(|error| error.get("service"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .get("incident")
+                .and_then(|incident| incident.get("service"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            payload
+                .get("target")
+                .and_then(|target| target.get("service"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            payload
+                .get("monitor")
+                .and_then(|monitor| monitor.get("service"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            payload
+                .get("annotation")
+                .and_then(|annotation| annotation.get("service"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| payload.get("service").and_then(Value::as_str))
+}
+
 pub(crate) fn endpoint_from_subscription(subscription: WebhookSubscription) -> WebhookEndpoint {
     WebhookEndpoint {
         id: subscription.id,
@@ -371,11 +439,15 @@ pub(crate) fn endpoint_from_subscription(subscription: WebhookSubscription) -> W
 
 pub(crate) fn delivery_insert(
     delivery: canary_workers::webhooks::PlannedWebhookDelivery,
+    authority: &WebhookEventAuthority,
     now: &str,
 ) -> WebhookDeliveryInsert {
     WebhookDeliveryInsert {
         delivery_id: delivery.delivery_id,
         webhook_id: delivery.webhook_id,
+        tenant_id: authority.tenant_id.clone(),
+        project_id: authority.project_id.clone(),
+        service: authority.service.clone(),
         event: delivery.event,
         now: now.to_owned(),
     }
@@ -412,5 +484,27 @@ mod tests {
 
         thread::sleep(StdDuration::from_millis(25));
         assert!(!cooldown.in_cooldown("WHK-a:error.new_class:grp-a"));
+    }
+
+    #[test]
+    fn webhook_event_authority_extracts_service_from_event_payload_families() {
+        for (payload, expected_service) in [
+            (json!({"error": {"service": "errors"}}), "errors"),
+            (json!({"incident": {"service": "incidents"}}), "incidents"),
+            (json!({"target": {"service": "targets"}}), "targets"),
+            (json!({"monitor": {"service": "monitors"}}), "monitors"),
+            (
+                json!({"annotation": {"service": "annotations"}}),
+                "annotations",
+            ),
+            (json!({"service": "top-level"}), "top-level"),
+        ] {
+            assert_eq!(
+                WebhookEventAuthority::from_payload(&payload)
+                    .service
+                    .as_deref(),
+                Some(expected_service)
+            );
+        }
     }
 }

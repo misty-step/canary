@@ -37,7 +37,6 @@
 | 036 | Agent-native inspection surface | high | done | L |
 | 037 | Watch the watchmen | high | done | L |
 | 038 | One-command integration agent | high | done | XL |
-| 039 | External-user security and privacy foundation | P0 | ready | XL |
 | 041 | Live integration verification harness | P0 | ready | L |
 | 042 | Runtime pressure and freshness operations | P0 | ready | L |
 | 040 | Universal integration and enrollment engine | P0 | ready | XL |
@@ -96,11 +95,8 @@
 
 ### Active order (2026-06-13)
 
-039 is the first pickup: arbitrary-user/app onboarding cannot safely expand
-while the data model is still single-org, read scopes are global, browser ingest
-keys can report arbitrary service names, and server-side privacy defaults are
-not enforced. 041 and 042 are the next parallel foundations: strict must prove
-SDK to server to query/webhook/doctor behavior, and runtime readiness must
+039 is delivered. 041 and 042 are the next parallel foundations: strict must
+prove SDK to server to query/webhook/doctor behavior, and runtime readiness must
 reflect freshness/pressure rather than thread liveness. 040 follows once those
 foundations can make integration receipts trustworthy. 043 and 044 are P1
 product-shaping epics that should not block the P0 foundation, but they define
@@ -184,6 +180,12 @@ parity backlog items were retired during the Rust scorched-earth migration.
   came from live `bin/canary doctor`, `bin/dogfood-inventory --strict`,
   integration discovery false negatives against LineJam/Chrondle/Misty/Vanity,
   source inspection, external exemplar docs, and read-only swarm lanes.
+- 2026-06-13: Delivered 039. Canary now has tenant/project/service ownership
+  across API keys, ingest, read models, admin surfaces, annotations, incidents,
+  health, webhooks, and delivery rows; service-bound keys are fail-closed, server
+  ingest applies redaction defaults, webhook delivery uses timestamped signatures
+  and scoped service authority, and durable rate limits back process-local
+  buckets.
 
 ## Status
 

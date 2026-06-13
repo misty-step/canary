@@ -766,7 +766,8 @@ pub(crate) fn record_tls_expiring_event(
     event: TlsExpiryEventInsert,
 ) -> Result<TlsExpiryEventCommit> {
     let transaction = connection.transaction()?;
-    let payload_json = tls_expiring_payload(&event).to_string();
+    let owner = target_owner(&transaction, &event.target_id)?;
+    let payload_json = tls_expiring_payload(&event, &owner).to_string();
     let summary = format!(
         "{}: TLS expires in {} day(s)",
         event.service, event.days_until_expiry
@@ -775,6 +776,8 @@ pub(crate) fn record_tls_expiring_event(
         &transaction,
         ServiceEventInsert {
             event_id: &event.event_id,
+            tenant_id: &owner.0,
+            project_id: &owner.1,
             service: &event.service,
             event: "health_check.tls_expiring",
             entity_type: "target",
@@ -797,11 +800,28 @@ pub(crate) fn insert_monitor(
     connection: &rusqlite::Connection,
     monitor: MonitorInsert,
 ) -> Result<()> {
+    insert_monitor_scoped(
+        connection,
+        monitor,
+        crate::BOOTSTRAP_TENANT_ID,
+        crate::BOOTSTRAP_PROJECT_ID,
+    )
+}
+
+pub(crate) fn insert_monitor_scoped(
+    connection: &rusqlite::Connection,
+    monitor: MonitorInsert,
+    tenant_id: &str,
+    project_id: &str,
+) -> Result<()> {
     connection.execute(
-        "INSERT INTO monitors (id, name, service, mode, expected_every_ms, grace_ms, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO monitors (
+            id, tenant_id, project_id, name, service, mode, expected_every_ms, grace_ms, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             monitor.id,
+            tenant_id,
+            project_id,
             monitor.name,
             monitor.service,
             monitor.mode,
@@ -817,11 +837,28 @@ pub(crate) fn create_monitor(
     connection: &mut rusqlite::Connection,
     monitor: MonitorInsert,
 ) -> Result<bool> {
+    create_monitor_scoped(
+        connection,
+        monitor,
+        crate::BOOTSTRAP_TENANT_ID,
+        crate::BOOTSTRAP_PROJECT_ID,
+    )
+}
+
+pub(crate) fn create_monitor_scoped(
+    connection: &mut rusqlite::Connection,
+    monitor: MonitorInsert,
+    tenant_id: &str,
+    project_id: &str,
+) -> Result<bool> {
     let transaction = connection.transaction()?;
     let exists = transaction
         .query_row(
-            "SELECT 1 FROM monitors WHERE name = ?1 LIMIT 1",
-            [&monitor.name],
+            "SELECT 1
+             FROM monitors
+             WHERE name = ?1 AND tenant_id = ?2 AND project_id = ?3
+             LIMIT 1",
+            params![&monitor.name, tenant_id, project_id],
             |_row| Ok(()),
         )
         .optional()?
@@ -832,10 +869,13 @@ pub(crate) fn create_monitor(
     }
 
     transaction.execute(
-        "INSERT INTO monitors (id, name, service, mode, expected_every_ms, grace_ms, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO monitors (
+            id, tenant_id, project_id, name, service, mode, expected_every_ms, grace_ms, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             monitor.id,
+            tenant_id,
+            project_id,
             monitor.name,
             monitor.service,
             monitor.mode,
@@ -853,14 +893,35 @@ pub(crate) fn create_monitor(
 }
 
 pub(crate) fn list_monitors(connection: &rusqlite::Connection) -> Result<Vec<MonitorRecord>> {
-    let mut statement = connection.prepare(
+    list_monitors_where(connection, "", &[])
+}
+
+pub(crate) fn list_monitors_scoped(
+    connection: &rusqlite::Connection,
+    tenant_id: &str,
+    project_id: &str,
+) -> Result<Vec<MonitorRecord>> {
+    list_monitors_where(
+        connection,
+        " WHERE tenant_id = ?1 AND project_id = ?2",
+        &[tenant_id, project_id],
+    )
+}
+
+fn list_monitors_where(
+    connection: &rusqlite::Connection,
+    where_clause: &str,
+    query_params: &[&str],
+) -> Result<Vec<MonitorRecord>> {
+    let mut statement = connection.prepare(&format!(
         "SELECT
             id, name, COALESCE(NULLIF(service, ''), name), mode,
             expected_every_ms, COALESCE(grace_ms, 0), created_at
          FROM monitors
+         {where_clause}
          ORDER BY name",
-    )?;
-    let rows = statement.query_map([], |row| {
+    ))?;
+    let rows = statement.query_map(params_from_iter(query_params.iter()), |row| {
         Ok(MonitorRecord {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -878,7 +939,27 @@ pub(crate) fn list_monitors(connection: &rusqlite::Connection) -> Result<Vec<Mon
 pub(crate) fn health_monitors(
     connection: &rusqlite::Connection,
 ) -> Result<Vec<HealthMonitorStatus>> {
-    let mut statement = connection.prepare(
+    health_monitors_where(connection, "", &[])
+}
+
+pub(crate) fn health_monitors_scoped(
+    connection: &rusqlite::Connection,
+    tenant_id: &str,
+    project_id: &str,
+) -> Result<Vec<HealthMonitorStatus>> {
+    health_monitors_where(
+        connection,
+        " WHERE m.tenant_id = ?1 AND m.project_id = ?2",
+        &[tenant_id, project_id],
+    )
+}
+
+fn health_monitors_where(
+    connection: &rusqlite::Connection,
+    where_clause: &str,
+    query_params: &[&str],
+) -> Result<Vec<HealthMonitorStatus>> {
+    let mut statement = connection.prepare(&format!(
         "SELECT
             m.id, m.name, COALESCE(NULLIF(m.service, ''), m.name), m.mode,
             m.expected_every_ms, COALESCE(m.grace_ms, 0),
@@ -886,9 +967,10 @@ pub(crate) fn health_monitors(
             s.last_check_in_at, s.last_success_at, s.last_failure_at, s.deadline_at
          FROM monitors AS m
          LEFT JOIN monitor_state AS s ON s.monitor_id = m.id
+         {where_clause}
          ORDER BY m.name",
-    )?;
-    let rows = statement.query_map([], |row| {
+    ))?;
+    let rows = statement.query_map(params_from_iter(query_params.iter()), |row| {
         Ok(HealthMonitorStatus {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -918,15 +1000,46 @@ pub(crate) fn delete_monitor(
     Ok(changed > 0)
 }
 
+pub(crate) fn delete_monitor_scoped(
+    connection: &mut rusqlite::Connection,
+    monitor_id: &str,
+    tenant_id: &str,
+    project_id: &str,
+) -> Result<bool> {
+    let transaction = connection.transaction()?;
+    let changed = transaction.execute(
+        "DELETE FROM monitors WHERE id = ?1 AND tenant_id = ?2 AND project_id = ?3",
+        params![monitor_id, tenant_id, project_id],
+    )?;
+    transaction.commit()?;
+    Ok(changed > 0)
+}
+
 pub(crate) fn insert_target(connection: &rusqlite::Connection, target: TargetInsert) -> Result<()> {
+    insert_target_scoped(
+        connection,
+        target,
+        crate::BOOTSTRAP_TENANT_ID,
+        crate::BOOTSTRAP_PROJECT_ID,
+    )
+}
+
+pub(crate) fn insert_target_scoped(
+    connection: &rusqlite::Connection,
+    target: TargetInsert,
+    tenant_id: &str,
+    project_id: &str,
+) -> Result<()> {
     connection.execute(
         "INSERT INTO targets (
-            id, url, name, service, method, headers, interval_ms, timeout_ms,
+            id, tenant_id, project_id, url, name, service, method, headers, interval_ms, timeout_ms,
             expected_status, body_contains, degraded_after, down_after,
             up_after, active, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             target.id,
+            tenant_id,
+            project_id,
             target.url,
             target.name,
             target.service,
@@ -946,36 +1059,87 @@ pub(crate) fn insert_target(connection: &rusqlite::Connection, target: TargetIns
     Ok(())
 }
 
-pub(crate) fn target_conflict(
+pub(crate) fn target_conflict_scoped(
     connection: &rusqlite::Connection,
     service: &str,
     url: &str,
+    tenant_id: &str,
+    project_id: &str,
 ) -> Result<TargetConflict> {
-    let service = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM targets WHERE service = ?1 LIMIT 1)",
-        [service],
-        |row| row.get::<_, i64>(0),
-    )? == 1;
-    let url = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM targets WHERE url = ?1 LIMIT 1)",
-        [url],
-        |row| row.get::<_, i64>(0),
-    )? == 1;
+    target_conflict_where(
+        connection,
+        service,
+        url,
+        " AND tenant_id = ?2 AND project_id = ?3",
+        &[tenant_id, project_id],
+    )
+}
+
+fn target_conflict_where(
+    connection: &rusqlite::Connection,
+    service: &str,
+    url: &str,
+    owner_clause: &str,
+    owner_params: &[&str],
+) -> Result<TargetConflict> {
+    let mut service_params: Vec<&dyn rusqlite::ToSql> = vec![&service];
+    service_params.extend(
+        owner_params
+            .iter()
+            .map(|value| value as &dyn rusqlite::ToSql),
+    );
+    let service_sql =
+        format!("SELECT EXISTS(SELECT 1 FROM targets WHERE service = ?1{owner_clause} LIMIT 1)");
+    let service = connection.query_row(&service_sql, service_params.as_slice(), |row| {
+        row.get::<_, i64>(0)
+    })? == 1;
+
+    let mut url_params: Vec<&dyn rusqlite::ToSql> = vec![&url];
+    url_params.extend(
+        owner_params
+            .iter()
+            .map(|value| value as &dyn rusqlite::ToSql),
+    );
+    let url_sql =
+        format!("SELECT EXISTS(SELECT 1 FROM targets WHERE url = ?1{owner_clause} LIMIT 1)");
+    let url =
+        connection.query_row(&url_sql, url_params.as_slice(), |row| row.get::<_, i64>(0))? == 1;
 
     Ok(TargetConflict { service, url })
 }
 
 pub(crate) fn list_targets(connection: &rusqlite::Connection) -> Result<Vec<TargetRecord>> {
-    let mut statement = connection.prepare(
+    list_targets_where(connection, "", &[])
+}
+
+pub(crate) fn list_targets_scoped(
+    connection: &rusqlite::Connection,
+    tenant_id: &str,
+    project_id: &str,
+) -> Result<Vec<TargetRecord>> {
+    list_targets_where(
+        connection,
+        " WHERE tenant_id = ?1 AND project_id = ?2",
+        &[tenant_id, project_id],
+    )
+}
+
+fn list_targets_where(
+    connection: &rusqlite::Connection,
+    where_clause: &str,
+    query_params: &[&str],
+) -> Result<Vec<TargetRecord>> {
+    let mut statement = connection.prepare(&format!(
         "SELECT
             id, url, name, COALESCE(NULLIF(service, ''), name),
             COALESCE(method, 'GET'), COALESCE(interval_ms, 60000),
             COALESCE(timeout_ms, 10000), COALESCE(expected_status, '200'),
             COALESCE(active, 1), created_at
          FROM targets
+         {where_clause}
          ORDER BY name",
-    )?;
-    let rows = statement.query_map([], |row| {
+    ))?;
+    let rows = statement.query_map(params_from_iter(query_params.iter()), |row| {
         Ok(TargetRecord {
             id: row.get(0)?,
             url: row.get(1)?,
@@ -994,16 +1158,37 @@ pub(crate) fn list_targets(connection: &rusqlite::Connection) -> Result<Vec<Targ
 }
 
 pub(crate) fn health_targets(connection: &rusqlite::Connection) -> Result<Vec<HealthTargetStatus>> {
-    let mut statement = connection.prepare(
+    health_targets_where(connection, "", &[])
+}
+
+pub(crate) fn health_targets_scoped(
+    connection: &rusqlite::Connection,
+    tenant_id: &str,
+    project_id: &str,
+) -> Result<Vec<HealthTargetStatus>> {
+    health_targets_where(
+        connection,
+        " WHERE t.tenant_id = ?1 AND t.project_id = ?2",
+        &[tenant_id, project_id],
+    )
+}
+
+fn health_targets_where(
+    connection: &rusqlite::Connection,
+    where_clause: &str,
+    params: &[&str],
+) -> Result<Vec<HealthTargetStatus>> {
+    let mut statement = connection.prepare(&format!(
         "SELECT
             t.id, t.name, COALESCE(NULLIF(t.service, ''), t.name), t.url,
             COALESCE(s.state, 'unknown'), COALESCE(s.consecutive_failures, 0),
             s.last_checked_at, s.last_success_at
          FROM targets AS t
          LEFT JOIN target_state AS s ON s.target_id = t.id
+         {where_clause}
          ORDER BY t.name",
-    )?;
-    let rows = statement.query_map([], |row| {
+    ))?;
+    let rows = statement.query_map(rusqlite::params_from_iter(params.iter()), |row| {
         Ok(HealthTargetStatus {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -1055,6 +1240,40 @@ pub(crate) fn target_checks(
         connection,
         target_id,
         window,
+        None,
+        time::OffsetDateTime::now_utc(),
+    )
+}
+
+pub(crate) fn target_checks_scoped(
+    connection: &rusqlite::Connection,
+    target_id: &str,
+    window: &str,
+    tenant_id: &str,
+    project_id: &str,
+) -> QueryResult<Vec<TargetCheckRead>> {
+    target_checks_at(
+        connection,
+        target_id,
+        window,
+        Some((tenant_id, project_id, None)),
+        time::OffsetDateTime::now_utc(),
+    )
+}
+
+pub(crate) fn target_checks_scoped_for_service(
+    connection: &rusqlite::Connection,
+    target_id: &str,
+    window: &str,
+    tenant_id: &str,
+    project_id: &str,
+    service: &str,
+) -> QueryResult<Vec<TargetCheckRead>> {
+    target_checks_at(
+        connection,
+        target_id,
+        window,
+        Some((tenant_id, project_id, Some(service))),
         time::OffsetDateTime::now_utc(),
     )
 }
@@ -1063,29 +1282,51 @@ pub(crate) fn target_checks_at(
     connection: &rusqlite::Connection,
     target_id: &str,
     window: &str,
+    owner: Option<(&str, &str, Option<&str>)>,
     now: time::OffsetDateTime,
 ) -> QueryResult<Vec<TargetCheckRead>> {
     let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
     let cutoff = window.cutoff_at(now);
-    let mut statement = connection.prepare(
+    let owner_clause = if owner.is_some() {
+        " AND EXISTS (
+            SELECT 1 FROM targets t
+            WHERE t.id = target_checks.target_id
+              AND t.tenant_id = ?3
+              AND t.project_id = ?4
+              AND (?5 IS NULL OR COALESCE(NULLIF(t.service, ''), t.name) = ?5)
+        )"
+    } else {
+        ""
+    };
+    let mut statement = connection.prepare(&format!(
         "SELECT checked_at, result, status_code, latency_ms, tls_expires_at, error_detail
          FROM target_checks
          WHERE target_id = ?1 AND checked_at >= ?2
+         {owner_clause}
          ORDER BY checked_at DESC
          LIMIT 500",
-    )?;
-    let rows = statement.query_map(params![target_id, cutoff], |row| {
-        Ok(TargetCheckRead {
-            checked_at: row.get(0)?,
-            result: row.get(1)?,
-            status_code: row.get(2)?,
-            latency_ms: row.get(3)?,
-            tls_expires_at: row.get(4)?,
-            error_detail: row.get(5)?,
-        })
-    })?;
+    ))?;
+    let rows = if let Some((tenant_id, project_id, service)) = owner {
+        statement.query_map(
+            params![target_id, cutoff, tenant_id, project_id, service],
+            target_check_row,
+        )?
+    } else {
+        statement.query_map(params![target_id, cutoff], target_check_row)?
+    };
     let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+fn target_check_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TargetCheckRead> {
+    Ok(TargetCheckRead {
+        checked_at: row.get(0)?,
+        result: row.get(1)?,
+        status_code: row.get(2)?,
+        latency_ms: row.get(3)?,
+        tls_expires_at: row.get(4)?,
+        error_detail: row.get(5)?,
+    })
 }
 
 pub(crate) fn delete_target(
@@ -1105,15 +1346,68 @@ pub(crate) fn delete_target(
     Ok(changed > 0)
 }
 
+pub(crate) fn delete_target_scoped(
+    connection: &mut rusqlite::Connection,
+    target_id: &str,
+    tenant_id: &str,
+    project_id: &str,
+) -> Result<bool> {
+    let transaction = connection.transaction()?;
+    let changed = transaction.execute(
+        "DELETE FROM targets WHERE id = ?1 AND tenant_id = ?2 AND project_id = ?3",
+        params![target_id, tenant_id, project_id],
+    )?;
+    if changed > 0 {
+        transaction.execute("DELETE FROM target_state WHERE target_id = ?1", [target_id])?;
+        transaction.execute(
+            "DELETE FROM target_checks WHERE target_id = ?1",
+            [target_id],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(changed > 0)
+}
+
 pub(crate) fn update_target_active(
     connection: &mut rusqlite::Connection,
     target_id: &str,
     active: bool,
 ) -> Result<bool> {
+    update_target_active_where(connection, target_id, active, "", &[])
+}
+
+pub(crate) fn update_target_active_scoped(
+    connection: &mut rusqlite::Connection,
+    target_id: &str,
+    active: bool,
+    tenant_id: &str,
+    project_id: &str,
+) -> Result<bool> {
+    update_target_active_where(
+        connection,
+        target_id,
+        active,
+        " AND tenant_id = ?3 AND project_id = ?4",
+        &[tenant_id, project_id],
+    )
+}
+
+fn update_target_active_where(
+    connection: &mut rusqlite::Connection,
+    target_id: &str,
+    active: bool,
+    authority_clause: &str,
+    authority_params: &[&str],
+) -> Result<bool> {
     let transaction = connection.transaction()?;
+    let mut params = vec![
+        target_id.to_owned(),
+        if active { "1" } else { "0" }.to_owned(),
+    ];
+    params.extend(authority_params.iter().map(|value| (*value).to_owned()));
     let changed = transaction.execute(
-        "UPDATE targets SET active = ?2 WHERE id = ?1",
-        rusqlite::params![target_id, if active { 1 } else { 0 }],
+        &format!("UPDATE targets SET active = ?2 WHERE id = ?1{authority_clause}"),
+        params_from_iter(params.iter()),
     )?;
     if changed > 0 {
         let state = if active { "unknown" } else { "paused" };
@@ -1131,13 +1425,43 @@ pub(crate) fn update_target_interval(
     target_id: &str,
     interval_ms: i64,
 ) -> Result<Option<TargetIntervalUpdate>> {
+    update_target_interval_where(connection, target_id, interval_ms, "", &[])
+}
+
+pub(crate) fn update_target_interval_scoped(
+    connection: &mut rusqlite::Connection,
+    target_id: &str,
+    interval_ms: i64,
+    tenant_id: &str,
+    project_id: &str,
+) -> Result<Option<TargetIntervalUpdate>> {
+    update_target_interval_where(
+        connection,
+        target_id,
+        interval_ms,
+        " AND tenant_id = ?2 AND project_id = ?3",
+        &[tenant_id, project_id],
+    )
+}
+
+fn update_target_interval_where(
+    connection: &mut rusqlite::Connection,
+    target_id: &str,
+    interval_ms: i64,
+    authority_clause: &str,
+    authority_params: &[&str],
+) -> Result<Option<TargetIntervalUpdate>> {
     let transaction = connection.transaction()?;
+    let mut lookup_params = vec![target_id.to_owned()];
+    lookup_params.extend(authority_params.iter().map(|value| (*value).to_owned()));
     let prior = transaction
         .query_row(
-            "SELECT COALESCE(interval_ms, 60000), COALESCE(active, 1)
+            &format!(
+                "SELECT COALESCE(interval_ms, 60000), COALESCE(active, 1)
              FROM targets
-             WHERE id = ?1",
-            [target_id],
+             WHERE id = ?1{authority_clause}"
+            ),
+            params_from_iter(lookup_params.iter()),
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? == 1)),
         )
         .optional()?;
@@ -1306,12 +1630,39 @@ pub(crate) fn monitor_check_in_snapshot_by_name(
     connection: &mut rusqlite::Connection,
     name: &str,
 ) -> Result<Option<MonitorCheckInSnapshot>> {
+    monitor_check_in_snapshot_by_name_where(connection, name, "", &[])
+}
+
+pub(crate) fn monitor_check_in_snapshot_by_name_scoped(
+    connection: &mut rusqlite::Connection,
+    name: &str,
+    tenant_id: &str,
+    project_id: &str,
+) -> Result<Option<MonitorCheckInSnapshot>> {
+    monitor_check_in_snapshot_by_name_where(
+        connection,
+        name,
+        " AND tenant_id = ?2 AND project_id = ?3",
+        &[tenant_id, project_id],
+    )
+}
+
+fn monitor_check_in_snapshot_by_name_where(
+    connection: &mut rusqlite::Connection,
+    name: &str,
+    owner_clause: &str,
+    owner_params: &[&str],
+) -> Result<Option<MonitorCheckInSnapshot>> {
     let transaction = connection.transaction()?;
+    let mut params = vec![name.to_owned()];
+    params.extend(owner_params.iter().map(|value| (*value).to_owned()));
     let monitor = transaction
         .query_row(
-            "SELECT id, name, service, mode, expected_every_ms, grace_ms
-             FROM monitors WHERE name = ?1",
-            [name],
+            &format!(
+                "SELECT id, name, service, mode, expected_every_ms, grace_ms
+                 FROM monitors WHERE name = ?1{owner_clause}"
+            ),
+            rusqlite::params_from_iter(params.iter()),
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -1547,7 +1898,8 @@ fn record_target_transition(
     transaction: &rusqlite::Transaction<'_>,
     transition: TargetTransitionRecord<'_>,
 ) -> Result<HealthTransitionCommit> {
-    let payload_json = target_payload(&transition).to_string();
+    let owner = target_owner(transaction, transition.target_id)?;
+    let payload_json = target_payload(&transition, &owner).to_string();
     let event = event_name_for(transition.state).to_owned();
     let summary = format!(
         "{}: {} {}",
@@ -1557,6 +1909,8 @@ fn record_target_transition(
         transaction,
         ServiceEventInsert {
             event_id: transition.event_id,
+            tenant_id: &owner.0,
+            project_id: &owner.1,
             service: transition.service,
             event: &event,
             entity_type: "target",
@@ -1570,6 +1924,8 @@ fn record_target_transition(
     let incident_event = correlate_in_transaction(
         transaction,
         IncidentCorrelation {
+            tenant_id: owner.0,
+            project_id: owner.1,
             signal_type: "health_transition".to_owned(),
             signal_ref: transition.target_id.to_owned(),
             service: transition.service.to_owned(),
@@ -1609,7 +1965,8 @@ fn record_monitor_transition(
     transaction: &rusqlite::Transaction<'_>,
     transition: MonitorTransitionRecord<'_>,
 ) -> Result<HealthTransitionCommit> {
-    let payload_json = monitor_payload(&transition).to_string();
+    let owner = monitor_owner(transaction, transition.monitor_id)?;
+    let payload_json = monitor_payload(&transition, &owner).to_string();
     let event = event_name_for(transition.state).to_owned();
     let summary = format!(
         "{}: {} {}",
@@ -1619,6 +1976,8 @@ fn record_monitor_transition(
         transaction,
         ServiceEventInsert {
             event_id: transition.event_id,
+            tenant_id: &owner.0,
+            project_id: &owner.1,
             service: transition.service,
             event: &event,
             entity_type: "monitor",
@@ -1632,6 +1991,8 @@ fn record_monitor_transition(
     let incident_event = correlate_in_transaction(
         transaction,
         IncidentCorrelation {
+            tenant_id: owner.0,
+            project_id: owner.1,
             signal_type: "health_transition".to_owned(),
             signal_ref: transition.monitor_id.to_owned(),
             service: transition.service.to_owned(),
@@ -1753,6 +2114,8 @@ fn insert_monitor_check_in(
 
 struct ServiceEventInsert<'a> {
     event_id: &'a EventId,
+    tenant_id: &'a str,
+    project_id: &'a str,
     service: &'a str,
     event: &'a str,
     entity_type: &'a str,
@@ -1769,10 +2132,12 @@ fn insert_service_event(
 ) -> Result<()> {
     transaction.execute(
         "INSERT INTO service_events (
-            id, service, event, entity_type, entity_ref, severity, summary, payload, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            id, tenant_id, project_id, service, event, entity_type, entity_ref, severity, summary, payload, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             event.event_id.as_str(),
+            event.tenant_id,
+            event.project_id,
             event.service,
             event.event,
             event.entity_type,
@@ -1786,9 +2151,40 @@ fn insert_service_event(
     Ok(())
 }
 
-fn target_payload(transition: &TargetTransitionRecord<'_>) -> serde_json::Value {
+fn target_owner(
+    transaction: &rusqlite::Transaction<'_>,
+    target_id: &str,
+) -> Result<(String, String)> {
+    transaction
+        .query_row(
+            "SELECT tenant_id, project_id FROM targets WHERE id = ?1",
+            [target_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(Into::into)
+}
+
+fn monitor_owner(
+    transaction: &rusqlite::Transaction<'_>,
+    monitor_id: &str,
+) -> Result<(String, String)> {
+    transaction
+        .query_row(
+            "SELECT tenant_id, project_id FROM monitors WHERE id = ?1",
+            [monitor_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(Into::into)
+}
+
+fn target_payload(
+    transition: &TargetTransitionRecord<'_>,
+    owner: &(String, String),
+) -> serde_json::Value {
     json!({
         "event": event_name_for(transition.state),
+        "tenant_id": owner.0,
+        "project_id": owner.1,
         "target": {
             "name": transition.name,
             "service": transition.service,
@@ -1803,9 +2199,14 @@ fn target_payload(transition: &TargetTransitionRecord<'_>) -> serde_json::Value 
     })
 }
 
-fn monitor_payload(transition: &MonitorTransitionRecord<'_>) -> serde_json::Value {
+fn monitor_payload(
+    transition: &MonitorTransitionRecord<'_>,
+    owner: &(String, String),
+) -> serde_json::Value {
     json!({
         "event": event_name_for(transition.state),
+        "tenant_id": owner.0,
+        "project_id": owner.1,
         "monitor": {
             "name": transition.name,
             "service": transition.service,
@@ -1823,9 +2224,14 @@ fn monitor_payload(transition: &MonitorTransitionRecord<'_>) -> serde_json::Valu
     })
 }
 
-fn tls_expiring_payload(event: &TlsExpiryEventInsert) -> serde_json::Value {
+fn tls_expiring_payload(
+    event: &TlsExpiryEventInsert,
+    owner: &(String, String),
+) -> serde_json::Value {
     json!({
         "event": "health_check.tls_expiring",
+        "tenant_id": owner.0,
+        "project_id": owner.1,
         "target": {
             "name": event.name,
             "service": event.service,

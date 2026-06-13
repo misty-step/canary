@@ -10,6 +10,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, Response, StatusCode},
 };
+use canary_core::query::active_incidents_response;
 use canary_http::problem_details::{
     internal_problem, invalid_cursor_problem, invalid_event_type_problem, invalid_limit_problem,
     invalid_window_problem, missing_query_problem, not_found_problem,
@@ -21,9 +22,9 @@ use canary_store::{
 use serde::Deserialize;
 
 use crate::{
-    IngestState,
+    IngestState, enforce_service_authority,
     http_contract::{json_status_response, problem_response},
-    require_read_scope,
+    require_read_scope, service_authority_problem,
 };
 
 enum QueryKind {
@@ -63,11 +64,12 @@ pub(crate) async fn query_errors(
     headers: HeaderMap,
     Query(params): Query<QueryParams>,
 ) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
+    let key = match require_read_scope(&state, &headers) {
+        Ok(key) => key,
+        Err(problem) => return problem_response(*problem),
+    };
 
-    let query_kind = match (
+    let mut query_kind = match (
         params.error_class.as_deref(),
         params.service.as_deref(),
         params.group_by.as_deref(),
@@ -82,6 +84,28 @@ pub(crate) async fn query_errors(
         (None, None, Some("error_class")) => QueryKind::ErrorClasses,
         (None, None, _) => return problem_response(missing_query_problem()),
     };
+    if let Some(bound_service) = key.service.as_deref() {
+        match &mut query_kind {
+            QueryKind::Service { service } => {
+                if let Err(problem) = enforce_service_authority(&key, service) {
+                    return problem_response(*problem);
+                }
+            }
+            QueryKind::ErrorClass { service, .. } => match service {
+                Some(service) => {
+                    if let Err(problem) = enforce_service_authority(&key, service) {
+                        return problem_response(*problem);
+                    }
+                }
+                None => {
+                    *service = Some(bound_service.to_owned());
+                }
+            },
+            QueryKind::ErrorClasses => {
+                return problem_response(service_authority_problem(bound_service, "*"));
+            }
+        }
+    }
 
     let default_window = match &query_kind {
         QueryKind::Service { .. } => "1h",
@@ -89,6 +113,8 @@ pub(crate) async fn query_errors(
     };
     let window = params.window.as_deref().unwrap_or(default_window);
     let options = ServiceQueryOptions {
+        tenant_id: Some(key.tenant_id.clone()),
+        project_id: Some(key.project_id.clone()),
         cursor: params.cursor,
         with_annotation: params.with_annotation,
         without_annotation: params.without_annotation,
@@ -121,11 +147,13 @@ pub(crate) async fn query_errors(
             Err(ErrorGroupQueryError::InvalidCursor) => problem_response(invalid_cursor_problem()),
             Err(ErrorGroupQueryError::Sqlite(_)) => problem_response(internal_problem()),
         },
-        QueryKind::ErrorClasses => match store.errors_by_class(window) {
-            Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
-            Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
-            Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
-        },
+        QueryKind::ErrorClasses => {
+            match store.errors_by_class_scoped(window, &key.tenant_id, &key.project_id) {
+                Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
+                Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
+                Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
+            }
+        }
     }
 }
 
@@ -134,14 +162,27 @@ pub(crate) async fn timeline(
     headers: HeaderMap,
     Query(params): Query<TimelineParams>,
 ) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
+    let key = match require_read_scope(&state, &headers) {
+        Ok(key) => key,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let window = params.window.as_deref().unwrap_or("24h");
     let cursor = params.after.or(params.cursor);
+    let service = match (key.service.as_deref(), params.service) {
+        (Some(_bound_service), Some(service)) => {
+            if let Err(problem) = enforce_service_authority(&key, &service) {
+                return problem_response(*problem);
+            }
+            Some(service)
+        }
+        (Some(bound_service), None) => Some(bound_service.to_owned()),
+        (None, service) => service,
+    };
     let options = TimelineQueryOptions {
-        service: params.service,
+        tenant_id: Some(key.tenant_id),
+        project_id: Some(key.project_id),
+        service,
         limit: params.limit,
         cursor,
         event_type: params.event_type,
@@ -168,9 +209,10 @@ pub(crate) async fn list_incidents(
     headers: HeaderMap,
     Query(params): Query<QueryParams>,
 ) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
+    let key = match require_read_scope(&state, &headers) {
+        Ok(key) => key,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let store = match state.lock_store() {
         Ok(store) => store,
@@ -178,10 +220,20 @@ pub(crate) async fn list_incidents(
     };
 
     match store.active_incidents(IncidentListOptions {
+        tenant_id: Some(key.tenant_id),
+        project_id: Some(key.project_id),
         with_annotation: params.with_annotation,
         without_annotation: params.without_annotation,
     }) {
-        Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
+        Ok(mut result) => {
+            if let Some(bound_service) = key.service.as_deref() {
+                result
+                    .incidents
+                    .retain(|incident| incident.service == bound_service);
+                result = active_incidents_response(result.incidents);
+            }
+            json_status_response(StatusCode::OK.as_u16(), result)
+        }
         Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
         Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
     }
@@ -192,17 +244,25 @@ pub(crate) async fn show_error(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
+    let key = match require_read_scope(&state, &headers) {
+        Ok(key) => key,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
 
-    match store.error_detail(&id) {
-        Ok(Some(result)) => json_status_response(StatusCode::OK.as_u16(), result),
+    match store.error_detail_scoped(&id, &key.tenant_id, &key.project_id) {
+        Ok(Some(result)) => {
+            if let Some(bound_service) = key.service.as_deref()
+                && result.service != bound_service
+            {
+                return problem_response(not_found_problem(format!("Error {id} not found.")));
+            }
+            json_status_response(StatusCode::OK.as_u16(), result)
+        }
         Ok(None) => problem_response(not_found_problem(format!("Error {id} not found."))),
         Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
         Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
@@ -214,17 +274,25 @@ pub(crate) async fn show_incident(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
+    let key = match require_read_scope(&state, &headers) {
+        Ok(key) => key,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
 
-    match store.incident_detail(&id) {
-        Ok(Some(result)) => json_status_response(StatusCode::OK.as_u16(), result),
+    match store.incident_detail_scoped(&id, &key.tenant_id, &key.project_id) {
+        Ok(Some(result)) => {
+            if let Some(bound_service) = key.service.as_deref()
+                && result.incident.service != bound_service
+            {
+                return problem_response(not_found_problem(format!("Incident {id} not found.")));
+            }
+            json_status_response(StatusCode::OK.as_u16(), result)
+        }
         Ok(None) => problem_response(not_found_problem(format!("Incident {id} not found."))),
         Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
         Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),

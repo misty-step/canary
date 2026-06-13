@@ -4,7 +4,7 @@
 //! truncation, grouping, classification, and the single call into
 //! `canary-store`.
 
-use std::collections::BTreeMap;
+use std::{borrow::Cow, collections::BTreeMap, sync::LazyLock};
 
 use canary_core::{
     ids::{ErrorId, EventId},
@@ -14,8 +14,10 @@ use canary_core::{
     },
 };
 use canary_store::{
-    ErrorIngest, ErrorIngestCommit, ErrorIngestIds, ErrorIngestPayload, Store, StoreError,
+    BOOTSTRAP_PROJECT_ID, BOOTSTRAP_TENANT_ID, ErrorIngest, ErrorIngestCommit, ErrorIngestIds,
+    ErrorIngestPayload, Store, StoreError,
 };
+use regex::Regex;
 use serde_json::{Map, Value};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -24,6 +26,44 @@ const MAX_FINGERPRINT_ELEMENTS: usize = 5;
 const MAX_FINGERPRINT_ELEMENT_LEN: usize = 256;
 const MAX_MESSAGE_LEN: usize = 4_096;
 const MAX_STACK_TRACE_LEN: usize = 32_768;
+const REDACTED: &str = "[REDACTED]";
+
+static REDACTION_RULES: LazyLock<std::result::Result<Vec<(Regex, &'static str)>, regex::Error>> =
+    LazyLock::new(|| {
+        Ok(vec![
+            (
+                Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")?,
+                "Bearer [REDACTED]",
+            ),
+            (
+                Regex::new(r"\bsk_(?:live|test)_[A-Za-z0-9_=-]+")?,
+                "[CANARY_API_KEY]",
+            ),
+            (
+                Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")?,
+                "[EMAIL]",
+            ),
+            (
+                Regex::new(
+                    r#"(?i)\b(password|secret|token|api[_-]?key)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'&,;]+)"#,
+                )?,
+                "$1=[REDACTED]",
+            ),
+        ])
+    });
+
+fn scrub_string(value: &str) -> String {
+    let Ok(rules) = REDACTION_RULES.as_ref() else {
+        return REDACTED.to_owned();
+    };
+    let mut scrubbed = Cow::Borrowed(value);
+    for (pattern, replacement) in rules {
+        if pattern.is_match(&scrubbed) {
+            scrubbed = Cow::Owned(pattern.replace_all(&scrubbed, *replacement).into_owned());
+        }
+    }
+    scrubbed.into_owned()
+}
 
 /// Result type returned by the ingest boundary.
 pub type Result<T> = std::result::Result<T, IngestError>;
@@ -61,6 +101,10 @@ pub struct IngestContext {
     pub error_id: ErrorId,
     /// Service-event row ID used when a timeline event is emitted.
     pub event_id: EventId,
+    /// Tenant that owns the ingested error.
+    pub tenant_id: String,
+    /// Project that owns the ingested error.
+    pub project_id: String,
     /// RFC3339 ingest timestamp.
     pub now: String,
 }
@@ -75,7 +119,18 @@ impl IngestContext {
         Self {
             error_id: ErrorId::generate(),
             event_id: EventId::generate(),
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
             now,
+        }
+    }
+
+    /// Build a context for a verified API key authority.
+    pub fn now_for_authority(tenant_id: impl Into<String>, project_id: impl Into<String>) -> Self {
+        Self {
+            tenant_id: tenant_id.into(),
+            project_id: project_id.into(),
+            ..Self::now()
         }
     }
 }
@@ -105,6 +160,10 @@ pub enum IngestEffect {
     },
     /// Attach the error group to the service incident graph.
     CorrelateIncident {
+        /// Tenant namespace for the signal.
+        tenant_id: String,
+        /// Project namespace for the signal.
+        project_id: String,
         /// Signal type to correlate.
         signal_type: String,
         /// Stable signal reference.
@@ -140,13 +199,15 @@ fn prepare(
 ) -> Result<ErrorIngest> {
     let service = required_string(attrs, "service")?;
     let error_class = required_string(attrs, "error_class")?;
-    let message = required_string(attrs, "message")?;
+    let message = scrub_string(&required_string(attrs, "message")?);
 
     validate_context(attrs)?;
     let fingerprint = validate_fingerprint(attrs)?;
 
-    let stack_trace = optional_string(attrs, "stack_trace");
+    let stack_trace = optional_string(attrs, "stack_trace").map(|value| scrub_string(&value));
     let grouping = compute(GroupingInput {
+        tenant_id: &context.tenant_id,
+        project_id: &context.project_id,
         service: &service,
         error_class: &error_class,
         message: &message,
@@ -163,6 +224,8 @@ fn prepare(
             event_id: context.event_id,
         },
         payload: ErrorIngestPayload {
+            tenant_id: context.tenant_id,
+            project_id: context.project_id,
             service,
             error_class,
             message: truncate(&message, MAX_MESSAGE_LEN),
@@ -188,6 +251,8 @@ fn accepted(commit: ErrorIngestCommit) -> IngestAccepted {
             service: commit.service.clone(),
         },
         IngestEffect::CorrelateIncident {
+            tenant_id: commit.tenant_id.clone(),
+            project_id: commit.project_id.clone(),
             signal_type: "error_group".to_owned(),
             signal_ref: commit.group_hash.clone(),
             service: commit.service.clone(),
@@ -292,10 +357,48 @@ fn optional_string(attrs: &Map<String, Value>, field: &str) -> Option<String> {
 fn context_json(attrs: &Map<String, Value>) -> Option<String> {
     let context = attrs.get("context")?;
     if context.is_object() {
-        Some(context.to_string())
+        Some(scrub_value(context).to_string())
     } else {
-        context.as_str().map(ToOwned::to_owned)
+        context.as_str().map(scrub_string)
     }
+}
+
+fn scrub_value(value: &Value) -> Value {
+    match value {
+        Value::String(value) => Value::String(scrub_string(value)),
+        Value::Array(values) => Value::Array(values.iter().map(scrub_value).collect()),
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| {
+                    let value = if sensitive_key(key) {
+                        Value::String(REDACTED.to_owned())
+                    } else {
+                        scrub_value(value)
+                    };
+                    (key.clone(), value)
+                })
+                .collect(),
+        ),
+        value => value.clone(),
+    }
+}
+
+fn sensitive_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().replace(['-', ' '], "_").as_str(),
+        "authorization"
+            | "cookie"
+            | "set_cookie"
+            | "password"
+            | "passwd"
+            | "secret"
+            | "token"
+            | "api_key"
+            | "apikey"
+            | "access_token"
+            | "refresh_token"
+    )
 }
 
 fn fingerprint_json(fingerprint: Option<&[String]>) -> Option<String> {
@@ -311,7 +414,7 @@ mod tests {
     use std::str::FromStr;
 
     use canary_core::ids::{ErrorId, EventId};
-    use canary_store::Store;
+    use canary_store::{BOOTSTRAP_PROJECT_ID, BOOTSTRAP_TENANT_ID, Store};
     use serde_json::json;
 
     use super::*;
@@ -344,6 +447,8 @@ mod tests {
         assert_eq!(
             accepted.post_commit_effects[1],
             IngestEffect::CorrelateIncident {
+                tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+                project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
                 signal_type: "error_group".to_owned(),
                 signal_ref: accepted.group_hash.clone(),
                 service: "cadence".to_owned(),
@@ -543,6 +648,64 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn server_side_redaction_runs_before_persistence() -> Result<()> {
+        let mut store = migrated_store()?;
+        let attrs = json!({
+            "service": "svc",
+            "error_class": "RuntimeError",
+            "message": "failed for alice@example.com with sk_live_secret123",
+            "stack_trace": "Authorization: Bearer abc.def.ghi\npassword = \"hunter2\"\ntoken='abc123'",
+            "context": {
+                "authorization": "Bearer context-secret",
+                "nested": {
+                    "email": "bob@example.com",
+                    "api_key": "sk_live_nested_secret"
+                }
+            }
+        });
+
+        let accepted = ingest(
+            &mut store,
+            object(&attrs)?,
+            &IngestConfig::default(),
+            context(
+                "ERR-redact000001",
+                "EVT-redact000001",
+                "2026-05-28T20:00:00Z",
+            ),
+        )?;
+        let detail = match store.error_detail(&accepted.id) {
+            Ok(Some(detail)) => detail,
+            Ok(None) => {
+                return Err(IngestError::PayloadTooLarge(
+                    "redacted error should be persisted".to_owned(),
+                ));
+            }
+            Err(_) => {
+                return Err(IngestError::PayloadTooLarge(
+                    "detail query should succeed".to_owned(),
+                ));
+            }
+        };
+
+        assert_eq!(detail.message, "failed for [EMAIL] with [CANARY_API_KEY]");
+        assert_eq!(
+            detail.stack_trace.as_deref(),
+            Some("Authorization: Bearer [REDACTED]\npassword=[REDACTED]\ntoken=[REDACTED]")
+        );
+        let Some(context) = detail.context else {
+            return Err(IngestError::PayloadTooLarge(
+                "redacted context should be present".to_owned(),
+            ));
+        };
+        assert_eq!(context["authorization"], REDACTED);
+        assert_eq!(context["nested"]["email"], "[EMAIL]");
+        assert_eq!(context["nested"]["api_key"], REDACTED);
+
+        Ok(())
+    }
+
     fn migrated_store() -> Result<Store> {
         let mut store = Store::open_in_memory()?;
         store.migrate()?;
@@ -567,11 +730,13 @@ mod tests {
         IngestContext {
             error_id: ErrorId::from_str(error_id).unwrap_or_else(|_| ErrorId::generate()),
             event_id: EventId::from_str(event_id).unwrap_or_else(|_| EventId::generate()),
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
             now: now.to_owned(),
         }
     }
 
     const fn canary_store_schema_version() -> u32 {
-        2026042200
+        2026061304
     }
 }

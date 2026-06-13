@@ -1852,6 +1852,9 @@ mod tests {
             let mut store = store.lock().map_err(|_| "store lock poisoned")?;
             store.insert_webhook_subscription(WebhookSubscriptionInsert {
                 id: "WHK-health".to_owned(),
+                tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
+                project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
+                service: None,
                 url: "https://example.test/hook".to_owned(),
                 events: vec!["health_check.recovered".to_owned()],
                 secret: "secret".to_owned(),

@@ -19,7 +19,7 @@ use canary_http::{
     request::{MAX_JSON_BODY_BYTES, decode_json_object},
 };
 use canary_ingest::{IngestEffect, ValidationErrors};
-use canary_store::{AnnotationError, AnnotationInsert, AnnotationPageOptions};
+use canary_store::{AnnotationError, AnnotationInsert, AnnotationPageOptions, VerifiedApiKey};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -112,9 +112,10 @@ pub(crate) async fn list_annotations(
     headers: HeaderMap,
     Query(params): Query<AnnotationPageParams>,
 ) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
+    let authority = match require_read_scope(&state, &headers) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
     let Some(subject_type) = params.subject_type.filter(|value| !value.is_empty()) else {
         return problem_response(annotation_missing_subject_problem("subject_type"));
     };
@@ -127,6 +128,9 @@ pub(crate) async fn list_annotations(
         Err(_) => return problem_response(internal_problem()),
     };
     match store.annotation_page(AnnotationPageOptions {
+        tenant_id: Some(authority.tenant_id),
+        project_id: Some(authority.project_id),
+        service: authority.service,
         subject_type,
         subject_id,
         limit: params.limit,
@@ -150,9 +154,10 @@ pub(crate) async fn create_annotation(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
-        return problem_response(*problem);
-    }
+    let authority = match require_scope(&state, &headers, Permission::Admin) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
     if let Err(problem) = check_content_length(&headers) {
         return problem_response(*problem);
     }
@@ -170,7 +175,7 @@ pub(crate) async fn create_annotation(
         Err(problem) => return problem_response(*problem),
     };
 
-    create_annotation_request(state, request, "Subject not found.")
+    create_annotation_request(state, authority, request, "Subject not found.")
 }
 
 fn list_annotations_for_subject(
@@ -180,14 +185,21 @@ fn list_annotations_for_subject(
     subject_id: String,
     not_found_detail: &'static str,
 ) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
+    let authority = match require_read_scope(&state, &headers) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
     let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
-    match store.annotations(subject_type, &subject_id) {
+    match store.annotations_scoped(
+        subject_type,
+        &subject_id,
+        &authority.tenant_id,
+        &authority.project_id,
+        authority.service.as_deref(),
+    ) {
         Ok(response) => json_status_response(StatusCode::OK.as_u16(), response),
         Err(AnnotationError::NotFound) => problem_response(not_found_problem(not_found_detail)),
         Err(AnnotationError::InvalidSubjectType) => {
@@ -208,9 +220,10 @@ fn create_annotation_for_subject(
     subject_id: String,
     not_found_detail: &'static str,
 ) -> Response<Body> {
-    if let Err(problem) = require_query_limited_admin_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
+    let authority = match require_query_limited_admin_scope(&state, &headers) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
     if let Err(problem) = check_content_length(&headers) {
         return problem_response(*problem);
     }
@@ -228,21 +241,45 @@ fn create_annotation_for_subject(
         Err(problem) => return problem_response(*problem),
     };
 
-    create_annotation_request(state, request, not_found_detail)
+    create_annotation_request(state, authority, request, not_found_detail)
 }
 
 fn create_annotation_request(
     state: IngestState,
+    authority: VerifiedApiKey,
     request: AnnotationCreate,
     not_found_detail: &'static str,
 ) -> Response<Body> {
-    let annotation = {
+    let tenant_id = authority.tenant_id;
+    let project_id = authority.project_id;
+    let (annotation, service) = {
         let mut store = match state.lock_store() {
             Ok(store) => store,
             Err(_) => return problem_response(internal_problem()),
         };
-        match store.create_annotation(AnnotationInsert {
+        let service = match store.annotation_subject_service_scoped(
+            &request.subject_type,
+            &request.subject_id,
+            &tenant_id,
+            &project_id,
+        ) {
+            Ok(service) => service,
+            Err(AnnotationError::NotFound) => {
+                return problem_response(not_found_problem(not_found_detail));
+            }
+            Err(AnnotationError::InvalidSubjectType) => {
+                return problem_response(invalid_annotation_subject_type_problem());
+            }
+            Err(AnnotationError::InvalidLimit | AnnotationError::InvalidCursor) => {
+                return problem_response(internal_problem());
+            }
+            Err(AnnotationError::Sqlite(_)) => return problem_response(internal_problem()),
+        };
+        let annotation = match store.create_annotation(AnnotationInsert {
             id: canary_core::ids::AnnotationId::generate().into_string(),
+            tenant_id: tenant_id.clone(),
+            project_id: project_id.clone(),
+            service: service.clone(),
             subject_type: request.subject_type,
             subject_id: request.subject_id,
             agent: request.agent,
@@ -261,12 +298,16 @@ fn create_annotation_request(
                 return problem_response(internal_problem());
             }
             Err(AnnotationError::Sqlite(_)) => return problem_response(internal_problem()),
-        }
+        };
+        (annotation, service)
     };
 
     let timestamp = annotation.created_at.clone();
     let payload = json!({
         "event": "annotation.added",
+        "tenant_id": tenant_id,
+        "project_id": project_id,
+        "service": service,
         "annotation": annotation,
         "timestamp": timestamp,
     });

@@ -1,15 +1,20 @@
 //! Ordered SQLite schema migrations ported from the Phoenix Ecto migrations.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::Connection;
 
 /// Current Rust schema version.
-pub const SCHEMA_VERSION: u32 = 2026042200;
+pub const SCHEMA_VERSION: u32 = 2026061304;
 
 pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
     transaction.execute_batch(SCHEMA_SQL)?;
+    add_bootstrap_ownership_columns(&transaction)?;
+    scope_error_group_identity(&transaction)?;
+    backfill_service_scope_columns(&transaction)?;
+    scope_monitor_name_index(&transaction)?;
+    scope_incident_open_service_index(&transaction)?;
     validate_schema_columns(&transaction)?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     transaction.commit()?;
@@ -34,28 +39,360 @@ const APP_TABLES: &[&str] = &[
     "monitors",
     "monitor_state",
     "monitor_check_ins",
+    "rate_limit_buckets",
 ];
 
 fn validate_schema_columns(connection: &Connection) -> rusqlite::Result<()> {
     let reference = Connection::open_in_memory()?;
     reference.execute_batch(SCHEMA_SQL)?;
+    scope_monitor_name_index(&reference)?;
+    scope_incident_open_service_index(&reference)?;
     for table in APP_TABLES {
-        let expected = table_columns(&reference, table)?;
-        let actual = table_columns(connection, table)?;
-        if let Some(column) = expected.difference(&actual).next() {
-            return Err(rusqlite::Error::InvalidColumnName(format!(
-                "{table}.{column}"
-            )));
+        let expected_columns = table_columns(&reference, table)?;
+        let actual_columns = table_columns(connection, table)?;
+        for (column_name, expected) in expected_columns {
+            let Some(actual) = actual_columns.get(&column_name) else {
+                return Err(rusqlite::Error::InvalidColumnName(format!(
+                    "{table}.{column_name}"
+                )));
+            };
+            if actual != &expected {
+                return Err(rusqlite::Error::InvalidColumnName(format!(
+                    "{table}.{column_name}"
+                )));
+            }
+        }
+
+        let expected_indexes = table_indexes(&reference, table)?;
+        let actual_indexes = table_indexes(connection, table)?;
+        for (index_name, expected) in expected_indexes {
+            let Some(actual) = actual_indexes.get(&index_name) else {
+                return Err(rusqlite::Error::InvalidColumnName(format!(
+                    "{table}.{index_name}"
+                )));
+            };
+            if actual != &expected {
+                return Err(rusqlite::Error::InvalidColumnName(format!(
+                    "{table}.{index_name}"
+                )));
+            }
         }
     }
     Ok(())
 }
 
-fn table_columns(connection: &Connection, table: &str) -> rusqlite::Result<BTreeSet<String>> {
+#[derive(Debug, PartialEq, Eq)]
+struct ColumnInfo {
+    data_type: String,
+    not_null: bool,
+    default_value: Option<String>,
+    primary_key_position: i64,
+}
+
+fn table_columns(
+    connection: &Connection,
+    table: &str,
+) -> rusqlite::Result<BTreeMap<String, ColumnInfo>> {
     let escaped_table = table.replace('"', "\"\"");
     let mut statement = connection.prepare(&format!("PRAGMA table_info(\"{escaped_table}\")"))?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
-    rows.collect()
+    statement
+        .query_map([], |row| {
+            let name = row.get::<_, String>(1)?;
+            Ok((
+                name,
+                ColumnInfo {
+                    data_type: row.get(2)?,
+                    not_null: row.get::<_, i64>(3)? == 1,
+                    default_value: row.get(4)?,
+                    primary_key_position: row.get(5)?,
+                },
+            ))
+        })?
+        .collect()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct IndexInfo {
+    unique: bool,
+    columns: Vec<String>,
+}
+
+fn table_indexes(
+    connection: &Connection,
+    table: &str,
+) -> rusqlite::Result<BTreeMap<String, IndexInfo>> {
+    let escaped_table = table.replace('"', "\"\"");
+    let mut statement = connection.prepare(&format!("PRAGMA index_list(\"{escaped_table}\")"))?;
+    let index_rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)? == 1))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut indexes = BTreeMap::new();
+    for (index_name, unique) in index_rows {
+        if index_name.starts_with("sqlite_autoindex_") {
+            continue;
+        }
+        indexes.insert(
+            index_name.clone(),
+            IndexInfo {
+                unique,
+                columns: index_columns(connection, &index_name)?,
+            },
+        );
+    }
+    Ok(indexes)
+}
+
+fn index_columns(connection: &Connection, index_name: &str) -> rusqlite::Result<Vec<String>> {
+    let escaped_index = index_name.replace('"', "\"\"");
+    let mut statement = connection.prepare(&format!("PRAGMA index_info(\"{escaped_index}\")"))?;
+    statement
+        .query_map([], |row| row.get::<_, String>(2))?
+        .collect()
+}
+
+fn table_column_names(connection: &Connection, table: &str) -> rusqlite::Result<BTreeSet<String>> {
+    Ok(table_columns(connection, table)?.into_keys().collect())
+}
+
+fn add_bootstrap_ownership_columns(connection: &Connection) -> rusqlite::Result<()> {
+    for table in [
+        "api_keys",
+        "errors",
+        "error_groups",
+        "targets",
+        "webhooks",
+        "incidents",
+        "service_events",
+        "annotations",
+        "webhook_deliveries",
+        "monitors",
+    ] {
+        add_text_column_if_missing(
+            connection,
+            table,
+            "tenant_id",
+            "TEXT NOT NULL DEFAULT 'TENANT-bootstrap'",
+        )?;
+        add_text_column_if_missing(
+            connection,
+            table,
+            "project_id",
+            "TEXT NOT NULL DEFAULT 'PROJECT-bootstrap'",
+        )?;
+    }
+
+    for table in ["api_keys", "webhooks", "annotations", "webhook_deliveries"] {
+        add_text_column_if_missing(connection, table, "service", "TEXT")?;
+    }
+
+    Ok(())
+}
+
+fn scope_monitor_name_index(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute("DROP INDEX IF EXISTS monitors_name_index", [])?;
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS monitors_owner_name_index
+         ON monitors(tenant_id, project_id, name)",
+        [],
+    )?;
+    Ok(())
+}
+
+fn backfill_service_scope_columns(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        r#"
+        UPDATE annotations
+        SET service = (
+          CASE subject_type
+            WHEN 'incident' THEN (
+              SELECT i.service
+              FROM incidents i
+              WHERE i.id = annotations.subject_id
+                AND i.tenant_id = annotations.tenant_id
+                AND i.project_id = annotations.project_id
+            )
+            WHEN 'error_group' THEN (
+              SELECT g.service
+              FROM error_groups g
+              WHERE g.group_hash = annotations.subject_id
+                AND g.tenant_id = annotations.tenant_id
+                AND g.project_id = annotations.project_id
+            )
+            WHEN 'target' THEN (
+              SELECT COALESCE(NULLIF(t.service, ''), t.name)
+              FROM targets t
+              WHERE t.id = annotations.subject_id
+                AND t.tenant_id = annotations.tenant_id
+                AND t.project_id = annotations.project_id
+            )
+            WHEN 'monitor' THEN (
+              SELECT COALESCE(NULLIF(m.service, ''), m.name)
+              FROM monitors m
+              WHERE m.id = annotations.subject_id
+                AND m.tenant_id = annotations.tenant_id
+                AND m.project_id = annotations.project_id
+            )
+          END
+        )
+        WHERE service IS NULL;
+
+        UPDATE webhook_deliveries
+        SET service = (
+          SELECT w.service
+          FROM webhooks w
+          WHERE w.id = webhook_deliveries.webhook_id
+            AND w.tenant_id = webhook_deliveries.tenant_id
+            AND w.project_id = webhook_deliveries.project_id
+            AND w.service IS NOT NULL
+          LIMIT 1
+        )
+        WHERE service IS NULL
+          AND EXISTS (
+            SELECT 1
+            FROM webhooks w
+            WHERE w.id = webhook_deliveries.webhook_id
+              AND w.tenant_id = webhook_deliveries.tenant_id
+              AND w.project_id = webhook_deliveries.project_id
+              AND w.service IS NOT NULL
+          );
+
+        UPDATE webhook_deliveries
+        SET service = (
+          SELECT COALESCE(
+            json_extract(j.args, '$.payload.error.service'),
+            json_extract(j.args, '$.payload.incident.service'),
+            json_extract(j.args, '$.payload.target.service'),
+            json_extract(j.args, '$.payload.monitor.service'),
+            json_extract(j.args, '$.payload.annotation.service'),
+            json_extract(j.args, '$.payload.service')
+          )
+          FROM oban_jobs j
+          WHERE json_extract(j.args, '$.delivery_id') = webhook_deliveries.delivery_id
+            AND COALESCE(
+              json_extract(j.args, '$.payload.error.service'),
+              json_extract(j.args, '$.payload.incident.service'),
+              json_extract(j.args, '$.payload.target.service'),
+              json_extract(j.args, '$.payload.monitor.service'),
+              json_extract(j.args, '$.payload.annotation.service'),
+              json_extract(j.args, '$.payload.service')
+            ) IS NOT NULL
+          ORDER BY j.id DESC
+          LIMIT 1
+        )
+        WHERE service IS NULL
+          AND EXISTS (
+            SELECT 1
+            FROM oban_jobs j
+            WHERE json_extract(j.args, '$.delivery_id') = webhook_deliveries.delivery_id
+              AND COALESCE(
+                json_extract(j.args, '$.payload.error.service'),
+                json_extract(j.args, '$.payload.incident.service'),
+                json_extract(j.args, '$.payload.target.service'),
+                json_extract(j.args, '$.payload.monitor.service'),
+                json_extract(j.args, '$.payload.annotation.service'),
+                json_extract(j.args, '$.payload.service')
+              ) IS NOT NULL
+          );
+        "#,
+    )
+}
+
+fn scope_error_group_identity(connection: &Connection) -> rusqlite::Result<()> {
+    if error_group_identity_is_scoped(connection)? {
+        return Ok(());
+    }
+
+    connection.execute_batch(
+        r#"
+        CREATE TABLE error_groups_scoped (
+          group_hash TEXT NOT NULL,
+          tenant_id TEXT NOT NULL DEFAULT 'TENANT-bootstrap',
+          project_id TEXT NOT NULL DEFAULT 'PROJECT-bootstrap',
+          service TEXT NOT NULL,
+          error_class TEXT NOT NULL,
+          message_template TEXT,
+          severity TEXT NOT NULL,
+          first_seen_at TEXT NOT NULL,
+          last_seen_at TEXT NOT NULL,
+          total_count INTEGER NOT NULL DEFAULT 1,
+          last_error_id TEXT NOT NULL,
+          status TEXT DEFAULT 'active',
+          PRIMARY KEY (tenant_id, project_id, group_hash)
+        );
+
+        INSERT OR IGNORE INTO error_groups_scoped (
+          group_hash, tenant_id, project_id, service, error_class, message_template, severity,
+          first_seen_at, last_seen_at, total_count, last_error_id, status
+        )
+        SELECT
+          group_hash, tenant_id, project_id, service, error_class, message_template, severity,
+          first_seen_at, last_seen_at, total_count, last_error_id, status
+        FROM error_groups;
+
+        DROP TABLE error_groups;
+        ALTER TABLE error_groups_scoped RENAME TO error_groups;
+
+        CREATE INDEX IF NOT EXISTS error_groups_service_last_seen_at_index
+        ON error_groups(service, last_seen_at);
+        "#,
+    )?;
+    Ok(())
+}
+
+fn error_group_identity_is_scoped(connection: &Connection) -> rusqlite::Result<bool> {
+    let mut statement = connection.prepare("PRAGMA table_info(\"error_groups\")")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+    })?;
+    let mut tenant_pk = 0;
+    let mut project_pk = 0;
+    let mut group_pk = 0;
+    for row in rows {
+        let (name, pk) = row?;
+        match name.as_str() {
+            "tenant_id" => tenant_pk = pk,
+            "project_id" => project_pk = pk,
+            "group_hash" => group_pk = pk,
+            _ => {}
+        }
+    }
+    Ok(tenant_pk > 0 && project_pk > 0 && group_pk > 0)
+}
+
+fn scope_incident_open_service_index(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute(
+        "DROP INDEX IF EXISTS incidents_open_service_unique_index",
+        [],
+    )?;
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS incidents_open_owner_service_unique_index
+         ON incidents(tenant_id, project_id, service)
+         WHERE state != 'resolved'",
+        [],
+    )?;
+    Ok(())
+}
+
+fn add_text_column_if_missing(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> rusqlite::Result<()> {
+    if table_column_names(connection, table)?.contains(column) {
+        return Ok(());
+    }
+
+    let escaped_table = table.replace('"', "\"\"");
+    let escaped_column = column.replace('"', "\"\"");
+    connection.execute(
+        &format!("ALTER TABLE \"{escaped_table}\" ADD COLUMN \"{escaped_column}\" {definition}"),
+        [],
+    )?;
+    Ok(())
 }
 
 const SCHEMA_SQL: &str = r#"
@@ -66,11 +403,26 @@ CREATE TABLE IF NOT EXISTS api_keys (
   key_hash TEXT NOT NULL,
   created_at TEXT NOT NULL,
   revoked_at TEXT,
-  scope TEXT NOT NULL DEFAULT 'admin'
+  scope TEXT NOT NULL DEFAULT 'admin',
+  tenant_id TEXT NOT NULL DEFAULT 'TENANT-bootstrap',
+  project_id TEXT NOT NULL DEFAULT 'PROJECT-bootstrap',
+  service TEXT
+);
+
+CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+  kind TEXT NOT NULL,
+  identity TEXT NOT NULL,
+  window_start_ms INTEGER NOT NULL,
+  window_ms INTEGER NOT NULL,
+  count INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (kind, identity)
 );
 
 CREATE TABLE IF NOT EXISTS errors (
   id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL DEFAULT 'TENANT-bootstrap',
+  project_id TEXT NOT NULL DEFAULT 'PROJECT-bootstrap',
   service TEXT NOT NULL,
   error_class TEXT NOT NULL,
   message TEXT NOT NULL,
@@ -95,7 +447,9 @@ CREATE INDEX IF NOT EXISTS errors_group_hash_created_at_index
 ON errors(group_hash, created_at);
 
 CREATE TABLE IF NOT EXISTS error_groups (
-  group_hash TEXT PRIMARY KEY,
+  group_hash TEXT NOT NULL,
+  tenant_id TEXT NOT NULL DEFAULT 'TENANT-bootstrap',
+  project_id TEXT NOT NULL DEFAULT 'PROJECT-bootstrap',
   service TEXT NOT NULL,
   error_class TEXT NOT NULL,
   message_template TEXT,
@@ -104,7 +458,8 @@ CREATE TABLE IF NOT EXISTS error_groups (
   last_seen_at TEXT NOT NULL,
   total_count INTEGER NOT NULL DEFAULT 1,
   last_error_id TEXT NOT NULL,
-  status TEXT DEFAULT 'active'
+  status TEXT DEFAULT 'active',
+  PRIMARY KEY (tenant_id, project_id, group_hash)
 );
 
 CREATE INDEX IF NOT EXISTS error_groups_service_last_seen_at_index
@@ -112,6 +467,8 @@ ON error_groups(service, last_seen_at);
 
 CREATE TABLE IF NOT EXISTS targets (
   id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL DEFAULT 'TENANT-bootstrap',
+  project_id TEXT NOT NULL DEFAULT 'PROJECT-bootstrap',
   url TEXT NOT NULL,
   name TEXT NOT NULL,
   method TEXT DEFAULT 'GET',
@@ -160,6 +517,9 @@ CREATE TABLE IF NOT EXISTS target_state (
 
 CREATE TABLE IF NOT EXISTS webhooks (
   id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL DEFAULT 'TENANT-bootstrap',
+  project_id TEXT NOT NULL DEFAULT 'PROJECT-bootstrap',
+  service TEXT,
   url TEXT NOT NULL,
   events TEXT NOT NULL,
   secret TEXT NOT NULL,
@@ -198,6 +558,8 @@ ON oban_jobs(state, queue, priority, scheduled_at, id);
 
 CREATE TABLE IF NOT EXISTS incidents (
   id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL DEFAULT 'TENANT-bootstrap',
+  project_id TEXT NOT NULL DEFAULT 'PROJECT-bootstrap',
   service TEXT NOT NULL,
   state TEXT NOT NULL DEFAULT 'investigating',
   severity TEXT NOT NULL DEFAULT 'medium',
@@ -211,10 +573,6 @@ ON incidents(service, state);
 
 CREATE INDEX IF NOT EXISTS incidents_opened_at_index
 ON incidents(opened_at);
-
-CREATE UNIQUE INDEX IF NOT EXISTS incidents_open_service_unique_index
-ON incidents(service)
-WHERE state != 'resolved';
 
 CREATE TABLE IF NOT EXISTS incident_signals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -266,6 +624,8 @@ END;
 
 CREATE TABLE IF NOT EXISTS service_events (
   id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL DEFAULT 'TENANT-bootstrap',
+  project_id TEXT NOT NULL DEFAULT 'PROJECT-bootstrap',
   service TEXT NOT NULL,
   event TEXT NOT NULL,
   entity_type TEXT NOT NULL,
@@ -287,6 +647,9 @@ ON service_events(event, created_at, id);
 
 CREATE TABLE IF NOT EXISTS annotations (
   id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL DEFAULT 'TENANT-bootstrap',
+  project_id TEXT NOT NULL DEFAULT 'PROJECT-bootstrap',
+  service TEXT,
   incident_id TEXT REFERENCES incidents(id) ON DELETE CASCADE,
   group_hash TEXT,
   agent TEXT NOT NULL,
@@ -314,6 +677,9 @@ ON annotations(subject_type, subject_id, id);
 
 CREATE TABLE IF NOT EXISTS webhook_deliveries (
   delivery_id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL DEFAULT 'TENANT-bootstrap',
+  project_id TEXT NOT NULL DEFAULT 'PROJECT-bootstrap',
+  service TEXT,
   webhook_id TEXT NOT NULL,
   event TEXT NOT NULL,
   status TEXT NOT NULL,
@@ -341,6 +707,8 @@ ON webhook_deliveries(status, created_at, delivery_id);
 
 CREATE TABLE IF NOT EXISTS monitors (
   id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL DEFAULT 'TENANT-bootstrap',
+  project_id TEXT NOT NULL DEFAULT 'PROJECT-bootstrap',
   name TEXT NOT NULL,
   service TEXT NOT NULL,
   mode TEXT NOT NULL,
@@ -348,9 +716,6 @@ CREATE TABLE IF NOT EXISTS monitors (
   grace_ms INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
-
-CREATE UNIQUE INDEX IF NOT EXISTS monitors_name_index
-ON monitors(name);
 
 CREATE INDEX IF NOT EXISTS monitors_service_index
 ON monitors(service);

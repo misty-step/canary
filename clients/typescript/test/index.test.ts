@@ -79,12 +79,11 @@ describe("initCanary + captureException", () => {
     await expect(captureException(new Error("boom"))).resolves.toBeNull();
   });
 
-  it("applies PII scrubbing when enabled", async () => {
+  it("applies PII scrubbing by default", async () => {
     initCanary({
       endpoint: "https://canary.test",
       apiKey: "sk_test_abc",
       service: "test-svc",
-      scrubPii: true,
     });
 
     await captureException(new Error("user alice@example.com failed"));
@@ -94,12 +93,11 @@ describe("initCanary + captureException", () => {
     expect(body.message).not.toContain("alice@example.com");
   });
 
-  it("scrubs PII in context when enabled", async () => {
+  it("scrubs PII in context by default", async () => {
     initCanary({
       endpoint: "https://canary.test",
       apiKey: "sk_test_abc",
       service: "test-svc",
-      scrubPii: true,
     });
 
     await captureException(new Error("oops"), {
@@ -109,6 +107,20 @@ describe("initCanary + captureException", () => {
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
     expect(body.context.userEmail).toBe("[EMAIL]");
     expect(body.context.count).toBe(5);
+  });
+
+  it("allows explicit PII scrubbing opt-out", async () => {
+    initCanary({
+      endpoint: "https://canary.test",
+      apiKey: "sk_test_abc",
+      service: "test-svc",
+      scrubPii: false,
+    });
+
+    await captureException(new Error("user alice@example.com failed"));
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.message).toBe("user alice@example.com failed");
   });
 
   it("passes context and severity through", async () => {

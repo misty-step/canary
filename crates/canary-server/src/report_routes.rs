@@ -43,9 +43,10 @@ pub(crate) async fn report(
     RawQuery(raw_query): RawQuery,
     Query(params): Query<ReportParams>,
 ) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
+    let key = match require_read_scope(&state, &headers) {
+        Ok(key) => key,
+        Err(problem) => return problem_response(*problem),
+    };
     if query_param_is_array(raw_query.as_deref(), "q") {
         return problem_response(invalid_string_param_problem("q"));
     }
@@ -64,42 +65,62 @@ pub(crate) async fn report(
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
-    let targets = match store.health_targets() {
+    let mut targets = match store.health_targets_scoped(&key.tenant_id, &key.project_id) {
         Ok(targets) => targets,
         Err(_) => return problem_response(internal_problem()),
     };
-    let monitors = match store.health_monitors() {
+    let mut monitors = match store.health_monitors_scoped(&key.tenant_id, &key.project_id) {
         Ok(monitors) => monitors,
         Err(_) => return problem_response(internal_problem()),
     };
-    let error_summary = match store.error_summary(window) {
-        Ok(summary) => summary,
-        Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
-        Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
-    };
-    let error_groups = match store.report_error_groups(window) {
-        Ok(groups) => groups,
-        Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
-        Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
-    };
-    let incidents = match store.active_incidents(IncidentListOptions::default()) {
+    let mut error_summary =
+        match store.error_summary_scoped(window, &key.tenant_id, &key.project_id) {
+            Ok(summary) => summary,
+            Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
+            Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
+        };
+    let mut error_groups =
+        match store.report_error_groups_scoped(window, &key.tenant_id, &key.project_id) {
+            Ok(groups) => groups,
+            Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
+            Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
+        };
+    let mut incidents = match store.active_incidents(IncidentListOptions {
+        tenant_id: Some(key.tenant_id.clone()),
+        project_id: Some(key.project_id.clone()),
+        ..IncidentListOptions::default()
+    }) {
         Ok(incidents) => incidents.incidents,
         Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
         Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
     };
-    let transitions = match store.recent_transitions(window) {
-        Ok(transitions) => transitions,
-        Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
-        Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
-    };
-    let search_results = match params.q.as_deref() {
-        Some(query) => match store.search_errors(query, window) {
-            Ok(results) => Some(results),
+    let mut transitions =
+        match store.recent_transitions_scoped(window, &key.tenant_id, &key.project_id) {
+            Ok(transitions) => transitions,
             Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
-            Err(QueryError::Sqlite(_)) => Some(Vec::new()),
-        },
+            Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
+        };
+    let mut search_results = match params.q.as_deref() {
+        Some(query) => {
+            match store.search_errors_scoped(query, window, &key.tenant_id, &key.project_id) {
+                Ok(results) => Some(results),
+                Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
+                Err(QueryError::Sqlite(_)) => Some(Vec::new()),
+            }
+        }
         None => None,
     };
+    if let Some(bound_service) = key.service.as_deref() {
+        targets.retain(|target| target.service == bound_service);
+        monitors.retain(|monitor| monitor.service == bound_service);
+        error_summary.retain(|summary| summary.service == bound_service);
+        error_groups.retain(|group| group.service == bound_service);
+        incidents.retain(|incident| incident.service == bound_service);
+        transitions.retain(|transition| transition.service == bound_service);
+        if let Some(results) = search_results.as_mut() {
+            results.retain(|result| result.service == bound_service);
+        }
+    }
 
     let overall = combined_overall(&targets, &monitors, &error_summary);
     let summary = combined_status_summary(&overall, &targets, &monitors, &error_summary, window);

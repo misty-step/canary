@@ -34,22 +34,27 @@ pub(crate) async fn health_status(
     State(state): State<IngestState>,
     headers: HeaderMap,
 ) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
+    let key = match require_read_scope(&state, &headers) {
+        Ok(key) => key,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
-    let targets = match store.health_targets() {
+    let mut targets = match store.health_targets_scoped(&key.tenant_id, &key.project_id) {
         Ok(targets) => targets,
         Err(_) => return problem_response(internal_problem()),
     };
-    let monitors = match store.health_monitors() {
+    let mut monitors = match store.health_monitors_scoped(&key.tenant_id, &key.project_id) {
         Ok(monitors) => monitors,
         Err(_) => return problem_response(internal_problem()),
     };
+    if let Some(bound_service) = key.service.as_deref() {
+        targets.retain(|target| target.service == bound_service);
+        monitors.retain(|monitor| monitor.service == bound_service);
+    }
 
     json_status_response(
         StatusCode::OK.as_u16(),
@@ -66,28 +71,35 @@ pub(crate) async fn status(
     headers: HeaderMap,
     Query(params): Query<StatusParams>,
 ) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
+    let key = match require_read_scope(&state, &headers) {
+        Ok(key) => key,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let window = params.window.as_deref().unwrap_or("1h");
     let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
-    let targets = match store.health_targets() {
+    let mut targets = match store.health_targets_scoped(&key.tenant_id, &key.project_id) {
         Ok(targets) => targets,
         Err(_) => return problem_response(internal_problem()),
     };
-    let monitors = match store.health_monitors() {
+    let mut monitors = match store.health_monitors_scoped(&key.tenant_id, &key.project_id) {
         Ok(monitors) => monitors,
         Err(_) => return problem_response(internal_problem()),
     };
-    let error_summary = match store.error_summary(window) {
-        Ok(summary) => summary,
-        Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
-        Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
-    };
+    let mut error_summary =
+        match store.error_summary_scoped(window, &key.tenant_id, &key.project_id) {
+            Ok(summary) => summary,
+            Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
+            Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
+        };
+    if let Some(bound_service) = key.service.as_deref() {
+        targets.retain(|target| target.service == bound_service);
+        monitors.retain(|monitor| monitor.service == bound_service);
+        error_summary.retain(|summary| summary.service == bound_service);
+    }
     let overall = combined_overall(&targets, &monitors, &error_summary);
 
     json_status_response(
@@ -108,16 +120,27 @@ pub(crate) async fn target_checks(
     Path(id): Path<String>,
     Query(params): Query<StatusParams>,
 ) -> Response<Body> {
-    if let Err(problem) = require_read_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
+    let key = match require_read_scope(&state, &headers) {
+        Ok(key) => key,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let window = params.window.as_deref().unwrap_or("24h");
     let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
-    let checks = match store.target_checks(&id, window) {
+    let checks = match key.service.as_deref() {
+        Some(service) => store.target_checks_scoped_for_service(
+            &id,
+            window,
+            &key.tenant_id,
+            &key.project_id,
+            service,
+        ),
+        None => store.target_checks_scoped(&id, window, &key.tenant_id, &key.project_id),
+    };
+    let checks = match checks {
         Ok(checks) => checks,
         Err(QueryError::InvalidWindow) => return problem_response(target_checks_window_problem()),
         Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),

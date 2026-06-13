@@ -30,22 +30,24 @@ use crate::{
 struct ApiKeyCreate {
     name: String,
     scope: String,
+    service: Option<String>,
 }
 
 pub(crate) async fn list_api_keys(
     State(state): State<IngestState>,
     headers: HeaderMap,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
-        return problem_response(*problem);
-    }
+    let authority = match require_scope(&state, &headers, Permission::Admin) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
 
-    match store.list_api_keys() {
+    match store.list_api_keys_scoped(&authority.tenant_id, &authority.project_id) {
         Ok(keys) => json_status_response(
             StatusCode::OK.as_u16(),
             json!({"keys": keys.into_iter().map(api_key_response).collect::<Vec<_>>()}),
@@ -69,9 +71,10 @@ pub(crate) async fn create_api_key(
         ));
     }
 
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
-        return problem_response(*problem);
-    }
+    let authority = match require_scope(&state, &headers, Permission::Admin) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let attrs = match decode_optional_json_object(&body) {
         Ok(attrs) => attrs,
@@ -101,6 +104,9 @@ pub(crate) async fn create_api_key(
         created_at: current_rfc3339(),
         revoked_at: None,
         scope: request.scope,
+        tenant_id: authority.tenant_id,
+        project_id: authority.project_id,
+        service: request.service,
     };
     let response_body = api_key_insert_response(&key, &raw_key);
 
@@ -119,15 +125,21 @@ pub(crate) async fn revoke_api_key(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
-        return problem_response(*problem);
-    }
+    let authority = match require_scope(&state, &headers, Permission::Admin) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
-    match store.revoke_api_key(&id, &current_rfc3339()) {
+    match store.revoke_api_key_scoped(
+        &id,
+        &current_rfc3339(),
+        &authority.tenant_id,
+        &authority.project_id,
+    ) {
         Ok(true) => json_status_response(StatusCode::OK.as_u16(), json!({"status": "revoked"})),
         Ok(false) => problem_response(not_found_problem("API key not found.")),
         Err(_) => problem_response(internal_problem()),
@@ -143,6 +155,9 @@ fn api_key_response(key: ApiKeyRecord) -> Value {
         "active": key.revoked_at.is_none(),
         "created_at": key.created_at,
         "revoked_at": key.revoked_at,
+        "tenant_id": key.tenant_id,
+        "project_id": key.project_id,
+        "service": key.service,
     })
 }
 
@@ -154,6 +169,9 @@ fn api_key_insert_response(key: &ApiKeyInsert, raw_key: &str) -> Value {
         "key": raw_key,
         "key_prefix": key.key_prefix,
         "created_at": key.created_at,
+        "tenant_id": key.tenant_id,
+        "project_id": key.project_id,
+        "service": key.service,
         "warning": "Store this key securely. It will not be shown again.",
     })
 }
@@ -169,7 +187,7 @@ fn decode_optional_json_object(body: &Bytes) -> Result<Map<String, Value>, Box<P
 fn parse_api_key_create(attrs: Map<String, Value>) -> Result<ApiKeyCreate, Box<ProblemDetails>> {
     let mut errors: ValidationErrors = ValidationErrors::new();
     for field in attrs.keys() {
-        if !matches!(field.as_str(), "name" | "scope") {
+        if !matches!(field.as_str(), "name" | "scope" | "service") {
             errors.insert(field.clone(), vec!["is not permitted".to_owned()]);
         }
     }
@@ -198,9 +216,31 @@ fn parse_api_key_create(attrs: Map<String, Value>) -> Result<ApiKeyCreate, Box<P
     {
         errors.insert("scope".to_owned(), vec!["is invalid".to_owned()]);
     }
+    let service = match attrs.get("service") {
+        Some(Value::String(value)) if !value.trim().is_empty() => Some(value.trim().to_owned()),
+        Some(Value::String(_)) => {
+            errors.insert("service".to_owned(), vec!["can't be blank".to_owned()]);
+            None
+        }
+        Some(Value::Null) | None => None,
+        Some(_) => {
+            errors.insert("service".to_owned(), vec!["must be a string".to_owned()]);
+            None
+        }
+    };
+    if service.is_some() && scope == "admin" {
+        errors.insert(
+            "service".to_owned(),
+            vec!["cannot be set on admin keys".to_owned()],
+        );
+    }
 
     if errors.is_empty() {
-        Ok(ApiKeyCreate { name, scope })
+        Ok(ApiKeyCreate {
+            name,
+            scope,
+            service,
+        })
     } else {
         Err(Box::new(validation_problem(
             "Invalid API key request.",

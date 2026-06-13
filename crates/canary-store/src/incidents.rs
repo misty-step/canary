@@ -23,6 +23,10 @@ const RESOLVED_STATE: &str = "resolved";
 /// One incident-correlation command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncidentCorrelation {
+    /// Tenant namespace for the signal.
+    pub tenant_id: String,
+    /// Project namespace for the signal.
+    pub project_id: String,
     /// Signal type, currently `error_group` or `health_transition`.
     pub signal_type: String,
     /// Stable signal reference.
@@ -51,6 +55,8 @@ pub struct IncidentCorrelationEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IncidentRow {
     id: String,
+    tenant_id: String,
+    project_id: String,
     service: String,
     state: String,
     severity: String,
@@ -86,9 +92,16 @@ pub(crate) fn correlate_in_transaction(
         transaction,
         &command.signal_type,
         &command.signal_ref,
+        &command.tenant_id,
+        &command.project_id,
         &command.now,
     )?;
-    match open_incident(transaction, &command.service)? {
+    match open_incident(
+        transaction,
+        &command.tenant_id,
+        &command.project_id,
+        &command.service,
+    )? {
         None if !signal_active => Ok(None),
         None => create_incident(transaction, &command).map(Some),
         Some(incident) => update_incident(transaction, &incident, &command, signal_active),
@@ -102,9 +115,18 @@ fn create_incident(
     let incident_id = command.incident_id.as_str();
     let title = title_for(&command.service);
     transaction.execute(
-        "INSERT INTO incidents (id, service, state, severity, title, opened_at)
-         VALUES (?1, ?2, ?3, 'medium', ?4, ?5)",
-        params![incident_id, command.service, OPEN_STATE, title, command.now],
+        "INSERT INTO incidents (
+            id, tenant_id, project_id, service, state, severity, title, opened_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 'medium', ?6, ?7)",
+        params![
+            incident_id,
+            command.tenant_id,
+            command.project_id,
+            command.service,
+            OPEN_STATE,
+            title,
+            command.now
+        ],
     )?;
     insert_signal(
         transaction,
@@ -126,7 +148,13 @@ fn update_incident(
 ) -> Result<Option<IncidentCorrelationEvent>> {
     let (signal_changed, attached) =
         sync_signal(transaction, &incident.id, command, signal_active)?;
-    let normalized = normalize_signals(transaction, &incident.id, &command.now)?;
+    let normalized = normalize_signals(
+        transaction,
+        &incident.id,
+        &incident.tenant_id,
+        &incident.project_id,
+        &command.now,
+    )?;
     let mut incident =
         incident_by_id(transaction, &incident.id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
     let signals = signals_for_incident(transaction, &incident.id)?;
@@ -197,11 +225,20 @@ fn sync_signal(
 fn normalize_signals(
     transaction: &rusqlite::Transaction<'_>,
     incident_id: &str,
+    tenant_id: &str,
+    project_id: &str,
     now: &str,
 ) -> Result<bool> {
     let mut changed = false;
     for signal in signals_for_incident(transaction, incident_id)? {
-        let active = signal_active(transaction, &signal.signal_type, &signal.signal_ref, now)?;
+        let active = signal_active(
+            transaction,
+            &signal.signal_type,
+            &signal.signal_ref,
+            tenant_id,
+            project_id,
+            now,
+        )?;
         if active && signal.resolved_at.is_some() {
             transaction.execute(
                 "UPDATE incident_signals
@@ -276,14 +313,18 @@ fn signal_active(
     transaction: &rusqlite::Transaction<'_>,
     signal_type: &str,
     signal_ref: &str,
+    tenant_id: &str,
+    project_id: &str,
     now: &str,
 ) -> Result<bool> {
     match signal_type {
         "error_group" => {
             let row = transaction
                 .query_row(
-                    "SELECT status, last_seen_at FROM error_groups WHERE group_hash = ?1",
-                    [signal_ref],
+                    "SELECT status, last_seen_at
+                     FROM error_groups
+                     WHERE tenant_id = ?1 AND project_id = ?2 AND group_hash = ?3",
+                    params![tenant_id, project_id, signal_ref],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )
                 .optional()?;
@@ -316,16 +357,18 @@ fn state_by_ref(
 
 fn open_incident(
     transaction: &rusqlite::Transaction<'_>,
+    tenant_id: &str,
+    project_id: &str,
     service: &str,
 ) -> Result<Option<IncidentRow>> {
     transaction
         .query_row(
-            "SELECT id, service, state, severity, title, opened_at, resolved_at
+            "SELECT id, tenant_id, project_id, service, state, severity, title, opened_at, resolved_at
              FROM incidents
-             WHERE service = ?1 AND state != ?2
+             WHERE tenant_id = ?1 AND project_id = ?2 AND service = ?3 AND state != ?4
              ORDER BY opened_at DESC
              LIMIT 1",
-            params![service, RESOLVED_STATE],
+            params![tenant_id, project_id, service, RESOLVED_STATE],
             incident_from_row,
         )
         .optional()
@@ -338,7 +381,7 @@ fn incident_by_id(
 ) -> Result<Option<IncidentRow>> {
     transaction
         .query_row(
-            "SELECT id, service, state, severity, title, opened_at, resolved_at
+            "SELECT id, tenant_id, project_id, service, state, severity, title, opened_at, resolved_at
              FROM incidents
              WHERE id = ?1",
             [incident_id],
@@ -351,12 +394,14 @@ fn incident_by_id(
 fn incident_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IncidentRow> {
     Ok(IncidentRow {
         id: row.get(0)?,
-        service: row.get(1)?,
-        state: row.get(2)?,
-        severity: row.get(3)?,
-        title: row.get(4)?,
-        opened_at: row.get(5)?,
-        resolved_at: row.get(6)?,
+        tenant_id: row.get(1)?,
+        project_id: row.get(2)?,
+        service: row.get(3)?,
+        state: row.get(4)?,
+        severity: row.get(5)?,
+        title: row.get(6)?,
+        opened_at: row.get(7)?,
+        resolved_at: row.get(8)?,
     })
 }
 
@@ -435,10 +480,12 @@ fn insert_incident_event(
     };
     transaction.execute(
         "INSERT INTO service_events (
-            id, service, event, entity_type, entity_ref, severity, summary, payload, created_at
-         ) VALUES (?1, ?2, ?3, 'incident', ?4, ?5, ?6, ?7, ?8)",
+            id, tenant_id, project_id, service, event, entity_type, entity_ref, severity, summary, payload, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 'incident', ?6, ?7, ?8, ?9, ?10)",
         params![
             command.event_id.as_str(),
+            incident.tenant_id,
+            incident.project_id,
             incident.service,
             event,
             incident.id,
@@ -463,6 +510,8 @@ fn incident_payload(
 ) -> serde_json::Value {
     json!({
         "event": event,
+        "tenant_id": incident.tenant_id,
+        "project_id": incident.project_id,
         "incident": {
             "id": incident.id,
             "service": incident.service,
