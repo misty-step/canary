@@ -54,6 +54,159 @@
       "name": "canary_doctor"
     },
     {
+      "description": "List remediation claims for one Canary subject.",
+      "input_schema": {
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "subject_id": {
+            "type": "string"
+          },
+          "subject_type": {
+            "enum": [
+              "incident",
+              "error_group",
+              "target",
+              "monitor"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject_type",
+          "subject_id"
+        ],
+        "type": "object"
+      },
+      "name": "canary_claims_list"
+    },
+    {
+      "description": "Read one remediation claim by id.",
+      "input_schema": {
+        "properties": {
+          "claim_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "claim_id"
+        ],
+        "type": "object"
+      },
+      "name": "canary_claim_get"
+    },
+    {
+      "description": "Claim one Canary subject for agentic remediation with owner, purpose, TTL, and idempotency key.",
+      "input_schema": {
+        "properties": {
+          "evidence_links": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "subject_id": {
+            "type": "string"
+          },
+          "subject_type": {
+            "enum": [
+              "incident",
+              "error_group",
+              "target",
+              "monitor"
+            ],
+            "type": "string"
+          },
+          "ttl_ms": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "subject_type",
+          "subject_id",
+          "owner",
+          "purpose",
+          "ttl_ms",
+          "idempotency_key"
+        ],
+        "type": "object"
+      },
+      "name": "canary_claim_create"
+    },
+    {
+      "description": "Transition one remediation claim to a bounded state.",
+      "input_schema": {
+        "properties": {
+          "claim_id": {
+            "type": "string"
+          },
+          "evidence_links": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "claimed",
+              "investigating",
+              "fix_proposed",
+              "verified",
+              "dismissed",
+              "expired",
+              "released"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "claim_id",
+          "owner",
+          "state"
+        ],
+        "type": "object"
+      },
+      "name": "canary_claim_transition"
+    },
+    {
+      "description": "Release one remediation claim.",
+      "input_schema": {
+        "properties": {
+          "claim_id": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "claim_id",
+          "owner"
+        ],
+        "type": "object"
+      },
+      "name": "canary_claim_release"
+    },
+    {
       "description": "Discover local project integration state without reading secret values.",
       "input_schema": {
         "properties": {

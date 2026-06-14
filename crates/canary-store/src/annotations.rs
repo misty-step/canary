@@ -8,6 +8,7 @@ use canary_core::query::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 /// Result type returned by annotation read/write models.
 pub type AnnotationResult<T> = std::result::Result<T, AnnotationError>;
@@ -74,6 +75,15 @@ pub struct AnnotationPageOptions {
     pub limit: Option<String>,
     /// Optional cursor.
     pub cursor: Option<String>,
+}
+
+impl AnnotationPageOptions {
+    pub(crate) fn tenant_project(&self) -> Option<(String, String)> {
+        self.tenant_id
+            .as_ref()
+            .zip(self.project_id.as_ref())
+            .map(|(tenant_id, project_id)| (tenant_id.clone(), project_id.clone()))
+    }
 }
 
 /// Canonical annotation subject type.
@@ -228,6 +238,8 @@ pub(crate) fn page(
     )?;
     let total_count = count_for_subject(connection, subject_type, &options.subject_id, owner)?;
     let latest = latest_for_summary(connection, subject_type, &options.subject_id, owner)?;
+    let current_claim =
+        current_claim_for_summary(connection, subject_type, &options.subject_id, owner)?;
 
     let (page, next_cursor) = paginate(rows, limit);
     Ok(annotation_page_response(
@@ -238,6 +250,7 @@ pub(crate) fn page(
             .as_ref()
             .map(|latest| (latest.agent.as_str(), latest.created_at.as_str())),
         page,
+        current_claim,
         next_cursor,
     ))
 }
@@ -558,6 +571,43 @@ fn latest_annotation_summary_row(
         agent: row.get(0)?,
         created_at: row.get(1)?,
     })
+}
+
+fn current_claim_for_summary(
+    connection: &Connection,
+    subject_type: AnnotationSubjectType,
+    subject_id: &str,
+    owner: Option<(&str, &str)>,
+) -> AnnotationResult<Option<canary_core::query::RemediationClaimSummary>> {
+    let Some((tenant_id, project_id)) = owner else {
+        return Ok(None);
+    };
+    let now = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+    match crate::claims::current_claim_for_subject(
+        connection,
+        tenant_id,
+        project_id,
+        subject_type.as_str(),
+        subject_id,
+        &now,
+    ) {
+        Ok(claim) => Ok(claim),
+        Err(crate::claims::ClaimError::Sqlite(error)) => Err(AnnotationError::Sqlite(error)),
+        Err(crate::claims::ClaimError::InvalidSubjectType) => {
+            Err(AnnotationError::InvalidSubjectType)
+        }
+        Err(crate::claims::ClaimError::NotFound) => Ok(None),
+        Err(
+            crate::claims::ClaimError::InvalidState
+            | crate::claims::ClaimError::InvalidClaim
+            | crate::claims::ClaimError::InvalidLimit
+            | crate::claims::ClaimError::InvalidCursor
+            | crate::claims::ClaimError::Conflict(_)
+            | crate::claims::ClaimError::InvalidTransition,
+        ) => Err(AnnotationError::Sqlite(rusqlite::Error::InvalidQuery)),
+    }
 }
 
 fn paginate(mut rows: Vec<Annotation>, limit: usize) -> (Vec<Annotation>, Option<String>) {

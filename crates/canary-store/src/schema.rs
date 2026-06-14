@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rusqlite::Connection;
 
 /// Current Rust schema version.
-pub const SCHEMA_VERSION: u32 = 2026061304;
+pub const SCHEMA_VERSION: u32 = 2026061306;
 
 pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
@@ -35,6 +35,7 @@ const APP_TABLES: &[&str] = &[
     "incident_signals",
     "service_events",
     "annotations",
+    "remediation_claims",
     "webhook_deliveries",
     "monitors",
     "monitor_state",
@@ -674,6 +675,52 @@ ON annotations(subject_type, subject_id, created_at);
 
 CREATE UNIQUE INDEX IF NOT EXISTS annotations_subject_type_subject_id_id_index
 ON annotations(subject_type, subject_id, id);
+
+CREATE TABLE IF NOT EXISTS remediation_claims (
+  id TEXT PRIMARY KEY CHECK (id LIKE 'CLM-%'),
+  tenant_id TEXT NOT NULL DEFAULT 'TENANT-bootstrap',
+  project_id TEXT NOT NULL DEFAULT 'PROJECT-bootstrap',
+  service TEXT,
+  subject_type TEXT NOT NULL CHECK (subject_type IN ('incident', 'error_group', 'target', 'monitor')),
+  subject_id TEXT NOT NULL CHECK (length(trim(subject_id)) > 0),
+  owner TEXT NOT NULL CHECK (length(trim(owner)) > 0),
+  purpose TEXT NOT NULL CHECK (length(trim(purpose)) > 0),
+  state TEXT NOT NULL CHECK (state IN ('claimed', 'investigating', 'fix_proposed', 'verified', 'dismissed', 'expired', 'released')),
+  idempotency_key TEXT NOT NULL CHECK (length(trim(idempotency_key)) > 0),
+  evidence_links TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(evidence_links) AND json_type(evidence_links) = 'array'),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL CHECK (strftime('%Y-%m-%dT%H:%M:%SZ', expires_at) IS NOT NULL),
+  released_at TEXT,
+  completed_at TEXT
+);
+
+CREATE TRIGGER IF NOT EXISTS remediation_claims_evidence_links_strings_insert
+BEFORE INSERT ON remediation_claims
+WHEN EXISTS (SELECT 1 FROM json_each(NEW.evidence_links) WHERE type != 'text')
+BEGIN
+  SELECT RAISE(ABORT, 'remediation_claims.evidence_links must be an array of strings');
+END;
+
+CREATE TRIGGER IF NOT EXISTS remediation_claims_evidence_links_strings_update
+BEFORE UPDATE OF evidence_links ON remediation_claims
+WHEN EXISTS (SELECT 1 FROM json_each(NEW.evidence_links) WHERE type != 'text')
+BEGIN
+  SELECT RAISE(ABORT, 'remediation_claims.evidence_links must be an array of strings');
+END;
+
+CREATE INDEX IF NOT EXISTS remediation_claims_subject_state_expires_at_index
+ON remediation_claims(tenant_id, project_id, subject_type, subject_id, state, expires_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS remediation_claims_idempotency_index
+ON remediation_claims(tenant_id, project_id, subject_type, subject_id, idempotency_key);
+
+CREATE UNIQUE INDEX IF NOT EXISTS remediation_claims_one_active_subject_index
+ON remediation_claims(tenant_id, project_id, subject_type, subject_id)
+WHERE state IN ('claimed', 'investigating', 'fix_proposed');
+
+CREATE INDEX IF NOT EXISTS remediation_claims_service_updated_at_index
+ON remediation_claims(service, updated_at);
 
 CREATE TABLE IF NOT EXISTS webhook_deliveries (
   delivery_id TEXT PRIMARY KEY,

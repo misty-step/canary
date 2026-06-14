@@ -120,7 +120,7 @@ pub(crate) async fn query_errors(
         without_annotation: params.without_annotation,
     };
 
-    let store = match state.lock_store() {
+    let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -214,7 +214,7 @@ pub(crate) async fn list_incidents(
         Err(problem) => return problem_response(*problem),
     };
 
-    let store = match state.lock_store() {
+    let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -279,7 +279,7 @@ pub(crate) async fn show_incident(
         Err(problem) => return problem_response(*problem),
     };
 
-    let store = match state.lock_store() {
+    let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };

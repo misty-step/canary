@@ -35,6 +35,8 @@ pub enum Prefix {
     Key,
     /// Annotation row ID, `ANN-*`.
     Annotation,
+    /// Remediation claim row ID, `CLM-*`.
+    Claim,
     /// Webhook delivery ID, `DLV-*`.
     Delivery,
 }
@@ -52,6 +54,7 @@ impl Prefix {
             Self::Webhook => "WHK",
             Self::Key => "KEY",
             Self::Annotation => "ANN",
+            Self::Claim => "CLM",
             Self::Delivery => "DLV",
         }
     }
@@ -148,6 +151,7 @@ prefixed_id!(CheckInId, Prefix::CheckIn);
 prefixed_id!(WebhookId, Prefix::Webhook);
 prefixed_id!(ApiKeyId, Prefix::Key);
 prefixed_id!(AnnotationId, Prefix::Annotation);
+prefixed_id!(ClaimId, Prefix::Claim);
 prefixed_id!(DeliveryId, Prefix::Delivery);
 
 #[cfg(test)]
