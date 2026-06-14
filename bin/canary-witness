@@ -222,7 +222,18 @@ request_json "readyz" "GET" "/readyz" "none" "$ready_file"
 request_json "canary-query" "GET" "/api/v1/query?service=canary&window=${encoded_window}" "read" "$query_file"
 
 health_ok="$(jq -r 'try (.curl_exit == 0 and .http_status == 200 and (.response | type == "object") and .response.status == "ok") catch false' "$health_file")"
-ready_ok="$(jq -r 'try (.curl_exit == 0 and .http_status == 200 and (.response | type == "object") and .response.status == "ready" and ([.response.checks[]?] | all(. == "ok"))) catch false' "$ready_file")"
+ready_ok="$(jq -r 'try (
+  .curl_exit == 0
+  and .http_status == 200
+  and (.response | type == "object")
+  and .response.status == "ready"
+  and .response.checks.database == "ok"
+  and .response.checks.supervisor == "ok"
+  and (.response.checks.workers | type == "array")
+  and (.response.checks.workers | length) == 5
+  and ([.response.checks.workers[].name] | sort) == ["monitor_overdue", "retention_prune", "target_probe", "tls_scan", "webhook_delivery"]
+  and all(.response.checks.workers[]; .state == "started" and .failure_count == 0 and (.last_success_at | type) == "string")
+) catch false' "$ready_file")"
 query_ok="$(jq -r 'try (.curl_exit == 0 and .http_status == 200 and (.response | type == "object") and .response.service == "canary" and (.response.total_errors | type == "number")) catch false' "$query_file")"
 transport_failures="$(jq -s '[.[] | select((.skipped // false | not) and (.curl_exit != 0))] | length' "$health_file" "$ready_file" "$query_file")"
 

@@ -78,7 +78,20 @@ fn doctor_summary_includes_watchman_and_self_errors() {
         "key_scope": "admin",
         "reachability": {
             "healthz": {"ok": true, "response": {"status": "ok"}},
-            "readyz": {"ok": true, "response": {"status": "ready"}}
+            "readyz": {"ok": true, "response": {
+                "status": "ready",
+                "checks": {
+                    "database": "ok",
+                    "supervisor": "ok",
+                    "workers": [
+                        {"name": "webhook_delivery", "state": "started", "last_success_at": "2026-06-14T02:07:53Z", "failure_count": 0, "last_error_class": null},
+                        {"name": "target_probe", "state": "started", "last_success_at": "2026-06-14T02:07:55Z", "failure_count": 0, "last_error_class": null},
+                        {"name": "monitor_overdue", "state": "started", "last_success_at": "2026-06-14T02:07:55Z", "failure_count": 0, "last_error_class": null},
+                        {"name": "retention_prune", "state": "started", "last_success_at": "2026-06-14T02:07:23Z", "failure_count": 0, "last_error_class": null},
+                        {"name": "tls_scan", "state": "started", "last_success_at": "2026-06-14T02:07:23Z", "failure_count": 0, "last_error_class": null}
+                    ]
+                }
+            }}
         },
         "summary": {"ok": true, "summary": ["summary: Canary healthy"]},
         "services": {"ok": true, "summary": ["summary: all surfaces healthy"]},
@@ -92,7 +105,17 @@ fn doctor_summary_includes_watchman_and_self_errors() {
         "canary_errors": {"ok": true, "summary": ["summary: 0 errors in canary in the last 1h."]},
         "incidents": {"ok": true, "summary": ["summary: 0 open incidents"]},
         "dogfood": {"ok": true, "summary": ["covered: 4"]},
-        "worker_readiness": {"available": false}
+        "worker_readiness": {
+            "available": true,
+            "status": "ready",
+            "workers": [
+                {"name": "webhook_delivery", "state": "started", "failure_count": 0},
+                {"name": "target_probe", "state": "started", "failure_count": 0},
+                {"name": "monitor_overdue", "state": "started", "failure_count": 0},
+                {"name": "retention_prune", "state": "started", "failure_count": 0},
+                {"name": "tls_scan", "state": "started", "failure_count": 0}
+            ]
+        }
     });
 
     let lines = summarize_doctor(&value);
@@ -104,5 +127,10 @@ fn doctor_summary_includes_watchman_and_self_errors() {
         lines
             .iter()
             .any(|line| line == "canary_errors: summary: 0 errors in canary in the last 1h.")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "worker_readiness: ready 5 workers, 0 failing")
     );
 }

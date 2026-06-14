@@ -62,7 +62,7 @@ case "${STUB_SCENARIO:?}:$method:$url" in
     write_response 200 0.010 '{"status":"ok"}'
     ;;
   healthy:GET:https://canary.example/readyz)
-    write_response 200 0.020 '{"status":"ready","checks":{"database":"ok","supervisor":"ok"}}'
+    write_response 200 0.020 '{"status":"ready","checks":{"database":"ok","supervisor":"ok","workers":[{"name":"webhook_delivery","state":"started","last_success_at":"2026-06-14T02:07:53Z","failure_count":0,"last_error_class":null},{"name":"target_probe","state":"started","last_success_at":"2026-06-14T02:07:55Z","failure_count":0,"last_error_class":null},{"name":"monitor_overdue","state":"started","last_success_at":"2026-06-14T02:07:55Z","failure_count":0,"last_error_class":null},{"name":"retention_prune","state":"started","last_success_at":"2026-06-14T02:07:23Z","failure_count":0,"last_error_class":null},{"name":"tls_scan","state":"started","last_success_at":"2026-06-14T02:07:23Z","failure_count":0,"last_error_class":null}]}}'
     ;;
   healthy:GET:https://canary.example/api/v1/query?service=canary\&window=1h)
     write_response 200 0.030 '{"service":"canary","window":"1h","summary":"0 errors in canary in the last 1h.","total_errors":0,"groups":[]}'
@@ -91,7 +91,7 @@ case "${STUB_SCENARIO:?}:$method:$url" in
     exit 7
     ;;
   unreachable:GET:https://canary.example/readyz)
-    write_response 200 0.020 '{"status":"ready","checks":{"database":"ok","supervisor":"ok"}}'
+    write_response 200 0.020 '{"status":"ready","checks":{"database":"ok","supervisor":"ok","workers":[{"name":"webhook_delivery","state":"started","last_success_at":"2026-06-14T02:07:53Z","failure_count":0,"last_error_class":null},{"name":"target_probe","state":"started","last_success_at":"2026-06-14T02:07:55Z","failure_count":0,"last_error_class":null},{"name":"monitor_overdue","state":"started","last_success_at":"2026-06-14T02:07:55Z","failure_count":0,"last_error_class":null},{"name":"retention_prune","state":"started","last_success_at":"2026-06-14T02:07:23Z","failure_count":0,"last_error_class":null},{"name":"tls_scan","state":"started","last_success_at":"2026-06-14T02:07:23Z","failure_count":0,"last_error_class":null}]}}'
     ;;
   unreachable:GET:https://canary.example/api/v1/query?service=canary\&window=1h)
     write_response 200 0.030 '{"service":"canary","window":"1h","summary":"0 errors in canary in the last 1h.","total_errors":0,"groups":[]}'

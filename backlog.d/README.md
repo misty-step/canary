@@ -37,7 +37,7 @@
 | 036 | Agent-native inspection surface | high | done | L |
 | 037 | Watch the watchmen | high | done | L |
 | 038 | One-command integration agent | high | done | XL |
-| 041 | Live integration verification harness | P0 | ready | L |
+| 041 | Live integration verification harness | P0 | done | L |
 | 042 | Runtime pressure and freshness operations | P0 | ready | L |
 | 040 | Universal integration and enrollment engine | P0 | ready | XL |
 | 043 | Agentic remediation claim protocol | P1 | ready | L |
@@ -72,7 +72,7 @@
 037 (watch the watchmen) — shipped; proves Canary itself from outside the Canary process, preserves receipts when Canary is unreachable, and surfaces the external witness in `bin/canary doctor`
 038 (one-command integration agent) — discovers, patches, enrolls, and verifies Canary integration for Vercel/Fly/Next apps
 039 (external-user security/privacy foundation) — must precede arbitrary-user hosted claims; adds tenant/project ownership, public-ingest constraints, privacy defaults, webhook scoping, and quotas
-041 (live integration verification harness) — makes strict prove the production-image write/readback path before integration coverage claims scale beyond dogfood
+041 (live integration verification harness) — shipped; strict now proves the production-image SDK/write/readback/webhook/doctor/MCP path before integration coverage claims scale beyond dogfood
 042 (runtime pressure/freshness ops) — hardens worker/job/readiness/backup/dogfood freshness so arbitrary-app scale fails loudly instead of silently aging
 040 (universal integration/enrollment engine) — builds on 039/041/042 to make arbitrary app onboarding state-aware, framework-neutral, and receipt-backed
 044 (telemetry/analytics signal model) — defines what analytics/log/metric/event signals Canary owns or bridges before adding broad ingest surfaces
@@ -95,12 +95,11 @@
 
 ### Active order (2026-06-13)
 
-039 is delivered. 041 and 042 are the next parallel foundations: strict must
-prove SDK to server to query/webhook/doctor behavior, and runtime readiness must
-reflect freshness/pressure rather than thread liveness. 040 follows once those
-foundations can make integration receipts trustworthy. 043 and 044 are P1
-product-shaping epics that should not block the P0 foundation, but they define
-the agentic-remediation and analytics direction.
+039 and 041 are delivered. 042 is the next P0 foundation: runtime readiness
+must reflect freshness/pressure rather than thread liveness. 040 follows once
+those foundations can make integration receipts trustworthy. 043 and 044 are
+P1 product-shaping epics that should not block the P0 foundation, but they
+define the agentic-remediation and analytics direction.
 
 020 stays blocked on Adminifi URLs; 010 stays blocked on the downstream
 bitterblossom triage sprite, but the new Lane 6 foundations now precede any
@@ -186,6 +185,11 @@ parity backlog items were retired during the Rust scorched-earth migration.
   ingest applies redaction defaults, webhook delivery uses timestamped signatures
   and scoped service authority, and durable rate limits back process-local
   buckets.
+- 2026-06-13: Delivered 041. Dagger strict now runs a production-image
+  integration harness that proves health/readiness workers, TypeScript SDK
+  ingest/readback against the Rust server, disposable target/monitor/webhook
+  write paths, webhook delivery ledger readback, doctor worker readiness, and
+  MCP manifest schema shape.
 
 ## Status
 

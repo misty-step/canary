@@ -8,6 +8,8 @@ import {
   dag,
   Container,
   Directory,
+  Secret,
+  Service,
   object,
   func,
   check,
@@ -267,42 +269,198 @@ export class Ci {
     return source.dockerBuild()
   }
 
-  private productionImageSmokeContainer(source: Directory): Container {
-    const service = this.productionImageContainer(source)
+  private async productionImageService(
+    source: Directory,
+  ): Promise<{ service: Service; adminKey: Secret }> {
+    const prepared = this.productionImageContainer(source)
       .withEnvVariable("CANARY_DB_PATH", "/tmp/canary-smoke.db")
       .withEnvVariable("PORT", "4000")
       .withEnvVariable("CANARY_DISCLOSE_BOOTSTRAP_KEY", "false")
-      .withExposedPort(4000)
-      .asService()
-
-    return dag
-      .container()
-      .from(RUST_IMAGE)
-      .withExec(["apt-get", "update", "-q"])
-      .withExec(["apt-get", "install", "-yq", "--no-install-recommends", "curl", "jq"])
-      .withServiceBinding("canary", service)
+      .withEnvVariable("ALLOW_PRIVATE_TARGETS", "true")
       .withExec([
         "bash",
         "-ceu",
-        [
-          "for _ in {1..60}; do",
-          "  if curl --fail --silent --show-error http://canary:4000/healthz >/tmp/healthz.json &&",
-          "     curl --fail --silent --show-error http://canary:4000/readyz >/tmp/readyz.json &&",
-          "     grep -F '\"status\":\"ok\"' /tmp/healthz.json &&",
-          "     grep -F '\"status\":\"ready\"' /tmp/readyz.json &&",
-          "     jq -e '",
-          "      (.checks.workers | length) == 5 and",
-          "      ([.checks.workers[].name] | sort) == [\"monitor_overdue\", \"retention_prune\", \"target_probe\", \"tls_scan\", \"webhook_delivery\"] and",
-          "      all(.checks.workers[]; .state == \"started\" and .failure_count == 0 and (.last_success_at | type) == \"string\")",
-          "    ' /tmp/readyz.json; then",
-          "    exit 0",
-          "  fi",
-          "  sleep 1",
-          "done",
-          "cat /tmp/healthz.json /tmp/readyz.json 2>/dev/null || true",
-          "exit 1",
-        ].join("\n"),
+        "/app/bin/canary-server mint-key --scope admin --name production-smoke-admin >/tmp/canary-admin-key 2>/tmp/canary-mint-key.log",
       ])
+
+    const rawKey = (await prepared.file("/tmp/canary-admin-key").contents()).trim()
+    const adminKey = dag.setSecret("canary-smoke-admin-key", rawKey)
+    const service = prepared
+      .withExposedPort(4000)
+      .asService()
+
+    return { service, adminKey }
+  }
+
+  private readinessProbeScript(): string {
+    return [
+      "for _ in {1..60}; do",
+      "  if curl --fail --silent --show-error http://canary:4000/healthz >/tmp/healthz.json &&",
+      "     curl --fail --silent --show-error http://canary:4000/readyz >/tmp/readyz.json &&",
+      "     grep -F '\"status\":\"ok\"' /tmp/healthz.json &&",
+      "     grep -F '\"status\":\"ready\"' /tmp/readyz.json &&",
+      "     jq -e '",
+      "      .checks.database == \"ok\" and",
+      "      .checks.supervisor == \"ok\" and",
+      "      (.checks.workers | length) == 5 and",
+      "      ([.checks.workers[].name] | sort) == [\"monitor_overdue\", \"retention_prune\", \"target_probe\", \"tls_scan\", \"webhook_delivery\"] and",
+      "      all(.checks.workers[]; .state == \"started\" and .failure_count == 0 and (.last_success_at | type) == \"string\")",
+      "    ' /tmp/readyz.json; then",
+      "    exit 0",
+      "  fi",
+      "  sleep 1",
+      "done",
+      "cat /tmp/healthz.json /tmp/readyz.json 2>/dev/null || true",
+      "exit 1",
+    ].join("\n")
+  }
+
+  private sdkSmokeScript(): string {
+    return `
+import { initCanary, captureException } from "./clients/typescript/dist/index.js";
+
+const endpoint = process.env.CANARY_ENDPOINT;
+const apiKey = process.env.CANARY_API_KEY;
+const service = \`canary-sdk-smoke-\${Date.now()}-\${process.pid}\`;
+
+if (!endpoint || !apiKey) {
+  throw new Error("missing Canary smoke endpoint or API key");
+}
+
+initCanary({
+  endpoint,
+  apiKey,
+  service,
+  environment: "ci",
+});
+
+const result = await captureException(new Error(\`Canary SDK production smoke \${service}\`), {
+  fingerprint: ["canary-sdk-production-smoke", service],
+  context: { source: "dagger-production-image-smoke" },
+});
+
+if (!result?.id || !result.group_hash) {
+  throw new Error(\`SDK ingest did not return an error id and group hash: \${JSON.stringify(result)}\`);
+}
+
+const query = await fetch(
+  \`\${endpoint}/api/v1/query?service=\${encodeURIComponent(service)}&window=1h\`,
+  { headers: { Authorization: \`Bearer \${apiKey}\` } },
+);
+if (!query.ok) {
+  throw new Error(\`SDK readback query failed with HTTP \${query.status}\`);
+}
+const body = await query.json();
+if (
+  body.service !== service ||
+  body.total_errors < 1 ||
+  !body.groups?.some((group) => group.group_hash === result.group_hash && group.service === service)
+) {
+  throw new Error(\`SDK readback did not include group \${result.group_hash}: \${JSON.stringify(body)}\`);
+}
+`
+  }
+
+  private writePathSmokeScript(): string {
+    return `
+prefix="dagger-prod-$(date -u +%Y%m%d%H%M%S)-$$"
+receipt="$(
+  CANARY_REHEARSAL_POLL_ATTEMPTS=20 \
+  CANARY_REHEARSAL_POLL_SLEEP=1 \
+  bin/canary-write-path-rehearsal \
+    --endpoint "$CANARY_ENDPOINT" \
+    --webhook-url https://httpbingo.org/status/204 \
+    --target-url http://127.0.0.1:4000/healthz \
+    --prefix "$prefix" \
+    --no-dr-status \
+    --json
+)"
+printf '%s' "$receipt" >/tmp/canary-write-path-rehearsal.json
+jq -e '
+  .status == "ok"
+  and (.resources.immutable_error_id | startswith("ERR-"))
+  and (.resources.immutable_webhook_delivery_id | startswith("DLV-"))
+  and ([.steps[].name] | index("api_key_create_ingest"))
+  and ([.steps[].name] | index("webhook_test"))
+  and ([.steps[].name] | index("error_ingest"))
+  and ([.steps[].name] | index("error_query_readback"))
+  and ([.steps[].name] | index("report_readback"))
+  and ([.steps[].name] | index("timeline_readback"))
+  and ([.steps[].name] | index("error_detail_readback"))
+  and ([.steps[].name] | index("webhook_delivery_lookup"))
+  and ([.steps[].name] | index("post_cleanup_targets"))
+  and ([.steps[].name] | index("post_cleanup_monitors"))
+  and ([.steps[].name] | index("post_cleanup_webhooks"))
+' /tmp/canary-write-path-rehearsal.json
+`
+  }
+
+  private doctorAndMcpSmokeScript(): string {
+    return `
+bin/canary doctor --json >/tmp/canary-doctor.json
+jq -e '
+  .response.worker_readiness.available == true
+  and .response.worker_readiness.status == "ready"
+  and .response.worker_readiness.worker_count == 5
+  and .response.worker_readiness.failing_workers == 0
+  and (.response.reachability.readyz.response.checks.workers | length) == 5
+' /tmp/canary-doctor.json
+
+bin/canary mcp-manifest >/tmp/canary-mcp-manifest.json
+jq -e '
+  .schema_version == 1
+  and (.tools | type == "array")
+  and (.tools | length) >= 4
+  and all(.tools[]; (.name | type == "string") and (.description | type == "string") and .input_schema.type == "object" and (.input_schema.properties | type == "object"))
+' /tmp/canary-mcp-manifest.json
+`
+  }
+
+  private async productionImageNodeSmokeContainer(
+    source: Directory,
+    service: Service,
+    adminKey: Secret,
+  ): Promise<Container> {
+    return (
+      await nodeContainer(
+        source,
+        "clients/typescript",
+        "clients/typescript/package-lock.json",
+        "canary-typescript",
+      )
+    )
+      .withWorkdir("/work")
+      .withExec(["apt-get", "update", "-q"])
+      .withExec(["apt-get", "install", "-yq", "--no-install-recommends", "curl", "jq"])
+      .withServiceBinding("canary", service)
+      .withSecretVariable("CANARY_API_KEY", adminKey)
+      .withEnvVariable("CANARY_ENDPOINT", "http://canary:4000")
+      .withExec(["bash", "-ceu", this.readinessProbeScript()])
+      .withExec(["npm", "--prefix", "clients/typescript", "run", "build"])
+      .withExec(["node", "--input-type=module", "-e", this.sdkSmokeScript()])
+      .withExec(["bash", "-ceu", this.writePathSmokeScript()])
+  }
+
+  private async productionImageDoctorSmokeContainer(
+    source: Directory,
+    service: Service,
+    adminKey: Secret,
+  ): Promise<Container> {
+    return (await rustContainer(source))
+      .withExec(["apt-get", "update", "-q"])
+      .withExec(["apt-get", "install", "-yq", "--no-install-recommends", "curl", "jq"])
+      .withServiceBinding("canary", service)
+      .withSecretVariable("CANARY_API_KEY", adminKey)
+      .withEnvVariable("CANARY_ENDPOINT", "http://canary:4000")
+      .withExec(["bash", "-ceu", this.readinessProbeScript()])
+      .withExec(["bash", "-ceu", this.doctorAndMcpSmokeScript()])
+  }
+
+  private async productionImageIntegration(source: Directory): Promise<void> {
+    const { service, adminKey } = await this.productionImageService(source)
+
+    await (await this.productionImageNodeSmokeContainer(source, service, adminKey)).sync()
+    await (await this.productionImageDoctorSmokeContainer(source, service, adminKey)).sync()
   }
 
   @func()
@@ -535,7 +693,7 @@ export class Ci {
     })
     source?: Directory,
   ): Promise<void> {
-    await this.productionImageSmokeContainer(source!).sync()
+    await this.productionImageIntegration(source!)
   }
 
   @func()

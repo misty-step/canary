@@ -1194,10 +1194,7 @@ pub fn doctor_report(client: &ApiClient, repo_root: &Path) -> Value {
         "canary_errors": canary_errors,
         "witness": witness,
         "dogfood": dogfood,
-        "worker_readiness": {
-            "available": false,
-            "reason": "backlog item #034 has not landed"
-        }
+        "worker_readiness": worker_readiness_report(&readyz)
     })
 }
 
@@ -1233,7 +1230,10 @@ pub fn summarize_doctor(value: &Value) -> Vec<String> {
         probe_summary(value.get("incidents"))
     ));
     lines.push(format!("dogfood: {}", probe_summary(value.get("dogfood"))));
-    lines.push("worker_readiness: unavailable until #034 lands".to_owned());
+    lines.push(format!(
+        "worker_readiness: {}",
+        worker_readiness_summary(value.get("worker_readiness"))
+    ));
     lines
 }
 
@@ -1469,6 +1469,55 @@ fn witness_monitor_report(status_probe: &Value, monitors_probe: &Value) -> Value
     }
 }
 
+fn worker_readiness_report(readyz_probe: &Value) -> Value {
+    if !probe_ok(readyz_probe) {
+        return json!({
+            "available": false,
+            "reason": string_field(readyz_probe, "error")
+        });
+    }
+
+    let Some(response) = readyz_probe.get("response") else {
+        return json!({
+            "available": false,
+            "reason": "readyz response missing"
+        });
+    };
+    let Some(workers) = response
+        .get("checks")
+        .and_then(|checks| checks.get("workers"))
+        .and_then(Value::as_array)
+    else {
+        return json!({
+            "available": false,
+            "reason": "readyz worker checks missing"
+        });
+    };
+
+    let failing_workers = workers
+        .iter()
+        .filter(|worker| {
+            worker.get("state").and_then(Value::as_str) != Some("started")
+                || worker
+                    .get("failure_count")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0)
+                    > 0
+        })
+        .count();
+
+    json!({
+        "available": true,
+        "status": response
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown"),
+        "worker_count": workers.len(),
+        "failing_workers": failing_workers,
+        "workers": workers
+    })
+}
+
 fn find_witness_monitor(probe: &Value) -> Option<&Value> {
     probe
         .get("response")
@@ -1529,6 +1578,55 @@ fn witness_summary(value: Option<&Value>) -> String {
         "unavailable" => format!("{} unavailable", string_field(value, "monitor")),
         other => other.to_owned(),
     }
+}
+
+fn worker_readiness_summary(value: Option<&Value>) -> String {
+    let Some(value) = value else {
+        return "missing".to_owned();
+    };
+    if !value
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return format!("unavailable: {}", string_field(value, "reason"));
+    }
+    let worker_count = value
+        .get("worker_count")
+        .and_then(Value::as_i64)
+        .unwrap_or_else(|| {
+            value
+                .get("workers")
+                .and_then(Value::as_array)
+                .map_or(0, |workers| workers.len() as i64)
+        });
+    let failing_workers = value
+        .get("failing_workers")
+        .and_then(Value::as_i64)
+        .unwrap_or_else(|| {
+            value
+                .get("workers")
+                .and_then(Value::as_array)
+                .map_or(0, |workers| {
+                    workers
+                        .iter()
+                        .filter(|worker| {
+                            worker.get("state").and_then(Value::as_str) != Some("started")
+                                || worker
+                                    .get("failure_count")
+                                    .and_then(Value::as_i64)
+                                    .unwrap_or(0)
+                                    > 0
+                        })
+                        .count() as i64
+                })
+        });
+    format!(
+        "{} {} workers, {} failing",
+        string_field(value, "status"),
+        worker_count,
+        failing_workers
+    )
 }
 
 fn probe_status(value: &Value) -> String {
@@ -1904,8 +2002,9 @@ mod tests {
 
     #[test]
     fn mcp_manifest_exposes_integration_tools() {
-        let names = tool_manifest()
-            .into_iter()
+        let manifest = tool_manifest();
+        let names = manifest
+            .iter()
             .map(|tool| tool.name)
             .collect::<BTreeSet<_>>();
 
@@ -1913,6 +2012,18 @@ mod tests {
         assert!(names.contains("canary_integrate_plan"));
         assert!(names.contains("canary_integrate_patch"));
         assert!(names.contains("canary_integrate_enroll"));
+        for tool in manifest {
+            assert_eq!(
+                tool.input_schema["type"], "object",
+                "{} should declare an object input schema",
+                tool.name
+            );
+            assert!(
+                tool.input_schema.get("properties").is_some(),
+                "{} should declare properties for agents",
+                tool.name
+            );
+        }
     }
 
     fn temp_project(name: &str) -> std::result::Result<PathBuf, Box<dyn std::error::Error>> {

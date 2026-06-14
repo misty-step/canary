@@ -20,7 +20,7 @@ is checking.
 | Signal | Route | Healthy expectation |
 |---|---|---|
 | Liveness | `GET /healthz` | HTTP 200 and `{"status":"ok"}` |
-| Readiness | `GET /readyz` | HTTP 200, `{"status":"ready"}`, and every dependency check is `ok` |
+| Readiness | `GET /readyz` | HTTP 200, `{"status":"ready"}`, database and supervisor `ok`, and all five worker lifecycle snapshots started with zero failures |
 | Error readback | `GET /api/v1/query?service=canary&window=1h` | HTTP 200, service `canary`, and numeric `total_errors` |
 
 When all three signals are healthy, the witness sends an ingest check-in:
@@ -80,5 +80,7 @@ secrets. If it is `configured` but not `observed`, inspect the latest GitHub
 Actions receipt. If it is `observed`, the check-in state and timestamp are the
 current external witness evidence.
 
-Worker lifecycle readiness remains separate until backlog item #034 lands;
-`doctor` continues to report that state explicitly.
+`doctor` also summarizes worker lifecycle readiness from `/readyz`, for example
+`worker_readiness: ready 5 workers, 0 failing`. Treat a missing or failing
+worker readiness line as a stale inspection surface or a runtime pressure
+signal, not as a healthy witness result.

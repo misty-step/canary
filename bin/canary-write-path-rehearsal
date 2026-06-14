@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENDPOINT="${CANARY_ENDPOINT:-}"
 API_KEY="${CANARY_API_KEY:-}"
 WEBHOOK_URL="${CANARY_REHEARSAL_WEBHOOK_URL:-https://httpbingo.org/status/204}"
+TARGET_URL="${CANARY_REHEARSAL_TARGET_URL:-}"
 APP="${FLY_APP:-canary-obs}"
 PREFIX=""
 JSON_OUTPUT=0
@@ -33,7 +34,7 @@ WEBHOOK_RUN_URL=""
 
 usage() {
   cat <<'EOF'
-Usage: bin/canary-write-path-rehearsal [--endpoint <url>] [--api-key <key>] [--webhook-url <url>] [--prefix <prefix>] [--app <fly-app>] [--poll-attempts <n>] [--poll-sleep <seconds>] [--no-dr-status] [--json] [-h|--help]
+Usage: bin/canary-write-path-rehearsal [--endpoint <url>] [--api-key <key>] [--webhook-url <url>] [--target-url <url>] [--prefix <prefix>] [--app <fly-app>] [--poll-attempts <n>] [--poll-sleep <seconds>] [--no-dr-status] [--json] [-h|--help]
 
 Exercise Canary's live write paths with uniquely named disposable resources.
 
@@ -575,6 +576,11 @@ while (($#)); do
       WEBHOOK_URL="$2"
       shift 2
       ;;
+    --target-url)
+      (($# >= 2)) || { usage >&2; exit 1; }
+      TARGET_URL="$2"
+      shift 2
+      ;;
     --prefix)
       (($# >= 2)) || { usage >&2; exit 1; }
       PREFIX="$2"
@@ -639,7 +645,9 @@ SERVICE="canary-write-path-$PREFIX"
 KEY_NAME="$SERVICE-ingest"
 TARGET_NAME="$SERVICE-target"
 MONITOR_NAME="$SERVICE-monitor"
-TARGET_URL="${ENDPOINT%/}/healthz"
+if [[ -z "$TARGET_URL" ]]; then
+  TARGET_URL="${ENDPOINT%/}/healthz"
+fi
 WEBHOOK_RUN_URL="$(append_rehearsal_query "$WEBHOOK_URL")"
 remember_sensitive_literal "$WEBHOOK_RUN_URL"
 
