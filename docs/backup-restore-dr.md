@@ -73,6 +73,19 @@ code instead of being hand-copied into the runbook.
 When backup configuration is missing, this command fails non-zero. That is the
 expected signal to fix Fly Tigris configuration before doing any DR work.
 
+Production startup can be made fail-closed on missing Litestream guarantees by
+setting:
+
+```bash
+CANARY_REQUIRE_LITESTREAM=1
+```
+
+With this enabled, `bin/entrypoint.sh` exits before launching Canary when the
+database is missing and Litestream credentials/configuration are not available
+to restore it. `/readyz` stays a fast request-path check over local process
+state; backup guarantees are surfaced through startup policy and
+`bin/canary doctor` rather than by shelling out from readiness requests.
+
 ## Non-Destructive Restore Drill
 
 Restore the Tigris replica to a temporary file on the running machine without

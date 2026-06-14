@@ -32,7 +32,8 @@ use crate::{
     TargetProbeOptions, TargetProbeRuntime, TlsExpiryScanLifecycle, TlsExpiryScanLifecycleConfig,
     TlsExpiryScanLifecycleWorker, WebhookDeliveryDrain, WebhookDeliveryDrainWorker,
     WebhookDeliveryRuntime, WebhookEnqueueEffectSink, WebhookTransport, WorkerHealthRegistry,
-    ingest_router, public_router, server_time::current_rfc3339,
+    ingest_router, public_router,
+    server_time::{current_rfc3339, current_unix_millis},
 };
 
 const DEFAULT_WEBHOOK_DRAIN_INTERVAL: StdDuration = StdDuration::from_secs(5);
@@ -401,7 +402,7 @@ impl PublicReadinessProbe for StoreReadinessProbe {
         PublicReadinessSnapshot::with_workers(
             database,
             DependencyStatus::Ok,
-            self.workers.snapshot(),
+            self.workers.snapshot_at(current_unix_millis()),
         )
     }
 }

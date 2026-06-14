@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
 MANIFEST="$ROOT/priv/dogfood/owned_services.json"
 DEFAULT_REQUESTED="canary-self,vanity,chrondle,linejam,misty-step,trump-goggles-splash,timeismoney-splash,sploot"
 REQUESTED="$DEFAULT_REQUESTED"
 WINDOW="24h"
+NOW=""
+MAX_EVIDENCE_AGE_HOURS=168
 STRICT=false
 JSON_ONLY=false
 VERCEL_SCOPES=("misty-step" "adminifi-growth")
@@ -15,7 +17,7 @@ FLY_APPS_FILE=""
 
 usage() {
   cat <<'EOF'
-Usage: bin/dogfood-inventory [--manifest <path>] [--vercel-scope <scope>] [--vercel-projects <scope=path>] [--fly-apps <path>] [--local-root <path>] [--requested <csv>] [--strict] [--json] [-h|--help]
+Usage: bin/dogfood-inventory [--manifest <path>] [--vercel-scope <scope>] [--vercel-projects <scope=path>] [--fly-apps <path>] [--local-root <path>] [--requested <csv>] [--window <window>] [--now <rfc3339>] [--max-evidence-age-hours <hours>] [--strict] [--json] [-h|--help]
 
 Inventory owned deployments and classify Canary dogfood coverage.
 
@@ -68,6 +70,16 @@ while [[ $# -gt 0 ]]; do
       WINDOW="$2"
       shift 2
       ;;
+    --now)
+      [[ $# -ge 2 ]] || die "--now requires a value"
+      NOW="$2"
+      shift 2
+      ;;
+    --max-evidence-age-hours)
+      [[ $# -ge 2 ]] || die "--max-evidence-age-hours requires a value"
+      MAX_EVIDENCE_AGE_HOURS="$2"
+      shift 2
+      ;;
     --strict)
       STRICT=true
       shift
@@ -88,6 +100,14 @@ done
 
 command -v jq >/dev/null 2>&1 || die "jq is required"
 [[ -f "$MANIFEST" ]] || die "manifest not found: $MANIFEST"
+[[ "$MAX_EVIDENCE_AGE_HOURS" =~ ^[0-9]+$ ]] || die "--max-evidence-age-hours must be a non-negative integer"
+if [[ -z "$NOW" ]]; then
+  command -v date >/dev/null 2>&1 || die "date is required"
+  NOW="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+fi
+
+NOW_EPOCH="$(jq -nr --arg now "$NOW" 'try ($now | fromdateiso8601) catch empty')"
+[[ -n "$NOW_EPOCH" ]] || die "--now must be an RFC3339 UTC timestamp"
 
 if [[ ${#LOCAL_ROOTS[@]} -eq 0 ]]; then
   LOCAL_ROOTS+=("$(cd "$ROOT/.." && pwd)")
@@ -128,6 +148,12 @@ jq -e '
 ' "$MANIFEST" >/dev/null || die "invalid dogfood registry shape: $MANIFEST"
 
 jq '.services' "$MANIFEST" >"$REGISTRY_JSON"
+DONE_BACKLOG_ITEMS="$(
+  find "$ROOT/backlog.d/_done" -maxdepth 1 -type f -name '[0-9][0-9][0-9]-*.md' 2>/dev/null \
+    | sed -E 's#.*/([0-9][0-9][0-9])-.*#\1#' \
+    | jq -R . \
+    | jq -s .
+)"
 
 fixture_for_scope() {
   local scope="$1" item
@@ -269,7 +295,21 @@ jq -s \
   --slurpfile local "$LOCAL_JSON" \
   --slurpfile errors "$ERRORS_JSON" \
   --arg requested "$REQUESTED" \
+  --argjson now_epoch "$NOW_EPOCH" \
+  --argjson max_evidence_age_hours "$MAX_EVIDENCE_AGE_HOURS" \
+  --argjson done_backlog_items "$DONE_BACKLOG_ITEMS" \
   --arg window "$WINDOW" '
+  def checked_epoch($value): try ($value | fromdateiso8601) catch null;
+  def stale_evidence($svc):
+    (checked_epoch($svc.last_checked_at)) as $checked
+    | ($checked == null)
+      or ($checked > $now_epoch)
+      or (($now_epoch - $checked) > ($max_evidence_age_hours * 3600));
+  def completed_ticket_reference($svc):
+    ($svc.next_action // "") as $next
+    | any($done_backlog_items[]; . as $done |
+        ($next | test("(#0*" + $done + "\\b)|(ticket\\s+0*" + $done + "\\b)|(backlog items?\\b[^.\\n;]*\\b0*" + $done + "\\b)"; "i"))
+      );
   def coverage_for($svc):
     if $svc.state == "ignored" or $svc.state == "suspended" then "ignored"
     elif $svc.state == "blocked" then "blocked"
@@ -310,6 +350,12 @@ jq -s \
           last_checked_at: $svc.last_checked_at,
           failure_mode: $svc.failure_mode,
           next_action: $svc.next_action,
+          evidence_stale: stale_evidence($svc),
+          evidence_age_hours: (
+            (checked_epoch($svc.last_checked_at)) as $checked
+            | if $checked == null then null else (($now_epoch - $checked) / 3600 | floor) end
+          ),
+          completed_ticket_next_action: completed_ticket_reference($svc),
           deployment_seen: ($deploy != null),
           local_link_seen: ($local != null),
           reasons: []
@@ -371,6 +417,8 @@ jq -s \
       + ([.surfaces[] | select((.reasons // []) | index("unregistered_deployment")) | {kind:"unregistered_deployment", platform:.platform, platform_project:.platform_project, owner:.owner}])
       + ([.surfaces[] | select((.reasons // []) | index("unregistered_local_link")) | {kind:"unregistered_local_link", platform_project:.platform_project, repo_path:.repo_path}])
       + ([.requested_services[] as $wanted | select([.registry[].service] | index($wanted) | not) | {kind:"missing_requested_registry_entry", service:$wanted}])
+      + ([.surfaces[] | select(.registry_state != "ignored" and .evidence_stale) | {kind:"stale_registry_evidence", service:.service, platform:.platform, platform_project:.platform_project, last_checked_at:.last_checked_at, evidence_age_hours:.evidence_age_hours}])
+      + ([.surfaces[] | select(.completed_ticket_next_action) | {kind:"completed_ticket_next_action", service:.service, next_action:.next_action}])
     )
   | .summary = {
       covered: ([.surfaces[] | select(.coverage == "covered")] | length),

@@ -24,12 +24,14 @@ use serde_json::Value;
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
-    WorkerHealthHandle, WorkerName,
-    server_time::current_rfc3339,
+    WorkerHealthHandle, WorkerName, WorkerPressureSnapshot,
+    server_time::{current_rfc3339, current_unix_millis},
     webhooks::{
         WebhookEventAuthority, WebhookTransport, delivery_insert, endpoint_from_subscription,
     },
 };
+
+const WEBHOOK_EXECUTION_LEASE_SECONDS: u64 = 60;
 
 /// Runtime boundary for webhook circuit state.
 pub trait WebhookCircuit: Send + Sync + 'static {
@@ -266,10 +268,24 @@ pub struct WebhookDeliveryDrain {
 /// Summary of one drain pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WebhookDeliveryDrainReport {
+    /// Due scheduler rows observed after stale recovery and before claiming.
+    pub due_count: u32,
+    /// Executing scheduler rows observed after stale recovery and before claiming.
+    pub in_flight_count: u32,
+    /// Age in milliseconds of the oldest due scheduler row.
+    pub oldest_due_age_ms: Option<u64>,
+    /// Stale executing jobs recovered before claiming due work.
+    pub recovered: u32,
+    /// Stale executing jobs leased back to retry.
+    pub recovery_retried: u32,
+    /// Stale executing jobs discarded after exhausting attempts.
+    pub recovery_discarded: u32,
     /// Jobs claimed from the scheduler store.
     pub claimed: u32,
     /// Jobs completed after successful delivery or intentional skip.
     pub completed: u32,
+    /// Jobs completed because the webhook circuit was open.
+    pub circuit_open_suppressed: u32,
     /// Jobs rescheduled for retry.
     pub retried: u32,
     /// Jobs permanently discarded by the scheduler.
@@ -375,18 +391,33 @@ impl WebhookDeliveryDrain {
     /// Claim due jobs, execute them sequentially, and persist retry/terminal state.
     pub fn drain_due(&self, now: &str) -> Result<WebhookDeliveryDrainReport, String> {
         validate_drain_timestamp(now)?;
+        let stale_before = subtract_seconds(now, WEBHOOK_EXECUTION_LEASE_SECONDS)?;
 
         let jobs = {
             let mut store = self
                 .store
                 .lock()
                 .map_err(|_| "store lock poisoned".to_owned())?;
+            let recovery = store
+                .recover_stale_webhook_delivery_jobs(now, &stale_before, self.max_jobs)
+                .map_err(|error| error.to_string())?;
+            let due_summary = store
+                .webhook_delivery_due_summary(now)
+                .map_err(|error| error.to_string())?;
             store
                 .claim_due_webhook_delivery_jobs(now, self.max_jobs)
-                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())
+                .map(|jobs| (recovery, due_summary, jobs))?
         };
+        let (recovery, due_summary, jobs) = jobs;
 
         let mut report = WebhookDeliveryDrainReport {
+            due_count: due_summary.due_count,
+            in_flight_count: due_summary.in_flight_count,
+            oldest_due_age_ms: oldest_due_age_ms(now, due_summary.oldest_scheduled_at.as_deref())?,
+            recovered: recovery.recovered,
+            recovery_retried: recovery.retried,
+            recovery_discarded: recovery.discarded,
             claimed: jobs.len() as u32,
             ..WebhookDeliveryDrainReport::default()
         };
@@ -396,7 +427,7 @@ impl WebhookDeliveryDrain {
                 Ok(job) => job,
                 Err(_) => {
                     self.complete_job(
-                        row.id,
+                        &row,
                         WebhookDeliveryJobCompletion::Discard {
                             now: now.to_owned(),
                         },
@@ -410,7 +441,7 @@ impl WebhookDeliveryDrain {
                 Ok(Ok(execution)) => execution,
                 Ok(Err(_)) | Err(_) => {
                     let completion = completion_for_runtime_error(now, &row)?;
-                    self.complete_job(row.id, completion)?;
+                    self.complete_job(&row, completion)?;
                     if row.attempt >= row.max_attempts {
                         report.discarded += 1;
                     } else {
@@ -419,17 +450,20 @@ impl WebhookDeliveryDrain {
                     continue;
                 }
             };
+            if matches!(
+                &execution.outcome,
+                DeliveryOutcome::Suppressed { reason } if reason == "circuit_open"
+            ) {
+                report.circuit_open_suppressed += 1;
+            }
             match completion_for_execution(now, &execution)? {
                 DrainCompletion::Retry { scheduled_at } => {
-                    self.complete_job(
-                        row.id,
-                        WebhookDeliveryJobCompletion::Retry { scheduled_at },
-                    )?;
+                    self.complete_job(&row, WebhookDeliveryJobCompletion::Retry { scheduled_at })?;
                     report.retried += 1;
                 }
                 DrainCompletion::Complete => {
                     self.complete_job(
-                        row.id,
+                        &row,
                         WebhookDeliveryJobCompletion::Complete {
                             now: now.to_owned(),
                         },
@@ -438,7 +472,7 @@ impl WebhookDeliveryDrain {
                 }
                 DrainCompletion::Discard => {
                     self.complete_job(
-                        row.id,
+                        &row,
                         WebhookDeliveryJobCompletion::Discard {
                             now: now.to_owned(),
                         },
@@ -453,16 +487,21 @@ impl WebhookDeliveryDrain {
 
     fn complete_job(
         &self,
-        job_id: i64,
+        job: &WebhookDeliveryJobRow,
         completion: WebhookDeliveryJobCompletion,
     ) -> Result<(), String> {
         let mut store = self
             .store
             .lock()
             .map_err(|_| "store lock poisoned".to_owned())?;
-        store
-            .complete_webhook_delivery_job(job_id, completion)
-            .map_err(|error| error.to_string())
+        let applied = store
+            .complete_webhook_delivery_job(job, completion)
+            .map_err(|error| error.to_string())?;
+        if applied {
+            Ok(())
+        } else {
+            Err(format!("webhook job {} execution lease lost", job.id))
+        }
     }
 }
 
@@ -527,7 +566,20 @@ fn run_drain_worker(
     while !stop.is_requested() {
         let now = current_rfc3339();
         match catch_unwind(AssertUnwindSafe(|| drain.drain_due(&now))) {
-            Ok(Ok(_)) => health.record_success(now),
+            Ok(Ok(report)) => health.record_success_with_pressure(
+                now,
+                current_unix_millis(),
+                WorkerPressureSnapshot {
+                    due_count: u64::from(report.due_count),
+                    in_flight_count: u64::from(report.in_flight_count),
+                    oldest_due_age_ms: report.oldest_due_age_ms,
+                    backoff_or_circuit_open: report.retried > 0
+                        || report.discarded > 0
+                        || report.circuit_open_suppressed > 0
+                        || report.recovery_retried > 0
+                        || report.recovery_discarded > 0,
+                },
+            ),
             Ok(Err(_)) => health.record_failure("runtime_error"),
             Err(_) => health.record_failure("panic"),
         }
@@ -617,8 +669,28 @@ fn add_seconds(now: &str, seconds: u64) -> Result<String, String> {
         .map_err(|error| format!("failed to format retry timestamp: {error}"))
 }
 
+fn subtract_seconds(now: &str, seconds: u64) -> Result<String, String> {
+    let now = parse_drain_timestamp(now)?;
+    now.checked_sub(Duration::seconds(seconds as i64))
+        .ok_or_else(|| "lease recovery timestamp overflow".to_owned())?
+        .format(&Rfc3339)
+        .map_err(|error| format!("failed to format lease recovery timestamp: {error}"))
+}
+
 fn validate_drain_timestamp(now: &str) -> Result<(), String> {
     parse_drain_timestamp(now).map(|_| ())
+}
+
+fn oldest_due_age_ms(now: &str, oldest_due_at: Option<&str>) -> Result<Option<u64>, String> {
+    let Some(oldest_due_at) = oldest_due_at else {
+        return Ok(None);
+    };
+    let now = parse_drain_timestamp(now)?;
+    let oldest_due_at = parse_drain_timestamp(oldest_due_at)?;
+    if oldest_due_at >= now {
+        return Ok(Some(0));
+    }
+    Ok(Some((now - oldest_due_at).whole_milliseconds() as u64))
 }
 
 fn parse_drain_timestamp(now: &str) -> Result<OffsetDateTime, String> {

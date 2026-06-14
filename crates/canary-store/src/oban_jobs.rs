@@ -75,6 +75,30 @@ pub struct WebhookDeliveryJobRow {
     pub max_attempts: u32,
     /// Scheduled timestamp.
     pub scheduled_at: String,
+    /// Timestamp for the currently claimed execution lease, when claimed.
+    pub attempted_at: Option<String>,
+}
+
+/// Point-in-time summary of due webhook delivery backlog.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WebhookDeliveryJobDueSummary {
+    /// Rows eligible for claiming at the observed timestamp.
+    pub due_count: u32,
+    /// Rows currently leased by a webhook delivery executor.
+    pub in_flight_count: u32,
+    /// Oldest eligible scheduled timestamp.
+    pub oldest_scheduled_at: Option<String>,
+}
+
+/// Summary of stale executing webhook jobs recovered back into scheduler control.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WebhookDeliveryJobRecoveryReport {
+    /// Executing rows selected as stale.
+    pub recovered: u32,
+    /// Rows leased back to the scheduled state.
+    pub retried: u32,
+    /// Rows discarded because they had exhausted attempts.
+    pub discarded: u32,
 }
 
 /// Scheduler-side completion transition for one claimed webhook delivery job.
@@ -136,9 +160,9 @@ pub(crate) fn claim_due_webhook_delivery_jobs(
     }
 
     let transaction = connection.transaction()?;
-    let ids = {
+    let selected = {
         let mut statement = transaction.prepare(
-            "SELECT id
+            "SELECT id, scheduled_at
              FROM oban_jobs
              WHERE worker = ?1
                AND queue = ?2
@@ -149,21 +173,29 @@ pub(crate) fn claim_due_webhook_delivery_jobs(
         )?;
         let rows = statement
             .query_map(params![WEBHOOK_WORKER, WEBHOOK_QUEUE, now, limit], |row| {
-                row.get::<_, i64>(0)
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()?
     };
 
-    for id in &ids {
-        transaction.execute(
+    let mut ids = Vec::with_capacity(selected.len());
+    for (id, scheduled_at) in selected {
+        let updated = transaction.execute(
             "UPDATE oban_jobs
              SET state = 'executing',
                  attempt = attempt + 1,
                  attempted_at = ?2,
                  attempted_by = '[\"canary-rust\"]'
-             WHERE id = ?1",
-            params![id, now],
+             WHERE id = ?1
+               AND worker = ?3
+               AND queue = ?4
+               AND state IN ('available', 'scheduled')
+               AND scheduled_at = ?5",
+            params![id, now, WEBHOOK_WORKER, WEBHOOK_QUEUE, scheduled_at],
         )?;
+        if updated > 0 {
+            ids.push(id);
+        }
     }
 
     let mut jobs = Vec::with_capacity(ids.len());
@@ -178,36 +210,182 @@ pub(crate) fn claim_due_webhook_delivery_jobs(
 
 pub(crate) fn complete_webhook_delivery_job(
     connection: &mut Connection,
-    job_id: i64,
+    job: &WebhookDeliveryJobRow,
     completion: WebhookDeliveryJobCompletion,
-) -> Result<()> {
+) -> Result<bool> {
+    let Some(attempted_at) = job.attempted_at.as_deref() else {
+        return Ok(false);
+    };
     match completion {
         WebhookDeliveryJobCompletion::Retry { scheduled_at } => {
-            connection.execute(
+            let updated = connection.execute(
                 "UPDATE oban_jobs
                  SET state = 'scheduled', scheduled_at = ?2
-                 WHERE id = ?1",
-                params![job_id, scheduled_at],
+                 WHERE id = ?1
+                   AND worker = ?3
+                   AND queue = ?4
+                   AND state = 'executing'
+                   AND attempt = ?5
+                   AND attempted_at = ?6",
+                params![
+                    job.id,
+                    scheduled_at,
+                    WEBHOOK_WORKER,
+                    WEBHOOK_QUEUE,
+                    job.attempt,
+                    attempted_at
+                ],
             )?;
+            Ok(updated > 0)
         }
         WebhookDeliveryJobCompletion::Complete { now } => {
-            connection.execute(
+            let updated = connection.execute(
                 "UPDATE oban_jobs
                  SET state = 'completed', completed_at = ?2
-                 WHERE id = ?1",
-                params![job_id, now],
+                 WHERE id = ?1
+                   AND worker = ?3
+                   AND queue = ?4
+                   AND state = 'executing'
+                   AND attempt = ?5
+                   AND attempted_at = ?6",
+                params![
+                    job.id,
+                    now,
+                    WEBHOOK_WORKER,
+                    WEBHOOK_QUEUE,
+                    job.attempt,
+                    attempted_at
+                ],
             )?;
+            Ok(updated > 0)
         }
         WebhookDeliveryJobCompletion::Discard { now } => {
-            connection.execute(
+            let updated = connection.execute(
                 "UPDATE oban_jobs
                  SET state = 'discarded', discarded_at = ?2
-                 WHERE id = ?1",
-                params![job_id, now],
+                 WHERE id = ?1
+                   AND worker = ?3
+                   AND queue = ?4
+                   AND state = 'executing'
+                   AND attempt = ?5
+                   AND attempted_at = ?6",
+                params![
+                    job.id,
+                    now,
+                    WEBHOOK_WORKER,
+                    WEBHOOK_QUEUE,
+                    job.attempt,
+                    attempted_at
+                ],
             )?;
+            Ok(updated > 0)
         }
     }
-    Ok(())
+}
+
+pub(crate) fn recover_stale_webhook_delivery_jobs(
+    connection: &mut Connection,
+    now: &str,
+    stale_before: &str,
+    limit: u32,
+) -> Result<WebhookDeliveryJobRecoveryReport> {
+    if limit == 0 {
+        return Ok(WebhookDeliveryJobRecoveryReport::default());
+    }
+
+    let transaction = connection.transaction()?;
+    let stale = {
+        let mut statement = transaction.prepare(
+            "SELECT id, attempt, max_attempts, errors, attempted_at
+             FROM oban_jobs
+             WHERE worker = ?1
+               AND queue = ?2
+               AND state = 'executing'
+               AND attempted_at IS NOT NULL
+               AND attempted_at <= ?3
+             ORDER BY attempted_at ASC, id ASC
+             LIMIT ?4",
+        )?;
+        let rows = statement.query_map(
+            params![WEBHOOK_WORKER, WEBHOOK_QUEUE, stale_before, limit],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, u32>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+
+    let mut report = WebhookDeliveryJobRecoveryReport::default();
+    for (id, attempt, max_attempts, errors, attempted_at) in stale {
+        let errors = append_recovery_error(errors, now, stale_before)?;
+        if attempt >= max_attempts {
+            let updated = transaction.execute(
+                "UPDATE oban_jobs
+                 SET state = 'discarded',
+                     discarded_at = ?2,
+                     errors = ?3
+                 WHERE id = ?1
+                   AND worker = ?4
+                   AND queue = ?5
+                   AND state = 'executing'
+                   AND attempted_at = ?6",
+                params![id, now, errors, WEBHOOK_WORKER, WEBHOOK_QUEUE, attempted_at],
+            )?;
+            if updated > 0 {
+                report.discarded += 1;
+                report.recovered += 1;
+            }
+        } else {
+            let updated = transaction.execute(
+                "UPDATE oban_jobs
+                 SET state = 'scheduled',
+                     scheduled_at = ?2,
+                     errors = ?3
+                 WHERE id = ?1
+                   AND worker = ?4
+                   AND queue = ?5
+                   AND state = 'executing'
+                   AND attempted_at = ?6",
+                params![id, now, errors, WEBHOOK_WORKER, WEBHOOK_QUEUE, attempted_at],
+            )?;
+            if updated > 0 {
+                report.retried += 1;
+                report.recovered += 1;
+            }
+        }
+    }
+    transaction.commit()?;
+    Ok(report)
+}
+
+pub(crate) fn webhook_delivery_due_summary(
+    connection: &Connection,
+    now: &str,
+) -> Result<WebhookDeliveryJobDueSummary> {
+    let mut statement = connection.prepare(
+        "SELECT
+           COUNT(CASE WHEN state IN ('available', 'scheduled') AND scheduled_at <= ?3 THEN 1 END),
+           MIN(CASE WHEN state IN ('available', 'scheduled') AND scheduled_at <= ?3 THEN scheduled_at END),
+           COUNT(CASE WHEN state = 'executing' THEN 1 END)
+         FROM oban_jobs
+         WHERE worker = ?1
+           AND queue = ?2",
+    )?;
+    statement
+        .query_row(params![WEBHOOK_WORKER, WEBHOOK_QUEUE, now], |row| {
+            Ok(WebhookDeliveryJobDueSummary {
+                due_count: row.get::<_, u32>(0)?,
+                oldest_scheduled_at: row.get::<_, Option<String>>(1)?,
+                in_flight_count: row.get::<_, u32>(2)?,
+            })
+        })
+        .map_err(Into::into)
 }
 
 pub(crate) fn webhook_delivery_job(
@@ -215,7 +393,7 @@ pub(crate) fn webhook_delivery_job(
     job_id: i64,
 ) -> Result<Option<WebhookDeliveryJobRow>> {
     let mut statement = connection.prepare(
-        "SELECT id, state, args, attempt, max_attempts, scheduled_at
+        "SELECT id, state, args, attempt, max_attempts, scheduled_at, attempted_at
          FROM oban_jobs
          WHERE id = ?1 AND worker = ?2 AND queue = ?3",
     )?;
@@ -232,6 +410,16 @@ fn webhook_delivery_job_in_transaction(
     webhook_delivery_job(connection, job_id)
 }
 
+fn append_recovery_error(errors: String, now: &str, stale_before: &str) -> Result<String> {
+    let mut errors = serde_json::from_str::<Vec<Value>>(&errors).unwrap_or_default();
+    errors.push(serde_json::json!({
+        "at": now,
+        "reason": "stale_executing_recovered",
+        "stale_before": stale_before
+    }));
+    serde_json::to_string(&errors).map_err(|_| rusqlite::Error::InvalidQuery.into())
+}
+
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WebhookDeliveryJobRow> {
     let state: String = row.get(1)?;
     let args: String = row.get(2)?;
@@ -242,5 +430,6 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WebhookDeliveryJobRow> {
         attempt: row.get::<_, u32>(3)?,
         max_attempts: row.get::<_, u32>(4)?,
         scheduled_at: row.get(5)?,
+        attempted_at: row.get(6)?,
     })
 }

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
 MANIFEST="$ROOT/priv/dogfood/owned_services.json"
 WINDOW="24h"
+NOW=""
+MAX_EVIDENCE_AGE_HOURS=168
 ENDPOINT="${CANARY_ENDPOINT:-}"
 API_KEY="${CANARY_API_KEY:-}"
 STRICT=0
@@ -11,7 +13,7 @@ JSON_OUTPUT=0
 
 usage() {
   cat <<'EOF'
-Usage: bin/dogfood-audit [--endpoint <url>] [--api-key <key>] [--window <window>] [--manifest <path>] [--strict] [--json] [-h|--help]
+Usage: bin/dogfood-audit [--endpoint <url>] [--api-key <key>] [--window <window>] [--manifest <path>] [--now <rfc3339>] [--max-evidence-age-hours <hours>] [--strict] [--json] [-h|--help]
 
 Audit Canary's deployed-service dogfood registry against a live Canary instance.
 
@@ -108,6 +110,22 @@ while (($#)); do
       WINDOW="$2"
       shift 2
       ;;
+    --now)
+      if (($# < 2)); then
+        usage >&2
+        exit 1
+      fi
+      NOW="$2"
+      shift 2
+      ;;
+    --max-evidence-age-hours)
+      if (($# < 2)); then
+        usage >&2
+        exit 1
+      fi
+      MAX_EVIDENCE_AGE_HOURS="$2"
+      shift 2
+      ;;
     --manifest)
       if (($# < 2)); then
         usage >&2
@@ -141,8 +159,21 @@ require_command jq
 [[ -n "$ENDPOINT" ]] || fail "Missing Canary endpoint. Set CANARY_ENDPOINT or pass --endpoint."
 [[ -n "$API_KEY" ]] || fail "Missing Canary API key. Set CANARY_API_KEY or pass --api-key."
 [[ -f "$MANIFEST" ]] || fail "Manifest not found: $MANIFEST"
+[[ "$MAX_EVIDENCE_AGE_HOURS" =~ ^[0-9]+$ ]] || fail "--max-evidence-age-hours must be a non-negative integer"
+if [[ -z "$NOW" ]]; then
+  require_command date
+  NOW="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+fi
+NOW_EPOCH="$(jq -nr --arg now "$NOW" 'try ($now | fromdateiso8601) catch empty')"
+[[ -n "$NOW_EPOCH" ]] || fail "--now must be an RFC3339 UTC timestamp"
 
 validate_manifest
+DONE_BACKLOG_ITEMS="$(
+  find "$ROOT/backlog.d/_done" -maxdepth 1 -type f -name '[0-9][0-9][0-9]-*.md' 2>/dev/null \
+    | sed -E 's#.*/([0-9][0-9][0-9])-.*#\1#' \
+    | jq -R . \
+    | jq -s .
+)"
 
 targets_json="$(api_get "/api/v1/targets")"
 report_json="$(api_get "/api/v1/report?window=$(urlencode "$WINDOW")")"
@@ -155,6 +186,37 @@ active_results="$tmpdir/active-results.ndjson"
 : > "$active_results"
 
 strict_failures=0
+registry_policy_failures="$tmpdir/registry-policy-failures.ndjson"
+: > "$registry_policy_failures"
+
+jq -c \
+  --argjson now_epoch "$NOW_EPOCH" \
+  --argjson max_evidence_age_hours "$MAX_EVIDENCE_AGE_HOURS" \
+  --argjson done_backlog_items "$DONE_BACKLOG_ITEMS" '
+    def checked_epoch($value): try ($value | fromdateiso8601) catch null;
+    def stale_evidence($svc):
+      (checked_epoch($svc.last_checked_at)) as $checked
+      | ($checked == null)
+        or ($checked > $now_epoch)
+        or (($now_epoch - $checked) > ($max_evidence_age_hours * 3600));
+    def completed_ticket_reference($svc):
+      ($svc.next_action // "") as $next
+      | any($done_backlog_items[]; . as $done |
+          ($next | test("(#0*" + $done + "\\b)|(ticket\\s+0*" + $done + "\\b)|(backlog items?\\b[^.\\n;]*\\b0*" + $done + "\\b)"; "i"))
+        );
+    .services[] as $svc
+    | (
+        if ($svc.state != "ignored" and stale_evidence($svc)) then
+          {kind:"stale_registry_evidence", service:$svc.service, last_checked_at:$svc.last_checked_at}
+        else empty end
+      ),
+      (
+        if completed_ticket_reference($svc) then
+          {kind:"completed_ticket_next_action", service:$svc.service, next_action:$svc.next_action}
+        else empty end
+      )
+  ' "$MANIFEST" > "$registry_policy_failures"
+strict_failures=$((strict_failures + $(wc -l < "$registry_policy_failures" | tr -d ' ')))
 
 while IFS= read -r service_json; do
   service="$(jq -r '.service' <<<"$service_json")"
@@ -242,6 +304,7 @@ if ((JSON_OUTPUT == 1)); then
     --argjson registry "$(jq '.services' "$MANIFEST")" \
     --argjson active "$(jq -s '.' "$active_results")" \
     --argjson extra "$extra_targets" \
+    --argjson registry_policy_failures "$(jq -s '.' "$registry_policy_failures")" \
     --argjson strict_failures "$strict_failures" \
     '{
       window: $window,
@@ -250,7 +313,8 @@ if ((JSON_OUTPUT == 1)); then
       strict_failures: $strict_failures,
       active_services: $active,
       registry: $registry,
-      extra_targets: $extra
+      extra_targets: $extra,
+      registry_policy_failures: $registry_policy_failures
     }'
 else
   printf 'Canary dogfood audit (%s)\n' "$WINDOW"
@@ -309,6 +373,8 @@ else
 fi
 
 if ((STRICT == 1 && strict_failures > 0)); then
-  printf '\nStrict audit failed: %s active service target issue(s).\n' "$strict_failures" >&2
+  if ((JSON_OUTPUT == 0)); then
+    printf '\nStrict audit failed: %s active service target issue(s).\n' "$strict_failures" >&2
+  fi
   exit 1
 fi

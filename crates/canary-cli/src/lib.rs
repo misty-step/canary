@@ -1175,6 +1175,7 @@ pub fn doctor_report(client: &ApiClient, repo_root: &Path) -> Value {
         Ok(value) => json!({"ok": true, "summary": summarize_dogfood(&value), "response": value}),
         Err(error) => json!({"ok": false, "error": error.to_string()}),
     };
+    let dr = dr_evidence_report(repo_root);
 
     json!({
         "schema_version": 1,
@@ -1193,6 +1194,7 @@ pub fn doctor_report(client: &ApiClient, repo_root: &Path) -> Value {
         "incidents": incidents,
         "canary_errors": canary_errors,
         "witness": witness,
+        "dr": dr,
         "dogfood": dogfood,
         "worker_readiness": worker_readiness_report(&readyz)
     })
@@ -1221,6 +1223,7 @@ pub fn summarize_doctor(value: &Value) -> Vec<String> {
         "witness: {}",
         witness_summary(value.get("witness"))
     ));
+    lines.push(format!("dr: {}", dr_summary(value.get("dr"))));
     lines.push(format!(
         "canary_errors: {}",
         probe_summary(value.get("canary_errors"))
@@ -1235,6 +1238,80 @@ pub fn summarize_doctor(value: &Value) -> Vec<String> {
         worker_readiness_summary(value.get("worker_readiness"))
     ));
     lines
+}
+
+fn dr_evidence_report(repo_root: &Path) -> Value {
+    let status = run_dr_status(repo_root);
+    json!({
+        "status": status,
+        "restore_receipt": latest_restore_receipt(repo_root)
+    })
+}
+
+fn run_dr_status(repo_root: &Path) -> Value {
+    let program = repo_root.join("bin/dr-status");
+    if !program.is_file() {
+        return json!({
+            "ok": false,
+            "reason": "bin/dr-status not found"
+        });
+    }
+    match Command::new(&program)
+        .current_dir(repo_root)
+        .env("NO_COLOR", "1")
+        .arg("--app")
+        .arg("canary-obs")
+        .output()
+    {
+        Ok(output) => json!({
+            "ok": output.status.success(),
+            "status": output
+                .status
+                .code()
+                .map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+            "command": "NO_COLOR=1 bin/dr-status --app canary-obs",
+            "stdout": redact_text(&String::from_utf8_lossy(&output.stdout)),
+            "stderr": redact_text(&String::from_utf8_lossy(&output.stderr))
+        }),
+        Err(error) => json!({
+            "ok": false,
+            "reason": error.to_string(),
+            "command": "NO_COLOR=1 bin/dr-status --app canary-obs"
+        }),
+    }
+}
+
+fn latest_restore_receipt(repo_root: &Path) -> Value {
+    let architecture_dir = repo_root.join("docs/architecture");
+    let latest = fs::read_dir(&architecture_dir)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(std::result::Result::ok))
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(is_restore_receipt_filename)
+        })
+        .max();
+    if let Some(path) = latest {
+        return json!({
+            "ok": true,
+            "path": path.strip_prefix(repo_root).unwrap_or(path.as_path()).display().to_string()
+        });
+    }
+    json!({
+        "ok": false,
+        "path": "docs/backup-restore-dr.md",
+        "reason": "no architecture DR receipt found"
+    })
+}
+
+fn is_restore_receipt_filename(name: &str) -> bool {
+    name.contains("dr-restore")
+        || name.contains("restore-drill")
+        || name.contains("restore-receipt")
+        || name.contains("restore-evidence")
 }
 
 fn read_file_config(config_path: Option<PathBuf>) -> Result<FileConfig> {
@@ -1494,10 +1571,15 @@ fn worker_readiness_report(readyz_probe: &Value) -> Value {
         });
     };
 
+    let schema_missing_health_fields = workers
+        .iter()
+        .filter(|worker| worker.get("health").and_then(Value::as_str).is_none())
+        .count();
     let failing_workers = workers
         .iter()
         .filter(|worker| {
             worker.get("state").and_then(Value::as_str) != Some("started")
+                || worker.get("health").and_then(Value::as_str) != Some("ok")
                 || worker
                     .get("failure_count")
                     .and_then(Value::as_i64)
@@ -1514,6 +1596,7 @@ fn worker_readiness_report(readyz_probe: &Value) -> Value {
             .unwrap_or("unknown"),
         "worker_count": workers.len(),
         "failing_workers": failing_workers,
+        "schema_missing_health_fields": schema_missing_health_fields,
         "workers": workers
     })
 }
@@ -1612,6 +1695,7 @@ fn worker_readiness_summary(value: Option<&Value>) -> String {
                         .iter()
                         .filter(|worker| {
                             worker.get("state").and_then(Value::as_str) != Some("started")
+                                || worker.get("health").and_then(Value::as_str) != Some("ok")
                                 || worker
                                     .get("failure_count")
                                     .and_then(Value::as_i64)
@@ -1621,12 +1705,66 @@ fn worker_readiness_summary(value: Option<&Value>) -> String {
                         .count() as i64
                 })
         });
-    format!(
-        "{} {} workers, {} failing",
-        string_field(value, "status"),
-        worker_count,
-        failing_workers
-    )
+    let missing_health = value
+        .get("schema_missing_health_fields")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    if missing_health > 0 {
+        format!(
+            "{} {} workers, {} failing, {} missing health fields",
+            string_field(value, "status"),
+            worker_count,
+            failing_workers,
+            missing_health
+        )
+    } else {
+        format!(
+            "{} {} workers, {} failing",
+            string_field(value, "status"),
+            worker_count,
+            failing_workers
+        )
+    }
+}
+
+fn dr_summary(value: Option<&Value>) -> String {
+    let Some(value) = value else {
+        return "missing".to_owned();
+    };
+    let status_ok = value
+        .get("status")
+        .and_then(|status| status.get("ok"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let receipt = value
+        .get("restore_receipt")
+        .and_then(|receipt| receipt.get("path"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let receipt_ok = value
+        .get("restore_receipt")
+        .and_then(|receipt| receipt.get("ok"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if status_ok {
+        if receipt_ok {
+            format!("litestream ok, restore_receipt={receipt}")
+        } else {
+            let reason = value
+                .get("restore_receipt")
+                .and_then(|receipt| receipt.get("reason"))
+                .and_then(Value::as_str)
+                .unwrap_or("restore evidence missing");
+            format!("litestream ok, restore_receipt_missing: {reason}, fallback={receipt}")
+        }
+    } else {
+        let reason = value
+            .get("status")
+            .and_then(|status| status.get("reason").or_else(|| status.get("stderr")))
+            .and_then(Value::as_str)
+            .unwrap_or("dr-status failed");
+        format!("litestream unavailable: {reason}, restore_receipt={receipt}")
+    }
 }
 
 fn probe_status(value: &Value) -> String {
@@ -1759,6 +1897,36 @@ mod tests {
         assert_eq!(report["status"], "configured");
         assert_eq!(report["monitor"], "canary-watchman");
         assert_eq!(report["mode"], "ttl");
+    }
+
+    #[test]
+    fn restore_receipt_discovery_requires_restore_specific_receipts()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = temp_project("restore-receipt")?;
+        let architecture = root.join("docs/architecture");
+        fs::create_dir_all(&architecture)?;
+        fs::write(
+            architecture.join("rust-write-path-evidence-2026-06-12.md"),
+            "write path evidence, not a restore drill",
+        )?;
+
+        let missing = latest_restore_receipt(&root);
+        assert_eq!(missing["ok"], false);
+        assert_eq!(missing["path"], "docs/backup-restore-dr.md");
+
+        fs::write(
+            architecture.join("restore-drill-evidence-2026-06-14.md"),
+            "restore drill evidence",
+        )?;
+        let found = latest_restore_receipt(&root);
+        assert_eq!(found["ok"], true);
+        assert_eq!(
+            found["path"],
+            "docs/architecture/restore-drill-evidence-2026-06-14.md"
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]

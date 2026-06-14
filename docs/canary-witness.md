@@ -84,3 +84,14 @@ current external witness evidence.
 `worker_readiness: ready 5 workers, 0 failing`. Treat a missing or failing
 worker readiness line as a stale inspection surface or a runtime pressure
 signal, not as a healthy witness result.
+
+The witness itself now requires each `/readyz` worker to report `state:
+started`, `health: ok`, zero cumulative and consecutive failures, a string
+`last_success_at`, numeric pressure counters, and a boolean
+`backoff_or_circuit_open`. A worker thread that is alive but stale, repeatedly
+failing, or pressured is therefore an unhealthy witness result.
+
+`doctor` also prints a `dr:` line. That line reflects the operator
+`bin/dr-status --app canary-obs` Litestream check when available and points to
+the latest checked-in restore-specific receipt when one exists; otherwise it
+reports `restore_receipt_missing` and the fallback runbook path.

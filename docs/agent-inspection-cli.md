@@ -76,6 +76,17 @@ line is derived from `/readyz` and should look like:
 worker_readiness: ready 5 workers, 0 failing
 ```
 
+`doctor` also surfaces DR evidence:
+
+```text
+dr: litestream ok, restore_receipt_missing: no architecture DR receipt found, fallback=docs/backup-restore-dr.md
+```
+
+The `dr` line is data, not a request-path dependency. It runs the operator
+`bin/dr-status --app canary-obs` check when available and points to the latest
+checked-in restore-specific receipt when one exists. Production startup can be
+made fail-closed on backup configuration with `CANARY_REQUIRE_LITESTREAM=1`.
+
 The witness line is:
 
 - `observed`: the scheduled witness has checked in; the line includes the last
