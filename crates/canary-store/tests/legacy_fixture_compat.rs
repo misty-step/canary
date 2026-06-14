@@ -24,7 +24,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const LEGACY_FIXTURE: &str = "tests/fixtures/legacy_schema.db";
 const POPULATED_LEGACY_FIXTURE: &str = "tests/fixtures/legacy_read_models.db";
-const RUST_SCHEMA_VERSION: u32 = 2026061304;
+const RUST_SCHEMA_VERSION: u32 = 2026061306;
 
 const LEGACY_MIGRATIONS: &[&str] = &[
     "20260314000001",
@@ -215,6 +215,7 @@ fn rust_migrate_restamps_a_legacy_fixture_without_schema_drift() -> Result<(), B
     let (rust_dir, rust) = rust_schema_connection()?;
     let mut rust_tables = table_names(&rust)?;
     assert!(rust_tables.remove("rate_limit_buckets"));
+    assert!(rust_tables.remove("remediation_claims"));
     assert_eq!(before_tables, rust_tables);
     fs::remove_dir_all(rust_dir)?;
     assert_eq!(user_version(&before)?, 0);
@@ -410,7 +411,7 @@ fn rust_query_read_models_read_populated_legacy_rows() -> Result<(), Box<dyn Err
 fn rust_now_relative_queries_read_populated_legacy_rows_at_fixed_time() -> Result<(), Box<dyn Error>>
 {
     let (dir, path) = copy_populated_fixture("read-models-at")?;
-    let store = Store::open(&path)?;
+    let mut store = Store::open(&path)?;
     let as_of = OffsetDateTime::parse("2026-05-28T20:02:00Z", &Rfc3339)?;
 
     let service =
@@ -492,7 +493,7 @@ fn rust_fixed_clock_queries_keep_legacy_pagination_and_incident_boundary()
 -> Result<(), Box<dyn Error>> {
     let (dir, path) = copy_populated_fixture("read-model-boundaries")?;
     insert_paged_error_groups(&path, "2026-05-28T20:00:00Z")?;
-    let store = Store::open(&path)?;
+    let mut store = Store::open(&path)?;
     let as_of = OffsetDateTime::parse("2026-05-28T20:02:00Z", &Rfc3339)?;
 
     let first_page =

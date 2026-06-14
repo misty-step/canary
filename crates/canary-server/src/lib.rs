@@ -19,6 +19,7 @@ mod admin_targets;
 mod admin_webhooks;
 mod annotations;
 mod body_fields;
+mod claims;
 mod egress;
 mod health_fanout;
 mod health_routes;
@@ -56,6 +57,7 @@ use annotations::{
     create_annotation, create_group_annotation, create_incident_annotation, list_annotations,
     list_group_annotations, list_incident_annotations,
 };
+use claims::{create_claim, list_claims, release_claim, show_claim, transition_claim};
 pub use health_fanout::{
     EnqueueFailure, EnqueueFailureKey, EnqueueFailureRecorder, EnqueueFailureSink,
     EventFanoutReport, HealthEventFanout, HealthEventSource,
@@ -149,6 +151,10 @@ pub fn ingest_router(state: IngestState) -> Router {
             "/api/v1/annotations",
             get(list_annotations).post(create_annotation),
         )
+        .route("/api/v1/claims", get(list_claims).post(create_claim))
+        .route("/api/v1/claims/{id}", get(show_claim))
+        .route("/api/v1/claims/{id}/transition", post(transition_claim))
+        .route("/api/v1/claims/{id}/release", post(release_claim))
         .route("/api/v1/errors/{id}", get(show_error))
         .route("/api/v1/monitors", get(list_monitors).post(create_monitor))
         .route("/api/v1/monitors/{id}", delete(delete_monitor))
@@ -374,6 +380,26 @@ mod tests {
             "POST",
             "/api/v1/annotations",
             "/api/v1/annotations",
+            "admin",
+        ),
+        auth_route("GET", "/api/v1/claims", "/api/v1/claims", "read-only"),
+        auth_route("POST", "/api/v1/claims", "/api/v1/claims", "admin"),
+        auth_route(
+            "GET",
+            "/api/v1/claims/{id}",
+            "/api/v1/claims/CLM-route",
+            "read-only",
+        ),
+        auth_route(
+            "POST",
+            "/api/v1/claims/{id}/transition",
+            "/api/v1/claims/CLM-route/transition",
+            "admin",
+        ),
+        auth_route(
+            "POST",
+            "/api/v1/claims/{id}/release",
+            "/api/v1/claims/CLM-route/release",
             "admin",
         ),
         auth_route(
@@ -1373,6 +1399,88 @@ mod tests {
             "missing deterministic summary or summary exception:\n{}",
             missing.join("\n")
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn openapi_remediation_claim_schemas_are_agent_validatable() -> Result<(), Box<dyn Error>> {
+        let document: Value = serde_json::from_str(OPENAPI_JSON)?;
+        let claim = document
+            .pointer("/components/schemas/RemediationClaim")
+            .ok_or("missing RemediationClaim schema")?;
+        assert!(
+            claim.get("allOf").is_none(),
+            "RemediationClaim must be a single closed object, not closed allOf composition"
+        );
+        assert_eq!(claim["additionalProperties"], false);
+        for field in [
+            "id",
+            "tenant_id",
+            "project_id",
+            "service",
+            "subject_type",
+            "subject_id",
+            "owner",
+            "purpose",
+            "state",
+            "idempotency_key",
+            "evidence_links",
+            "created_at",
+            "updated_at",
+            "expires_at",
+            "released_at",
+            "completed_at",
+        ] {
+            assert!(
+                schema_required_field(claim, field),
+                "RemediationClaim must require {field}"
+            );
+            assert!(
+                claim.pointer(&format!("/properties/{field}")).is_some(),
+                "RemediationClaim must define {field}"
+            );
+        }
+
+        let conflict = document
+            .pointer("/components/schemas/RemediationClaimConflictProblem")
+            .ok_or("missing RemediationClaimConflictProblem schema")?;
+        assert!(
+            conflict.get("allOf").is_none(),
+            "RemediationClaimConflictProblem must be a single closed object"
+        );
+        for field in [
+            "type",
+            "title",
+            "status",
+            "detail",
+            "code",
+            "request_id",
+            "current_claim",
+        ] {
+            assert!(
+                schema_required_field(conflict, field),
+                "RemediationClaimConflictProblem must require {field}"
+            );
+            assert!(
+                conflict.pointer(&format!("/properties/{field}")).is_some(),
+                "RemediationClaimConflictProblem must define {field}"
+            );
+        }
+
+        let response = document
+            .pointer("/components/schemas/RemediationClaimsResponse")
+            .ok_or("missing RemediationClaimsResponse schema")?;
+        for field in ["limit", "cursor", "truncated"] {
+            assert!(
+                schema_required_field(response, field),
+                "RemediationClaimsResponse must require {field}"
+            );
+            assert!(
+                response.pointer(&format!("/properties/{field}")).is_some(),
+                "RemediationClaimsResponse must define {field}"
+            );
+        }
 
         Ok(())
     }
@@ -6623,6 +6731,253 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remediation_claim_routes_coordinate_agents_and_emit_webhook_effects()
+    -> Result<(), Box<dyn Error>> {
+        const API_READ_KEY: &str = "sk_live_claims_api_read_secret";
+        const WEB_READ_KEY: &str = "sk_live_claims_web_read_secret";
+        let sink = Arc::new(RecordingFailingSink::default());
+        let state = test_ingest_state_with_sink(sink.clone())?;
+        {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            seed_read_api_key_for_service(&mut store, "KEY-claims-api-read", API_READ_KEY, "api")?;
+            seed_read_api_key_for_service(&mut store, "KEY-claims-web-read", WEB_READ_KEY, "web")?;
+            seed_target(&mut store, "api")?;
+        }
+        let router = ingest_router(state);
+
+        let created = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/claims",
+                ADMIN_KEY,
+                r#"{"subject_type":"target","subject_id":"TGT-api","owner":"codex","purpose":"investigate failed deploy","ttl_ms":900000,"idempotency_key":"run-1","evidence_links":["https://example.com/run/1"]}"#,
+            )?)
+            .await?;
+        let created_status = created.status();
+        let created_body = json_body(created).await?;
+        assert_eq!(created_status, StatusCode::CREATED);
+        assert!(
+            created_body["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("CLM-"))
+        );
+        assert_eq!(created_body["subject_type"], "target");
+        assert_eq!(created_body["subject_id"], "TGT-api");
+        assert_eq!(created_body["owner"], "codex");
+        assert_eq!(created_body["state"], "claimed");
+        let claim_id = created_body["id"].as_str().ok_or("missing claim id")?;
+
+        let replayed = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/claims",
+                ADMIN_KEY,
+                r#"{"subject_type":"target","subject_id":"TGT-api","owner":"codex","purpose":"investigate failed deploy","ttl_ms":900000,"idempotency_key":"run-1","evidence_links":["https://example.com/run/1"]}"#,
+            )?)
+            .await?;
+        let replayed_status = replayed.status();
+        let replayed_body = json_body(replayed).await?;
+        assert_eq!(replayed_status, StatusCode::OK);
+        assert_eq!(replayed_body["id"], claim_id);
+
+        let shown = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                &format!("/api/v1/claims/{claim_id}"),
+            )?)
+            .await?;
+        let shown_body = json_body(shown).await?;
+        assert_eq!(shown_body["id"], claim_id);
+        assert_eq!(shown_body["owner"], "codex");
+
+        let conflict = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/claims",
+                ADMIN_KEY,
+                r#"{"subject_type":"target","subject_id":"TGT-api","owner":"claude","purpose":"parallel triage","ttl_ms":900000,"idempotency_key":"run-2"}"#,
+            )?)
+            .await?;
+        let conflict_status = conflict.status();
+        let conflict_body = json_body(conflict).await?;
+        assert_eq!(conflict_status, StatusCode::CONFLICT);
+        assert_eq!(conflict_body["code"], "claim_conflict");
+        assert_eq!(
+            conflict_body["detail"],
+            "Subject already has an active remediation claim. Release or complete the current claim before creating another active claim."
+        );
+        assert_eq!(conflict_body["current_claim"]["id"], claim_id);
+        assert_eq!(conflict_body["current_claim"]["owner"], "codex");
+
+        let listed = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/claims?subject_type=target&subject_id=TGT-api",
+            )?)
+            .await?;
+        let listed_body = json_body(listed).await?;
+        assert_eq!(listed_body["current_claim"]["id"], claim_id);
+        assert_eq!(listed_body["claims"].as_array().map(Vec::len), Some(1));
+
+        let service_visible = router
+            .clone()
+            .oneshot(read_request(
+                API_READ_KEY,
+                "/api/v1/claims?subject_type=target&subject_id=TGT-api",
+            )?)
+            .await?;
+        assert_eq!(service_visible.status(), StatusCode::OK);
+
+        let service_hidden = router
+            .clone()
+            .oneshot(read_request(
+                WEB_READ_KEY,
+                "/api/v1/claims?subject_type=target&subject_id=TGT-api",
+            )?)
+            .await?;
+        assert_eq!(service_hidden.status(), StatusCode::NOT_FOUND);
+
+        let annotation_page = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/annotations?subject_type=target&subject_id=TGT-api",
+            )?)
+            .await?;
+        let annotation_page = json_body(annotation_page).await?;
+        assert_eq!(annotation_page["current_claim"]["id"], claim_id);
+
+        let error = router
+            .clone()
+            .oneshot(error_request(
+                INGEST_KEY,
+                r#"{"service":"api","error_class":"RuntimeError","message":"claim surface regression"}"#,
+            )?)
+            .await?;
+        assert_eq!(error.status(), StatusCode::CREATED);
+        let error_body = json_body(error).await?;
+        let group_hash = error_body["group_hash"]
+            .as_str()
+            .ok_or("missing error group hash")?
+            .to_owned();
+
+        let group_claim = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/claims",
+                ADMIN_KEY,
+                &format!(
+                    r#"{{"subject_type":"error_group","subject_id":"{}","owner":"codex","purpose":"inspect grouped errors","ttl_ms":900000,"idempotency_key":"run-group"}}"#,
+                    group_hash
+                ),
+            )?)
+            .await?;
+        let group_claim_status = group_claim.status();
+        let group_claim_body = json_body(group_claim).await?;
+        assert_eq!(
+            group_claim_status,
+            StatusCode::CREATED,
+            "{group_claim_body}"
+        );
+        let group_claim_id = group_claim_body["id"]
+            .as_str()
+            .ok_or("missing group claim")?;
+
+        let query = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/query?service=api&window=30d",
+            )?)
+            .await?;
+        let query = json_body(query).await?;
+        assert_eq!(query["groups"][0]["group_hash"], group_hash);
+        assert_eq!(query["groups"][0]["current_claim"]["id"], group_claim_id);
+
+        let report = router
+            .clone()
+            .oneshot(read_request(READ_KEY, "/api/v1/report?window=30d")?)
+            .await?;
+        let report = json_body(report).await?;
+        assert_eq!(report["error_groups"][0]["group_hash"], group_hash);
+        assert_eq!(
+            report["error_groups"][0]["current_claim"]["id"],
+            group_claim_id
+        );
+
+        let transitioned = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/claims/{claim_id}/transition"),
+                ADMIN_KEY,
+                r#"{"owner":"codex","state":"investigating","evidence_links":["https://example.com/run/2"]}"#,
+            )?)
+            .await?;
+        let transitioned_body = json_body(transitioned).await?;
+        assert_eq!(transitioned_body["state"], "investigating");
+        assert_eq!(
+            transitioned_body["evidence_links"],
+            json!(["https://example.com/run/1", "https://example.com/run/2"])
+        );
+
+        let wrong_owner = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/claims/{claim_id}/transition"),
+                ADMIN_KEY,
+                r#"{"owner":"claude","state":"fix_proposed"}"#,
+            )?)
+            .await?;
+        assert_eq!(wrong_owner.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let released = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/claims/{claim_id}/release"),
+                ADMIN_KEY,
+                r#"{"owner":"codex"}"#,
+            )?)
+            .await?;
+        let released_body = json_body(released).await?;
+        assert_eq!(released_body["state"], "released");
+
+        {
+            let effects = sink.effects.lock().map_err(|_| "effect lock poisoned")?;
+            let events = effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    IngestEffect::EnqueueWebhook { event, .. }
+                        if event.starts_with("remediation_claim.") =>
+                    {
+                        Some(event.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                events,
+                [
+                    "remediation_claim.created",
+                    "remediation_claim.created",
+                    "remediation_claim.updated",
+                    "remediation_claim.released"
+                ]
+            );
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn annotation_routes_scope_subjects_and_rows_by_owner() -> Result<(), Box<dyn Error>> {
         let sink = Arc::new(RecordingFailingSink::default());
         let state = test_ingest_state_with_sink(sink.clone())?;
@@ -8014,6 +8369,13 @@ mod tests {
                     .iter()
                     .any(|field| field.as_str() == Some("summary"))
             })
+    }
+
+    fn schema_required_field(schema: &Value, name: &str) -> bool {
+        schema
+            .get("required")
+            .and_then(Value::as_array)
+            .is_some_and(|required| required.iter().any(|field| field.as_str() == Some(name)))
     }
 
     fn resolve_openapi_ref<'a>(document: &'a Value, reference: &str) -> Option<&'a Value> {

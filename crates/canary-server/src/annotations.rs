@@ -123,7 +123,7 @@ pub(crate) async fn list_annotations(
         return problem_response(annotation_missing_subject_problem("subject_id"));
     };
 
-    let store = match state.lock_store() {
+    let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };

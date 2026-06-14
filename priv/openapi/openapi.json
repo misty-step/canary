@@ -7,6 +7,7 @@
     "x-agent-guide": {
       "summary": "Register webhooks as wake-up hints, then treat the timeline as the durable source of truth for correctness.",
       "flow": [
+        "Create a remediation claim before starting automated triage or repair work on an incident, error_group, target, or monitor.",
         "Create a webhook subscription for the business events that should wake the agent.",
         "Persist the last processed timeline cursor after each successful polling cycle.",
         "When a webhook arrives, poll GET /api/v1/timeline from the last persisted cursor.",
@@ -24,7 +25,7 @@
         "handoff": "After the bounded report snapshot is exhausted, switch to GET /api/v1/timeline for durable replay. Do not pass report.cursor to timeline; start timeline with an agent-chosen after timestamp for the report window boundary, or omit cursor/after to read the default timeline window, then persist the returned timeline cursor."
       },
       "annotation_write_back": {
-        "summary": "Annotations are coordination records on incident, error_group, target, or monitor subjects. Canary stores and emits them; downstream responders decide what the metadata means.",
+        "summary": "Annotations are loose coordination notes on incident, error_group, target, or monitor subjects. Use remediation claims for active ownership; use annotations for evidence, PR links, and decisions.",
         "stable_actions": [
           "triaged",
           "fix-proposed",
@@ -69,7 +70,8 @@
             "Monitor",
             "WebhookCreateResponse",
             "ApiKeyCreateResponse",
-            "SimpleStatusResponse"
+            "SimpleStatusResponse",
+            "RemediationClaim"
           ]
         },
         {
@@ -89,17 +91,44 @@
             "WebhookDeliveriesResponse",
             "WebhookDelivery",
             "TargetChecksResponse",
-            "AnnotationsResponse"
+            "AnnotationsResponse",
+            "RemediationClaimsResponse"
           ]
         },
         {
           "category": "problem_details",
           "reason": "RFC 9457 Problem Details responses are structured error contracts with status, code, and detail; agents handle them through error branching rather than triage summaries.",
           "schemas": [
-            "ProblemDetails"
+            "ProblemDetails",
+            "RemediationClaimConflictProblem"
           ]
         }
-      ]
+      ],
+      "claim_protocol": {
+        "summary": "Claims are typed ownership records for agentic remediation. Use annotations for notes and claims for who owns active work.",
+        "states": [
+          "claimed",
+          "investigating",
+          "fix_proposed",
+          "verified",
+          "dismissed",
+          "expired",
+          "released"
+        ],
+        "active_states": [
+          "claimed",
+          "investigating",
+          "fix_proposed"
+        ],
+        "conflict_policy": "POST /api/v1/claims returns 409 Problem Details with current_claim when another active, unexpired claim owns the subject.",
+        "idempotency": "Replay the same idempotency_key for the same subject to recover the existing claim instead of creating a duplicate.",
+        "lifecycle_events": [
+          "remediation_claim.created",
+          "remediation_claim.updated",
+          "remediation_claim.expired",
+          "remediation_claim.released"
+        ]
+      }
     }
   },
   "servers": [
@@ -148,6 +177,9 @@
     },
     {
       "name": "Onboarding"
+    },
+    {
+      "name": "Claims"
     }
   ],
   "paths": {
@@ -1909,6 +1941,315 @@
         },
         "x-canary-required-scope": "admin"
       }
+    },
+    "/api/v1/claims": {
+      "get": {
+        "tags": [
+          "Claims"
+        ],
+        "summary": "List remediation claims for a subject",
+        "description": "Returns bounded durable remediation claim state for an incident, error_group, target, or monitor. Agents use current_claim to decide whether work is already owned.",
+        "parameters": [
+          {
+            "name": "subject_type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "incident",
+                "error_group",
+                "target",
+                "monitor"
+              ]
+            }
+          },
+          {
+            "name": "subject_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 20
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Claims on the subject.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemediationClaimsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          }
+        },
+        "x-canary-required-scope": "read-only"
+      },
+      "post": {
+        "tags": [
+          "Claims"
+        ],
+        "summary": "Claim a remediation subject",
+        "description": "Atomically claims a subject for agentic remediation. Active unexpired claims conflict with 409 Problem Details carrying current_claim. Replaying the same idempotency key for the same subject returns the existing claim.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemediationClaimCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Existing claim returned for idempotent replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemediationClaim"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Created or idempotently returned claim.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemediationClaim"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          },
+          "409": {
+            "description": "Active claim conflict. The body includes current_claim.",
+            "content": {
+              "application/json": {
+	                "schema": {
+	                  "$ref": "#/components/schemas/RemediationClaimConflictProblem"
+	                }
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          }
+        },
+        "x-canary-required-scope": "admin"
+      }
+    },
+    "/api/v1/claims/{id}": {
+      "get": {
+        "tags": [
+          "Claims"
+        ],
+        "summary": "Read one remediation claim",
+        "description": "Returns one claim row by CLM id within the caller tenant/project/service authority.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^CLM-"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Claim row.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemediationClaim"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          }
+        },
+        "x-canary-required-scope": "read-only"
+      }
+    },
+    "/api/v1/claims/{id}/transition": {
+      "post": {
+        "tags": [
+          "Claims"
+        ],
+        "summary": "Transition a remediation claim",
+        "description": "Moves a claim through the bounded remediation state machine and appends evidence links.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^CLM-"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemediationClaimTransitionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated claim.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemediationClaim"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          }
+        },
+        "x-canary-required-scope": "admin"
+      }
+    },
+    "/api/v1/claims/{id}/release": {
+      "post": {
+        "tags": [
+          "Claims"
+        ],
+        "summary": "Release a remediation claim",
+        "description": "Marks a claim released so another agent can claim the subject later.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^CLM-"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Released claim.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemediationClaim"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          }
+        },
+        "x-canary-required-scope": "admin",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemediationClaimReleaseRequest"
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2090,7 +2431,12 @@
           "error.regression",
           "incident.opened",
           "incident.updated",
-          "incident.resolved"
+          "incident.resolved",
+          "remediation_claim.created",
+          "remediation_claim.updated",
+          "remediation_claim.expired",
+          "remediation_claim.released",
+          "annotation.added"
         ]
       },
       "WebhookEvent": {
@@ -2151,6 +2497,68 @@
                 "type": "string"
               }
             }
+          },
+          "current_claim": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RemediationClaimSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "RemediationClaimConflictProblem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "code",
+          "request_id",
+          "current_claim"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "format": "uri"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "retry_after": {
+            "type": "integer"
+          },
+          "errors": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "current_claim": {
+            "$ref": "#/components/schemas/RemediationClaimSummary"
           }
         }
       },
@@ -2697,6 +3105,9 @@
           },
           "status": {
             "type": "string"
+          },
+          "current_claim": {
+            "$ref": "#/components/schemas/RemediationClaimSummary"
           }
         }
       },
@@ -3318,6 +3729,9 @@
           },
           "classification": {
             "$ref": "#/components/schemas/ErrorGroupClassification"
+          },
+          "current_claim": {
+            "$ref": "#/components/schemas/RemediationClaimSummary"
           }
         }
       },
@@ -3372,6 +3786,9 @@
           "annotation_count": {
             "type": "integer",
             "description": "Count of annotations on this signal's underlying target/monitor subject."
+          },
+          "current_claim": {
+            "$ref": "#/components/schemas/RemediationClaimSummary"
           }
         }
       },
@@ -3437,7 +3854,8 @@
           "recommendation",
           "signal_counts",
           "signals_truncated",
-          "latest_annotation"
+          "latest_annotation",
+          "current_claim"
         ],
         "properties": {
           "summary": {
@@ -3483,6 +3901,16 @@
                 "type": "null"
               }
             ]
+          },
+          "current_claim": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RemediationClaimSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -3521,7 +3949,8 @@
           "annotations",
           "annotations_truncated",
           "recent_timeline_events",
-          "action_brief"
+          "action_brief",
+          "claims"
         ],
         "properties": {
           "summary": {
@@ -3556,6 +3985,12 @@
           },
           "action_brief": {
             "$ref": "#/components/schemas/IncidentActionBrief"
+          },
+          "claims": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RemediationClaim"
+            }
           }
         }
       },
@@ -3716,7 +4151,8 @@
         "required": [
           "summary",
           "annotations",
-          "cursor"
+          "cursor",
+          "current_claim"
         ],
         "properties": {
           "summary": {
@@ -3735,6 +4171,16 @@
               "null"
             ],
             "description": "Opaque cursor for fetching the next page, or null when the current page is the last."
+          },
+          "current_claim": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RemediationClaimSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -4960,6 +5406,314 @@
           "read-only"
         ],
         "description": "Authorization scope attached to an API key."
+      },
+      "RemediationClaimSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "subject_type",
+          "subject_id",
+          "owner",
+          "state",
+          "purpose",
+          "expires_at",
+          "updated_at",
+          "evidence_links"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^CLM-"
+          },
+          "subject_type": {
+            "type": "string",
+            "enum": [
+              "incident",
+              "error_group",
+              "target",
+              "monitor"
+            ]
+          },
+          "subject_id": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "claimed",
+              "investigating",
+              "fix_proposed",
+              "verified",
+              "dismissed",
+              "expired",
+              "released"
+            ]
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "evidence_links": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "RemediationClaim": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "tenant_id",
+          "project_id",
+          "service",
+          "subject_type",
+          "subject_id",
+          "owner",
+          "purpose",
+          "state",
+          "idempotency_key",
+          "evidence_links",
+          "created_at",
+          "updated_at",
+          "expires_at",
+          "released_at",
+          "completed_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^CLM-"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "service": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject_type": {
+            "type": "string",
+            "enum": [
+              "incident",
+              "error_group",
+              "target",
+              "monitor"
+            ]
+          },
+          "subject_id": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "claimed",
+              "investigating",
+              "fix_proposed",
+              "verified",
+              "dismissed",
+              "expired",
+              "released"
+            ]
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "evidence_links": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "released_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "RemediationClaimsResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "summary",
+          "claims",
+          "limit",
+          "current_claim",
+          "cursor",
+          "truncated"
+        ],
+        "properties": {
+          "summary": {
+            "type": "string"
+          },
+          "claims": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RemediationClaim"
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          },
+          "current_claim": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RemediationClaimSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for fetching the next page, or null when all claims are visible."
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "RemediationClaimCreateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "subject_type",
+          "subject_id",
+          "owner",
+          "purpose",
+          "ttl_ms",
+          "idempotency_key"
+        ],
+        "properties": {
+          "subject_type": {
+            "type": "string",
+            "enum": [
+              "incident",
+              "error_group",
+              "target",
+              "monitor"
+            ]
+          },
+          "subject_id": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "ttl_ms": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "evidence_links": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          }
+        }
+      },
+      "RemediationClaimTransitionRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "state",
+          "owner"
+        ],
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "claimed",
+              "investigating",
+              "fix_proposed",
+              "verified",
+              "dismissed",
+              "expired",
+              "released"
+            ]
+          },
+          "evidence_links": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "owner": {
+            "type": "string"
+          }
+        }
+      },
+      "RemediationClaimReleaseRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "owner"
+        ],
+        "properties": {
+          "owner": {
+            "type": "string"
+          }
+        }
       }
     }
   }

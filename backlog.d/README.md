@@ -40,7 +40,7 @@
 | 041 | Live integration verification harness | P0 | done | L |
 | 042 | Runtime pressure and freshness operations | P0 | done | L |
 | 040 | Universal integration and enrollment engine | P0 | done | XL |
-| 043 | Agentic remediation claim protocol | P1 | ready | L |
+| 043 | Agentic remediation claim protocol | P1 | done | L |
 | 044 | Telemetry and analytics signal model | P1 | ready | XL |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
@@ -76,7 +76,7 @@
 042 (runtime pressure/freshness ops) — shipped; worker/job/readiness/backup/dogfood freshness now fails loudly instead of silently aging under arbitrary-app scale
 040 (universal integration/enrollment engine) — builds on 039/041/042 to make arbitrary app onboarding state-aware, framework-neutral, and receipt-backed
 044 (telemetry/analytics signal model) — defines what analytics/log/metric/event signals Canary owns or bridges before adding broad ingest surfaces
-043 (agentic remediation claim protocol) — builds on annotations and 039 to add deterministic ownership/claim state for downstream triage agents
+043 (agentic remediation claim protocol) — shipped; typed claims now add deterministic ownership/claim state for downstream triage agents
 
 022 (contract hygiene) ──── ships independently; restores summary invariant + supervision-tree collapse
 023 (incident detail API) ──→ Canary-side substrate for bb/011 (and thus 010 ramp pattern)
@@ -91,14 +91,13 @@
 **Lane 3 (structural):** 006 (query split) → 005 (connect-a-service) · **022 (contract hygiene + shallow-module collapse)** — ship first of the active set; unblocks nothing but restores the summary invariant and sheds ~300 LOC of drift
 **Lane 4 (hardening):** 008, 014, 016, 017, 018, 019 (independent, small, can ship anytime) · **034 (worker lifecycle readiness oracle)** hardens the Rust background-worker proof surface
 **Lane 5 (dogfood coverage):** 020 (Adminifi HTTP surface verification) · **033 (deployed service registry lifecycle)** shipped the managed registry substrate · **035 (deployed app Canary coverage)** makes every active owned deployment covered or explicitly blocked · **036 (agent-native inspection surface)** gives agents the operating view · **037 (watch the watchmen)** proves Canary externally · **038 (one-command integration agent)** removes setup friction
-**Lane 6 (arbitrary-app productization):** 039 (external-user security/privacy foundation) → 041 (live integration verification harness) + 042 (runtime pressure/freshness ops) → 040 (universal integration/enrollment engine) → 044 (telemetry/analytics signal model) + 043 (agentic remediation claim protocol) → 010 (Ramp pattern, once downstream triage sprite exists)
+**Lane 6 (arbitrary-app productization):** 039 (external-user security/privacy foundation) → 041 (live integration verification harness) + 042 (runtime pressure/freshness ops) → 040 (universal integration/enrollment engine) → 043 (agentic remediation claim protocol) + 044 (telemetry/analytics signal model) → 010 (Ramp pattern, once downstream triage sprite exists)
 
 ### Active order (2026-06-13)
 
-039, 041, 042, and 040 are delivered. 043 and 044 are the remaining ready P1
-product-shaping epics: 043 defines deterministic claim/ownership state for
-agentic remediation, and 044 defines the telemetry/analytics signal model
-before Canary broadens ingest surfaces.
+039, 041, 042, 040, and 043 are delivered. 044 is the remaining ready P1
+product-shaping epic: it defines the telemetry/analytics signal model before
+Canary broadens ingest surfaces.
 
 020 stays blocked on Adminifi URLs; 010 stays blocked on the downstream
 bitterblossom triage sprite, but the new Lane 6 foundations now precede any
@@ -203,6 +202,12 @@ parity backlog items were retired during the Rust scorched-earth migration.
   patch/enroll writes reviewable receipts; static/Vercel and non-HTTP runtimes
   get concrete coverage paths; and the TypeScript SDK now carries the Next.js,
   Sentry, browser, health, and check-in helpers needed by arbitrary consumers.
+- 2026-06-14: Delivered 043. Canary now has durable remediation claims for
+  incidents, error groups, targets, and monitors, with typed ownership,
+  idempotent create, bounded transitions, TTL expiry, conflict Problem Details,
+  query/report/incident/annotation surfacing, lifecycle webhooks, CLI/MCP
+  helpers, fail-closed claim row validation, and OpenAPI guidance for agentic
+  remediation handoff.
 
 ## Status
 

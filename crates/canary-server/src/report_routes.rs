@@ -61,7 +61,7 @@ pub(crate) async fn report(
         Err(problem) => return problem_response(*problem),
     };
 
-    let store = match state.lock_store() {
+    let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -186,6 +186,7 @@ fn error_group_response(group: &ErrorGroupSummary) -> Value {
             "persistence": group.classification.persistence,
             "component": group.classification.component,
         },
+        "current_claim": group.current_claim,
     })
 }
 

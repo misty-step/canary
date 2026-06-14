@@ -7,9 +7,11 @@
 use std::path::Path;
 
 use rusqlite::Connection;
+use time::format_description::well_known::Rfc3339;
 
 mod annotations;
 mod api_keys;
+mod claims;
 pub mod fixtures;
 mod health;
 mod incidents;
@@ -32,6 +34,10 @@ pub use api_keys::{
     VerifiedApiKey,
 };
 pub use canary_core::metrics::MetricsSnapshot;
+pub use claims::{
+    ClaimCreateOutcome, ClaimError, ClaimInsert, ClaimListOptions, ClaimResult, ClaimTransition,
+    subject_types as claim_subject_types,
+};
 pub use health::{
     ActiveTargetProbeSchedule, HealthCheckSummary, HealthMonitorStatus, HealthTargetStatus,
     HealthTransitionCommit, MonitorCheckInCommit, MonitorCheckInCommitResult,
@@ -554,45 +560,59 @@ impl Store {
 
     /// Query recent error groups for a service.
     pub fn errors_by_service(
-        &self,
+        &mut self,
         service: &str,
         window: &str,
         options: ServiceQueryOptions,
     ) -> ErrorGroupQueryResult<canary_core::query::ErrorsByService> {
+        self.expire_due_claims_for_options(
+            options.tenant_project(),
+            time::OffsetDateTime::now_utc(),
+        )
+        .map_err(ErrorGroupQueryError::Sqlite)?;
         query::errors_by_service(&self.connection, service, window, options)
     }
 
     /// Query recent error groups for a service at a deterministic evaluation time.
     pub fn errors_by_service_at(
-        &self,
+        &mut self,
         service: &str,
         window: &str,
         options: ServiceQueryOptions,
         now: time::OffsetDateTime,
     ) -> ErrorGroupQueryResult<canary_core::query::ErrorsByService> {
+        self.expire_due_claims_for_options(options.tenant_project(), now)
+            .map_err(ErrorGroupQueryError::Sqlite)?;
         query::errors_by_service_at(&self.connection, service, window, options, now)
     }
 
     /// Query recent error groups for an error class.
     pub fn errors_by_error_class(
-        &self,
+        &mut self,
         error_class: &str,
         window: &str,
         service: Option<&str>,
         options: ServiceQueryOptions,
     ) -> ErrorGroupQueryResult<canary_core::query::ErrorsByErrorClass> {
+        self.expire_due_claims_for_options(
+            options.tenant_project(),
+            time::OffsetDateTime::now_utc(),
+        )
+        .map_err(ErrorGroupQueryError::Sqlite)?;
         query::errors_by_error_class(&self.connection, error_class, window, service, options)
     }
 
     /// Query recent error groups for an error class at a deterministic evaluation time.
     pub fn errors_by_error_class_at(
-        &self,
+        &mut self,
         error_class: &str,
         window: &str,
         service: Option<&str>,
         options: ServiceQueryOptions,
         now: time::OffsetDateTime,
     ) -> ErrorGroupQueryResult<canary_core::query::ErrorsByErrorClass> {
+        self.expire_due_claims_for_options(options.tenant_project(), now)
+            .map_err(ErrorGroupQueryError::Sqlite)?;
         query::errors_by_error_class_at(
             &self.connection,
             error_class,
@@ -643,11 +663,13 @@ impl Store {
 
     /// Query active error groups for one tenant/project.
     pub fn report_error_groups_scoped(
-        &self,
+        &mut self,
         window: &str,
         tenant_id: &str,
         project_id: &str,
     ) -> QueryResult<Vec<canary_core::query::ErrorGroupSummary>> {
+        self.expire_due_claims_for_owner_at(tenant_id, project_id, time::OffsetDateTime::now_utc())
+            .map_err(QueryError::Sqlite)?;
         query::report_error_groups_scoped(&self.connection, window, tenant_id, project_id)
     }
 
@@ -711,18 +733,25 @@ impl Store {
 
     /// Query active incidents with currently active signals.
     pub fn active_incidents(
-        &self,
+        &mut self,
         options: IncidentListOptions,
     ) -> QueryResult<canary_core::query::ActiveIncidents> {
+        self.expire_due_claims_for_options(
+            options.tenant_project(),
+            time::OffsetDateTime::now_utc(),
+        )
+        .map_err(QueryError::Sqlite)?;
         query::active_incidents(&self.connection, options)
     }
 
     /// Query active incidents with currently active signals at a deterministic evaluation time.
     pub fn active_incidents_at(
-        &self,
+        &mut self,
         options: IncidentListOptions,
         now: time::OffsetDateTime,
     ) -> QueryResult<canary_core::query::ActiveIncidents> {
+        self.expire_due_claims_for_options(options.tenant_project(), now)
+            .map_err(QueryError::Sqlite)?;
         query::active_incidents_at(&self.connection, options, now)
     }
 
@@ -736,11 +765,13 @@ impl Store {
 
     /// Return one incident detail read model for one tenant/project.
     pub fn incident_detail_scoped(
-        &self,
+        &mut self,
         incident_id: &str,
         tenant_id: &str,
         project_id: &str,
     ) -> QueryResult<Option<canary_core::query::IncidentDetail>> {
+        self.expire_due_claims_for_owner_at(tenant_id, project_id, time::OffsetDateTime::now_utc())
+            .map_err(QueryError::Sqlite)?;
         query::incident_detail_scoped(&self.connection, incident_id, tenant_id, project_id)
     }
 
@@ -800,9 +831,17 @@ impl Store {
 
     /// Page annotations for the unified read route.
     pub fn annotation_page(
-        &self,
+        &mut self,
         options: AnnotationPageOptions,
     ) -> AnnotationResult<canary_core::query::AnnotationPageResponse> {
+        if let Some((tenant_id, project_id)) = options.tenant_project() {
+            self.expire_due_claims_for_owner_at(
+                &tenant_id,
+                &project_id,
+                time::OffsetDateTime::now_utc(),
+            )
+            .map_err(AnnotationError::Sqlite)?;
+        }
         annotations::page(&self.connection, options)
     }
 
@@ -820,6 +859,72 @@ impl Store {
             subject_id,
             tenant_id,
             project_id,
+        )
+    }
+
+    /// Create one durable remediation claim after verifying the target subject exists.
+    pub fn create_claim(
+        &mut self,
+        insert: ClaimInsert,
+    ) -> ClaimResult<canary_core::query::RemediationClaim> {
+        Ok(claims::create(&mut self.connection, insert)?.claim)
+    }
+
+    /// Create or replay one durable remediation claim with creation status.
+    pub fn create_claim_outcome(&mut self, insert: ClaimInsert) -> ClaimResult<ClaimCreateOutcome> {
+        claims::create(&mut self.connection, insert)
+    }
+
+    /// List remediation claims for one subject.
+    pub fn claims(
+        &mut self,
+        options: ClaimListOptions,
+    ) -> ClaimResult<canary_core::query::RemediationClaimsResponse> {
+        claims::list(&mut self.connection, options)
+    }
+
+    /// Return one remediation claim in a tenant/project/service boundary.
+    pub fn claim_scoped(
+        &mut self,
+        claim_id: &str,
+        tenant_id: &str,
+        project_id: &str,
+        service: Option<&str>,
+    ) -> ClaimResult<Option<canary_core::query::RemediationClaim>> {
+        claims::read_scoped(
+            &mut self.connection,
+            claim_id,
+            tenant_id,
+            project_id,
+            service,
+        )
+    }
+
+    /// Transition one remediation claim in a tenant/project/service boundary.
+    pub fn transition_claim(
+        &mut self,
+        transition: ClaimTransition,
+    ) -> ClaimResult<canary_core::query::RemediationClaim> {
+        claims::transition(&mut self.connection, transition)
+    }
+
+    /// Return the current active claim for one subject.
+    pub fn current_claim_for_subject(
+        &mut self,
+        tenant_id: &str,
+        project_id: &str,
+        subject_type: &str,
+        subject_id: &str,
+        now: &str,
+    ) -> ClaimResult<Option<canary_core::query::RemediationClaimSummary>> {
+        claims::expire_due_claims_for_owner(&mut self.connection, tenant_id, project_id, now)?;
+        claims::current_claim_for_subject(
+            &self.connection,
+            tenant_id,
+            project_id,
+            subject_type,
+            subject_id,
+            now,
         )
     }
 
@@ -1062,11 +1167,49 @@ impl Store {
         Ok(count)
     }
 
+    fn expire_due_claims_for_options(
+        &mut self,
+        owner: Option<(String, String)>,
+        now: time::OffsetDateTime,
+    ) -> rusqlite::Result<()> {
+        if let Some((tenant_id, project_id)) = owner {
+            self.expire_due_claims_for_owner_at(&tenant_id, &project_id, now)?;
+        }
+        Ok(())
+    }
+
+    fn expire_due_claims_for_owner_at(
+        &mut self,
+        tenant_id: &str,
+        project_id: &str,
+        now: time::OffsetDateTime,
+    ) -> rusqlite::Result<()> {
+        let now = now
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+        claims::expire_due_claims_for_owner(&mut self.connection, tenant_id, project_id, &now)
+            .map_err(claim_error_to_sqlite)
+    }
+
     fn from_connection(connection: Connection) -> Result<Self> {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(Self { connection })
+    }
+}
+
+fn claim_error_to_sqlite(error: ClaimError) -> rusqlite::Error {
+    match error {
+        ClaimError::Sqlite(error) => error,
+        ClaimError::InvalidSubjectType
+        | ClaimError::InvalidState
+        | ClaimError::InvalidClaim
+        | ClaimError::InvalidLimit
+        | ClaimError::InvalidCursor
+        | ClaimError::NotFound
+        | ClaimError::Conflict(_)
+        | ClaimError::InvalidTransition => rusqlite::Error::InvalidQuery,
     }
 }
 
@@ -1077,7 +1220,7 @@ mod tests {
 
     use canary_core::{
         health::state_machine::HealthState,
-        ids::{ErrorId, EventId, IncidentId},
+        ids::{ClaimId, ErrorId, EventId, IncidentId},
         ingest::classification::{Category, Classification, Component, Persistence},
     };
     use rusqlite::params;
@@ -1118,6 +1261,7 @@ mod tests {
                 "monitors".to_owned(),
                 "oban_jobs".to_owned(),
                 "rate_limit_buckets".to_owned(),
+                "remediation_claims".to_owned(),
                 "seed_runs".to_owned(),
                 "service_events".to_owned(),
                 "target_checks".to_owned(),
@@ -2006,6 +2150,419 @@ mod tests {
             }),
             Err(AnnotationError::NotFound)
         ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn remediation_claims_are_idempotent_conflict_checked_and_expirable()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        seed_api_target(&mut store)?;
+
+        let missing_expiry = store.create_claim(claim_insert(
+            ClaimId::generate().into_string(),
+            EventId::generate().into_string(),
+            "codex",
+            "missing expiry",
+            "run-missing-expiry",
+            "2026-05-28T19:59:00Z",
+            "",
+        ));
+        assert!(matches!(missing_expiry, Err(ClaimError::InvalidClaim)));
+
+        let first = store.create_claim(claim_insert(
+            ClaimId::generate().into_string(),
+            EventId::generate().into_string(),
+            "codex",
+            "investigate failed deploy",
+            "run-1",
+            "2026-05-28T20:00:00Z",
+            "2026-05-28T20:10:00Z",
+        ))?;
+        assert_eq!(first.state, "claimed");
+        assert_eq!(first.service.as_deref(), Some("api"));
+        assert_eq!(first.evidence_links, ["https://example.com/run/1"]);
+
+        let replay = store.create_claim(claim_insert(
+            ClaimId::generate().into_string(),
+            EventId::generate().into_string(),
+            "codex",
+            "investigate failed deploy",
+            "run-1",
+            "2026-05-28T20:00:01Z",
+            "2026-05-28T20:10:00Z",
+        ))?;
+        assert_eq!(replay.id, first.id);
+
+        let conflict = store.create_claim(claim_insert(
+            ClaimId::generate().into_string(),
+            EventId::generate().into_string(),
+            "claude",
+            "parallel triage",
+            "run-2",
+            "2026-05-28T20:00:02Z",
+            "2026-05-28T20:10:00Z",
+        ));
+        match conflict {
+            Err(ClaimError::Conflict(current)) => {
+                assert_eq!(current.id, first.id);
+                assert_eq!(current.owner, "codex");
+                assert_eq!(current.state, "claimed");
+            }
+            other => return Err(format!("expected claim conflict, got {other:?}").into()),
+        }
+
+        let expired_transition = store.transition_claim(ClaimTransition {
+            event_id: EventId::generate().into_string(),
+            claim_id: first.id.clone(),
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: Some("api".to_owned()),
+            owner: "codex".to_owned(),
+            state: "investigating".to_owned(),
+            evidence_links: Vec::new(),
+            now: "2026-05-28T20:10:01Z".to_owned(),
+        });
+        assert!(matches!(
+            expired_transition,
+            Err(ClaimError::InvalidTransition)
+        ));
+
+        let takeover = store.create_claim(claim_insert(
+            ClaimId::generate().into_string(),
+            EventId::generate().into_string(),
+            "claude",
+            "take over expired claim",
+            "run-3",
+            "2026-05-28T20:10:01Z",
+            "2099-05-28T20:20:00Z",
+        ))?;
+        assert_eq!(takeover.owner, "claude");
+        assert_ne!(takeover.id, first.id);
+
+        let listed = store.claims(ClaimListOptions {
+            tenant_id: Some(BOOTSTRAP_TENANT_ID.to_owned()),
+            project_id: Some(BOOTSTRAP_PROJECT_ID.to_owned()),
+            service: None,
+            subject_type: "target".to_owned(),
+            subject_id: "TGT-api".to_owned(),
+            limit: None,
+            cursor: None,
+        })?;
+        assert_eq!(
+            listed.current_claim.as_ref().map(|claim| claim.id.as_str()),
+            Some(takeover.id.as_str())
+        );
+        assert_eq!(listed.claims.len(), 2);
+        assert!(
+            listed
+                .claims
+                .iter()
+                .any(|claim| claim.id == first.id && claim.state == "expired")
+        );
+        assert_eq!(listed.cursor, None);
+        assert!(!listed.truncated);
+
+        let first_page = store.claims(ClaimListOptions {
+            tenant_id: Some(BOOTSTRAP_TENANT_ID.to_owned()),
+            project_id: Some(BOOTSTRAP_PROJECT_ID.to_owned()),
+            service: None,
+            subject_type: "target".to_owned(),
+            subject_id: "TGT-api".to_owned(),
+            limit: Some("1".to_owned()),
+            cursor: None,
+        })?;
+        assert_eq!(first_page.claims.len(), 1);
+        assert_eq!(first_page.claims[0].id, takeover.id);
+        assert!(first_page.truncated);
+        let cursor = first_page.cursor.ok_or("expected claim cursor")?;
+        let second_page = store.claims(ClaimListOptions {
+            tenant_id: Some(BOOTSTRAP_TENANT_ID.to_owned()),
+            project_id: Some(BOOTSTRAP_PROJECT_ID.to_owned()),
+            service: None,
+            subject_type: "target".to_owned(),
+            subject_id: "TGT-api".to_owned(),
+            limit: Some("1".to_owned()),
+            cursor: Some(cursor),
+        })?;
+        assert_eq!(second_page.claims.len(), 1);
+        assert_eq!(second_page.claims[0].id, first.id);
+        assert_eq!(
+            second_page
+                .current_claim
+                .as_ref()
+                .map(|claim| claim.id.as_str()),
+            Some(takeover.id.as_str())
+        );
+        assert!(!second_page.truncated);
+        assert_eq!(second_page.cursor, None);
+
+        let service_mismatch = store.create_claim(ClaimInsert {
+            service: Some("web".to_owned()),
+            ..claim_insert(
+                ClaimId::generate().into_string(),
+                EventId::generate().into_string(),
+                "pi",
+                "service scoped mismatch",
+                "run-service-mismatch",
+                "2026-05-28T20:11:00Z",
+                "2099-05-28T20:20:00Z",
+            )
+        });
+        assert!(matches!(service_mismatch, Err(ClaimError::NotFound)));
+
+        store.insert_target(TargetInsert {
+            id: "TGT-worker".to_owned(),
+            url: "https://worker.example.com/health".to_owned(),
+            name: "Worker".to_owned(),
+            service: "worker".to_owned(),
+            method: "GET".to_owned(),
+            headers: None,
+            interval_ms: 60_000,
+            timeout_ms: 10_000,
+            expected_status: "200".to_owned(),
+            body_contains: None,
+            degraded_after: 1,
+            down_after: 3,
+            up_after: 1,
+            active: true,
+            created_at: "2026-05-28T19:00:00Z".to_owned(),
+        })?;
+        let stale_ownerless = store.create_claim(ClaimInsert {
+            subject_id: "TGT-worker".to_owned(),
+            idempotency_key: "run-ownerless-expiry".to_owned(),
+            expires_at: "2026-05-28T20:01:00Z".to_owned(),
+            ..claim_insert(
+                ClaimId::generate().into_string(),
+                EventId::generate().into_string(),
+                "codex",
+                "ownerless expiry",
+                "unused",
+                "2026-05-28T20:00:00Z",
+                "2026-05-28T20:01:00Z",
+            )
+        })?;
+        let ownerless = store.claims(ClaimListOptions {
+            tenant_id: None,
+            project_id: None,
+            service: None,
+            subject_type: "target".to_owned(),
+            subject_id: "TGT-worker".to_owned(),
+            limit: None,
+            cursor: None,
+        })?;
+        assert_eq!(ownerless.current_claim, None);
+        assert_eq!(ownerless.claims.len(), 1);
+        assert_eq!(ownerless.claims[0].id, stale_ownerless.id);
+        assert_eq!(ownerless.claims[0].state, "expired");
+
+        assert!(matches!(
+            store.claims(ClaimListOptions {
+                tenant_id: Some(BOOTSTRAP_TENANT_ID.to_owned()),
+                project_id: Some(BOOTSTRAP_PROJECT_ID.to_owned()),
+                service: None,
+                subject_type: "target".to_owned(),
+                subject_id: "TGT-api".to_owned(),
+                limit: Some("0".to_owned()),
+                cursor: None,
+            }),
+            Err(ClaimError::InvalidLimit)
+        ));
+        assert!(matches!(
+            store.claims(ClaimListOptions {
+                tenant_id: Some(BOOTSTRAP_TENANT_ID.to_owned()),
+                project_id: Some(BOOTSTRAP_PROJECT_ID.to_owned()),
+                service: None,
+                subject_type: "target".to_owned(),
+                subject_id: "TGT-api".to_owned(),
+                limit: None,
+                cursor: Some("bogus".to_owned()),
+            }),
+            Err(ClaimError::InvalidCursor)
+        ));
+        let expired_events: u64 = store.connection.query_row(
+            "SELECT count(*) FROM service_events WHERE event = 'remediation_claim.expired' AND entity_ref = 'TGT-api'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(expired_events, 1);
+        let invalid_state_insert = store.connection.execute(
+            "INSERT INTO remediation_claims (
+                 id, tenant_id, project_id, service, subject_type, subject_id, owner, purpose,
+                 state, idempotency_key, evidence_links, created_at, updated_at, expires_at
+             ) VALUES (
+                 'CLM-invalid-state', 'TENANT-bootstrap', 'PROJECT-bootstrap', 'api',
+                 'target', 'TGT-api', 'codex', 'bad state', 'bogus', 'raw-sql',
+                 '[]', '2026-05-28T20:30:00Z', '2026-05-28T20:30:00Z',
+                 '2026-05-28T20:40:00Z'
+             )",
+            [],
+        );
+        assert!(invalid_state_insert.is_err());
+        for (id, subject_id, owner, purpose, idempotency_key, evidence_links, expires_at) in [
+            (
+                "CLM-empty-subject",
+                "",
+                "codex",
+                "bad subject",
+                "raw-empty-subject",
+                "[]",
+                "2026-05-28T20:40:00Z",
+            ),
+            (
+                "CLM-empty-owner",
+                "TGT-api",
+                "",
+                "bad owner",
+                "raw-empty-owner",
+                "[]",
+                "2026-05-28T20:40:00Z",
+            ),
+            (
+                "CLM-empty-purpose",
+                "TGT-api",
+                "codex",
+                "",
+                "raw-empty-purpose",
+                "[]",
+                "2026-05-28T20:40:00Z",
+            ),
+            (
+                "CLM-empty-idempotency",
+                "TGT-api",
+                "codex",
+                "bad idempotency",
+                "",
+                "[]",
+                "2026-05-28T20:40:00Z",
+            ),
+            (
+                "CLM-object-evidence",
+                "TGT-api",
+                "codex",
+                "bad evidence",
+                "raw-object-evidence",
+                "{}",
+                "2026-05-28T20:40:00Z",
+            ),
+            (
+                "CLM-numeric-evidence",
+                "TGT-api",
+                "codex",
+                "bad evidence item",
+                "raw-numeric-evidence",
+                "[1]",
+                "2026-05-28T20:40:00Z",
+            ),
+            (
+                "CLM-bad-expiry",
+                "TGT-api",
+                "codex",
+                "bad expiry",
+                "raw-bad-expiry",
+                "[]",
+                "not-a-date",
+            ),
+            (
+                "CLM-impossible-expiry",
+                "TGT-api",
+                "codex",
+                "bad future expiry",
+                "raw-impossible-expiry",
+                "[]",
+                "9999-99-99T99:99:99Z",
+            ),
+        ] {
+            let invalid_insert = store.connection.execute(
+                "INSERT INTO remediation_claims (
+                     id, tenant_id, project_id, service, subject_type, subject_id, owner, purpose,
+                     state, idempotency_key, evidence_links, created_at, updated_at, expires_at
+                 ) VALUES (
+                     ?1, 'TENANT-bootstrap', 'PROJECT-bootstrap', 'api',
+                     'target', ?2, ?3, ?4, 'released', ?5, ?6,
+                     '2026-05-28T20:30:00Z', '2026-05-28T20:30:00Z', ?7
+                 )",
+                params![
+                    id,
+                    subject_id,
+                    owner,
+                    purpose,
+                    idempotency_key,
+                    evidence_links,
+                    expires_at
+                ],
+            );
+            assert!(invalid_insert.is_err(), "{id} should be rejected");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn remediation_claim_transitions_append_evidence_and_prevent_terminal_reopen()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        seed_api_target(&mut store)?;
+        let claim = store.create_claim(claim_insert(
+            ClaimId::generate().into_string(),
+            EventId::generate().into_string(),
+            "codex",
+            "investigate failed deploy",
+            "run-1",
+            "2026-05-28T20:00:00Z",
+            "2026-05-28T20:10:00Z",
+        ))?;
+
+        let investigating = store.transition_claim(ClaimTransition {
+            event_id: EventId::generate().into_string(),
+            claim_id: claim.id.clone(),
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: Some("api".to_owned()),
+            owner: "codex".to_owned(),
+            state: "investigating".to_owned(),
+            evidence_links: vec!["https://example.com/run/2".to_owned()],
+            now: "2026-05-28T20:01:00Z".to_owned(),
+        })?;
+        assert_eq!(investigating.state, "investigating");
+        assert_eq!(
+            investigating.evidence_links,
+            [
+                "https://example.com/run/1".to_owned(),
+                "https://example.com/run/2".to_owned()
+            ]
+        );
+
+        let released = store.transition_claim(ClaimTransition {
+            event_id: EventId::generate().into_string(),
+            claim_id: claim.id.clone(),
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: Some("api".to_owned()),
+            owner: "codex".to_owned(),
+            state: "released".to_owned(),
+            evidence_links: Vec::new(),
+            now: "2026-05-28T20:02:00Z".to_owned(),
+        })?;
+        assert_eq!(released.state, "released");
+        assert_eq!(
+            released.released_at.as_deref(),
+            Some("2026-05-28T20:02:00Z")
+        );
+
+        let reopen = store.transition_claim(ClaimTransition {
+            event_id: EventId::generate().into_string(),
+            claim_id: claim.id,
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: Some("api".to_owned()),
+            owner: "codex".to_owned(),
+            state: "investigating".to_owned(),
+            evidence_links: Vec::new(),
+            now: "2026-05-28T20:03:00Z".to_owned(),
+        });
+        assert!(matches!(reopen, Err(ClaimError::InvalidTransition)));
 
         Ok(())
     }
@@ -3121,7 +3678,7 @@ mod tests {
     #[test]
     fn errors_by_service_cursor_follows_count_then_hash_order()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let store = migrated_store()?;
+        let mut store = migrated_store()?;
         let now = "2026-05-28T20:00:00Z";
 
         for rank in 1..=51 {
@@ -3229,7 +3786,7 @@ mod tests {
     #[test]
     fn errors_by_service_rejects_malformed_cursor()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let store = migrated_store()?;
+        let mut store = migrated_store()?;
         let as_of = OffsetDateTime::parse("2026-05-28T21:00:00Z", &Rfc3339)?;
 
         let result = store.errors_by_service_at(
@@ -3846,7 +4403,7 @@ mod tests {
     #[test]
     fn active_incidents_filters_inactive_signals_and_annotation_actions()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let store = migrated_store()?;
+        let mut store = migrated_store()?;
         let now =
             OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?;
 
@@ -4044,7 +4601,7 @@ mod tests {
     #[test]
     fn active_incidents_marks_high_severity_after_three_recent_signals()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let store = migrated_store()?;
+        let mut store = migrated_store()?;
         let now =
             OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)?;
 
@@ -4314,7 +4871,7 @@ mod tests {
     #[test]
     fn incident_detail_scoped_counts_annotations_only_for_incident_owner()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let store = migrated_store()?;
+        let mut store = migrated_store()?;
         for (tenant_id, incident_id, annotation_id) in [
             ("TENANT-alpha", "INC-alpha", "ANN-alpha"),
             ("TENANT-beta", "INC-beta", "ANN-beta"),
@@ -4369,6 +4926,22 @@ mod tests {
             )?;
         }
 
+        let stale_claim = store.create_claim(ClaimInsert {
+            id: ClaimId::generate().into_string(),
+            event_id: EventId::generate().into_string(),
+            tenant_id: "TENANT-alpha".to_owned(),
+            project_id: "PROJECT-api".to_owned(),
+            service: None,
+            subject_type: "incident".to_owned(),
+            subject_id: "INC-alpha".to_owned(),
+            owner: "codex".to_owned(),
+            purpose: "stale incident triage".to_owned(),
+            idempotency_key: "incident-run-1".to_owned(),
+            evidence_links: Vec::new(),
+            now: "2026-05-28T20:02:00Z".to_owned(),
+            expires_at: "2026-05-28T20:03:00Z".to_owned(),
+        })?;
+
         let detail = store
             .incident_detail_scoped("INC-alpha", "TENANT-alpha", "PROJECT-api")?
             .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
@@ -4379,6 +4952,16 @@ mod tests {
             .find(|signal| signal.group_hash.as_deref() == Some("shared-hash"))
             .ok_or("missing shared group signal")?;
         assert_eq!(signal.annotation_count, 1);
+        assert_eq!(detail.claims.len(), 1);
+        assert_eq!(detail.claims[0].id, stale_claim.id);
+        assert_eq!(detail.claims[0].state, "expired");
+        let expired_events: u64 = store.connection.query_row(
+            "SELECT count(*) FROM service_events
+             WHERE event = 'remediation_claim.expired' AND entity_ref = 'INC-alpha'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(expired_events, 1);
 
         Ok(())
     }
@@ -5909,6 +6492,32 @@ mod tests {
             active: true,
             created_at: "2026-05-28T19:00:00Z".to_owned(),
         })
+    }
+
+    fn claim_insert(
+        id: String,
+        event_id: String,
+        owner: &str,
+        purpose: &str,
+        idempotency_key: &str,
+        now: &str,
+        expires_at: &str,
+    ) -> ClaimInsert {
+        ClaimInsert {
+            id,
+            event_id,
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: None,
+            subject_type: "target".to_owned(),
+            subject_id: "TGT-api".to_owned(),
+            owner: owner.to_owned(),
+            purpose: purpose.to_owned(),
+            idempotency_key: idempotency_key.to_owned(),
+            evidence_links: vec!["https://example.com/run/1".to_owned()],
+            now: now.to_owned(),
+            expires_at: expires_at.to_owned(),
+        }
     }
 
     fn webhook_delivery_insert(

@@ -29,6 +29,27 @@ pub const DEFAULT_ANNOTATION_LIMIT: usize = 50;
 /// Maximum number of annotations accepted by Phoenix.
 pub const MAX_ANNOTATION_LIMIT: usize = 50;
 
+/// Default number of remediation claims returned by subject-list APIs.
+pub const DEFAULT_CLAIM_LIMIT: usize = 20;
+
+/// Maximum number of remediation claims returned by subject-list APIs.
+pub const MAX_CLAIM_LIMIT: usize = 50;
+
+/// Subject types accepted by remediation claims.
+pub const REMEDIATION_CLAIM_SUBJECT_TYPES: [&str; 4] =
+    ["incident", "error_group", "target", "monitor"];
+
+/// States accepted by remediation claims.
+pub const REMEDIATION_CLAIM_STATES: [&str; 7] = [
+    "claimed",
+    "investigating",
+    "fix_proposed",
+    "verified",
+    "dismissed",
+    "expired",
+    "released",
+];
+
 /// User-facing validation detail for invalid query windows.
 pub const INVALID_WINDOW_DETAIL: &str = "Invalid window. Allowed: 1h, 6h, 24h, 7d, 30d";
 
@@ -142,6 +163,15 @@ pub struct AnnotationCursor {
     pub id: String,
 }
 
+/// Structured cursor used by remediation claim pagination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimCursor {
+    /// Last row timestamp from the previous page.
+    pub created_at: String,
+    /// Last row id from the previous page.
+    pub id: String,
+}
+
 /// Offset cursor used by Phoenix for the unified report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportCursor {
@@ -228,6 +258,22 @@ pub fn encode_annotation_cursor(cursor: &AnnotationCursor) -> Option<String> {
     Some(BASE64_URL_SAFE_NO_PAD.encode(json))
 }
 
+/// Decode a remediation claim cursor.
+pub fn decode_claim_cursor(cursor: &str) -> Option<ClaimCursor> {
+    let decoded = BASE64_URL_SAFE_NO_PAD.decode(cursor).ok()?;
+    let cursor = serde_json::from_slice::<ClaimCursor>(&decoded).ok()?;
+    if cursor.created_at.is_empty() || cursor.id.is_empty() {
+        return None;
+    }
+    Some(cursor)
+}
+
+/// Encode a remediation claim cursor.
+pub fn encode_claim_cursor(cursor: &ClaimCursor) -> Option<String> {
+    let json = serde_json::to_vec(cursor).ok()?;
+    Some(BASE64_URL_SAFE_NO_PAD.encode(json))
+}
+
 /// Decode a Phoenix report cursor.
 pub fn decode_report_cursor(cursor: &str) -> Option<ReportCursor> {
     if cursor.is_empty() {
@@ -309,6 +355,103 @@ pub struct ErrorGroupSummary {
     pub status: String,
     /// Deterministic classification.
     pub classification: ErrorClassification,
+    /// Current active remediation claim for this group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_claim: Option<RemediationClaimSummary>,
+}
+
+/// Compact remediation-claim view embedded in agent read models.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemediationClaimSummary {
+    /// Claim id.
+    pub id: String,
+    /// Claimed subject type.
+    pub subject_type: String,
+    /// Claimed subject id.
+    pub subject_id: String,
+    /// Agent or automation owner.
+    pub owner: String,
+    /// Bounded claim state.
+    pub state: String,
+    /// Human-readable purpose.
+    pub purpose: String,
+    /// Expiration timestamp.
+    pub expires_at: String,
+    /// Last update timestamp.
+    pub updated_at: String,
+    /// Evidence links supplied by the owner.
+    pub evidence_links: Vec<String>,
+}
+
+/// Full remediation claim row returned by claim routes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemediationClaim {
+    /// Claim id.
+    pub id: String,
+    /// Tenant namespace.
+    pub tenant_id: String,
+    /// Project namespace.
+    pub project_id: String,
+    /// Service resolved from the subject.
+    pub service: Option<String>,
+    /// Claimed subject type.
+    pub subject_type: String,
+    /// Claimed subject id.
+    pub subject_id: String,
+    /// Agent or automation owner.
+    pub owner: String,
+    /// Human-readable purpose.
+    pub purpose: String,
+    /// Bounded claim state.
+    pub state: String,
+    /// Idempotency key for creation.
+    pub idempotency_key: String,
+    /// Evidence links supplied by the owner.
+    pub evidence_links: Vec<String>,
+    /// Creation timestamp.
+    pub created_at: String,
+    /// Last update timestamp.
+    pub updated_at: String,
+    /// Expiration timestamp.
+    pub expires_at: String,
+    /// Release timestamp.
+    pub released_at: Option<String>,
+    /// Terminal timestamp.
+    pub completed_at: Option<String>,
+}
+
+impl RemediationClaim {
+    /// Return the compact read-model shape for this claim.
+    pub fn summary(&self) -> RemediationClaimSummary {
+        RemediationClaimSummary {
+            id: self.id.clone(),
+            subject_type: self.subject_type.clone(),
+            subject_id: self.subject_id.clone(),
+            owner: self.owner.clone(),
+            state: self.state.clone(),
+            purpose: self.purpose.clone(),
+            expires_at: self.expires_at.clone(),
+            updated_at: self.updated_at.clone(),
+            evidence_links: self.evidence_links.clone(),
+        }
+    }
+}
+
+/// Response for `GET /api/v1/claims`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemediationClaimsResponse {
+    /// Deterministic summary.
+    pub summary: String,
+    /// Matching claims.
+    pub claims: Vec<RemediationClaim>,
+    /// Effective page limit.
+    pub limit: usize,
+    /// Current active claim for the subject, if one exists.
+    pub current_claim: Option<RemediationClaimSummary>,
+    /// Next-page cursor, or null when all matching claims are visible.
+    pub cursor: Option<String>,
+    /// Whether more claims exist past this response.
+    pub truncated: bool,
 }
 
 /// Response for `GET /api/v1/query?service=...`.
@@ -407,6 +550,9 @@ pub struct ActiveIncident {
     pub signal_count: usize,
     /// Active signals.
     pub signals: Vec<ActiveIncidentSignal>,
+    /// Current active remediation claim for this incident.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_claim: Option<RemediationClaimSummary>,
 }
 
 /// Response for `GET /api/v1/incidents`.
@@ -492,6 +638,9 @@ pub struct IncidentDetailSignal {
     pub resolved_at: Option<String>,
     /// Number of coordination annotations on the signal's underlying subject.
     pub annotation_count: u64,
+    /// Current active remediation claim for the signal's underlying subject.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_claim: Option<RemediationClaimSummary>,
 }
 
 /// Incident annotation view embedded in incident detail.
@@ -580,6 +729,8 @@ pub struct IncidentActionBrief {
     pub signals_truncated: bool,
     /// Newest incident annotation, if one exists.
     pub latest_annotation: Option<LatestIncidentAnnotation>,
+    /// Current remediation claim on this incident, if one exists.
+    pub current_claim: Option<RemediationClaimSummary>,
 }
 
 /// Response for `GET /api/v1/incidents/:id`.
@@ -595,6 +746,8 @@ pub struct IncidentDetail {
     pub signals_truncated: bool,
     /// Bounded incident annotation list.
     pub annotations: Vec<IncidentAnnotation>,
+    /// Bounded remediation claim list for the incident.
+    pub claims: Vec<RemediationClaim>,
     /// Whether more annotations exist past the visible list.
     pub annotations_truncated: bool,
     /// Recent timeline events for this incident.
@@ -777,6 +930,8 @@ pub struct AnnotationPageResponse {
     pub summary: String,
     /// Matching annotations.
     pub annotations: Vec<Annotation>,
+    /// Current active remediation claim for the annotated subject.
+    pub current_claim: Option<RemediationClaimSummary>,
     /// Next-page cursor.
     pub cursor: Option<String>,
 }
@@ -880,13 +1035,19 @@ pub fn incident_detail_response(
     signals_truncated: bool,
     annotations: Vec<IncidentAnnotation>,
     annotations_truncated: bool,
+    claims: Vec<RemediationClaim>,
     recent_timeline_events: Vec<IncidentTimelineEvent>,
 ) -> IncidentDetail {
     let summary = incident_detail_summary(&incident, annotations.len());
+    let current_claim = claims
+        .iter()
+        .find(|claim| claim_state_is_active(&claim.state))
+        .map(RemediationClaim::summary);
     let action_brief = incident_action_brief(
         &incident,
         &signals,
         signals_truncated,
+        current_claim.clone(),
         annotations
             .first()
             .map(|annotation| LatestIncidentAnnotation {
@@ -903,6 +1064,7 @@ pub fn incident_detail_response(
         signals,
         signals_truncated,
         annotations,
+        claims,
         annotations_truncated,
         recent_timeline_events,
         action_brief,
@@ -980,13 +1142,46 @@ pub fn annotation_page_response(
     total_count: u64,
     latest: Option<(&str, &str)>,
     annotations: Vec<Annotation>,
+    current_claim: Option<RemediationClaimSummary>,
     cursor: Option<String>,
 ) -> AnnotationPageResponse {
     AnnotationPageResponse {
         summary: annotation_page_summary(subject_type, subject_id, total_count, latest),
         annotations,
+        current_claim,
         cursor,
     }
+}
+
+/// Build a remediation-claim list response.
+pub fn remediation_claims_response(
+    subject_type: &str,
+    subject_id: &str,
+    claims: Vec<RemediationClaim>,
+    limit: usize,
+    current_claim: Option<RemediationClaimSummary>,
+    cursor: Option<String>,
+) -> RemediationClaimsResponse {
+    let claim_count = claims.len();
+    let truncated = cursor.is_some();
+    RemediationClaimsResponse {
+        summary: format!("{claim_count} remediation claims on {subject_type} {subject_id}."),
+        claims,
+        limit,
+        current_claim,
+        cursor,
+        truncated,
+    }
+}
+
+/// Return whether a claim state represents active ownership.
+pub fn claim_state_is_active(state: &str) -> bool {
+    matches!(state, "claimed" | "investigating" | "fix_proposed")
+}
+
+/// Return whether a value is an accepted claim state.
+pub fn claim_state_is_valid(state: &str) -> bool {
+    REMEDIATION_CLAIM_STATES.contains(&state)
 }
 
 fn annotation_page_summary(
@@ -1163,6 +1358,7 @@ fn incident_action_brief(
     incident: &IncidentDetailIncident,
     signals: &[IncidentDetailSignal],
     signals_truncated: bool,
+    current_claim: Option<RemediationClaimSummary>,
     latest_annotation: Option<LatestIncidentAnnotation>,
 ) -> IncidentActionBrief {
     let active = signals
@@ -1191,6 +1387,7 @@ fn incident_action_brief(
         },
         signals_truncated,
         latest_annotation,
+        current_claim,
     }
 }
 
@@ -1398,6 +1595,7 @@ mod tests {
                 metadata: Some(serde_json::json!({"ticket": "OPS-1"})),
                 created_at: "2026-05-28T20:59:50Z".to_owned(),
             }],
+            None,
             Some("cursor".to_owned()),
         );
 

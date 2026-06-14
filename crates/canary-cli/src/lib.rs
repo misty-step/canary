@@ -369,6 +369,36 @@ pub fn summarize_incidents(value: &Value) -> Vec<String> {
     ]
 }
 
+/// Summarize remediation claim responses.
+pub fn summarize_claims(value: &Value) -> Vec<String> {
+    if value.get("claims").is_some() {
+        let current = value
+            .get("current_claim")
+            .and_then(|claim| claim.get("owner"))
+            .and_then(Value::as_str)
+            .unwrap_or("none");
+        vec![
+            format!("summary: {}", string_field(value, "summary")),
+            format!("claims: {}", array_len(value, "claims")),
+            format!("limit: {}", number_field(value, "limit")),
+            format!("current_owner: {current}"),
+            format!("truncated: {}", bool_field(value, "truncated")),
+            format!("cursor: {}", nullable_string_field(value, "cursor")),
+        ]
+    } else {
+        vec![
+            format!("id: {}", string_field(value, "id")),
+            format!(
+                "subject: {} {}",
+                string_field(value, "subject_type"),
+                string_field(value, "subject_id")
+            ),
+            format!("owner: {}", string_field(value, "owner")),
+            format!("state: {}", string_field(value, "state")),
+        ]
+    }
+}
+
 /// Summarize timeline events.
 pub fn summarize_timeline(value: &Value) -> Vec<String> {
     vec![
@@ -2105,6 +2135,18 @@ fn number_field(value: &Value, key: &str) -> i64 {
     value.get(key).and_then(Value::as_i64).unwrap_or(0)
 }
 
+fn bool_field(value: &Value, key: &str) -> bool {
+    value.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn nullable_string_field(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("none")
+        .to_owned()
+}
+
 fn array_len(value: &Value, key: &str) -> usize {
     value.get(key).and_then(Value::as_array).map_or(0, Vec::len)
 }
@@ -2558,6 +2600,31 @@ pub fn tool_manifest() -> Vec<ToolSpec> {
             input_schema: json!({"type":"object","properties":{}}),
         },
         ToolSpec {
+            name: "canary_claims_list",
+            description: "List remediation claims for one Canary subject.",
+            input_schema: json!({"type":"object","required":["subject_type","subject_id"],"properties":{"subject_type":{"type":"string","enum":["incident","error_group","target","monitor"]},"subject_id":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":50},"cursor":{"type":"string"}}}),
+        },
+        ToolSpec {
+            name: "canary_claim_get",
+            description: "Read one remediation claim by id.",
+            input_schema: json!({"type":"object","required":["claim_id"],"properties":{"claim_id":{"type":"string"}}}),
+        },
+        ToolSpec {
+            name: "canary_claim_create",
+            description: "Claim one Canary subject for agentic remediation with owner, purpose, TTL, and idempotency key.",
+            input_schema: json!({"type":"object","required":["subject_type","subject_id","owner","purpose","ttl_ms","idempotency_key"],"properties":{"subject_type":{"type":"string","enum":["incident","error_group","target","monitor"]},"subject_id":{"type":"string"},"owner":{"type":"string"},"purpose":{"type":"string"},"idempotency_key":{"type":"string"},"ttl_ms":{"type":"integer","minimum":1},"evidence_links":{"type":"array","items":{"type":"string"}}}}),
+        },
+        ToolSpec {
+            name: "canary_claim_transition",
+            description: "Transition one remediation claim to a bounded state.",
+            input_schema: json!({"type":"object","required":["claim_id","owner","state"],"properties":{"claim_id":{"type":"string"},"owner":{"type":"string"},"state":{"type":"string","enum":["claimed","investigating","fix_proposed","verified","dismissed","expired","released"]},"evidence_links":{"type":"array","items":{"type":"string"}}}}),
+        },
+        ToolSpec {
+            name: "canary_claim_release",
+            description: "Release one remediation claim.",
+            input_schema: json!({"type":"object","required":["claim_id","owner"],"properties":{"claim_id":{"type":"string"},"owner":{"type":"string"}}}),
+        },
+        ToolSpec {
             name: "canary_integrate_discover",
             description: "Discover local project integration state without reading secret values.",
             input_schema: json!({"type":"object","required":["path_or_project"],"properties":{"path_or_project":{"type":"string"},"service":{"type":"string"},"production_url":{"type":"string"},"platform_project":{"type":"string"}}}),
@@ -2588,6 +2655,7 @@ pub fn tool_manifest() -> Vec<ToolSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -3223,6 +3291,47 @@ Vercel CLI completed
         assert!(names.contains("canary_integrate_plan"));
         assert!(names.contains("canary_integrate_patch"));
         assert!(names.contains("canary_integrate_enroll"));
+        assert!(names.contains("canary_claims_list"));
+        assert!(names.contains("canary_claim_get"));
+        assert!(names.contains("canary_claim_create"));
+        assert!(names.contains("canary_claim_transition"));
+        assert!(names.contains("canary_claim_release"));
+        let tool_by_name = manifest
+            .iter()
+            .map(|tool| (tool.name, tool))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            tool_by_name["canary_claim_get"].input_schema["required"],
+            json!(["claim_id"])
+        );
+        assert_eq!(
+            tool_by_name["canary_claim_create"].input_schema["required"],
+            json!([
+                "subject_type",
+                "subject_id",
+                "owner",
+                "purpose",
+                "ttl_ms",
+                "idempotency_key"
+            ])
+        );
+        assert_eq!(
+            tool_by_name["canary_claims_list"].input_schema["properties"]["limit"]["maximum"],
+            json!(50)
+        );
+        assert!(
+            tool_by_name["canary_claims_list"].input_schema["properties"]
+                .get("cursor")
+                .is_some()
+        );
+        assert_eq!(
+            tool_by_name["canary_claim_transition"].input_schema["required"],
+            json!(["claim_id", "owner", "state"])
+        );
+        assert_eq!(
+            tool_by_name["canary_claim_release"].input_schema["required"],
+            json!(["claim_id", "owner"])
+        );
         for tool in manifest {
             assert_eq!(
                 tool.input_schema["type"], "object",

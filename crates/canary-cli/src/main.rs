@@ -7,9 +7,9 @@ use canary_cli::{
     Window, doctor_report, dogfood_strict_failure_count, encode, find_repo_root,
     integration_discover, integration_enroll, integration_patch, integration_plan,
     integration_status, json_envelope, print_json, print_lines, resolve_endpoint_without_config,
-    run_dogfood_inventory, summarize_doctor, summarize_dogfood, summarize_incidents,
-    summarize_integration, summarize_monitors, summarize_query, summarize_report,
-    summarize_services, summarize_targets, summarize_timeline, tool_manifest,
+    run_dogfood_inventory, summarize_claims, summarize_doctor, summarize_dogfood,
+    summarize_incidents, summarize_integration, summarize_monitors, summarize_query,
+    summarize_report, summarize_services, summarize_targets, summarize_timeline, tool_manifest,
 };
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
@@ -48,6 +48,8 @@ enum Commands {
     Monitors,
     /// Inspect dogfood coverage.
     Dogfood(DogfoodArgs),
+    /// Coordinate agentic remediation claims.
+    Claims(ClaimsArgs),
     /// Discover, plan, patch, and enroll application integrations.
     Integrate(IntegrateArgs),
     /// Run an agent-oriented health and coverage diagnostic.
@@ -109,6 +111,79 @@ enum DogfoodCommand {
 struct DogfoodAuditArgs {
     #[arg(long)]
     strict: bool,
+}
+
+#[derive(Debug, Args)]
+struct ClaimsArgs {
+    #[command(subcommand)]
+    command: ClaimsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ClaimsCommand {
+    /// List claims for one subject.
+    List(ClaimSubjectArgs),
+    /// Read one claim by id.
+    Get(ClaimIdArgs),
+    /// Claim one subject.
+    Claim(ClaimCreateArgs),
+    /// Transition one claim to a bounded state.
+    Transition(ClaimTransitionArgs),
+    /// Release one claim.
+    Release(ClaimReleaseArgs),
+}
+
+#[derive(Debug, Args)]
+struct ClaimSubjectArgs {
+    #[arg(long)]
+    subject_type: String,
+    #[arg(long)]
+    subject_id: String,
+    #[arg(long)]
+    limit: Option<u16>,
+    #[arg(long)]
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct ClaimCreateArgs {
+    #[arg(long)]
+    subject_type: String,
+    #[arg(long)]
+    subject_id: String,
+    #[arg(long)]
+    owner: String,
+    #[arg(long)]
+    purpose: String,
+    #[arg(long)]
+    idempotency_key: String,
+    #[arg(long, default_value_t = 900_000)]
+    ttl_ms: i64,
+    #[arg(long = "evidence-link")]
+    evidence_links: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct ClaimTransitionArgs {
+    claim_id: String,
+    #[arg(long)]
+    owner: String,
+    #[arg(long)]
+    state: String,
+    #[arg(long = "evidence-link")]
+    evidence_links: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct ClaimIdArgs {
+    claim_id: String,
+}
+
+#[derive(Debug, Args)]
+struct ClaimReleaseArgs {
+    claim_id: String,
+    #[arg(long)]
+    owner: String,
 }
 
 #[derive(Debug, Args)]
@@ -404,6 +479,7 @@ fn run_http_command(
                 summarize_monitors,
             )
         }
+        Commands::Claims(args) => run_claims_command(args, &client, mode),
         Commands::Doctor => {
             let cwd = env::current_dir().map_err(|source| CliError::Io {
                 path: PathBuf::from("."),
@@ -421,6 +497,96 @@ fn run_http_command(
         }
         Commands::Dogfood(_) | Commands::Integrate(_) | Commands::McpManifest => {
             unreachable!("handled before HTTP setup")
+        }
+    }
+}
+
+fn run_claims_command(args: ClaimsArgs, client: &ApiClient, mode: RenderMode) -> Result<()> {
+    match args.command {
+        ClaimsCommand::List(args) => {
+            let mut path = format!(
+                "/api/v1/claims?subject_type={}&subject_id={}",
+                encode(&args.subject_type),
+                encode(&args.subject_id)
+            );
+            if let Some(limit) = args.limit {
+                path.push_str(&format!("&limit={limit}"));
+            }
+            if let Some(cursor) = args.cursor {
+                path.push_str(&format!("&cursor={}", encode(&cursor)));
+            }
+            let response = client.get_auth_json(&path)?;
+            render(
+                "claims list",
+                client.endpoint(),
+                response,
+                mode,
+                summarize_claims,
+            )
+        }
+        ClaimsCommand::Claim(args) => {
+            let response = client.post_auth_json(
+                "/api/v1/claims",
+                &json!({
+                    "subject_type": args.subject_type,
+                    "subject_id": args.subject_id,
+                    "owner": args.owner,
+                    "purpose": args.purpose,
+                    "idempotency_key": args.idempotency_key,
+                    "ttl_ms": args.ttl_ms,
+                    "evidence_links": args.evidence_links,
+                }),
+            )?;
+            render(
+                "claims claim",
+                client.endpoint(),
+                response,
+                mode,
+                summarize_claims,
+            )
+        }
+        ClaimsCommand::Get(args) => {
+            let response =
+                client.get_auth_json(&format!("/api/v1/claims/{}", encode(&args.claim_id)))?;
+            render(
+                "claims get",
+                client.endpoint(),
+                response,
+                mode,
+                summarize_claims,
+            )
+        }
+        ClaimsCommand::Transition(args) => {
+            let response = client.post_auth_json(
+                &format!("/api/v1/claims/{}/transition", encode(&args.claim_id)),
+                &json!({
+                    "owner": args.owner,
+                    "state": args.state,
+                    "evidence_links": args.evidence_links,
+                }),
+            )?;
+            render(
+                "claims transition",
+                client.endpoint(),
+                response,
+                mode,
+                summarize_claims,
+            )
+        }
+        ClaimsCommand::Release(args) => {
+            let response = client.post_auth_json(
+                &format!("/api/v1/claims/{}/release", encode(&args.claim_id)),
+                &json!({
+                    "owner": args.owner,
+                }),
+            )?;
+            render(
+                "claims release",
+                client.endpoint(),
+                response,
+                mode,
+                summarize_claims,
+            )
         }
     }
 }

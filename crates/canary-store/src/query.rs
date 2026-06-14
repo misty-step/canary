@@ -5,14 +5,15 @@ use canary_core::{
         ErrorClassification, ErrorDetail, ErrorDetailGroup, ErrorGroupSummary, ErrorsByClass,
         ErrorsByErrorClass, ErrorsByService, IncidentAnnotation, IncidentDetail,
         IncidentDetailIncident, IncidentDetailSignal, IncidentTimelineEvent, QueryCursor,
-        QueryWindow, TimelineCursor, TimelineEvent, TimelineResponse, active_incidents_response,
-        decode_cursor, decode_timeline_cursor, encode_timeline_cursor, error_detail_response,
-        errors_by_class_response, errors_by_error_class_response, errors_by_service_response,
-        incident_detail_response, timeline_response,
+        QueryWindow, RemediationClaim, RemediationClaimSummary, TimelineCursor, TimelineEvent,
+        TimelineResponse, active_incidents_response, decode_cursor, decode_timeline_cursor,
+        encode_timeline_cursor, error_detail_response, errors_by_class_response,
+        errors_by_error_class_response, errors_by_service_response, incident_detail_response,
+        timeline_response,
     },
     webhook_events,
 };
-use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Type};
 use serde_json::Value;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -35,6 +36,15 @@ pub struct ServiceQueryOptions {
     pub without_annotation: Option<String>,
 }
 
+impl ServiceQueryOptions {
+    pub(crate) fn tenant_project(&self) -> Option<(String, String)> {
+        self.tenant_id
+            .as_ref()
+            .zip(self.project_id.as_ref())
+            .map(|(tenant_id, project_id)| (tenant_id.clone(), project_id.clone()))
+    }
+}
+
 /// Optional filters for active incident queries.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IncidentListOptions {
@@ -46,6 +56,15 @@ pub struct IncidentListOptions {
     pub with_annotation: Option<String>,
     /// Optional annotation action that must not exist for the incident.
     pub without_annotation: Option<String>,
+}
+
+impl IncidentListOptions {
+    pub(crate) fn tenant_project(&self) -> Option<(String, String)> {
+        self.tenant_id
+            .as_ref()
+            .zip(self.project_id.as_ref())
+            .map(|(tenant_id, project_id)| (tenant_id.clone(), project_id.clone()))
+    }
 }
 
 /// Error-summary row returned by combined service status.
@@ -189,7 +208,12 @@ pub(crate) fn errors_by_service_at(
     now: OffsetDateTime,
 ) -> ErrorGroupQueryResult<ErrorsByService> {
     let window = QueryWindow::parse(window).ok_or(ErrorGroupQueryError::InvalidWindow)?;
-    let groups = list_error_groups(
+    let owner = options
+        .tenant_id
+        .as_deref()
+        .zip(options.project_id.as_deref())
+        .map(|(tenant_id, project_id)| (tenant_id.to_owned(), project_id.to_owned()));
+    let mut groups = list_error_groups(
         connection,
         ErrorGroupFilter::Service {
             service: service.to_owned(),
@@ -198,6 +222,15 @@ pub(crate) fn errors_by_service_at(
         options,
         now,
     )?;
+    enrich_error_group_claims(
+        connection,
+        &mut groups,
+        owner
+            .as_ref()
+            .map(|(tenant_id, project_id)| (tenant_id.as_str(), project_id.as_str())),
+        now,
+    )
+    .map_err(ErrorGroupQueryError::Sqlite)?;
 
     Ok(errors_by_service_response(
         service.to_owned(),
@@ -232,7 +265,12 @@ pub(crate) fn errors_by_error_class_at(
     now: OffsetDateTime,
 ) -> ErrorGroupQueryResult<ErrorsByErrorClass> {
     let window = QueryWindow::parse(window).ok_or(ErrorGroupQueryError::InvalidWindow)?;
-    let groups = list_error_groups(
+    let owner = options
+        .tenant_id
+        .as_deref()
+        .zip(options.project_id.as_deref())
+        .map(|(tenant_id, project_id)| (tenant_id.to_owned(), project_id.to_owned()));
+    let mut groups = list_error_groups(
         connection,
         ErrorGroupFilter::ErrorClass {
             error_class: error_class.to_owned(),
@@ -242,6 +280,15 @@ pub(crate) fn errors_by_error_class_at(
         options,
         now,
     )?;
+    enrich_error_group_claims(
+        connection,
+        &mut groups,
+        owner
+            .as_ref()
+            .map(|(tenant_id, project_id)| (tenant_id.as_str(), project_id.as_str())),
+        now,
+    )
+    .map_err(ErrorGroupQueryError::Sqlite)?;
 
     Ok(errors_by_error_class_response(
         error_class.to_owned(),
@@ -450,13 +497,15 @@ fn report_error_groups_at_scoped(
             .to_owned()
     };
     let mut statement = connection.prepare(&sql)?;
-    if let Some((tenant_id, project_id)) = owner {
+    let mut groups = if let Some((tenant_id, project_id)) = owner {
         groups_from_rows(
             statement.query_map(params![cutoff, tenant_id, project_id], group_from_row)?,
-        )
+        )?
     } else {
-        groups_from_rows(statement.query_map(params![cutoff], group_from_row)?)
-    }
+        groups_from_rows(statement.query_map(params![cutoff], group_from_row)?)?
+    };
+    enrich_error_group_claims(connection, &mut groups, owner, now)?;
+    Ok(groups)
 }
 
 pub(crate) fn recent_transitions(
@@ -842,6 +891,21 @@ pub(crate) fn active_incidents_at(
 
         let severity = incident_severity(&active_signals, now);
         let signal_count = active_signals.len();
+        let current_claim = if let Some((tenant_id, project_id)) = row.owner() {
+            let now_string = now
+                .format(&Rfc3339)
+                .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+            current_claim_summary(
+                connection,
+                tenant_id,
+                project_id,
+                "incident",
+                &row.id,
+                &now_string,
+            )?
+        } else {
+            None
+        };
         incidents.push(ActiveIncident {
             id: row.id,
             service: row.service,
@@ -852,6 +916,7 @@ pub(crate) fn active_incidents_at(
             resolved_at: row.resolved_at,
             signal_count,
             signals: active_signals,
+            current_claim,
         });
     }
 
@@ -887,13 +952,30 @@ fn incident_detail_for_owner(
     let signal_rows = incident_detail_signals(connection, incident_id, MAX_INCIDENT_SIGNALS)?;
     let signals_truncated = total_signals > signal_rows.len();
     let signal_owner = incident.owner();
-    let signal_context = load_incident_signal_context(connection, &signal_rows, signal_owner)?;
+    let now = OffsetDateTime::now_utc();
+    let now_string = now
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+    let signal_context =
+        load_incident_signal_context(connection, &signal_rows, signal_owner, &now_string)?;
     let signals = signal_rows
         .iter()
         .map(|signal| format_incident_signal(signal, &signal_context))
         .collect::<Vec<_>>();
     let (annotations, annotations_truncated) =
         incident_annotations(connection, incident_id, MAX_INCIDENT_ANNOTATIONS)?;
+    let claims = if let Some((tenant_id, project_id)) = incident.owner() {
+        claims_for_subject(
+            connection,
+            tenant_id,
+            project_id,
+            "incident",
+            incident_id,
+            MAX_INCIDENT_ANNOTATIONS,
+        )?
+    } else {
+        Vec::new()
+    };
     let timeline = incident_timeline_events(connection, incident_id, MAX_INCIDENT_TIMELINE_EVENTS)?;
 
     Ok(Some(incident_detail_response(
@@ -911,6 +993,7 @@ fn incident_detail_for_owner(
         signals_truncated,
         annotations,
         annotations_truncated,
+        claims,
         timeline,
     )))
 }
@@ -1073,6 +1156,7 @@ struct IncidentSignalContext {
     targets: std::collections::HashMap<String, TargetSignalContext>,
     monitors: std::collections::HashMap<String, MonitorSignalContext>,
     annotation_counts: std::collections::HashMap<(String, String), u64>,
+    claim_summaries: std::collections::HashMap<(String, String), RemediationClaimSummary>,
 }
 
 fn incident_rows(
@@ -1250,6 +1334,7 @@ fn load_incident_signal_context(
     connection: &Connection,
     signals: &[IncidentDetailSignalRow],
     owner: Option<(&str, &str)>,
+    now: &str,
 ) -> QueryResult<IncidentSignalContext> {
     let error_refs = signal_refs_for_detail(signals, "error_group");
     let health_refs = signal_refs_for_detail(signals, "health_transition");
@@ -1269,6 +1354,7 @@ fn load_incident_signal_context(
         targets: load_target_signal_context(connection, &target_refs)?,
         monitors: load_monitor_signal_context(connection, &monitor_refs)?,
         annotation_counts: load_signal_annotation_counts(connection, signals, owner)?,
+        claim_summaries: load_signal_claim_summaries(connection, signals, owner, now)?,
     })
 }
 
@@ -1444,6 +1530,170 @@ fn annotation_count_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<((String, S
     ))
 }
 
+fn load_signal_claim_summaries(
+    connection: &Connection,
+    signals: &[IncidentDetailSignalRow],
+    owner: Option<(&str, &str)>,
+    now: &str,
+) -> QueryResult<std::collections::HashMap<(String, String), RemediationClaimSummary>> {
+    let Some((tenant_id, project_id)) = owner else {
+        return Ok(std::collections::HashMap::new());
+    };
+    let mut summaries = std::collections::HashMap::new();
+    for (subject_type, subject_id) in signal_subjects(signals) {
+        if let Some(summary) = current_claim_summary(
+            connection,
+            tenant_id,
+            project_id,
+            &subject_type,
+            &subject_id,
+            now,
+        )? {
+            summaries.insert((subject_type, subject_id), summary);
+        }
+    }
+    Ok(summaries)
+}
+
+fn enrich_error_group_claims(
+    connection: &Connection,
+    groups: &mut [ErrorGroupSummary],
+    owner: Option<(&str, &str)>,
+    now: OffsetDateTime,
+) -> rusqlite::Result<()> {
+    let Some((tenant_id, project_id)) = owner else {
+        return Ok(());
+    };
+    let now = now
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+    for group in groups {
+        group.current_claim = current_claim_summary(
+            connection,
+            tenant_id,
+            project_id,
+            "error_group",
+            &group.group_hash,
+            &now,
+        )?;
+    }
+    Ok(())
+}
+
+fn current_claim_summary(
+    connection: &Connection,
+    tenant_id: &str,
+    project_id: &str,
+    subject_type: &str,
+    subject_id: &str,
+    now: &str,
+) -> rusqlite::Result<Option<RemediationClaimSummary>> {
+    connection
+        .query_row(
+            "SELECT id, subject_type, subject_id, owner, state, purpose, expires_at, updated_at,
+                    evidence_links
+	             FROM remediation_claims
+	             WHERE tenant_id = ?1 AND project_id = ?2 AND subject_type = ?3 AND subject_id = ?4
+	               AND state IN ('claimed', 'investigating', 'fix_proposed')
+	               AND expires_at > ?5
+	             ORDER BY updated_at DESC, id DESC
+	             LIMIT 1",
+            params![tenant_id, project_id, subject_type, subject_id, now],
+            remediation_claim_summary_row,
+        )
+        .optional()
+}
+
+fn claims_for_subject(
+    connection: &Connection,
+    tenant_id: &str,
+    project_id: &str,
+    subject_type: &str,
+    subject_id: &str,
+    limit: usize,
+) -> QueryResult<Vec<RemediationClaim>> {
+    let mut statement = connection.prepare(
+        "SELECT id, tenant_id, project_id, service, subject_type, subject_id, owner, purpose,
+                state, idempotency_key, evidence_links, created_at, updated_at, expires_at,
+                released_at, completed_at
+         FROM remediation_claims
+         WHERE tenant_id = ?1 AND project_id = ?2 AND subject_type = ?3 AND subject_id = ?4
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?5",
+    )?;
+    let rows = statement.query_map(
+        params![
+            tenant_id,
+            project_id,
+            subject_type,
+            subject_id,
+            limit as i64,
+        ],
+        remediation_claim_row,
+    )?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn remediation_claim_summary_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<RemediationClaimSummary> {
+    Ok(RemediationClaimSummary {
+        id: row.get(0)?,
+        subject_type: row.get(1)?,
+        subject_id: row.get(2)?,
+        owner: row.get(3)?,
+        state: row.get(4)?,
+        purpose: row.get(5)?,
+        expires_at: decode_claim_rfc3339(row.get(6)?, 6)?,
+        updated_at: decode_claim_rfc3339(row.get(7)?, 7)?,
+        evidence_links: decode_claim_evidence(row.get(8)?)?,
+    })
+}
+
+fn remediation_claim_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RemediationClaim> {
+    Ok(RemediationClaim {
+        id: row.get(0)?,
+        tenant_id: row.get(1)?,
+        project_id: row.get(2)?,
+        service: row.get(3)?,
+        subject_type: row.get(4)?,
+        subject_id: row.get(5)?,
+        owner: row.get(6)?,
+        purpose: row.get(7)?,
+        state: row.get(8)?,
+        idempotency_key: row.get(9)?,
+        evidence_links: decode_claim_evidence(row.get(10)?)?,
+        created_at: decode_claim_rfc3339(row.get(11)?, 11)?,
+        updated_at: decode_claim_rfc3339(row.get(12)?, 12)?,
+        expires_at: decode_claim_rfc3339(row.get(13)?, 13)?,
+        released_at: row
+            .get::<_, Option<String>>(14)?
+            .map(|value| decode_claim_rfc3339(value, 14))
+            .transpose()?,
+        completed_at: row
+            .get::<_, Option<String>>(15)?
+            .map(|value| decode_claim_rfc3339(value, 15))
+            .transpose()?,
+    })
+}
+
+fn decode_claim_evidence(value: Option<String>) -> rusqlite::Result<Vec<String>> {
+    match value {
+        Some(value) => serde_json::from_str::<Vec<String>>(&value).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(10, Type::Text, Box::new(error))
+        }),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn decode_claim_rfc3339(value: String, column: usize) -> rusqlite::Result<String> {
+    OffsetDateTime::parse(&value, &Rfc3339)
+        .map(|_| value)
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
+        })
+}
+
 fn signal_subjects(signals: &[IncidentDetailSignalRow]) -> Vec<(String, String)> {
     let mut subjects = signals
         .iter()
@@ -1501,6 +1751,7 @@ fn format_incident_signal(
             attached_at: signal.attached_at.clone(),
             resolved_at: signal.resolved_at.clone(),
             annotation_count: 0,
+            current_claim: claim_summary(context, &signal.signal_type, &signal.signal_ref),
         },
         _ => IncidentDetailSignal {
             signal_type: signal.signal_type.clone(),
@@ -1524,6 +1775,7 @@ fn format_incident_signal(
             attached_at: signal.attached_at.clone(),
             resolved_at: signal.resolved_at.clone(),
             annotation_count: annotation_count(context, &signal.signal_type, &signal.signal_ref),
+            current_claim: claim_summary(context, &signal.signal_type, &signal.signal_ref),
         },
     }
 }
@@ -1572,6 +1824,7 @@ fn format_error_group_signal(
         attached_at: signal.attached_at.clone(),
         resolved_at: signal.resolved_at.clone(),
         annotation_count: annotation_count(context, &signal.signal_type, &signal.signal_ref),
+        current_claim: claim_summary(context, &signal.signal_type, &signal.signal_ref),
     }
 }
 
@@ -1617,6 +1870,7 @@ fn format_target_signal(
         attached_at: signal.attached_at.clone(),
         resolved_at: signal.resolved_at.clone(),
         annotation_count: annotation_count(context, &signal.signal_type, &signal.signal_ref),
+        current_claim: claim_summary(context, &signal.signal_type, &signal.signal_ref),
     }
 }
 
@@ -1656,6 +1910,7 @@ fn format_monitor_signal(
         attached_at: signal.attached_at.clone(),
         resolved_at: signal.resolved_at.clone(),
         annotation_count: annotation_count(context, &signal.signal_type, &signal.signal_ref),
+        current_claim: claim_summary(context, &signal.signal_type, &signal.signal_ref),
     }
 }
 
@@ -1663,6 +1918,15 @@ fn annotation_count(context: &IncidentSignalContext, signal_type: &str, signal_r
     signal_subject(signal_type, signal_ref)
         .and_then(|subject| context.annotation_counts.get(&subject).copied())
         .unwrap_or(0)
+}
+
+fn claim_summary(
+    context: &IncidentSignalContext,
+    signal_type: &str,
+    signal_ref: &str,
+) -> Option<RemediationClaimSummary> {
+    signal_subject(signal_type, signal_ref)
+        .and_then(|subject| context.claim_summaries.get(&subject).cloned())
 }
 
 fn incident_annotations(
@@ -2113,6 +2377,7 @@ fn group_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ErrorGroupSummary
         severity: row.get(7)?,
         status: row.get(8)?,
         classification: ErrorClassification::new(row.get(9)?, row.get(10)?, row.get(11)?),
+        current_claim: None,
     })
 }
 
