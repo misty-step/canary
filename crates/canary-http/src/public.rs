@@ -190,7 +190,10 @@ pub fn readyz_response(
         && matches!(supervisor, DependencyStatus::Ok)
         && workers.iter().all(|worker| {
             matches!(worker.state, WorkerLifecycleState::Started)
-                && matches!(worker.health, WorkerHealthStatus::Ok)
+                && matches!(
+                    worker.health,
+                    WorkerHealthStatus::Ok | WorkerHealthStatus::Pressured
+                )
         });
     let status = if all_ok { 200 } else { 503 };
     let body_status = if all_ok {
@@ -326,11 +329,7 @@ mod tests {
 
     #[test]
     fn readyz_marks_unhealthy_started_workers_not_ready() {
-        for health in [
-            WorkerHealthStatus::Stale,
-            WorkerHealthStatus::Failing,
-            WorkerHealthStatus::Pressured,
-        ] {
+        for health in [WorkerHealthStatus::Stale, WorkerHealthStatus::Failing] {
             let response = readyz_response(
                 DependencyStatus::Ok,
                 DependencyStatus::Ok,
@@ -354,6 +353,37 @@ mod tests {
             assert_eq!(response.status, 503);
             assert_eq!(body["status"], "not_ready");
         }
+    }
+
+    #[test]
+    fn readyz_keeps_pressured_started_workers_route_ready() {
+        let response = readyz_response(
+            DependencyStatus::Ok,
+            DependencyStatus::Ok,
+            vec![WorkerReadyzCheck {
+                name: "monitor_overdue".to_owned(),
+                state: WorkerLifecycleState::Started,
+                health: WorkerHealthStatus::Pressured,
+                last_success_at: Some("2026-06-12T20:00:00Z".to_owned()),
+                last_success_age_ms: Some(735),
+                failure_count: 0,
+                consecutive_failures: 0,
+                last_error_class: None,
+                due_count: 1,
+                in_flight_count: 0,
+                oldest_due_age_ms: Some(690_853),
+                backoff_or_circuit_open: false,
+            }],
+        );
+        let body = serde_json::to_value(response.body).unwrap_or(Value::Null);
+
+        assert_eq!(response.status, 200);
+        assert_eq!(body["status"], "ready");
+        assert_eq!(body["checks"]["workers"][0]["name"], "monitor_overdue");
+        assert_eq!(body["checks"]["workers"][0]["state"], "started");
+        assert_eq!(body["checks"]["workers"][0]["health"], "pressured");
+        assert_eq!(body["checks"]["workers"][0]["due_count"], 1);
+        assert_eq!(body["checks"]["workers"][0]["oldest_due_age_ms"], 690_853);
     }
 
     #[test]
