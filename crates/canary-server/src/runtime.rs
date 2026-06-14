@@ -439,10 +439,14 @@ impl IngestEffectSink for RuntimeIngestEffectSink {
             let result = match effect {
                 IngestEffect::BroadcastNewError { .. } => Ok(()),
                 IngestEffect::CorrelateIncident {
+                    tenant_id,
+                    project_id,
                     signal_type,
                     signal_ref,
                     service,
-                } => self.correlate_incident(signal_type, signal_ref, service),
+                } => {
+                    self.correlate_incident(tenant_id, project_id, signal_type, signal_ref, service)
+                }
                 IngestEffect::EnqueueWebhook {
                     event,
                     payload_json,
@@ -465,6 +469,8 @@ impl IngestEffectSink for RuntimeIngestEffectSink {
 impl RuntimeIngestEffectSink {
     fn correlate_incident(
         &self,
+        tenant_id: &str,
+        project_id: &str,
         signal_type: &str,
         signal_ref: &str,
         service: &str,
@@ -476,6 +482,8 @@ impl RuntimeIngestEffectSink {
                 .map_err(|_| "store lock poisoned".to_owned())?;
             store
                 .correlate_incident(IncidentCorrelation {
+                    tenant_id: tenant_id.to_owned(),
+                    project_id: project_id.to_owned(),
                     signal_type: signal_type.to_owned(),
                     signal_ref: signal_ref.to_owned(),
                     service: service.to_owned(),

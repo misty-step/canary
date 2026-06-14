@@ -458,6 +458,8 @@ mod tests {
                 event_id: EventId::generate(),
             },
             payload: ErrorIngestPayload {
+                tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
+                project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
                 service: "retention".to_owned(),
                 error_class: "RuntimeError".to_owned(),
                 message: "old".to_owned(),

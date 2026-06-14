@@ -696,6 +696,12 @@ pub struct WebhookDelivery {
     pub delivery_id: String,
     /// Webhook subscription id.
     pub webhook_id: String,
+    /// Tenant that owns the delivery row.
+    pub tenant_id: String,
+    /// Project that owns the delivery row.
+    pub project_id: String,
+    /// Optional service scope for the delivery row.
+    pub service: Option<String>,
     /// Event name.
     pub event: String,
     /// Current delivery status.
@@ -1341,6 +1347,9 @@ mod tests {
             vec![WebhookDelivery {
                 delivery_id: "DLV-a".to_owned(),
                 webhook_id: "WHK-a".to_owned(),
+                tenant_id: "TENANT-bootstrap".to_owned(),
+                project_id: "PROJECT-bootstrap".to_owned(),
+                service: None,
                 event: "error.new_class".to_owned(),
                 status: "suppressed".to_owned(),
                 attempt_count: 0,

@@ -45,9 +45,10 @@ pub(crate) async fn create_service_onboarding(
         ));
     }
 
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
-        return problem_response(*problem);
-    }
+    let authority = match require_scope(&state, &headers, Permission::Admin) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let attrs = match decode_json_object(&body, None) {
         Ok(attrs) => attrs,
@@ -80,6 +81,9 @@ pub(crate) async fn create_service_onboarding(
         created_at,
         revoked_at: None,
         scope: "ingest-only".to_owned(),
+        tenant_id: authority.tenant_id.clone(),
+        project_id: authority.project_id.clone(),
+        service: Some(request.service.clone()),
     };
     let response_body =
         service_onboarding_response(&request, &target, &api_key, &raw_key, &base_url(&headers));
@@ -92,7 +96,12 @@ pub(crate) async fn create_service_onboarding(
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
-    match store.commit_service_onboarding_target_and_key(target, api_key) {
+    match store.commit_service_onboarding_target_and_key_scoped(
+        target,
+        api_key,
+        &authority.tenant_id,
+        &authority.project_id,
+    ) {
         Ok(()) => {}
         Err(StoreError::TargetConflict(conflict)) => {
             return problem_response(service_onboarding_conflict_problem(conflict));

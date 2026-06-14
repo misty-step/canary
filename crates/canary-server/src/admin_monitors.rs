@@ -34,16 +34,17 @@ pub(crate) async fn list_monitors(
     State(state): State<IngestState>,
     headers: HeaderMap,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
-        return problem_response(*problem);
-    }
+    let authority = match require_scope(&state, &headers, Permission::Admin) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
 
-    match store.list_monitors() {
+    match store.list_monitors_scoped(&authority.tenant_id, &authority.project_id) {
         Ok(monitors) => json_status_response(
             StatusCode::OK.as_u16(),
             json!({"monitors": monitors.into_iter().map(monitor_response).collect::<Vec<_>>()}),
@@ -67,9 +68,10 @@ pub(crate) async fn create_monitor(
         ));
     }
 
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
-        return problem_response(*problem);
-    }
+    let authority = match require_scope(&state, &headers, Permission::Admin) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let attrs = match decode_json_object(&body, None) {
         Ok(attrs) => attrs,
@@ -85,7 +87,7 @@ pub(crate) async fn create_monitor(
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
-    match store.create_monitor(monitor) {
+    match store.create_monitor_scoped(monitor, &authority.tenant_id, &authority.project_id) {
         Ok(true) => json_status_response(StatusCode::CREATED.as_u16(), response_body),
         Ok(false) => problem_response(validation_problem(
             "Invalid monitor configuration.",
@@ -100,15 +102,16 @@ pub(crate) async fn delete_monitor(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
-        return problem_response(*problem);
-    }
+    let authority = match require_scope(&state, &headers, Permission::Admin) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
-    match store.delete_monitor(&id) {
+    match store.delete_monitor_scoped(&id, &authority.tenant_id, &authority.project_id) {
         Ok(true) => response(
             StatusCode::NO_CONTENT.as_u16(),
             "text/plain; charset=utf-8",

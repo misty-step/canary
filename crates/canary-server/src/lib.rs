@@ -90,7 +90,8 @@ pub use runtime_env::{RuntimeEnvError, ServerProcessConfig};
 #[cfg(test)]
 pub(crate) use server_auth::{UNKNOWN_AUTH_FAIL_IDENTITY, auth_fail_identity};
 pub(crate) use server_auth::{
-    require_ingest_scope, require_query_limited_admin_scope, require_read_scope, require_scope,
+    enforce_service_authority, require_ingest_scope, require_query_limited_admin_scope,
+    require_read_scope, require_scope, service_authority_problem,
 };
 use service_onboarding_routes::create_service_onboarding;
 pub use target_probes::{
@@ -205,10 +206,10 @@ mod tests {
     };
     use canary_ingest::{IngestConfig, IngestEffect};
     use canary_store::{
-        API_KEY_PREFIX_LEN, ApiKeyInsert, ErrorIngest, ErrorIngestIds, ErrorIngestPayload,
-        MonitorInsert, Store, TargetCheckObservation, TargetInsert, TargetProbeCommit,
-        WebhookDeliveryInsert, WebhookDeliveryJobInsert, WebhookDeliveryJobState,
-        WebhookDeliveryStatus, WebhookSubscriptionInsert,
+        API_KEY_PREFIX_LEN, AnnotationInsert, ApiKeyInsert, ErrorIngest, ErrorIngestIds,
+        ErrorIngestPayload, MonitorInsert, Store, TargetCheckObservation, TargetInsert,
+        TargetProbeCommit, WebhookDeliveryInsert, WebhookDeliveryJobInsert,
+        WebhookDeliveryJobState, WebhookDeliveryStatus, WebhookSubscriptionInsert,
     };
     use canary_workers::webhooks::{CircuitDecision, TransportResult, WebhookJob, WebhookRequest};
     use serde_json::{Value, json};
@@ -251,8 +252,12 @@ mod tests {
     }
 
     const ADMIN_KEY: &str = "sk_live_admin_secret";
+    const OTHER_ADMIN_KEY: &str = "sk_live_other_admin_secret";
     const INGEST_KEY: &str = "sk_live_ingest_secret";
+    const OTHER_INGEST_KEY: &str = "sk_live_other_ingest_secret";
+    const WRONG_INGEST_PREFIX_KEY: &str = "sk_live_ingest_wrong";
     const READ_KEY: &str = "sk_live_read_secret";
+    const OTHER_READ_KEY: &str = "sk_live_other_read_secret";
     const REVOKED_KEY: &str = "sk_live_revoked_secret";
     static ADMIN_ACCEPTED_KEYS: &[&str] = &[ADMIN_KEY];
     static INGEST_ACCEPTED_KEYS: &[&str] = &[ADMIN_KEY, INGEST_KEY];
@@ -911,14 +916,14 @@ mod tests {
             let mut store = Store::open(&path)?;
             store.migrate()?;
             seed_api_key(&mut store, "KEY-ingest", INGEST_KEY, "ingest-only", None)?;
-            store.insert_webhook_subscription(WebhookSubscriptionInsert {
-                id: "WHK-boot".to_owned(),
-                url,
-                events: vec!["error.new_class".to_owned()],
-                secret: "test-webhook-secret".to_owned(),
-                active: true,
-                created_at: "2026-05-28T20:00:00Z".to_owned(),
-            })?;
+            store.insert_webhook_subscription(webhook_subscription_insert(
+                "WHK-boot",
+                &url,
+                vec!["error.new_class".to_owned()],
+                "test-webhook-secret",
+                true,
+                "2026-05-28T20:00:00Z",
+            ))?;
         }
 
         let config = ServerConfig {
@@ -944,6 +949,60 @@ mod tests {
 
         drop_server(server).await?;
         fs::remove_file(path)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn error_ingest_enqueues_only_matching_service_scoped_webhooks()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = Store::open_in_memory()?;
+        store.migrate()?;
+        seed_api_key(&mut store, "KEY-ingest", INGEST_KEY, "ingest-only", None)?;
+        let mut matching = webhook_subscription_insert(
+            "WHK-test-svc",
+            "https://example.test/test-svc",
+            vec!["error.new_class".to_owned()],
+            "test-webhook-secret",
+            true,
+            "2026-05-28T20:00:00Z",
+        );
+        matching.service = Some("test-svc".to_owned());
+        store.insert_webhook_subscription(matching)?;
+        let mut other = webhook_subscription_insert(
+            "WHK-other-svc",
+            "https://example.test/other-svc",
+            vec!["error.new_class".to_owned()],
+            "test-webhook-secret",
+            true,
+            "2026-05-28T20:00:01Z",
+        );
+        other.service = Some("other-svc".to_owned());
+        store.insert_webhook_subscription(other)?;
+
+        let scheduler = Arc::new(RecordingScheduler::default());
+        let state = IngestState::new_with_webhook_scheduler(
+            store,
+            IngestConfig::default(),
+            scheduler.clone(),
+        );
+        let response = ingest_router(state)
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let jobs = scheduler.jobs()?;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].webhook_id, "WHK-test-svc");
+        assert_eq!(
+            jobs[0].payload["tenant_id"],
+            canary_store::BOOTSTRAP_TENANT_ID
+        );
+        assert_eq!(
+            jobs[0].payload["project_id"],
+            canary_store::BOOTSTRAP_PROJECT_ID
+        );
+        assert_eq!(jobs[0].payload["error"]["service"], "test-svc");
 
         Ok(())
     }
@@ -997,14 +1056,14 @@ mod tests {
             let mut store = Store::open(&path)?;
             store.migrate()?;
             seed_api_key(&mut store, "KEY-ingest", INGEST_KEY, "ingest-only", None)?;
-            store.insert_webhook_subscription(WebhookSubscriptionInsert {
-                id: "WHK-incident".to_owned(),
-                url,
-                events: vec!["incident.opened".to_owned()],
-                secret: "test-webhook-secret".to_owned(),
-                active: true,
-                created_at: "2026-05-28T20:00:00Z".to_owned(),
-            })?;
+            store.insert_webhook_subscription(webhook_subscription_insert(
+                "WHK-incident",
+                &url,
+                vec!["incident.opened".to_owned()],
+                "test-webhook-secret",
+                true,
+                "2026-05-28T20:00:00Z",
+            ))?;
         }
 
         let config = ServerConfig {
@@ -1230,6 +1289,9 @@ mod tests {
             .ok_or("missing webhook_contract guide")?;
         assert!(guide.contains("GET /api/v1/webhook-deliveries/{delivery_id}"));
         assert!(guide.to_ascii_lowercase().contains("x-delivery-id"));
+        assert!(guide.to_ascii_lowercase().contains("x-canary-signature"));
+        assert!(guide.to_ascii_lowercase().contains("x-timestamp"));
+        assert!(guide.to_ascii_lowercase().contains("x-webhook-id"));
 
         let operation =
             openapi_operation(&document, "/api/v1/webhook-deliveries/{delivery_id}", "GET")?;
@@ -1733,6 +1795,8 @@ mod tests {
                 "test-webhook-secret",
                 "error.new_class",
                 "DLV-http-ok",
+                "WHK-http-ok",
+                Some("2026-05-28T20:00:00Z".to_owned()),
                 Some(42),
             ),
         };
@@ -1767,6 +1831,14 @@ mod tests {
             Some("DLV-http-ok")
         );
         assert_eq!(
+            header_value(&captured.head, "x-webhook-id").as_deref(),
+            Some("WHK-http-ok")
+        );
+        assert_eq!(
+            header_value(&captured.head, "x-timestamp").as_deref(),
+            Some("2026-05-28T20:00:00Z")
+        );
+        assert_eq!(
             header_value(&captured.head, "x-webhook-version").as_deref(),
             Some("1")
         );
@@ -1777,6 +1849,20 @@ mod tests {
         assert_eq!(
             header_value(&captured.head, "x-signature").as_deref(),
             Some(request.headers.signature.as_str())
+        );
+        assert_eq!(
+            header_value(&captured.head, "x-canary-signature").as_deref(),
+            Some(request.headers.canary_signature.as_str())
+        );
+        assert!(
+            canary_http::webhooks::verify_timestamped_signature(
+                captured.body.as_bytes(),
+                "test-webhook-secret",
+                "2026-05-28T20:00:00Z",
+                "DLV-http-ok",
+                &request.headers.canary_signature,
+            ),
+            "receiver should be able to verify timestamp-bound Canary signature"
         );
 
         Ok(())
@@ -1794,6 +1880,8 @@ mod tests {
                 "test-webhook-secret",
                 "error.new_class",
                 "DLV-http-redirect",
+                "WHK-http-redirect",
+                None,
                 None,
             ),
         };
@@ -1822,6 +1910,8 @@ mod tests {
                 "test-webhook-secret",
                 "error.new_class",
                 "DLV-http-503",
+                "WHK-http-503",
+                None,
                 None,
             ),
         };
@@ -1852,6 +1942,8 @@ mod tests {
                 "test-webhook-secret",
                 "error.new_class",
                 "DLV-http-error",
+                "WHK-http-error",
+                None,
                 None,
             ),
         };
@@ -1880,6 +1972,8 @@ mod tests {
                 "test-webhook-secret",
                 "error.new_class",
                 "DLV-http-private",
+                "WHK-http-private",
+                None,
                 None,
             ),
         };
@@ -2302,6 +2396,63 @@ mod tests {
         assert_eq!(body["state"], "up");
         assert_eq!(body["observed_at"], "2026-05-28T20:00:00Z");
         assert_eq!(body["sequence"], 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn monitor_check_in_uses_key_owner_to_resolve_monitor_name() -> Result<(), Box<dyn Error>>
+    {
+        let state = test_ingest_state()?;
+        {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            seed_monitor(&mut store, "worker-heartbeat")?;
+            seed_api_key_with_owner(
+                &mut store,
+                "KEY-other-ingest",
+                OTHER_INGEST_KEY,
+                "ingest-only",
+                None,
+                "TENANT-other",
+                "PROJECT-other",
+            )?;
+            store.create_monitor_scoped(
+                MonitorInsert {
+                    id: "MON-other-worker".to_owned(),
+                    name: "worker-heartbeat".to_owned(),
+                    service: "other-worker".to_owned(),
+                    mode: "ttl".to_owned(),
+                    expected_every_ms: 90_000,
+                    grace_ms: 5_000,
+                    created_at: "2026-05-28T20:00:00Z".to_owned(),
+                },
+                "TENANT-other",
+                "PROJECT-other",
+            )?;
+        }
+        let router = ingest_router(state);
+
+        let bootstrap = router
+            .clone()
+            .oneshot(check_in_request(
+                INGEST_KEY,
+                r#"{"monitor":"worker-heartbeat","status":"alive","observed_at":"2026-05-28T20:00:00Z"}"#,
+            )?)
+            .await?;
+        assert_eq!(bootstrap.status(), StatusCode::CREATED);
+        assert_eq!(
+            json_body(bootstrap).await?["monitor_id"],
+            "MON-worker-heartbeat"
+        );
+
+        let other = router
+            .oneshot(check_in_request(
+                OTHER_INGEST_KEY,
+                r#"{"monitor":"worker-heartbeat","status":"alive","observed_at":"2026-05-28T20:01:00Z"}"#,
+            )?)
+            .await?;
+        assert_eq!(other.status(), StatusCode::CREATED);
+        assert_eq!(json_body(other).await?["monitor_id"], "MON-other-worker");
 
         Ok(())
     }
@@ -2830,6 +2981,87 @@ mod tests {
             vec![TargetProbeLifecycleCommand::Track {
                 target_id,
                 interval_ms: 30_000,
+            }]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn service_onboarding_inherits_admin_tenant_project_authority()
+    -> Result<(), Box<dyn Error>> {
+        let recorder = Arc::new(RecordingTargetControl::default());
+        let state = test_ingest_state()?.with_target_control(recorder.clone());
+        {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            seed_api_key_with_owner(
+                &mut store,
+                "KEY-other-admin",
+                OTHER_ADMIN_KEY,
+                "admin",
+                None,
+                "TENANT-other",
+                "PROJECT-other",
+            )?;
+        }
+        let router = ingest_router(state);
+
+        let response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/service-onboarding",
+                OTHER_ADMIN_KEY,
+                r#"{
+                    "service":"other-api",
+                    "url":"https://example.com/other-api/health",
+                    "environment":"production"
+                }"#,
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let created = json_body(response).await?;
+        let target_id = created["target"]["id"]
+            .as_str()
+            .ok_or("missing target id")?
+            .to_owned();
+        let key_id = created["api_key"]["id"]
+            .as_str()
+            .ok_or("missing key id")?
+            .to_owned();
+
+        let bootstrap_targets = router
+            .clone()
+            .oneshot(read_request(ADMIN_KEY, "/api/v1/targets")?)
+            .await?;
+        assert_eq!(json_body(bootstrap_targets).await?["targets"], json!([]));
+
+        let other_targets = router
+            .clone()
+            .oneshot(read_request(OTHER_ADMIN_KEY, "/api/v1/targets")?)
+            .await?;
+        let other_targets = json_body(other_targets).await?;
+        assert_eq!(other_targets["targets"][0]["id"], target_id);
+        assert_eq!(other_targets["targets"][0]["service"], "other-api");
+
+        let other_keys = router
+            .oneshot(read_request(OTHER_ADMIN_KEY, "/api/v1/keys")?)
+            .await?;
+        let other_keys = json_body(other_keys).await?;
+        let created_key = other_keys["keys"]
+            .as_array()
+            .and_then(|keys| keys.iter().find(|key| key["id"] == key_id))
+            .ok_or("missing service key")?;
+        assert_eq!(created_key["tenant_id"], "TENANT-other");
+        assert_eq!(created_key["project_id"], "PROJECT-other");
+        assert_eq!(created_key["service"], "other-api");
+
+        assert_eq!(
+            recorder.commands(),
+            vec![TargetProbeLifecycleCommand::Track {
+                target_id,
+                interval_ms: 60_000,
             }]
         );
 
@@ -3959,14 +4191,14 @@ mod tests {
         ));
         {
             let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
-            store.insert_webhook_subscription(WebhookSubscriptionInsert {
-                id: "WHK-inactive-test".to_owned(),
-                url: "https://example.com/inactive".to_owned(),
-                events: vec!["canary.ping".to_owned()],
-                secret: "inactive-secret".to_owned(),
-                active: false,
-                created_at: "2026-06-01T00:00:00Z".to_owned(),
-            })?;
+            store.insert_webhook_subscription(webhook_subscription_insert(
+                "WHK-inactive-test",
+                "https://example.com/inactive",
+                vec!["canary.ping".to_owned()],
+                "inactive-secret",
+                false,
+                "2026-06-01T00:00:00Z",
+            ))?;
         }
         let router = ingest_router(state);
 
@@ -4041,6 +4273,9 @@ mod tests {
         assert!(raw_key.starts_with("sk_live_"));
         assert_eq!(created["name"], "deploy");
         assert_eq!(created["scope"], "read-only");
+        assert_eq!(created["service"], Value::Null);
+        assert_eq!(created["tenant_id"], canary_store::BOOTSTRAP_TENANT_ID);
+        assert_eq!(created["project_id"], canary_store::BOOTSTRAP_PROJECT_ID);
         assert_eq!(
             created["key_prefix"],
             &raw_key[..canary_store::API_KEY_PREFIX_LEN]
@@ -4065,6 +4300,9 @@ mod tests {
             .ok_or("missing listed key")?;
         assert_eq!(listed_key["name"], "deploy");
         assert_eq!(listed_key["scope"], "read-only");
+        assert_eq!(listed_key["service"], Value::Null);
+        assert_eq!(listed_key["tenant_id"], canary_store::BOOTSTRAP_TENANT_ID);
+        assert_eq!(listed_key["project_id"], canary_store::BOOTSTRAP_PROJECT_ID);
         assert_eq!(
             listed_key["key_prefix"],
             &raw_key[..canary_store::API_KEY_PREFIX_LEN]
@@ -4079,6 +4317,38 @@ mod tests {
             .oneshot(read_request(&raw_key, "/api/v1/incidents")?)
             .await?;
         assert_eq!(read_with_created_key.status(), StatusCode::OK);
+
+        let bound_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/keys",
+                ADMIN_KEY,
+                r#"{"name":"linejam-browser","scope":"ingest-only","service":"linejam"}"#,
+            )?)
+            .await?;
+        assert_eq!(bound_response.status(), StatusCode::CREATED);
+        let bound = json_body(bound_response).await?;
+        assert_eq!(bound["scope"], "ingest-only");
+        assert_eq!(bound["service"], "linejam");
+
+        let invalid_bound_admin = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/keys",
+                ADMIN_KEY,
+                r#"{"scope":"admin","service":"linejam"}"#,
+            )?)
+            .await?;
+        assert_eq!(
+            invalid_bound_admin.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            json_body(invalid_bound_admin).await?["code"],
+            "validation_error"
+        );
 
         let revoke_response = router
             .clone()
@@ -4348,6 +4618,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_bound_read_key_cannot_query_another_service() -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let read_key = "sk_live_linejam_read_secret";
+        {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            store.insert_api_key(ApiKeyInsert {
+                id: "KEY-linejam-read".to_owned(),
+                name: "linejam read".to_owned(),
+                key_prefix: read_key.chars().take(API_KEY_PREFIX_LEN).collect(),
+                key_hash: bcrypt::hash(read_key, TEST_BCRYPT_COST)?,
+                created_at: "2026-05-28T20:00:00Z".to_owned(),
+                revoked_at: None,
+                scope: "read-only".to_owned(),
+                tenant_id: "TENANT-alpha".to_owned(),
+                project_id: "PROJECT-web".to_owned(),
+                service: Some("linejam".to_owned()),
+            })?;
+            store.commit_error_ingest(owned_error_ingest(
+                "TENANT-alpha",
+                "PROJECT-web",
+                "ERR-linejamread1",
+                "EVT-linejamread1",
+                "group-linejam-read",
+                "linejam",
+                "linejam visible token",
+            )?)?;
+        }
+        let router = ingest_router(state);
+
+        let forbidden = router
+            .clone()
+            .oneshot(read_request(read_key, "/api/v1/query?service=vanity")?)
+            .await?;
+        let status = forbidden.status();
+        let body = json_body(forbidden).await?;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "insufficient_scope");
+        assert_eq!(body["bound_service"], "linejam");
+        assert_eq!(body["requested_service"], "vanity");
+
+        let allowed = router
+            .oneshot(read_request(
+                read_key,
+                "/api/v1/query?service=linejam&window=30d",
+            )?)
+            .await?;
+        let status = allowed.status();
+        let body = json_body(allowed).await?;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["service"], "linejam");
+        assert_eq!(body["total_errors"], 1);
+        assert_eq!(body["groups"][0]["service"], "linejam");
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn error_query_accepts_group_by_error_class() -> Result<(), Box<dyn Error>> {
         let state = test_ingest_state()?;
         let router = ingest_router(state);
@@ -4591,38 +4920,38 @@ mod tests {
         let state = test_ingest_state()?;
         {
             let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
-            store.create_pending_webhook_delivery(WebhookDeliveryInsert {
-                delivery_id: "DLV-old".to_owned(),
-                webhook_id: "WHK-alpha".to_owned(),
-                event: "error.new_class".to_owned(),
-                now: "2026-04-02T10:00:00Z".to_owned(),
-            })?;
+            store.create_pending_webhook_delivery(webhook_delivery_insert(
+                "DLV-old",
+                "WHK-alpha",
+                "error.new_class",
+                "2026-04-02T10:00:00Z",
+            ))?;
             store.mark_webhook_delivery_attempt("DLV-old", "2026-04-02T10:00:01Z")?;
             store.mark_webhook_delivery_delivered("DLV-old", "2026-04-02T10:00:02Z")?;
             store.create_suppressed_webhook_delivery(
-                WebhookDeliveryInsert {
-                    delivery_id: "DLV-suppressed".to_owned(),
-                    webhook_id: "WHK-alpha".to_owned(),
-                    event: "error.new_class".to_owned(),
-                    now: "2026-04-02T10:05:00Z".to_owned(),
-                },
+                webhook_delivery_insert(
+                    "DLV-suppressed",
+                    "WHK-alpha",
+                    "error.new_class",
+                    "2026-04-02T10:05:00Z",
+                ),
                 "cooldown",
             )?;
             store.create_suppressed_webhook_delivery(
-                WebhookDeliveryInsert {
-                    delivery_id: "DLV-other".to_owned(),
-                    webhook_id: "WHK-beta".to_owned(),
-                    event: "incident.updated".to_owned(),
-                    now: "2026-04-02T10:10:00Z".to_owned(),
-                },
+                webhook_delivery_insert(
+                    "DLV-other",
+                    "WHK-beta",
+                    "incident.updated",
+                    "2026-04-02T10:10:00Z",
+                ),
                 "cooldown",
             )?;
-            store.create_pending_webhook_delivery(WebhookDeliveryInsert {
-                delivery_id: "DLV-pending".to_owned(),
-                webhook_id: "WHK-pending".to_owned(),
-                event: "error.new_class".to_owned(),
-                now: "2026-04-02T10:15:00Z".to_owned(),
-            })?;
+            store.create_pending_webhook_delivery(webhook_delivery_insert(
+                "DLV-pending",
+                "WHK-pending",
+                "error.new_class",
+                "2026-04-02T10:15:00Z",
+            ))?;
         }
         let router = ingest_router(state);
 
@@ -4882,12 +5211,12 @@ mod tests {
         let state = test_ingest_state()?;
         {
             let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
-            store.create_pending_webhook_delivery(WebhookDeliveryInsert {
-                delivery_id: "DLV-diagnostic-show".to_owned(),
-                webhook_id: "WHK-diagnostic".to_owned(),
-                event: "incident.updated".to_owned(),
-                now: "2026-04-02T10:00:00Z".to_owned(),
-            })?;
+            store.create_pending_webhook_delivery(webhook_delivery_insert(
+                "DLV-diagnostic-show",
+                "WHK-diagnostic",
+                "incident.updated",
+                "2026-04-02T10:00:00Z",
+            ))?;
             store.mark_webhook_delivery_attempt("DLV-diagnostic-show", "2026-04-02T10:00:01Z")?;
             store.mark_webhook_delivery_discarded(
                 "DLV-diagnostic-show",
@@ -5000,6 +5329,296 @@ mod tests {
         assert_eq!(body["error_summary"][0]["service"], "test-svc");
         assert_eq!(body["error_summary"][0]["total_count"], 1);
         assert_eq!(body["error_summary"][0]["unique_classes"], 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_routes_scope_health_status_and_webhook_deliveries_by_owner()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            seed_api_key_with_owner(
+                &mut store,
+                "KEY-other-read",
+                OTHER_READ_KEY,
+                "read-only",
+                None,
+                "TENANT-other",
+                "PROJECT-other",
+            )?;
+            let mut target = target_insert("other-api");
+            target.id = "TGT-other-api".to_owned();
+            store.insert_target_scoped(target, "TENANT-other", "PROJECT-other")?;
+            store.create_pending_webhook_delivery(webhook_delivery_insert(
+                "DLV-bootstrap",
+                "WHK-bootstrap",
+                "error.new_class",
+                "2026-04-02T10:00:00Z",
+            ))?;
+            store.create_pending_webhook_delivery(webhook_delivery_insert_with_owner(
+                "DLV-other-tenant",
+                "WHK-other",
+                "error.new_class",
+                "2026-04-02T10:01:00Z",
+                "TENANT-other",
+                "PROJECT-other",
+                Some("other-api"),
+            ))?;
+        }
+        let router = ingest_router(state);
+
+        let bootstrap_health = router
+            .clone()
+            .oneshot(read_request(READ_KEY, "/api/v1/health-status")?)
+            .await?;
+        assert_eq!(json_body(bootstrap_health).await?["targets"], json!([]));
+
+        let other_health = router
+            .clone()
+            .oneshot(read_request(OTHER_READ_KEY, "/api/v1/health-status")?)
+            .await?;
+        let other_health = json_body(other_health).await?;
+        assert_eq!(other_health["targets"][0]["id"], "TGT-other-api");
+        assert_eq!(other_health["targets"][0]["service"], "other-api");
+
+        let bootstrap_deliveries = router
+            .clone()
+            .oneshot(read_request(READ_KEY, "/api/v1/webhook-deliveries")?)
+            .await?;
+        let bootstrap_deliveries = json_body(bootstrap_deliveries).await?;
+        assert_eq!(bootstrap_deliveries["returned_count"], 1);
+        assert_eq!(
+            bootstrap_deliveries["deliveries"][0]["delivery_id"],
+            "DLV-bootstrap"
+        );
+
+        let other_deliveries = router
+            .clone()
+            .oneshot(read_request(OTHER_READ_KEY, "/api/v1/webhook-deliveries")?)
+            .await?;
+        let other_deliveries = json_body(other_deliveries).await?;
+        assert_eq!(other_deliveries["returned_count"], 1);
+        assert_eq!(
+            other_deliveries["deliveries"][0]["delivery_id"],
+            "DLV-other-tenant"
+        );
+
+        let hidden_delivery = router
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/webhook-deliveries/DLV-other-tenant",
+            )?)
+            .await?;
+        assert_eq!(hidden_delivery.status(), StatusCode::NOT_FOUND);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn service_bound_read_routes_hide_sibling_service_surfaces() -> Result<(), Box<dyn Error>>
+    {
+        const SERVICE_READ_KEY: &str = "sk_live_billing_read_secret";
+        let state = test_ingest_state()?;
+        {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            seed_read_api_key_for_service(
+                &mut store,
+                "KEY-billing-read",
+                SERVICE_READ_KEY,
+                "billing",
+            )?;
+            seed_target(&mut store, "billing")?;
+            seed_target(&mut store, "payments")?;
+            seed_monitor(&mut store, "billing")?;
+            seed_monitor(&mut store, "payments")?;
+            for service in ["billing", "payments"] {
+                store.commit_target_probe(TargetProbeCommit {
+                    target_id: format!("TGT-{service}"),
+                    state: "up".to_owned(),
+                    consecutive_failures: 0,
+                    consecutive_successes: 1,
+                    check_succeeded: true,
+                    check: TargetCheckObservation {
+                        status_code: Some(200),
+                        latency_ms: Some(42),
+                        result: "ok".to_owned(),
+                        tls_expires_at: None,
+                        error_detail: None,
+                        region: None,
+                    },
+                    now: server_time::current_rfc3339(),
+                    transition: None,
+                })?;
+            }
+            store.create_pending_webhook_delivery(webhook_delivery_insert_with_owner(
+                "DLV-billing",
+                "WHK-billing",
+                "error.new_class",
+                "2026-04-02T10:00:00Z",
+                canary_store::BOOTSTRAP_TENANT_ID,
+                canary_store::BOOTSTRAP_PROJECT_ID,
+                Some("billing"),
+            ))?;
+            store.create_pending_webhook_delivery(webhook_delivery_insert_with_owner(
+                "DLV-payments",
+                "WHK-payments",
+                "error.new_class",
+                "2026-04-02T10:01:00Z",
+                canary_store::BOOTSTRAP_TENANT_ID,
+                canary_store::BOOTSTRAP_PROJECT_ID,
+                Some("payments"),
+            ))?;
+            for service in ["billing", "payments"] {
+                store.create_annotation(AnnotationInsert {
+                    id: format!("ANN-{service}"),
+                    tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
+                    project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
+                    service: None,
+                    subject_type: "target".to_owned(),
+                    subject_id: format!("TGT-{service}"),
+                    agent: "codex".to_owned(),
+                    action: "triaged".to_owned(),
+                    metadata: Some(json!({"service": service})),
+                    created_at: "2026-04-02T10:02:00Z".to_owned(),
+                })?;
+            }
+        }
+        let router = ingest_router(state);
+
+        let health = router
+            .clone()
+            .oneshot(read_request(SERVICE_READ_KEY, "/api/v1/health-status")?)
+            .await?;
+        let health = json_body(health).await?;
+        assert_eq!(health["targets"].as_array().map(Vec::len), Some(1));
+        assert_eq!(health["targets"][0]["service"], "billing");
+        assert_eq!(health["monitors"].as_array().map(Vec::len), Some(1));
+        assert_eq!(health["monitors"][0]["service"], "billing");
+
+        let status = router
+            .clone()
+            .oneshot(read_request(SERVICE_READ_KEY, "/api/v1/status")?)
+            .await?;
+        let status = json_body(status).await?;
+        assert_eq!(status["targets"].as_array().map(Vec::len), Some(1));
+        assert_eq!(status["targets"][0]["id"], "TGT-billing");
+        assert_eq!(status["monitors"].as_array().map(Vec::len), Some(1));
+        assert_eq!(status["monitors"][0]["service"], "billing");
+
+        let billing_checks = router
+            .clone()
+            .oneshot(read_request(
+                SERVICE_READ_KEY,
+                "/api/v1/targets/TGT-billing/checks",
+            )?)
+            .await?;
+        let billing_checks = json_body(billing_checks).await?;
+        assert_eq!(billing_checks["checks"][0]["result"], "ok");
+
+        let payments_checks = router
+            .clone()
+            .oneshot(read_request(
+                SERVICE_READ_KEY,
+                "/api/v1/targets/TGT-payments/checks",
+            )?)
+            .await?;
+        let payments_checks = json_body(payments_checks).await?;
+        assert_eq!(payments_checks["checks"], json!([]));
+
+        let deliveries = router
+            .clone()
+            .oneshot(read_request(
+                SERVICE_READ_KEY,
+                "/api/v1/webhook-deliveries",
+            )?)
+            .await?;
+        let deliveries = json_body(deliveries).await?;
+        assert_eq!(deliveries["returned_count"], 1);
+        assert_eq!(deliveries["deliveries"][0]["delivery_id"], "DLV-billing");
+
+        let hidden_delivery = router
+            .clone()
+            .oneshot(read_request(
+                SERVICE_READ_KEY,
+                "/api/v1/webhook-deliveries/DLV-payments",
+            )?)
+            .await?;
+        assert_eq!(hidden_delivery.status(), StatusCode::NOT_FOUND);
+
+        let billing_annotations = router
+            .clone()
+            .oneshot(read_request(
+                SERVICE_READ_KEY,
+                "/api/v1/annotations?subject_type=target&subject_id=TGT-billing",
+            )?)
+            .await?;
+        let billing_annotations = json_body(billing_annotations).await?;
+        assert_eq!(
+            billing_annotations["annotations"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            billing_annotations["annotations"][0]["subject_id"],
+            "TGT-billing"
+        );
+
+        let hidden_annotations = router
+            .oneshot(read_request(
+                SERVICE_READ_KEY,
+                "/api/v1/annotations?subject_type=target&subject_id=TGT-payments",
+            )?)
+            .await?;
+        assert_eq!(hidden_annotations.status(), StatusCode::NOT_FOUND);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn service_bound_admin_key_is_rejected_even_if_persisted() -> Result<(), Box<dyn Error>> {
+        const SERVICE_ADMIN_KEY: &str = "sk_live_billing_admin_secret";
+        let state = test_ingest_state()?;
+        {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            seed_admin_api_key_for_service(
+                &mut store,
+                "KEY-billing-admin",
+                SERVICE_ADMIN_KEY,
+                "billing",
+            )?;
+        }
+
+        let router = ingest_router(state);
+
+        let response = router
+            .clone()
+            .oneshot(read_request(SERVICE_ADMIN_KEY, "/api/v1/targets")?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "insufficient_scope");
+        assert_eq!(body["bound_service"], "billing");
+        assert_eq!(body["requested_service"], "*");
+
+        let response = router
+            .clone()
+            .oneshot(read_request(
+                SERVICE_ADMIN_KEY,
+                "/api/v1/query?service=billing",
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = router
+            .oneshot(error_request(
+                SERVICE_ADMIN_KEY,
+                r#"{"service":"billing","error_class":"RuntimeError","message":"boom"}"#,
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
         Ok(())
     }
@@ -5210,6 +5829,174 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_routes_scope_query_report_and_error_detail_by_owner() -> Result<(), Box<dyn Error>>
+    {
+        let state = test_ingest_state()?;
+        let bootstrap_error = owned_error_ingest(
+            canary_store::BOOTSTRAP_TENANT_ID,
+            canary_store::BOOTSTRAP_PROJECT_ID,
+            "ERR-bootread1234",
+            "EVT-bootread1234",
+            "group-bootstrap-scope",
+            "shared-api",
+            "bootstrap visible token",
+        )?;
+        let other_error = owned_error_ingest(
+            "TENANT-other",
+            "PROJECT-other",
+            "ERR-otherread123",
+            "EVT-otherread123",
+            "group-other-scope",
+            "shared-api",
+            "other tenant token",
+        )?;
+        let other_error_id = other_error.ids.error_id.to_string();
+        {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            seed_api_key_with_owner(
+                &mut store,
+                "KEY-other-read",
+                OTHER_READ_KEY,
+                "read-only",
+                None,
+                "TENANT-other",
+                "PROJECT-other",
+            )?;
+            store.commit_error_ingest(bootstrap_error)?;
+            store.commit_error_ingest(other_error)?;
+        }
+        let router = ingest_router(state);
+
+        let bootstrap_query = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/query?service=shared-api&window=30d",
+            )?)
+            .await?;
+        let bootstrap_query = json_body(bootstrap_query).await?;
+        assert_eq!(
+            bootstrap_query["groups"][0]["group_hash"],
+            "group-bootstrap-scope"
+        );
+        assert_eq!(bootstrap_query["total_errors"], 1);
+
+        let other_query = router
+            .clone()
+            .oneshot(read_request(
+                OTHER_READ_KEY,
+                "/api/v1/query?service=shared-api&window=30d",
+            )?)
+            .await?;
+        let other_query = json_body(other_query).await?;
+        assert_eq!(other_query["groups"][0]["group_hash"], "group-other-scope");
+        assert_eq!(other_query["total_errors"], 1);
+
+        let hidden_error = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                &format!("/api/v1/errors/{other_error_id}"),
+            )?)
+            .await?;
+        assert_eq!(hidden_error.status(), StatusCode::NOT_FOUND);
+
+        let visible_error = router
+            .clone()
+            .oneshot(read_request(
+                OTHER_READ_KEY,
+                &format!("/api/v1/errors/{other_error_id}"),
+            )?)
+            .await?;
+        let visible_error = json_body(visible_error).await?;
+        assert_eq!(visible_error["group_hash"], "group-other-scope");
+        assert_eq!(visible_error["message"], "other tenant token");
+
+        let bootstrap_report = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/report?window=30d&q=other%20tenant%20token",
+            )?)
+            .await?;
+        let bootstrap_report = json_body(bootstrap_report).await?;
+        assert_eq!(
+            bootstrap_report["error_groups"][0]["group_hash"],
+            "group-bootstrap-scope"
+        );
+        assert_eq!(bootstrap_report["search_results"], json!([]));
+
+        let other_report = router
+            .oneshot(read_request(
+                OTHER_READ_KEY,
+                "/api/v1/report?window=30d&q=other%20tenant%20token",
+            )?)
+            .await?;
+        let other_report = json_body(other_report).await?;
+        assert_eq!(
+            other_report["error_groups"][0]["group_hash"],
+            "group-other-scope"
+        );
+        assert_eq!(other_report["search_results"][0]["id"], other_error_id);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn service_bound_read_key_filters_report_to_its_service() -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let read_key = "sk_live_report_bound_secret";
+        {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            store.insert_api_key(ApiKeyInsert {
+                id: "KEY-report-bound".to_owned(),
+                name: "report bound".to_owned(),
+                key_prefix: read_key.chars().take(API_KEY_PREFIX_LEN).collect(),
+                key_hash: bcrypt::hash(read_key, TEST_BCRYPT_COST)?,
+                created_at: "2026-05-28T20:00:00Z".to_owned(),
+                revoked_at: None,
+                scope: "read-only".to_owned(),
+                tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
+                project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
+                service: Some("linejam".to_owned()),
+            })?;
+        }
+        let router = ingest_router(state);
+
+        for service in ["linejam", "vanity"] {
+            let response = router
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/api/v1/errors",
+                    INGEST_KEY,
+                    &format!(
+                        r#"{{"service":"{service}","error_class":"TimeoutError","message":"timeout while reporting {service}"}}"#
+                    ),
+                )?)
+                .await?;
+            assert_eq!(response.status(), StatusCode::CREATED);
+        }
+
+        let response = router
+            .oneshot(read_request(
+                read_key,
+                "/api/v1/report?window=1h&q=timeout",
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["error_groups"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["error_groups"][0]["service"], "linejam");
+        assert_eq!(body["search_results"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["search_results"][0]["service"], "linejam");
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn report_defaults_window_to_1h_and_rejects_invalid_window() -> Result<(), Box<dyn Error>>
     {
         let state = test_ingest_state()?;
@@ -5334,12 +6121,12 @@ mod tests {
             let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
             seed_target(&mut store, "metrics-svc")?;
             seed_monitor(&mut store, "metrics-monitor")?;
-            store.create_pending_webhook_delivery(WebhookDeliveryInsert {
-                delivery_id: "DLV-metrics".to_owned(),
-                webhook_id: "WHK-metrics".to_owned(),
-                event: "error.new_class".to_owned(),
-                now: "2026-05-28T20:00:00Z".to_owned(),
-            })?;
+            store.create_pending_webhook_delivery(webhook_delivery_insert(
+                "DLV-metrics",
+                "WHK-metrics",
+                "error.new_class",
+                "2026-05-28T20:00:00Z",
+            ))?;
             store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
                 args: json!({"delivery_id": "DLV-metrics"}),
                 scheduled_at: "2026-05-28T20:00:00Z".to_owned(),
@@ -5639,6 +6426,9 @@ mod tests {
                         payload,
                         json!({
                             "event": "annotation.added",
+                            "tenant_id": canary_store::BOOTSTRAP_TENANT_ID,
+                            "project_id": canary_store::BOOTSTRAP_PROJECT_ID,
+                            "service": "api",
                             "annotation": {
                                 "id": alpha_body["id"],
                                 "subject_type": "target",
@@ -5695,6 +6485,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn annotation_routes_scope_subjects_and_rows_by_owner() -> Result<(), Box<dyn Error>> {
+        let sink = Arc::new(RecordingFailingSink::default());
+        let state = test_ingest_state_with_sink(sink.clone())?;
+        {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            seed_api_key_with_owner(
+                &mut store,
+                "KEY-other-admin",
+                OTHER_ADMIN_KEY,
+                "admin",
+                None,
+                "TENANT-other",
+                "PROJECT-other",
+            )?;
+            seed_api_key_with_owner(
+                &mut store,
+                "KEY-other-read",
+                OTHER_READ_KEY,
+                "read-only",
+                None,
+                "TENANT-other",
+                "PROJECT-other",
+            )?;
+            let mut target = target_insert("other-api");
+            target.id = "TGT-other-api".to_owned();
+            store.insert_target_scoped(target, "TENANT-other", "PROJECT-other")?;
+        }
+        let router = ingest_router(state);
+
+        let hidden_create = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/annotations",
+                ADMIN_KEY,
+                r#"{"subject_type":"target","subject_id":"TGT-other-api","agent":"bootstrap","action":"acknowledged"}"#,
+            )?)
+            .await?;
+        assert_eq!(hidden_create.status(), StatusCode::NOT_FOUND);
+
+        let created = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/annotations",
+                OTHER_ADMIN_KEY,
+                r#"{"subject_type":"target","subject_id":"TGT-other-api","agent":"other","action":"acknowledged"}"#,
+            )?)
+            .await?;
+        let created_status = created.status();
+        let created_body = json_body(created).await?;
+        assert_eq!(created_status, StatusCode::CREATED);
+        assert_eq!(created_body["subject_id"], "TGT-other-api");
+
+        let hidden_list = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/annotations?subject_type=target&subject_id=TGT-other-api",
+            )?)
+            .await?;
+        assert_eq!(hidden_list.status(), StatusCode::NOT_FOUND);
+
+        let visible_list = router
+            .clone()
+            .oneshot(read_request(
+                OTHER_READ_KEY,
+                "/api/v1/annotations?subject_type=target&subject_id=TGT-other-api",
+            )?)
+            .await?;
+        let visible_body = json_body(visible_list).await?;
+        assert_eq!(
+            visible_body["annotations"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(visible_body["annotations"][0]["agent"], "other");
+
+        let effects = sink.effects.lock().map_err(|_| "effect lock poisoned")?;
+        assert_eq!(effects.len(), 1);
+        let IngestEffect::EnqueueWebhook { payload_json, .. } = &effects[0] else {
+            return Err("expected annotation webhook".into());
+        };
+        let payload: Value = serde_json::from_str(payload_json)?;
+        assert_eq!(payload["tenant_id"], "TENANT-other");
+        assert_eq!(payload["project_id"], "PROJECT-other");
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn legacy_annotation_routes_and_errors_follow_phoenix_contract()
     -> Result<(), Box<dyn Error>> {
         let state = test_ingest_state()?;
@@ -5712,6 +6592,8 @@ mod tests {
             let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
             let id = canary_core::ids::IncidentId::generate().into_string();
             store.correlate_incident(IncidentCorrelation {
+                tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
+                project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
                 signal_type: "error_group".to_owned(),
                 signal_ref: group_hash,
                 service: "test-svc".to_owned(),
@@ -5903,6 +6785,8 @@ mod tests {
             let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
             let annotated_id = canary_core::ids::IncidentId::generate().into_string();
             store.correlate_incident(IncidentCorrelation {
+                tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
+                project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
                 signal_type: "error_group".to_owned(),
                 signal_ref: first_group,
                 service: "api".to_owned(),
@@ -5912,6 +6796,8 @@ mod tests {
             })?;
             let plain_id = canary_core::ids::IncidentId::generate().into_string();
             store.correlate_incident(IncidentCorrelation {
+                tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
+                project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
                 signal_type: "error_group".to_owned(),
                 signal_ref: second_group,
                 service: "web".to_owned(),
@@ -6139,6 +7025,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_bound_ingest_key_cannot_impersonate_another_service()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let raw_key = "sk_live_linejam_bound_secret";
+        {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            store.insert_api_key(ApiKeyInsert {
+                id: "KEY-linejam-bound".to_owned(),
+                name: "linejam browser ingest".to_owned(),
+                key_prefix: raw_key.chars().take(API_KEY_PREFIX_LEN).collect(),
+                key_hash: bcrypt::hash(raw_key, TEST_BCRYPT_COST)?,
+                created_at: "2026-05-28T20:00:00Z".to_owned(),
+                revoked_at: None,
+                scope: "ingest-only".to_owned(),
+                tenant_id: "TENANT-alpha".to_owned(),
+                project_id: "PROJECT-web".to_owned(),
+                service: Some("linejam".to_owned()),
+            })?;
+        }
+
+        let response = ingest_router(state.clone())
+            .oneshot(error_request(
+                raw_key,
+                r#"{"service":"vanity","error_class":"RuntimeError","message":"spoofed"}"#,
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "insufficient_scope");
+        assert_eq!(body["bound_service"], "linejam");
+        assert_eq!(body["requested_service"], "vanity");
+        assert_eq!(error_count(&state)?, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn error_ingest_wrong_scope_does_not_account_auth_fail() -> Result<(), Box<dyn Error>> {
         let state = test_ingest_state()?.with_auth_fail_identity(AuthFailIdentityConfig {
             trust_proxy_headers: true,
@@ -6346,6 +7271,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ingest_rate_limit_uses_durable_store_bucket_after_auth() -> Result<(), Box<dyn Error>>
+    {
+        let state = test_ingest_state()?;
+        {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            let now_ms = crate::server_time::current_unix_millis();
+            for offset in 0..100 {
+                assert_eq!(
+                    store.check_rate_limit("ingest", "KEY-ingest", 100, 60_000, now_ms + offset)?,
+                    canary_store::DurableRateLimitDecision::Allowed
+                );
+            }
+        }
+
+        let response = ingest_router(state)
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["code"], "rate_limited");
+        assert!(
+            body["retry_after"]
+                .as_u64()
+                .is_some_and(|retry_after| (1..=60).contains(&retry_after))
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn invalid_api_keys_are_silently_accounted_by_proxy_identity()
     -> Result<(), Box<dyn Error>> {
         let state = test_ingest_state()?.with_auth_fail_identity(AuthFailIdentityConfig {
@@ -6412,7 +7369,7 @@ mod tests {
                 .clone()
                 .oneshot(
                     Request::post("/api/v1/errors")
-                        .header("authorization", "Bearer sk_live_unknown_secret")
+                        .header("authorization", format!("Bearer {WRONG_INGEST_PREFIX_KEY}"))
                         .header("fly-client-ip", "203.0.113.9")
                         .header(CONTENT_TYPE, APPLICATION_JSON)
                         .body(Body::from(valid_error_body()))?,
@@ -6428,7 +7385,7 @@ mod tests {
         let response = router
             .oneshot(
                 Request::post("/api/v1/errors")
-                    .header("authorization", "Bearer sk_live_unknown_secret")
+                    .header("authorization", format!("Bearer {WRONG_INGEST_PREFIX_KEY}"))
                     .header("fly-client-ip", "203.0.113.9")
                     .header(CONTENT_TYPE, APPLICATION_JSON)
                     .body(Body::from(valid_error_body()))?,
@@ -6961,14 +7918,14 @@ mod tests {
         seed_api_key(&mut store, "KEY-ingest", INGEST_KEY, "ingest-only", None)?;
         seed_api_key(&mut store, "KEY-read", READ_KEY, "read-only", None)?;
         seed_monitor(&mut store, name)?;
-        store.insert_webhook_subscription(WebhookSubscriptionInsert {
-            id: "WHK-monitor".to_owned(),
-            url: "https://example.test/monitor".to_owned(),
-            events: vec![event.to_owned()],
-            secret: "test-webhook-secret".to_owned(),
-            active: true,
-            created_at: "2026-05-28T20:00:00Z".to_owned(),
-        })?;
+        store.insert_webhook_subscription(webhook_subscription_insert(
+            "WHK-monitor",
+            "https://example.test/monitor",
+            vec![event.to_owned()],
+            "test-webhook-secret",
+            true,
+            "2026-05-28T20:00:00Z",
+        ))?;
 
         Ok(IngestState::new_with_webhook_scheduler(
             store,
@@ -7011,14 +7968,14 @@ mod tests {
         seed_api_key(&mut store, "KEY-admin", ADMIN_KEY, "admin", None)?;
         seed_api_key(&mut store, "KEY-ingest", INGEST_KEY, "ingest-only", None)?;
         seed_api_key(&mut store, "KEY-read", READ_KEY, "read-only", None)?;
-        store.insert_webhook_subscription(WebhookSubscriptionInsert {
-            id: "WHK-test".to_owned(),
-            url: "https://example.test/hook".to_owned(),
-            events: vec!["error.new_class".to_owned()],
-            secret: "test-webhook-secret".to_owned(),
-            active: active_webhook,
-            created_at: "2026-05-28T20:00:00Z".to_owned(),
-        })?;
+        store.insert_webhook_subscription(webhook_subscription_insert(
+            "WHK-test",
+            "https://example.test/hook",
+            vec!["error.new_class".to_owned()],
+            "test-webhook-secret",
+            active_webhook,
+            "2026-05-28T20:00:00Z",
+        ))?;
 
         Ok(IngestState::new_with_webhook_scheduler(
             store,
@@ -7132,6 +8089,26 @@ mod tests {
         scope: &str,
         revoked_at: Option<&str>,
     ) -> Result<(), Box<dyn Error>> {
+        seed_api_key_with_owner(
+            store,
+            id,
+            raw_key,
+            scope,
+            revoked_at,
+            canary_store::BOOTSTRAP_TENANT_ID,
+            canary_store::BOOTSTRAP_PROJECT_ID,
+        )
+    }
+
+    fn seed_api_key_with_owner(
+        store: &mut Store,
+        id: &str,
+        raw_key: &str,
+        scope: &str,
+        revoked_at: Option<&str>,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> Result<(), Box<dyn Error>> {
         store.insert_api_key(ApiKeyInsert {
             id: id.to_owned(),
             name: format!("key {id}"),
@@ -7140,8 +8117,111 @@ mod tests {
             created_at: "2026-05-28T20:00:00Z".to_owned(),
             revoked_at: revoked_at.map(str::to_owned),
             scope: scope.to_owned(),
+            tenant_id: tenant_id.to_owned(),
+            project_id: project_id.to_owned(),
+            service: None,
         })?;
         Ok(())
+    }
+
+    fn seed_read_api_key_for_service(
+        store: &mut Store,
+        id: &str,
+        raw_key: &str,
+        service: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        store.insert_api_key(ApiKeyInsert {
+            id: id.to_owned(),
+            name: format!("key {id}"),
+            key_prefix: raw_key.chars().take(API_KEY_PREFIX_LEN).collect(),
+            key_hash: bcrypt::hash(raw_key, TEST_BCRYPT_COST)?,
+            created_at: "2026-05-28T20:00:00Z".to_owned(),
+            revoked_at: None,
+            scope: "read-only".to_owned(),
+            tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: Some(service.to_owned()),
+        })?;
+        Ok(())
+    }
+
+    fn seed_admin_api_key_for_service(
+        store: &mut Store,
+        id: &str,
+        raw_key: &str,
+        service: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        store.insert_api_key(ApiKeyInsert {
+            id: id.to_owned(),
+            name: format!("key {id}"),
+            key_prefix: raw_key.chars().take(API_KEY_PREFIX_LEN).collect(),
+            key_hash: bcrypt::hash(raw_key, TEST_BCRYPT_COST)?,
+            created_at: "2026-05-28T20:00:00Z".to_owned(),
+            revoked_at: None,
+            scope: "admin".to_owned(),
+            tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: Some(service.to_owned()),
+        })?;
+        Ok(())
+    }
+
+    fn webhook_subscription_insert(
+        id: &str,
+        url: &str,
+        events: Vec<String>,
+        secret: &str,
+        active: bool,
+        created_at: &str,
+    ) -> WebhookSubscriptionInsert {
+        WebhookSubscriptionInsert {
+            id: id.to_owned(),
+            tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: None,
+            url: url.to_owned(),
+            events,
+            secret: secret.to_owned(),
+            active,
+            created_at: created_at.to_owned(),
+        }
+    }
+
+    fn webhook_delivery_insert(
+        delivery_id: &str,
+        webhook_id: &str,
+        event: &str,
+        now: &str,
+    ) -> WebhookDeliveryInsert {
+        webhook_delivery_insert_with_owner(
+            delivery_id,
+            webhook_id,
+            event,
+            now,
+            canary_store::BOOTSTRAP_TENANT_ID,
+            canary_store::BOOTSTRAP_PROJECT_ID,
+            None,
+        )
+    }
+
+    fn webhook_delivery_insert_with_owner(
+        delivery_id: &str,
+        webhook_id: &str,
+        event: &str,
+        now: &str,
+        tenant_id: &str,
+        project_id: &str,
+        service: Option<&str>,
+    ) -> WebhookDeliveryInsert {
+        WebhookDeliveryInsert {
+            delivery_id: delivery_id.to_owned(),
+            webhook_id: webhook_id.to_owned(),
+            tenant_id: tenant_id.to_owned(),
+            project_id: project_id.to_owned(),
+            service: service.map(str::to_owned),
+            event: event.to_owned(),
+            now: now.to_owned(),
+        }
     }
 
     fn seed_monitor(store: &mut Store, name: &str) -> Result<(), Box<dyn Error>> {
@@ -7158,7 +8238,12 @@ mod tests {
     }
 
     fn seed_target(store: &mut Store, service: &str) -> Result<(), Box<dyn Error>> {
-        store.insert_target(TargetInsert {
+        store.insert_target(target_insert(service))?;
+        Ok(())
+    }
+
+    fn target_insert(service: &str) -> TargetInsert {
+        TargetInsert {
             id: format!("TGT-{service}"),
             url: format!("https://example.com/{service}/health"),
             name: service.to_owned(),
@@ -7174,8 +8259,7 @@ mod tests {
             up_after: 1,
             active: true,
             created_at: "2026-05-28T20:00:00Z".to_owned(),
-        })?;
-        Ok(())
+        }
     }
 
     fn test_error_ingest(index: usize, created_at: &str) -> ErrorIngest {
@@ -7185,6 +8269,8 @@ mod tests {
                 event_id: EventId::generate(),
             },
             payload: ErrorIngestPayload {
+                tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
+                project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
                 service: "retention".to_owned(),
                 error_class: "RuntimeError".to_owned(),
                 message: "old".to_owned(),
@@ -7206,6 +8292,44 @@ mod tests {
         }
     }
 
+    fn owned_error_ingest(
+        tenant_id: &str,
+        project_id: &str,
+        error_id: &str,
+        event_id: &str,
+        group_hash: &str,
+        service: &str,
+        message: &str,
+    ) -> Result<ErrorIngest, Box<dyn Error>> {
+        Ok(ErrorIngest {
+            ids: ErrorIngestIds {
+                error_id: error_id.parse()?,
+                event_id: event_id.parse()?,
+            },
+            payload: ErrorIngestPayload {
+                tenant_id: tenant_id.to_owned(),
+                project_id: project_id.to_owned(),
+                service: service.to_owned(),
+                error_class: "RuntimeError".to_owned(),
+                message: message.to_owned(),
+                message_template: message.to_owned(),
+                stack_trace: None,
+                context_json: None,
+                severity: "error".to_owned(),
+                environment: "production".to_owned(),
+                group_hash: group_hash.to_owned(),
+                fingerprint_json: None,
+                region: None,
+                classification: Classification {
+                    category: Category::Application,
+                    persistence: Persistence::Persistent,
+                    component: Component::Runtime,
+                },
+                created_at: "2026-05-28T20:00:00Z".to_owned(),
+            },
+        })
+    }
+
     fn valid_error_body() -> &'static str {
         r#"{"service":"test-svc","error_class":"RuntimeError","message":"something went wrong"}"#
     }
@@ -7224,14 +8348,14 @@ mod tests {
     ) -> Result<Arc<Mutex<Store>>, Box<dyn Error>> {
         let mut store = Store::open_in_memory()?;
         store.migrate()?;
-        store.insert_webhook_subscription(WebhookSubscriptionInsert {
-            id: "WHK-test".to_owned(),
-            url: url.to_owned(),
-            events: vec!["error.new_class".to_owned()],
-            secret: "test-webhook-secret".to_owned(),
-            active: active_webhook,
-            created_at: "2026-05-28T20:00:00Z".to_owned(),
-        })?;
+        store.insert_webhook_subscription(webhook_subscription_insert(
+            "WHK-test",
+            url,
+            vec!["error.new_class".to_owned()],
+            "test-webhook-secret",
+            active_webhook,
+            "2026-05-28T20:00:00Z",
+        ))?;
 
         Ok(Arc::new(Mutex::new(store)))
     }
@@ -7248,6 +8372,7 @@ mod tests {
             legacy_job_id: None,
             attempt,
             max_attempts,
+            attempt_timestamp: None,
         }
     }
 
@@ -7585,6 +8710,15 @@ mod tests {
                 .map_err(|_| "scheduler lock poisoned".to_owned())?
                 .push(job.clone());
             Ok(())
+        }
+    }
+
+    impl RecordingScheduler {
+        fn jobs(&self) -> Result<Vec<WebhookJob>, String> {
+            self.jobs
+                .lock()
+                .map_err(|_| "scheduler lock poisoned".to_owned())
+                .map(|jobs| jobs.clone())
         }
     }
 

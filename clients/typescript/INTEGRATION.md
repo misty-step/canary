@@ -26,11 +26,12 @@ In `.env.local` and your deployment platform:
 CANARY_API_KEY=sk_live_...
 CANARY_ENDPOINT=https://canary-obs.fly.dev
 NEXT_PUBLIC_CANARY_ENDPOINT=https://canary-obs.fly.dev
-NEXT_PUBLIC_CANARY_API_KEY=sk_live_...
 ```
 
-`CANARY_API_KEY` is for server-side. `NEXT_PUBLIC_` variants are for client-side
-error boundaries (write-only key — safe to expose in browser bundles).
+`CANARY_API_KEY` is for server-side ingest. Do not expose raw Canary API keys in
+browser bundles. Browser-side ingest should use service-bound public DSNs once
+that surface lands; until then, route client errors through an application-owned
+server endpoint or accept the risk explicitly with a constrained ingest-only key.
 
 ## Step 3: Initialize in `instrumentation.ts` (server-side)
 
@@ -44,12 +45,13 @@ export function register() {
     apiKey: process.env.CANARY_API_KEY ?? "",
     service: "my-app",
     environment: process.env.NODE_ENV ?? "production",
-    scrubPii: true,
   });
 }
 ```
 
 This captures all server-side errors automatically via `onRequestError`.
+The SDK scrubs common PII by default; Canary also applies server-side redaction
+before persistence.
 
 ## Step 4: Client-side error boundaries
 
@@ -67,8 +69,8 @@ import { initCanary } from "@canary-obs/sdk";
 export function CanaryProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     initCanary({
-      endpoint: process.env.NEXT_PUBLIC_CANARY_ENDPOINT ?? "",
-      apiKey: process.env.NEXT_PUBLIC_CANARY_API_KEY ?? "",
+      endpoint: "/api/canary",
+      apiKey: "relay", // Non-secret sentinel; the relay owns the real key.
       service: "my-app",
     });
   }, []);
@@ -77,6 +79,42 @@ export function CanaryProvider({ children }: { children: React.ReactNode }) {
 ```
 
 Wrap your root layout with `<CanaryProvider>`.
+
+### `app/api/canary/api/v1/errors/route.ts`
+
+```typescript
+export async function POST(request: Request) {
+  const payload = await request.json();
+  const { service: _service, environment: _environment, ...event } = payload;
+
+  const response = await fetch(
+    `${process.env.CANARY_ENDPOINT ?? "https://canary-obs.fly.dev"}/api/v1/errors`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.CANARY_API_KEY ?? ""}`,
+      },
+      body: JSON.stringify({
+        ...event,
+        service: "my-app",
+        environment: process.env.NODE_ENV ?? "production",
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    return Response.json({ ok: false }, { status: 502 });
+  }
+
+  return Response.json(await response.json(), { status: 202 });
+}
+```
+
+The relay path mirrors the SDK ingest suffix, so `endpoint: "/api/canary"`
+causes browser captures to post to `/api/canary/api/v1/errors`. Keep the raw
+Canary API key in server-only environment variables, and apply the same body
+size, origin, and rate-limit controls you use for other public write endpoints.
 
 ### `app/global-error.tsx`
 

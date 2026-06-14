@@ -5,6 +5,10 @@ use crate::Result;
 
 /// Number of leading characters stored by Phoenix as `api_keys.key_prefix`.
 pub const API_KEY_PREFIX_LEN: usize = 12;
+/// Tenant assigned to pre-multitenant rows during the ownership migration.
+pub const BOOTSTRAP_TENANT_ID: &str = "TENANT-bootstrap";
+/// Project assigned to pre-multitenant rows during the ownership migration.
+pub const BOOTSTRAP_PROJECT_ID: &str = "PROJECT-bootstrap";
 
 const DUMMY_BCRYPT_HASH: &str = "$2b$12$C6UzMDM.H6dfI/f/IKcEeO6H9G7Qe0eeDVF2.oTu.2R4z.0/t6j2K";
 
@@ -25,6 +29,12 @@ pub struct ApiKeyInsert {
     pub revoked_at: Option<String>,
     /// Phoenix wire-value scope, such as `admin` or `ingest-only`.
     pub scope: String,
+    /// Tenant this key can operate within.
+    pub tenant_id: String,
+    /// Project this key can operate within.
+    pub project_id: String,
+    /// Optional service this key is bound to for constrained ingest/read use.
+    pub service: Option<String>,
 }
 
 /// Active API key whose bcrypt hash matched the supplied raw bearer token.
@@ -36,6 +46,12 @@ pub struct VerifiedApiKey {
     pub name: String,
     /// Phoenix wire-value scope, such as `admin` or `ingest-only`.
     pub scope: String,
+    /// Tenant this key can operate within.
+    pub tenant_id: String,
+    /// Project this key can operate within.
+    pub project_id: String,
+    /// Optional service this key is bound to for constrained ingest/read use.
+    pub service: Option<String>,
 }
 
 /// Admin-visible API key metadata. The raw key and hash are never exposed here.
@@ -53,13 +69,20 @@ pub struct ApiKeyRecord {
     pub created_at: String,
     /// ISO8601 revocation timestamp, when inactive.
     pub revoked_at: Option<String>,
+    /// Tenant this key can operate within.
+    pub tenant_id: String,
+    /// Project this key can operate within.
+    pub project_id: String,
+    /// Optional service this key is bound to for constrained ingest/read use.
+    pub service: Option<String>,
 }
 
 pub(crate) fn insert(connection: &Connection, key: ApiKeyInsert) -> Result<()> {
     connection.execute(
         "INSERT INTO api_keys (
-            id, name, key_prefix, key_hash, created_at, revoked_at, scope
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            id, name, key_prefix, key_hash, created_at, revoked_at, scope,
+            tenant_id, project_id, service
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             key.id,
             key.name,
@@ -67,7 +90,10 @@ pub(crate) fn insert(connection: &Connection, key: ApiKeyInsert) -> Result<()> {
             key.key_hash,
             key.created_at,
             key.revoked_at,
-            key.scope
+            key.scope,
+            key.tenant_id,
+            key.project_id,
+            key.service
         ],
     )?;
     Ok(())
@@ -75,7 +101,8 @@ pub(crate) fn insert(connection: &Connection, key: ApiKeyInsert) -> Result<()> {
 
 pub(crate) fn list(connection: &Connection) -> Result<Vec<ApiKeyRecord>> {
     let mut statement = connection.prepare(
-        "SELECT id, name, scope, key_prefix, created_at, revoked_at
+        "SELECT id, name, scope, key_prefix, created_at, revoked_at,
+                tenant_id, project_id, service
          FROM api_keys
          ORDER BY created_at DESC",
     )?;
@@ -88,6 +115,40 @@ pub(crate) fn list(connection: &Connection) -> Result<Vec<ApiKeyRecord>> {
                 key_prefix: row.get(3)?,
                 created_at: row.get(4)?,
                 revoked_at: row.get(5)?,
+                tenant_id: row.get(6)?,
+                project_id: row.get(7)?,
+                service: row.get(8)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(keys)
+}
+
+pub(crate) fn list_scoped(
+    connection: &Connection,
+    tenant_id: &str,
+    project_id: &str,
+) -> Result<Vec<ApiKeyRecord>> {
+    let mut statement = connection.prepare(
+        "SELECT id, name, scope, key_prefix, created_at, revoked_at,
+                tenant_id, project_id, service
+         FROM api_keys
+         WHERE tenant_id = ?1 AND project_id = ?2
+         ORDER BY created_at DESC",
+    )?;
+    let keys = statement
+        .query_map(params![tenant_id, project_id], |row| {
+            Ok(ApiKeyRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                scope: row.get(2)?,
+                key_prefix: row.get(3)?,
+                created_at: row.get(4)?,
+                revoked_at: row.get(5)?,
+                tenant_id: row.get(6)?,
+                project_id: row.get(7)?,
+                service: row.get(8)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -101,6 +162,22 @@ pub(crate) fn revoke(connection: &Connection, key_id: &str, revoked_at: &str) ->
          SET revoked_at = ?2
          WHERE id = ?1",
         params![key_id, revoked_at],
+    )?;
+    Ok(changed > 0)
+}
+
+pub(crate) fn revoke_scoped(
+    connection: &Connection,
+    key_id: &str,
+    revoked_at: &str,
+    tenant_id: &str,
+    project_id: &str,
+) -> Result<bool> {
+    let changed = connection.execute(
+        "UPDATE api_keys
+         SET revoked_at = ?2
+         WHERE id = ?1 AND tenant_id = ?3 AND project_id = ?4 AND revoked_at IS NULL",
+        params![key_id, revoked_at, tenant_id, project_id],
     )?;
     Ok(changed > 0)
 }
@@ -120,6 +197,9 @@ pub(crate) fn verify_key(connection: &Connection, raw_key: &str) -> Result<Optio
                 id: candidate.id,
                 name: candidate.name,
                 scope: candidate.scope,
+                tenant_id: candidate.tenant_id,
+                project_id: candidate.project_id,
+                service: candidate.service,
             }));
         }
     }
@@ -146,7 +226,7 @@ pub(crate) fn key_prefix(raw_key: &str) -> String {
 
 fn active_candidates(connection: &Connection, key_prefix: &str) -> Result<Vec<ApiKeyCandidate>> {
     let mut statement = connection.prepare(
-        "SELECT id, name, scope, key_hash
+        "SELECT id, name, scope, key_hash, tenant_id, project_id, service
          FROM api_keys
          WHERE key_prefix = ?1 AND revoked_at IS NULL
          ORDER BY created_at ASC, id ASC",
@@ -158,6 +238,9 @@ fn active_candidates(connection: &Connection, key_prefix: &str) -> Result<Vec<Ap
                 name: row.get(1)?,
                 scope: row.get(2)?,
                 key_hash: row.get(3)?,
+                tenant_id: row.get(4)?,
+                project_id: row.get(5)?,
+                service: row.get(6)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -170,4 +253,7 @@ struct ApiKeyCandidate {
     name: String,
     scope: String,
     key_hash: String,
+    tenant_id: String,
+    project_id: String,
+    service: Option<String>,
 }

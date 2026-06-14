@@ -6,7 +6,7 @@
 use canary_core::{ids::ApiKeyId, secrets};
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::{ApiKeyInsert, Result, api_keys};
+use crate::{ApiKeyInsert, BOOTSTRAP_PROJECT_ID, BOOTSTRAP_TENANT_ID, Result, api_keys};
 
 const INITIAL_CONFIG_SEED: &str = "initial_config_v1";
 
@@ -40,6 +40,9 @@ pub(crate) fn apply_initial_seed(
             created_at: applied_at.to_owned(),
             revoked_at: None,
             scope: "admin".to_owned(),
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: None,
         },
     )?;
     transaction.execute(

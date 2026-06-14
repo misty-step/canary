@@ -23,6 +23,10 @@ const MAX_INCIDENT_TIMELINE_EVENTS: usize = 5;
 /// Optional filters for service error queries.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServiceQueryOptions {
+    /// Tenant namespace for read isolation.
+    pub tenant_id: Option<String>,
+    /// Project namespace for read isolation.
+    pub project_id: Option<String>,
     /// Optional pagination cursor.
     pub cursor: Option<String>,
     /// Optional annotation action that must exist for the group.
@@ -34,6 +38,10 @@ pub struct ServiceQueryOptions {
 /// Optional filters for active incident queries.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IncidentListOptions {
+    /// Tenant namespace for read isolation.
+    pub tenant_id: Option<String>,
+    /// Project namespace for read isolation.
+    pub project_id: Option<String>,
     /// Optional annotation action that must exist for the incident.
     pub with_annotation: Option<String>,
     /// Optional annotation action that must not exist for the incident.
@@ -144,6 +152,10 @@ pub type TimelineQueryResult<T> = std::result::Result<T, TimelineQueryError>;
 /// Optional filters for timeline queries.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TimelineQueryOptions {
+    /// Tenant namespace for read isolation.
+    pub tenant_id: Option<String>,
+    /// Project namespace for read isolation.
+    pub project_id: Option<String>,
     /// Optional service filter. Empty strings are treated as absent.
     pub service: Option<String>,
     /// Optional limit. Defaults to Phoenix's 50-row page size.
@@ -242,15 +254,38 @@ pub(crate) fn errors_by_class(connection: &Connection, window: &str) -> QueryRes
     errors_by_class_at(connection, window, OffsetDateTime::now_utc())
 }
 
+pub(crate) fn errors_by_class_scoped(
+    connection: &Connection,
+    window: &str,
+    tenant_id: &str,
+    project_id: &str,
+) -> QueryResult<ErrorsByClass> {
+    errors_by_class_at_scoped(
+        connection,
+        window,
+        OffsetDateTime::now_utc(),
+        Some((tenant_id, project_id)),
+    )
+}
+
 pub(crate) fn errors_by_class_at(
     connection: &Connection,
     window: &str,
     now: OffsetDateTime,
 ) -> QueryResult<ErrorsByClass> {
+    errors_by_class_at_scoped(connection, window, now, None)
+}
+
+fn errors_by_class_at_scoped(
+    connection: &Connection,
+    window: &str,
+    now: OffsetDateTime,
+    owner: Option<(&str, &str)>,
+) -> QueryResult<ErrorsByClass> {
     let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
     let cutoff = window.cutoff_at(now);
-    let groups = error_class_aggregates(connection, &cutoff)?;
-    let (total_errors, total_error_classes) = error_class_totals(connection, &cutoff)?;
+    let groups = error_class_aggregates(connection, &cutoff, owner)?;
+    let (total_errors, total_error_classes) = error_class_totals(connection, &cutoff, owner)?;
 
     Ok(errors_by_class_response(
         window,
@@ -267,29 +302,70 @@ pub(crate) fn error_summary(
     error_summary_at(connection, window, OffsetDateTime::now_utc())
 }
 
+pub(crate) fn error_summary_scoped(
+    connection: &Connection,
+    window: &str,
+    tenant_id: &str,
+    project_id: &str,
+) -> QueryResult<Vec<ErrorSummaryItem>> {
+    error_summary_at_scoped(
+        connection,
+        window,
+        OffsetDateTime::now_utc(),
+        Some((tenant_id, project_id)),
+    )
+}
+
 pub(crate) fn error_summary_at(
     connection: &Connection,
     window: &str,
     now: OffsetDateTime,
 ) -> QueryResult<Vec<ErrorSummaryItem>> {
+    error_summary_at_scoped(connection, window, now, None)
+}
+
+fn error_summary_at_scoped(
+    connection: &Connection,
+    window: &str,
+    now: OffsetDateTime,
+    owner: Option<(&str, &str)>,
+) -> QueryResult<Vec<ErrorSummaryItem>> {
     let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
     let cutoff = window.cutoff_at(now);
-    let mut statement = connection.prepare(
+    let owner_clause = owner_clause("error_groups", 2);
+    let sql = if owner.is_some() {
+        format!(
+            "SELECT service, SUM(total_count), COUNT(group_hash)
+             FROM error_groups
+             WHERE last_seen_at >= ?1 AND status = 'active'
+             {owner_clause}
+             GROUP BY service
+             ORDER BY SUM(total_count) DESC"
+        )
+    } else {
         "SELECT service, SUM(total_count), COUNT(group_hash)
          FROM error_groups
          WHERE last_seen_at >= ?1 AND status = 'active'
          GROUP BY service
-         ORDER BY SUM(total_count) DESC",
-    )?;
-    let rows = statement.query_map([cutoff], |row| {
-        Ok(ErrorSummaryItem {
-            service: row.get(0)?,
-            total_count: row.get(1)?,
-            unique_classes: row.get(2)?,
-        })
-    })?;
+         ORDER BY SUM(total_count) DESC"
+            .to_owned()
+    };
+    let mut statement = connection.prepare(&sql)?;
+    let rows = if let Some((tenant_id, project_id)) = owner {
+        statement.query_map(params![cutoff, tenant_id, project_id], error_summary_row)?
+    } else {
+        statement.query_map(params![cutoff], error_summary_row)?
+    };
     let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+fn error_summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ErrorSummaryItem> {
+    Ok(ErrorSummaryItem {
+        service: row.get(0)?,
+        total_count: row.get(1)?,
+        unique_classes: row.get(2)?,
+    })
 }
 
 pub(crate) fn report_error_groups(
@@ -299,14 +375,60 @@ pub(crate) fn report_error_groups(
     report_error_groups_at(connection, window, OffsetDateTime::now_utc())
 }
 
+pub(crate) fn report_error_groups_scoped(
+    connection: &Connection,
+    window: &str,
+    tenant_id: &str,
+    project_id: &str,
+) -> QueryResult<Vec<ErrorGroupSummary>> {
+    report_error_groups_at_scoped(
+        connection,
+        window,
+        OffsetDateTime::now_utc(),
+        Some((tenant_id, project_id)),
+    )
+}
+
 pub(crate) fn report_error_groups_at(
     connection: &Connection,
     window: &str,
     now: OffsetDateTime,
 ) -> QueryResult<Vec<ErrorGroupSummary>> {
+    report_error_groups_at_scoped(connection, window, now, None)
+}
+
+fn report_error_groups_at_scoped(
+    connection: &Connection,
+    window: &str,
+    now: OffsetDateTime,
+    owner: Option<(&str, &str)>,
+) -> QueryResult<Vec<ErrorGroupSummary>> {
     let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
     let cutoff = window.cutoff_at(now);
-    let mut statement = connection.prepare(
+    let owner_clause = owner_clause("g", 2);
+    let sql = if owner.is_some() {
+        format!(
+            "SELECT
+                g.group_hash,
+                g.error_class,
+                g.service,
+                g.total_count,
+                g.first_seen_at,
+                g.last_seen_at,
+                g.message_template,
+                g.severity,
+                g.status,
+                e.classification_category,
+                e.classification_persistence,
+                e.classification_component
+             FROM error_groups g
+             LEFT JOIN errors e ON e.id = g.last_error_id
+             WHERE g.last_seen_at >= ?1 AND g.status = 'active'
+             {owner_clause}
+             ORDER BY g.total_count DESC, g.service ASC, g.error_class ASC
+             LIMIT 50"
+        )
+    } else {
         "SELECT
             g.group_hash,
             g.error_class,
@@ -324,9 +446,17 @@ pub(crate) fn report_error_groups_at(
          LEFT JOIN errors e ON e.id = g.last_error_id
          WHERE g.last_seen_at >= ?1 AND g.status = 'active'
          ORDER BY g.total_count DESC, g.service ASC, g.error_class ASC
-         LIMIT 50",
-    )?;
-    groups_from_rows(statement.query_map([cutoff], group_from_row)?)
+         LIMIT 50"
+            .to_owned()
+    };
+    let mut statement = connection.prepare(&sql)?;
+    if let Some((tenant_id, project_id)) = owner {
+        groups_from_rows(
+            statement.query_map(params![cutoff, tenant_id, project_id], group_from_row)?,
+        )
+    } else {
+        groups_from_rows(statement.query_map(params![cutoff], group_from_row)?)
+    }
 }
 
 pub(crate) fn recent_transitions(
@@ -336,14 +466,54 @@ pub(crate) fn recent_transitions(
     recent_transitions_at(connection, window, OffsetDateTime::now_utc())
 }
 
+pub(crate) fn recent_transitions_scoped(
+    connection: &Connection,
+    window: &str,
+    tenant_id: &str,
+    project_id: &str,
+) -> QueryResult<Vec<RecentTransition>> {
+    recent_transitions_at_scoped(
+        connection,
+        window,
+        OffsetDateTime::now_utc(),
+        Some((tenant_id, project_id)),
+    )
+}
+
 pub(crate) fn recent_transitions_at(
     connection: &Connection,
     window: &str,
     now: OffsetDateTime,
 ) -> QueryResult<Vec<RecentTransition>> {
+    recent_transitions_at_scoped(connection, window, now, None)
+}
+
+fn recent_transitions_at_scoped(
+    connection: &Connection,
+    window: &str,
+    now: OffsetDateTime,
+    owner: Option<(&str, &str)>,
+) -> QueryResult<Vec<RecentTransition>> {
     let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
     let cutoff = window.cutoff_at(now);
-    let mut statement = connection.prepare(
+    let target_owner_clause = owner_clause("t", 2);
+    let monitor_owner_clause = owner_clause("m", 2);
+    let sql = if owner.is_some() {
+        format!(
+            "SELECT 'target', t.id, t.name, COALESCE(NULLIF(t.service, ''), t.name), s.state, s.last_transition_at
+             FROM targets t
+             JOIN target_state s ON s.target_id = t.id
+             WHERE s.last_transition_at >= ?1
+             {target_owner_clause}
+             UNION ALL
+             SELECT 'monitor', m.id, m.name, COALESCE(NULLIF(m.service, ''), m.name), s.state, s.last_transition_at
+             FROM monitors m
+             JOIN monitor_state s ON s.monitor_id = m.id
+             WHERE s.last_transition_at >= ?1
+             {monitor_owner_clause}
+             ORDER BY 6 DESC, 1 DESC, 3 DESC"
+        )
+    } else {
         "SELECT 'target', t.id, t.name, COALESCE(NULLIF(t.service, ''), t.name), s.state, s.last_transition_at
          FROM targets t
          JOIN target_state s ON s.target_id = t.id
@@ -353,19 +523,30 @@ pub(crate) fn recent_transitions_at(
          FROM monitors m
          JOIN monitor_state s ON s.monitor_id = m.id
          WHERE s.last_transition_at >= ?1
-         ORDER BY 6 DESC, 1 DESC, 3 DESC",
-    )?;
-    let rows = statement.query_map([cutoff], |row| {
-        Ok(RecentTransition {
-            entity_type: row.get(0)?,
-            entity_ref: row.get(1)?,
-            name: row.get(2)?,
-            service: row.get(3)?,
-            state: row.get(4)?,
-            transitioned_at: row.get(5)?,
-        })
-    })?;
+         ORDER BY 6 DESC, 1 DESC, 3 DESC"
+            .to_owned()
+    };
+    let mut statement = connection.prepare(&sql)?;
+    let rows = if let Some((tenant_id, project_id)) = owner {
+        statement.query_map(
+            params![cutoff, tenant_id, project_id],
+            recent_transition_row,
+        )?
+    } else {
+        statement.query_map(params![cutoff], recent_transition_row)?
+    };
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn recent_transition_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecentTransition> {
+    Ok(RecentTransition {
+        entity_type: row.get(0)?,
+        entity_ref: row.get(1)?,
+        name: row.get(2)?,
+        service: row.get(3)?,
+        state: row.get(4)?,
+        transitioned_at: row.get(5)?,
+    })
 }
 
 pub(crate) fn search_errors(
@@ -376,11 +557,37 @@ pub(crate) fn search_errors(
     search_errors_at(connection, query, window, OffsetDateTime::now_utc())
 }
 
+pub(crate) fn search_errors_scoped(
+    connection: &Connection,
+    query: &str,
+    window: &str,
+    tenant_id: &str,
+    project_id: &str,
+) -> QueryResult<Vec<SearchResult>> {
+    search_errors_at_scoped(
+        connection,
+        query,
+        window,
+        OffsetDateTime::now_utc(),
+        Some((tenant_id, project_id)),
+    )
+}
+
 pub(crate) fn search_errors_at(
     connection: &Connection,
     query: &str,
     window: &str,
     now: OffsetDateTime,
+) -> QueryResult<Vec<SearchResult>> {
+    search_errors_at_scoped(connection, query, window, now, None)
+}
+
+fn search_errors_at_scoped(
+    connection: &Connection,
+    query: &str,
+    window: &str,
+    now: OffsetDateTime,
+    owner: Option<(&str, &str)>,
 ) -> QueryResult<Vec<SearchResult>> {
     let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
     let trimmed = query.trim();
@@ -389,30 +596,41 @@ pub(crate) fn search_errors_at(
     }
     let cutoff = window.cutoff_at(now);
     let quoted = format!("\"{}\"", trimmed.replace('"', "\"\""));
-    let mut statement = match connection.prepare(
+    let owner_clause = owner_clause("e", 3);
+    let sql = if owner.is_some() {
+        format!(
+            "SELECT e.id, e.service, e.error_class, e.message, e.group_hash, e.created_at,
+                    -bm25(errors_fts, 1.0, 2.0, 5.0, 1.0) AS score
+             FROM errors_fts
+             JOIN errors AS e ON e.rowid = errors_fts.rowid
+             WHERE errors_fts MATCH ?1 AND e.created_at >= ?2
+             {owner_clause}
+             ORDER BY score DESC, e.created_at DESC
+             LIMIT 20"
+        )
+    } else {
         "SELECT e.id, e.service, e.error_class, e.message, e.group_hash, e.created_at,
                 -bm25(errors_fts, 1.0, 2.0, 5.0, 1.0) AS score
          FROM errors_fts
          JOIN errors AS e ON e.rowid = errors_fts.rowid
          WHERE errors_fts MATCH ?1 AND e.created_at >= ?2
          ORDER BY score DESC, e.created_at DESC
-         LIMIT 20",
-    ) {
+         LIMIT 20"
+            .to_owned()
+    };
+    let mut statement = match connection.prepare(&sql) {
         Ok(statement) => statement,
         Err(rusqlite::Error::SqliteFailure(_, _)) => return Ok(Vec::new()),
         Err(error) => return Err(QueryError::Sqlite(error)),
     };
-    let rows = match statement.query_map(params![quoted, cutoff], |row| {
-        Ok(SearchResult {
-            id: row.get(0)?,
-            service: row.get(1)?,
-            error_class: row.get(2)?,
-            message: row.get(3)?,
-            group_hash: row.get(4)?,
-            created_at: row.get(5)?,
-            score: row.get(6)?,
-        })
-    }) {
+    let rows = match if let Some((tenant_id, project_id)) = owner {
+        statement.query_map(
+            params![quoted, cutoff, tenant_id, project_id],
+            search_result_row,
+        )
+    } else {
+        statement.query_map(params![quoted, cutoff], search_result_row)
+    } {
         Ok(rows) => rows,
         Err(rusqlite::Error::SqliteFailure(_, _)) => return Ok(Vec::new()),
         Err(error) => return Err(QueryError::Sqlite(error)),
@@ -422,6 +640,18 @@ pub(crate) fn search_errors_at(
         Err(rusqlite::Error::SqliteFailure(_, _)) => Ok(Vec::new()),
         Err(error) => Err(QueryError::Sqlite(error)),
     }
+}
+
+fn search_result_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchResult> {
+    Ok(SearchResult {
+        id: row.get(0)?,
+        service: row.get(1)?,
+        error_class: row.get(2)?,
+        message: row.get(3)?,
+        group_hash: row.get(4)?,
+        created_at: row.get(5)?,
+        score: row.get(6)?,
+    })
 }
 
 pub(crate) fn timeline(
@@ -444,6 +674,10 @@ pub(crate) fn timeline_at(
     let cursor = parse_timeline_cursor(options.cursor.as_deref())?;
     let event_types = parse_timeline_event_types(options.event_type.as_deref())?;
     let service = options.service.filter(|service| !service.is_empty());
+    let tenant_id = options.tenant_id.filter(|tenant_id| !tenant_id.is_empty());
+    let project_id = options
+        .project_id
+        .filter(|project_id| !project_id.is_empty());
 
     let mut sql = String::from(
         "SELECT id, service, event, entity_type, entity_ref, severity, summary, payload, created_at
@@ -452,6 +686,11 @@ pub(crate) fn timeline_at(
     );
     let mut filters = vec![cutoff];
 
+    if let (Some(tenant_id), Some(project_id)) = (tenant_id.as_deref(), project_id.as_deref()) {
+        sql.push_str(" AND tenant_id = ? AND project_id = ?");
+        filters.push(tenant_id.to_owned());
+        filters.push(project_id.to_owned());
+    }
     if let Some(service) = service.as_deref() {
         sql.push_str(" AND service = ?");
         filters.push(service.to_owned());
@@ -512,11 +751,28 @@ pub(crate) fn error_detail(
     connection: &Connection,
     error_id: &str,
 ) -> QueryResult<Option<ErrorDetail>> {
-    let Some(row) = error_row(connection, error_id)? else {
+    error_detail_for_owner(connection, error_id, None)
+}
+
+pub(crate) fn error_detail_scoped(
+    connection: &Connection,
+    error_id: &str,
+    tenant_id: &str,
+    project_id: &str,
+) -> QueryResult<Option<ErrorDetail>> {
+    error_detail_for_owner(connection, error_id, Some((tenant_id, project_id)))
+}
+
+fn error_detail_for_owner(
+    connection: &Connection,
+    error_id: &str,
+    owner: Option<(&str, &str)>,
+) -> QueryResult<Option<ErrorDetail>> {
+    let Some(row) = error_row(connection, error_id, owner)? else {
         return Ok(None);
     };
-    let group = group_detail(connection, &row.group_hash)?;
-    let incident_ids = incident_ids_for_group(connection, &row.group_hash)?;
+    let group = group_detail(connection, &row.group_hash, owner)?;
+    let incident_ids = incident_ids_for_group(connection, &row.group_hash, owner)?;
     let (count, first_seen, last_seen) = group
         .as_ref()
         .map(|group| {
@@ -562,7 +818,13 @@ pub(crate) fn active_incidents_at(
     options: IncidentListOptions,
     now: OffsetDateTime,
 ) -> QueryResult<ActiveIncidents> {
-    let rows = incident_rows(connection)?;
+    let rows = incident_rows(
+        connection,
+        options
+            .tenant_id
+            .as_deref()
+            .zip(options.project_id.as_deref()),
+    )?;
     let mut incidents = Vec::new();
 
     for row in rows {
@@ -571,7 +833,8 @@ pub(crate) fn active_incidents_at(
         }
 
         let signals = incident_signals(connection, &row.id)?;
-        let active_signals = active_signals(connection, signals, now)?;
+        let signal_owner = row.owner();
+        let active_signals = active_signals(connection, signals, signal_owner, now)?;
 
         if active_signals.is_empty() {
             continue;
@@ -599,14 +862,32 @@ pub(crate) fn incident_detail(
     connection: &Connection,
     incident_id: &str,
 ) -> QueryResult<Option<IncidentDetail>> {
-    let Some(incident) = incident_detail_incident(connection, incident_id)? else {
+    incident_detail_for_owner(connection, incident_id, None)
+}
+
+pub(crate) fn incident_detail_scoped(
+    connection: &Connection,
+    incident_id: &str,
+    tenant_id: &str,
+    project_id: &str,
+) -> QueryResult<Option<IncidentDetail>> {
+    incident_detail_for_owner(connection, incident_id, Some((tenant_id, project_id)))
+}
+
+fn incident_detail_for_owner(
+    connection: &Connection,
+    incident_id: &str,
+    owner: Option<(&str, &str)>,
+) -> QueryResult<Option<IncidentDetail>> {
+    let Some(incident) = incident_detail_incident(connection, incident_id, owner)? else {
         return Ok(None);
     };
 
     let total_signals = count_incident_signals(connection, incident_id)?;
     let signal_rows = incident_detail_signals(connection, incident_id, MAX_INCIDENT_SIGNALS)?;
     let signals_truncated = total_signals > signal_rows.len();
-    let signal_context = load_incident_signal_context(connection, &signal_rows)?;
+    let signal_owner = incident.owner();
+    let signal_context = load_incident_signal_context(connection, &signal_rows, signal_owner)?;
     let signals = signal_rows
         .iter()
         .map(|signal| format_incident_signal(signal, &signal_context))
@@ -637,44 +918,95 @@ pub(crate) fn incident_detail(
 fn error_class_aggregates(
     connection: &Connection,
     cutoff: &str,
+    owner: Option<(&str, &str)>,
 ) -> QueryResult<Vec<ErrorClassAggregate>> {
-    let mut statement = connection.prepare(
+    let owner_clause = owner_clause("error_groups", 2);
+    let sql = if owner.is_some() {
+        format!(
+            "SELECT error_class, COALESCE(SUM(total_count), 0), COUNT(DISTINCT service)
+             FROM error_groups
+             WHERE last_seen_at >= ?1 AND status = 'active'
+             {owner_clause}
+             GROUP BY error_class
+             ORDER BY SUM(total_count) DESC, error_class ASC
+             LIMIT 50"
+        )
+    } else {
         "SELECT error_class, COALESCE(SUM(total_count), 0), COUNT(DISTINCT service)
          FROM error_groups
          WHERE last_seen_at >= ?1 AND status = 'active'
          GROUP BY error_class
          ORDER BY SUM(total_count) DESC, error_class ASC
-         LIMIT 50",
-    )?;
-    let groups = statement
-        .query_map([cutoff], |row| {
-            Ok(ErrorClassAggregate {
-                error_class: row.get(0)?,
-                total_count: row.get(1)?,
-                service_count: row.get(2)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+         LIMIT 50"
+            .to_owned()
+    };
+    let mut statement = connection.prepare(&sql)?;
+    let rows = if let Some((tenant_id, project_id)) = owner {
+        statement.query_map(
+            params![cutoff, tenant_id, project_id],
+            error_class_aggregate_row,
+        )?
+    } else {
+        statement.query_map([cutoff], error_class_aggregate_row)?
+    };
+    let groups = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(groups)
 }
 
-fn error_class_totals(connection: &Connection, cutoff: &str) -> QueryResult<(u64, u64)> {
-    Ok(connection.query_row(
+fn error_class_aggregate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ErrorClassAggregate> {
+    Ok(ErrorClassAggregate {
+        error_class: row.get(0)?,
+        total_count: row.get(1)?,
+        service_count: row.get(2)?,
+    })
+}
+
+fn error_class_totals(
+    connection: &Connection,
+    cutoff: &str,
+    owner: Option<(&str, &str)>,
+) -> QueryResult<(u64, u64)> {
+    let owner_clause = owner_clause("error_groups", 2);
+    let sql = if owner.is_some() {
+        format!(
+            "SELECT COALESCE(SUM(total_count), 0), COUNT(DISTINCT error_class)
+             FROM error_groups
+             WHERE last_seen_at >= ?1 AND status = 'active'
+             {owner_clause}"
+        )
+    } else {
         "SELECT COALESCE(SUM(total_count), 0), COUNT(DISTINCT error_class)
          FROM error_groups
-         WHERE last_seen_at >= ?1 AND status = 'active'",
-        [cutoff],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?)
+         WHERE last_seen_at >= ?1 AND status = 'active'"
+            .to_owned()
+    };
+    let mut statement = connection.prepare(&sql)?;
+    let row = if let Some((tenant_id, project_id)) = owner {
+        statement.query_row(params![cutoff, tenant_id, project_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?
+    } else {
+        statement.query_row([cutoff], |row| Ok((row.get(0)?, row.get(1)?)))?
+    };
+    Ok(row)
 }
 
 #[derive(Debug)]
 struct IncidentRow {
     id: String,
+    tenant_id: String,
+    project_id: String,
     service: String,
     title: Option<String>,
     opened_at: String,
     resolved_at: Option<String>,
+}
+
+impl IncidentRow {
+    fn owner(&self) -> Option<(&str, &str)> {
+        (!self.tenant_id.is_empty() && !self.project_id.is_empty())
+            .then_some((self.tenant_id.as_str(), self.project_id.as_str()))
+    }
 }
 
 #[derive(Debug)]
@@ -688,12 +1020,21 @@ struct IncidentSignalRow {
 #[derive(Debug)]
 struct IncidentDetailRow {
     id: String,
+    tenant_id: String,
+    project_id: String,
     service: String,
     state: String,
     severity: String,
     title: Option<String>,
     opened_at: String,
     resolved_at: Option<String>,
+}
+
+impl IncidentDetailRow {
+    fn owner(&self) -> Option<(&str, &str)> {
+        (!self.tenant_id.is_empty() && !self.project_id.is_empty())
+            .then_some((self.tenant_id.as_str(), self.project_id.as_str()))
+    }
 }
 
 #[derive(Debug)]
@@ -734,24 +1075,58 @@ struct IncidentSignalContext {
     annotation_counts: std::collections::HashMap<(String, String), u64>,
 }
 
-fn incident_rows(connection: &Connection) -> QueryResult<Vec<IncidentRow>> {
-    let mut statement = connection.prepare(
+fn incident_rows(
+    connection: &Connection,
+    owner: Option<(&str, &str)>,
+) -> QueryResult<Vec<IncidentRow>> {
+    let owner_clause = owner_clause("incidents", 1);
+    let sql = if owner.is_some() {
+        format!(
+            "SELECT id, tenant_id, project_id, service, title, opened_at, resolved_at
+             FROM incidents
+             WHERE state != 'resolved'
+             {owner_clause}
+             ORDER BY opened_at DESC"
+        )
+    } else {
         "SELECT id, service, title, opened_at, resolved_at
          FROM incidents
          WHERE state != 'resolved'
-         ORDER BY opened_at DESC",
-    )?;
-    Ok(statement
-        .query_map([], |row| {
-            Ok(IncidentRow {
-                id: row.get(0)?,
-                service: row.get(1)?,
-                title: row.get(2)?,
-                opened_at: row.get(3)?,
-                resolved_at: row.get(4)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?)
+         ORDER BY opened_at DESC"
+            .to_owned()
+    };
+    let mut statement = connection.prepare(&sql)?;
+    if let Some((tenant_id, project_id)) = owner {
+        let rows = statement.query_map(params![tenant_id, project_id], incident_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    } else {
+        let rows = statement.query_map([], legacy_incident_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}
+
+fn incident_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IncidentRow> {
+    Ok(IncidentRow {
+        id: row.get(0)?,
+        tenant_id: row.get(1)?,
+        project_id: row.get(2)?,
+        service: row.get(3)?,
+        title: row.get(4)?,
+        opened_at: row.get(5)?,
+        resolved_at: row.get(6)?,
+    })
+}
+
+fn legacy_incident_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IncidentRow> {
+    Ok(IncidentRow {
+        id: row.get(0)?,
+        tenant_id: String::new(),
+        project_id: String::new(),
+        service: row.get(1)?,
+        title: row.get(2)?,
+        opened_at: row.get(3)?,
+        resolved_at: row.get(4)?,
+    })
 }
 
 fn incident_signals(
@@ -779,26 +1154,63 @@ fn incident_signals(
 fn incident_detail_incident(
     connection: &Connection,
     incident_id: &str,
+    owner: Option<(&str, &str)>,
 ) -> QueryResult<Option<IncidentDetailRow>> {
-    Ok(connection
-        .query_row(
-            "SELECT id, service, state, severity, title, opened_at, resolved_at
+    let owner_clause = if owner.is_some() {
+        " AND tenant_id = ?2 AND project_id = ?3"
+    } else {
+        ""
+    };
+    let sql = if owner.is_some() {
+        format!(
+            "SELECT id, tenant_id, project_id, service, state, severity, title, opened_at, resolved_at
              FROM incidents
-             WHERE id = ?1",
-            [incident_id],
-            |row| {
-                Ok(IncidentDetailRow {
-                    id: row.get(0)?,
-                    service: row.get(1)?,
-                    state: row.get(2)?,
-                    severity: row.get(3)?,
-                    title: row.get(4)?,
-                    opened_at: row.get(5)?,
-                    resolved_at: row.get(6)?,
-                })
-            },
+             WHERE id = ?1{owner_clause}"
         )
-        .optional()?)
+    } else {
+        "SELECT id, service, state, severity, title, opened_at, resolved_at
+         FROM incidents
+         WHERE id = ?1"
+            .to_owned()
+    };
+    let mut statement = connection.prepare(&sql)?;
+    let result = if let Some((tenant_id, project_id)) = owner {
+        statement.query_row(
+            params![incident_id, tenant_id, project_id],
+            incident_detail_row,
+        )
+    } else {
+        statement.query_row([incident_id], legacy_incident_detail_row)
+    };
+    Ok(result.optional()?)
+}
+
+fn incident_detail_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IncidentDetailRow> {
+    Ok(IncidentDetailRow {
+        id: row.get(0)?,
+        tenant_id: row.get(1)?,
+        project_id: row.get(2)?,
+        service: row.get(3)?,
+        state: row.get(4)?,
+        severity: row.get(5)?,
+        title: row.get(6)?,
+        opened_at: row.get(7)?,
+        resolved_at: row.get(8)?,
+    })
+}
+
+fn legacy_incident_detail_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IncidentDetailRow> {
+    Ok(IncidentDetailRow {
+        id: row.get(0)?,
+        tenant_id: String::new(),
+        project_id: String::new(),
+        service: row.get(1)?,
+        state: row.get(2)?,
+        severity: row.get(3)?,
+        title: row.get(4)?,
+        opened_at: row.get(5)?,
+        resolved_at: row.get(6)?,
+    })
 }
 
 fn count_incident_signals(connection: &Connection, incident_id: &str) -> QueryResult<usize> {
@@ -837,6 +1249,7 @@ fn incident_detail_signals(
 fn load_incident_signal_context(
     connection: &Connection,
     signals: &[IncidentDetailSignalRow],
+    owner: Option<(&str, &str)>,
 ) -> QueryResult<IncidentSignalContext> {
     let error_refs = signal_refs_for_detail(signals, "error_group");
     let health_refs = signal_refs_for_detail(signals, "health_transition");
@@ -852,10 +1265,10 @@ fn load_incident_signal_context(
         .collect::<Vec<_>>();
 
     Ok(IncidentSignalContext {
-        error_groups: load_error_group_signal_context(connection, &error_refs)?,
+        error_groups: load_error_group_signal_context(connection, &error_refs, owner)?,
         targets: load_target_signal_context(connection, &target_refs)?,
         monitors: load_monitor_signal_context(connection, &monitor_refs)?,
-        annotation_counts: load_signal_annotation_counts(connection, signals)?,
+        annotation_counts: load_signal_annotation_counts(connection, signals, owner)?,
     })
 }
 
@@ -873,11 +1286,17 @@ fn signal_refs_for_detail(signals: &[IncidentDetailSignalRow], signal_type: &str
 fn load_error_group_signal_context(
     connection: &Connection,
     refs: &[String],
+    owner: Option<(&str, &str)>,
 ) -> QueryResult<std::collections::HashMap<String, ErrorGroupSignalContext>> {
     if refs.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
 
+    let owner_clause = if owner.is_some() {
+        " AND g.tenant_id = ? AND g.project_id = ?"
+    } else {
+        ""
+    };
     let mut statement = connection.prepare(&format!(
         "SELECT
             g.group_hash,
@@ -890,10 +1309,16 @@ fn load_error_group_signal_context(
             e.classification_component
          FROM error_groups g
          LEFT JOIN errors e ON e.id = g.last_error_id
-         WHERE g.group_hash IN ({})",
-        placeholders(refs.len())
+         WHERE g.group_hash IN ({})
+         {owner_clause}",
+        placeholders(refs.len()),
     ))?;
-    let rows = statement.query_map(rusqlite::params_from_iter(refs.iter()), |row| {
+    let params = refs.iter().map(String::as_str).chain(
+        owner
+            .into_iter()
+            .flat_map(|(tenant_id, project_id)| [tenant_id, project_id]),
+    );
+    let rows = statement.query_map(rusqlite::params_from_iter(params), |row| {
         Ok((
             row.get::<_, String>(0)?,
             ErrorGroupSignalContext {
@@ -973,13 +1398,19 @@ fn load_monitor_signal_context(
 fn load_signal_annotation_counts(
     connection: &Connection,
     signals: &[IncidentDetailSignalRow],
+    owner: Option<(&str, &str)>,
 ) -> QueryResult<std::collections::HashMap<(String, String), u64>> {
     let subjects = signal_subjects(signals);
     if subjects.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
 
-    let mut statement = connection.prepare(
+    let owner_clause = if owner.is_some() {
+        " AND tenant_id = ?2 AND project_id = ?3"
+    } else {
+        ""
+    };
+    let mut statement = connection.prepare(&format!(
         "SELECT subject_type, subject_id, COUNT(*)
          FROM annotations
          WHERE subject_type IS NOT NULL
@@ -987,20 +1418,30 @@ fn load_signal_annotation_counts(
            AND (subject_type || char(31) || subject_id) IN (
              SELECT value FROM json_each(?1)
            )
+           {owner_clause}
          GROUP BY subject_type, subject_id",
-    )?;
+    ))?;
     let subject_keys = subjects
         .iter()
         .map(|(subject_type, subject_id)| format!("{subject_type}\u{1f}{subject_id}"))
         .collect::<Vec<_>>();
     let subject_keys_json = serde_json::to_string(&subject_keys).unwrap_or_else(|_| "[]".into());
-    let rows = statement.query_map([subject_keys_json], |row| {
-        Ok((
-            (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
-            row.get::<_, u64>(2)?,
-        ))
-    })?;
+    let rows = if let Some((tenant_id, project_id)) = owner {
+        statement.query_map(
+            params![subject_keys_json, tenant_id, project_id],
+            annotation_count_row,
+        )?
+    } else {
+        statement.query_map(params![subject_keys_json], annotation_count_row)?
+    };
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+fn annotation_count_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<((String, String), u64)> {
+    Ok((
+        (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+        row.get::<_, u64>(2)?,
+    ))
 }
 
 fn signal_subjects(signals: &[IncidentDetailSignalRow]) -> Vec<(String, String)> {
@@ -1299,6 +1740,7 @@ fn pluralize<'a>(count: u64, singular: &'a str, plural: &'a str) -> &'a str {
 fn active_signals(
     connection: &Connection,
     signals: Vec<IncidentSignalRow>,
+    owner: Option<(&str, &str)>,
     now: OffsetDateTime,
 ) -> QueryResult<Vec<ActiveIncidentSignal>> {
     let mut active = Vec::new();
@@ -1308,7 +1750,7 @@ fn active_signals(
             continue;
         }
 
-        if signal_active_for_report(connection, &signal, now)? {
+        if signal_active_for_report(connection, &signal, owner, now)? {
             active.push(ActiveIncidentSignal {
                 signal_type: signal.signal_type,
                 signal_ref: signal.signal_ref,
@@ -1324,11 +1766,12 @@ fn active_signals(
 fn signal_active_for_report(
     connection: &Connection,
     signal: &IncidentSignalRow,
+    owner: Option<(&str, &str)>,
     now: OffsetDateTime,
 ) -> QueryResult<bool> {
     match signal.signal_type.as_str() {
         "health_transition" => health_signal_active(connection, &signal.signal_ref),
-        "error_group" => error_group_signal_active(connection, &signal.signal_ref, now),
+        "error_group" => error_group_signal_active(connection, &signal.signal_ref, owner, now),
         _ => Ok(false),
     }
 }
@@ -1360,15 +1803,28 @@ fn health_signal_active(connection: &Connection, signal_ref: &str) -> QueryResul
 fn error_group_signal_active(
     connection: &Connection,
     signal_ref: &str,
+    owner: Option<(&str, &str)>,
     now: OffsetDateTime,
 ) -> QueryResult<bool> {
-    let row = connection
-        .query_row(
-            "SELECT status, last_seen_at FROM error_groups WHERE group_hash = ?1",
-            [signal_ref],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()?;
+    let owner_clause = if owner.is_some() {
+        " AND tenant_id = ?2 AND project_id = ?3"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT status, last_seen_at FROM error_groups WHERE group_hash = ?1{owner_clause}"
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let row = if let Some((tenant_id, project_id)) = owner {
+        statement.query_row(params![signal_ref, tenant_id, project_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+    } else {
+        statement.query_row([signal_ref], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+    }
+    .optional()?;
 
     Ok(row.is_some_and(|(status, last_seen_at)| {
         status == "active" && within_incident_window(&last_seen_at, now)
@@ -1470,13 +1926,16 @@ fn paged_error_groups(
     cursor: Option<QueryCursor>,
     options: &ServiceQueryOptions,
 ) -> ErrorGroupQueryResult<Vec<ErrorGroupSummary>> {
+    let tenant_id = options.tenant_id.as_deref();
+    let project_id = options.project_id.as_deref();
+    let scoped = tenant_id.is_some() && project_id.is_some();
     match cursor {
         Some(QueryCursor::Structured(cursor)) => {
             let mut statement = connection.prepare(&format!(
-                "{} AND (g.total_count < ?7 OR (g.total_count = ?7 AND g.group_hash > ?8))
+                "{} AND (g.total_count < ?9 OR (g.total_count = ?9 AND g.group_hash > ?10))
                  ORDER BY g.total_count DESC, g.group_hash ASC
                  LIMIT 50",
-                service_groups_sql()
+                service_groups_sql(scoped)
             ))?;
             error_query_groups_from_rows(statement.query_map(
                 params![
@@ -1486,6 +1945,8 @@ fn paged_error_groups(
                     options.with_annotation.as_deref(),
                     options.with_annotation.as_deref(),
                     options.without_annotation.as_deref(),
+                    tenant_id,
+                    project_id,
                     cursor.total_count,
                     cursor.group_hash.as_str(),
                 ],
@@ -1494,10 +1955,10 @@ fn paged_error_groups(
         }
         Some(QueryCursor::LegacyGroupHash(group_hash)) => {
             let mut statement = connection.prepare(&format!(
-                "{} AND g.group_hash > ?7
+                "{} AND g.group_hash > ?9
                  ORDER BY g.total_count DESC, g.group_hash ASC
                  LIMIT 50",
-                service_groups_sql()
+                service_groups_sql(scoped)
             ))?;
             error_query_groups_from_rows(statement.query_map(
                 params![
@@ -1507,6 +1968,8 @@ fn paged_error_groups(
                     options.with_annotation.as_deref(),
                     options.with_annotation.as_deref(),
                     options.without_annotation.as_deref(),
+                    tenant_id,
+                    project_id,
                     group_hash.as_str(),
                 ],
                 group_from_row,
@@ -1517,7 +1980,7 @@ fn paged_error_groups(
                 "{}
                  ORDER BY g.total_count DESC, g.group_hash ASC
                  LIMIT 50",
-                service_groups_sql()
+                service_groups_sql(scoped)
             ))?;
             error_query_groups_from_rows(statement.query_map(
                 params![
@@ -1527,6 +1990,8 @@ fn paged_error_groups(
                     options.with_annotation.as_deref(),
                     options.with_annotation.as_deref(),
                     options.without_annotation.as_deref(),
+                    tenant_id,
+                    project_id,
                 ],
                 group_from_row,
             )?)
@@ -1534,34 +1999,53 @@ fn paged_error_groups(
     }
 }
 
-fn service_groups_sql() -> &'static str {
-    "SELECT
-        g.group_hash,
-        g.error_class,
-        g.service,
-        g.total_count,
-        g.first_seen_at,
-        g.last_seen_at,
-        g.message_template,
-        g.severity,
-        g.status,
-        e.classification_category,
-        e.classification_persistence,
-        e.classification_component
-     FROM error_groups g
-     LEFT JOIN errors e ON e.id = g.last_error_id
-     WHERE (?1 IS NULL OR g.service = ?1)
-       AND (?2 IS NULL OR g.error_class = ?2)
-       AND g.last_seen_at >= ?3
-       AND g.status = 'active'
-       AND (?4 IS NULL OR EXISTS (
-         SELECT 1 FROM annotations a
-         WHERE a.group_hash = g.group_hash AND a.action = ?5
-       ))
-       AND (?6 IS NULL OR NOT EXISTS (
-         SELECT 1 FROM annotations a
-         WHERE a.group_hash = g.group_hash AND a.action = ?6
-       ))"
+fn service_groups_sql(scoped: bool) -> String {
+    let annotation_owner_clause = if scoped {
+        "           AND (?7 IS NULL OR a.tenant_id = ?7)
+           AND (?8 IS NULL OR a.project_id = ?8)
+"
+    } else {
+        ""
+    };
+    let group_owner_clause = if scoped {
+        "       AND (?7 IS NULL OR g.tenant_id = ?7)
+       AND (?8 IS NULL OR g.project_id = ?8)"
+    } else {
+        "       AND (?7 IS NULL OR 1 = 1)
+       AND (?8 IS NULL OR 1 = 1)"
+    };
+    format!(
+        "SELECT
+            g.group_hash,
+            g.error_class,
+            g.service,
+            g.total_count,
+            g.first_seen_at,
+            g.last_seen_at,
+            g.message_template,
+            g.severity,
+            g.status,
+            e.classification_category,
+            e.classification_persistence,
+            e.classification_component
+         FROM error_groups g
+         LEFT JOIN errors e ON e.id = g.last_error_id
+         WHERE (?1 IS NULL OR g.service = ?1)
+           AND (?2 IS NULL OR g.error_class = ?2)
+           AND g.last_seen_at >= ?3
+           AND g.status = 'active'
+           AND (?4 IS NULL OR EXISTS (
+             SELECT 1 FROM annotations a
+             WHERE a.group_hash = g.group_hash
+               AND a.action = ?5
+{annotation_owner_clause}       ))
+           AND (?6 IS NULL OR NOT EXISTS (
+             SELECT 1 FROM annotations a
+             WHERE a.group_hash = g.group_hash
+               AND a.action = ?6
+{annotation_owner_clause}       ))
+{group_owner_clause}"
+    )
 }
 
 enum ErrorGroupFilter {
@@ -1608,6 +2092,13 @@ fn error_query_groups_from_rows(
 ) -> ErrorGroupQueryResult<Vec<ErrorGroupSummary>> {
     let groups = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(groups)
+}
+
+fn owner_clause(alias: &str, first_parameter: usize) -> String {
+    format!(
+        " AND {alias}.tenant_id = ?{first_parameter} AND {alias}.project_id = ?{}",
+        first_parameter + 1
+    )
 }
 
 fn group_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ErrorGroupSummary> {
@@ -1686,67 +2177,122 @@ struct ErrorRow {
     created_at: String,
 }
 
-fn error_row(connection: &Connection, error_id: &str) -> QueryResult<Option<ErrorRow>> {
-    Ok(connection
-        .query_row(
-            "SELECT
+fn error_row(
+    connection: &Connection,
+    error_id: &str,
+    owner: Option<(&str, &str)>,
+) -> QueryResult<Option<ErrorRow>> {
+    let owner_clause = if owner.is_some() {
+        " AND tenant_id = ?2 AND project_id = ?3"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT
                 id, service, error_class, message, message_template, stack_trace, context,
                 severity, environment, group_hash, created_at
              FROM errors
-             WHERE id = ?1",
-            [error_id],
-            |row| {
-                Ok(ErrorRow {
-                    id: row.get(0)?,
-                    service: row.get(1)?,
-                    error_class: row.get(2)?,
-                    message: row.get(3)?,
-                    message_template: row.get(4)?,
-                    stack_trace: row.get(5)?,
-                    context: row.get(6)?,
-                    severity: row.get(7)?,
-                    environment: row.get(8)?,
-                    group_hash: row.get(9)?,
-                    created_at: row.get(10)?,
-                })
-            },
-        )
-        .optional()?)
+             WHERE id = ?1{owner_clause}"
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let result = if let Some((tenant_id, project_id)) = owner {
+        statement.query_row(params![error_id, tenant_id, project_id], error_row_from_row)
+    } else {
+        statement.query_row([error_id], error_row_from_row)
+    };
+    Ok(result.optional()?)
+}
+
+fn error_row_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ErrorRow> {
+    Ok(ErrorRow {
+        id: row.get(0)?,
+        service: row.get(1)?,
+        error_class: row.get(2)?,
+        message: row.get(3)?,
+        message_template: row.get(4)?,
+        stack_trace: row.get(5)?,
+        context: row.get(6)?,
+        severity: row.get(7)?,
+        environment: row.get(8)?,
+        group_hash: row.get(9)?,
+        created_at: row.get(10)?,
+    })
 }
 
 fn group_detail(
     connection: &Connection,
     group_hash: &str,
+    owner: Option<(&str, &str)>,
 ) -> QueryResult<Option<ErrorDetailGroup>> {
-    Ok(connection
-        .query_row(
-            "SELECT total_count, first_seen_at, last_seen_at, status
+    let owner_clause = if owner.is_some() {
+        " AND tenant_id = ?2 AND project_id = ?3"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT total_count, first_seen_at, last_seen_at, status
              FROM error_groups
-             WHERE group_hash = ?1",
-            [group_hash],
-            |row| {
-                Ok(ErrorDetailGroup {
-                    total_count: row.get(0)?,
-                    first_seen_at: row.get(1)?,
-                    last_seen_at: row.get(2)?,
-                    status: row.get(3)?,
-                })
-            },
-        )
-        .optional()?)
+             WHERE group_hash = ?1{owner_clause}"
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let result = if let Some((tenant_id, project_id)) = owner {
+        statement.query_row(params![group_hash, tenant_id, project_id], |row| {
+            Ok(ErrorDetailGroup {
+                total_count: row.get(0)?,
+                first_seen_at: row.get(1)?,
+                last_seen_at: row.get(2)?,
+                status: row.get(3)?,
+            })
+        })
+    } else {
+        statement.query_row([group_hash], |row| {
+            Ok(ErrorDetailGroup {
+                total_count: row.get(0)?,
+                first_seen_at: row.get(1)?,
+                last_seen_at: row.get(2)?,
+                status: row.get(3)?,
+            })
+        })
+    };
+    Ok(result.optional()?)
 }
 
-fn incident_ids_for_group(connection: &Connection, group_hash: &str) -> QueryResult<Vec<String>> {
-    let mut statement = connection.prepare(
+fn incident_ids_for_group(
+    connection: &Connection,
+    group_hash: &str,
+    owner: Option<(&str, &str)>,
+) -> QueryResult<Vec<String>> {
+    let owner_clause = if owner.is_some() {
+        " AND EXISTS (
+            SELECT 1 FROM incidents i
+            WHERE i.id = incident_signals.incident_id
+              AND i.tenant_id = ?2
+              AND i.project_id = ?3
+        )"
+    } else {
+        ""
+    };
+    let mut statement = connection.prepare(&format!(
         "SELECT DISTINCT incident_id
          FROM incident_signals
          WHERE signal_type = 'error_group' AND signal_ref = ?1
+         {owner_clause}
          ORDER BY incident_id",
-    )?;
-    let ids = statement
-        .query_map([group_hash], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    ))?;
+    let rows = if let Some((tenant_id, project_id)) = owner {
+        statement.query_map(
+            params![group_hash, tenant_id, project_id],
+            string_first_column,
+        )?
+    } else {
+        statement.query_map([group_hash], string_first_column)?
+    };
+    let ids = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(ids)
+}
+
+fn string_first_column(row: &rusqlite::Row<'_>) -> rusqlite::Result<String> {
+    row.get::<_, String>(0)
 }
 
 fn safe_decode_json(json: Option<String>) -> Option<Value> {

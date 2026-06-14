@@ -35,16 +35,17 @@ pub(crate) async fn list_targets(
     State(state): State<IngestState>,
     headers: HeaderMap,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
-        return problem_response(*problem);
-    }
+    let authority = match require_scope(&state, &headers, Permission::Admin) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
 
-    match store.list_targets() {
+    match store.list_targets_scoped(&authority.tenant_id, &authority.project_id) {
         Ok(targets) => json_status_response(
             StatusCode::OK.as_u16(),
             json!({"targets": targets.into_iter().map(target_response).collect::<Vec<_>>()}),
@@ -68,9 +69,10 @@ pub(crate) async fn create_target(
         ));
     }
 
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
-        return problem_response(*problem);
-    }
+    let authority = match require_scope(&state, &headers, Permission::Admin) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let attrs = match decode_json_object(&body, None) {
         Ok(attrs) => attrs,
@@ -90,7 +92,10 @@ pub(crate) async fn create_target(
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
-    if store.insert_target(target).is_err() {
+    if store
+        .insert_target_scoped(target, &authority.tenant_id, &authority.project_id)
+        .is_err()
+    {
         return problem_response(internal_problem());
     }
     drop(store);
@@ -105,15 +110,16 @@ pub(crate) async fn delete_target(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
-        return problem_response(*problem);
-    }
+    let authority = match require_scope(&state, &headers, Permission::Admin) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
-    match store.delete_target(&id) {
+    match store.delete_target_scoped(&id, &authority.tenant_id, &authority.project_id) {
         Ok(true) => {}
         Ok(false) => return problem_response(not_found_problem("Target not found.")),
         Err(_) => return problem_response(internal_problem()),
@@ -146,9 +152,10 @@ pub(crate) async fn update_target_interval(
         ));
     }
 
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
-        return problem_response(*problem);
-    }
+    let authority = match require_scope(&state, &headers, Permission::Admin) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let attrs = match decode_json_object(&body, None) {
         Ok(attrs) => attrs,
@@ -163,7 +170,12 @@ pub(crate) async fn update_target_interval(
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
-    let update = match store.update_target_interval(&id, interval_ms) {
+    let update = match store.update_target_interval_scoped(
+        &id,
+        interval_ms,
+        &authority.tenant_id,
+        &authority.project_id,
+    ) {
         Ok(Some(update)) => update,
         Ok(None) => return problem_response(not_found_problem("Target not found.")),
         Err(_) => return problem_response(internal_problem()),
@@ -202,15 +214,21 @@ async fn set_target_active(
     id: String,
     active: bool,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
-        return problem_response(*problem);
-    }
+    let authority = match require_scope(&state, &headers, Permission::Admin) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
-    match store.update_target_active(&id, active) {
+    match store.update_target_active_scoped(
+        &id,
+        active,
+        &authority.tenant_id,
+        &authority.project_id,
+    ) {
         Ok(true) => {}
         Ok(false) => return problem_response(not_found_problem("Target not found.")),
         Err(_) => return problem_response(internal_problem()),

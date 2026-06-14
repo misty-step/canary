@@ -26,7 +26,9 @@ use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::{
     WorkerHealthHandle, WorkerName,
     server_time::current_rfc3339,
-    webhooks::{WebhookTransport, delivery_insert, endpoint_from_subscription},
+    webhooks::{
+        WebhookEventAuthority, WebhookTransport, delivery_insert, endpoint_from_subscription,
+    },
 };
 
 /// Runtime boundary for webhook circuit state.
@@ -171,17 +173,21 @@ impl WebhookDeliveryRuntime {
 
     /// Execute one scheduled job and persist the ordered ledger actions.
     pub fn deliver(&self, job: &WebhookJob) -> Result<DeliveryExecution, String> {
-        let lookup = self.lookup_webhook(job)?;
+        let mut job = job.clone();
+        job.attempt_timestamp = Some(current_rfc3339());
+
+        let lookup = self.lookup_webhook(&job)?;
         let circuit = match &lookup {
             WebhookLookup::Active(endpoint) => self.circuit.decision(&endpoint.id),
             WebhookLookup::Missing | WebhookLookup::Inactive(_) => CircuitDecision::Closed,
         };
+        let authority = WebhookEventAuthority::from_payload(&job.payload);
 
         let execution = try_execute_delivery(
-            job,
+            &job,
             lookup,
             circuit,
-            |action| self.apply_ledger_action(action),
+            |action| self.apply_ledger_action(action, &authority),
             |request| self.transport.send(&request),
         )?;
         self.apply_circuit_effect(&execution.circuit_effect);
@@ -205,7 +211,11 @@ impl WebhookDeliveryRuntime {
         })
     }
 
-    fn apply_ledger_action(&self, action: DeliveryLedgerAction) -> Result<(), String> {
+    fn apply_ledger_action(
+        &self,
+        action: DeliveryLedgerAction,
+        authority: &WebhookEventAuthority,
+    ) -> Result<(), String> {
         let now = current_rfc3339();
         let mut store = self
             .store
@@ -214,7 +224,7 @@ impl WebhookDeliveryRuntime {
 
         match action {
             DeliveryLedgerAction::CreatePending(delivery) => store
-                .create_pending_webhook_delivery(delivery_insert(delivery, &now))
+                .create_pending_webhook_delivery(delivery_insert(delivery, authority, &now))
                 .map_err(|error| error.to_string()),
             DeliveryLedgerAction::MarkAttempt { delivery_id } => store
                 .mark_webhook_delivery_attempt(&delivery_id, &now)
@@ -229,7 +239,10 @@ impl WebhookDeliveryRuntime {
                 .mark_webhook_delivery_discarded(&delivery_id, &reason, &now)
                 .map_err(|error| error.to_string()),
             DeliveryLedgerAction::CreateSuppressed { delivery, reason } => store
-                .create_suppressed_webhook_delivery(delivery_insert(delivery, &now), &reason)
+                .create_suppressed_webhook_delivery(
+                    delivery_insert(delivery, authority, &now),
+                    &reason,
+                )
                 .map_err(|error| error.to_string()),
         }
     }
@@ -585,6 +598,7 @@ fn job_from_row(row: &WebhookDeliveryJobRow) -> Result<WebhookJob, String> {
         } else {
             row.max_attempts
         },
+        attempt_timestamp: None,
     })
 }
 

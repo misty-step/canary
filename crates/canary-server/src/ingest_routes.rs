@@ -28,6 +28,7 @@ use serde_json::{Map, Value, json};
 use crate::{
     HealthEventSource, IngestState,
     body_fields::{optional_string, required_string},
+    enforce_service_authority,
     http_contract::{check_content_length, json_status_response, problem_response},
     require_ingest_scope,
     server_time::{current_rfc3339, current_unix_millis},
@@ -54,21 +55,32 @@ pub(crate) async fn create_error(
         ));
     }
 
-    if let Err(problem) = require_ingest_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
+    let key = match require_ingest_scope(&state, &headers) {
+        Ok(key) => key,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let attrs = match decode_json_object(&body, None) {
         Ok(attrs) => attrs,
         Err(problem) => return problem_response(*problem),
     };
+    if let Some(requested_service) = attrs.get("service").and_then(Value::as_str)
+        && let Err(problem) = enforce_service_authority(&key, requested_service)
+    {
+        return problem_response(*problem);
+    }
 
     let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
 
-    let result = ingest_error(&mut store, &attrs, state.config(), IngestContext::now());
+    let result = ingest_error(
+        &mut store,
+        &attrs,
+        state.config(),
+        IngestContext::now_for_authority(key.tenant_id, key.project_id),
+    );
     drop(store);
 
     match result {
@@ -109,9 +121,10 @@ pub(crate) async fn create_check_in(
         ));
     }
 
-    if let Err(problem) = require_ingest_scope(&state, &headers) {
-        return problem_response(*problem);
-    }
+    let key = match require_ingest_scope(&state, &headers) {
+        Ok(key) => key,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let attrs = match decode_json_object(&body, None) {
         Ok(attrs) => attrs,
@@ -127,11 +140,18 @@ pub(crate) async fn create_check_in(
         Err(_) => return problem_response(internal_problem()),
     };
 
-    let snapshot = match store.monitor_check_in_snapshot_by_name(&check_in.monitor_name) {
+    let snapshot = match store.monitor_check_in_snapshot_by_name_scoped(
+        &check_in.monitor_name,
+        &key.tenant_id,
+        &key.project_id,
+    ) {
         Ok(Some(snapshot)) => snapshot,
         Ok(None) => return problem_response(not_found_problem("Monitor not found.")),
         Err(_) => return problem_response(internal_problem()),
     };
+    if let Err(problem) = enforce_service_authority(&key, &snapshot.service) {
+        return problem_response(*problem);
+    }
     let monitor = match monitor_snapshot(snapshot) {
         Ok(monitor) => monitor,
         Err(_) => return problem_response(internal_problem()),

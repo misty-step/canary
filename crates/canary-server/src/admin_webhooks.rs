@@ -35,16 +35,17 @@ pub(crate) async fn list_webhooks(
     State(state): State<IngestState>,
     headers: HeaderMap,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
-        return problem_response(*problem);
-    }
+    let authority = match require_scope(&state, &headers, Permission::Admin) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
 
-    match store.webhook_subscriptions() {
+    match store.webhook_subscriptions_scoped(&authority.tenant_id, &authority.project_id) {
         Ok(webhooks) => json_status_response(
             StatusCode::OK.as_u16(),
             json!({"webhooks": webhooks.into_iter().map(webhook_response).collect::<Vec<_>>()}),
@@ -68,15 +69,16 @@ pub(crate) async fn create_webhook(
         ));
     }
 
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
-        return problem_response(*problem);
-    }
+    let authority = match require_scope(&state, &headers, Permission::Admin) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let attrs = match decode_json_object(&body, None) {
         Ok(attrs) => attrs,
         Err(problem) => return problem_response(*problem),
     };
-    let webhook = match parse_webhook_create(attrs) {
+    let webhook = match parse_webhook_create(attrs, &authority.tenant_id, &authority.project_id) {
         Ok(webhook) => webhook,
         Err(problem) => return problem_response(*problem),
     };
@@ -97,15 +99,17 @@ pub(crate) async fn delete_webhook(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
-        return problem_response(*problem);
-    }
+    let authority = match require_scope(&state, &headers, Permission::Admin) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
-    match store.delete_webhook_subscription(&id) {
+    match store.delete_webhook_subscription_scoped(&id, &authority.tenant_id, &authority.project_id)
+    {
         Ok(true) => response(
             StatusCode::NO_CONTENT.as_u16(),
             "text/plain; charset=utf-8",
@@ -121,9 +125,10 @@ pub(crate) async fn test_webhook(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response<Body> {
-    if let Err(problem) = require_scope(&state, &headers, Permission::Admin) {
-        return problem_response(*problem);
-    }
+    let authority = match require_scope(&state, &headers, Permission::Admin) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
 
     let subscription = {
         let store = match state.lock_store() {
@@ -131,7 +136,13 @@ pub(crate) async fn test_webhook(
             Err(_) => return problem_response(internal_problem()),
         };
         match store.webhook_subscription(&id) {
-            Ok(Some(subscription)) => subscription,
+            Ok(Some(subscription))
+                if subscription.tenant_id == authority.tenant_id
+                    && subscription.project_id == authority.project_id =>
+            {
+                subscription
+            }
+            Ok(Some(_)) => return problem_response(not_found_problem("Webhook not found.")),
             Ok(None) => return problem_response(not_found_problem("Webhook not found.")),
             Err(_) => return problem_response(internal_problem()),
         }
@@ -152,6 +163,7 @@ pub(crate) async fn test_webhook(
         legacy_job_id: None,
         attempt: 1,
         max_attempts: 1,
+        attempt_timestamp: Some(current_rfc3339()),
     };
     let Some(request) = build_request(&endpoint, &job) else {
         return problem_response(webhook_delivery_failed_problem("webhook_inactive"));
@@ -177,6 +189,9 @@ pub(crate) async fn test_webhook(
 fn webhook_response(webhook: WebhookSubscription) -> Value {
     json!({
         "id": webhook.id,
+        "tenant_id": webhook.tenant_id,
+        "project_id": webhook.project_id,
+        "service": webhook.service,
         "url": webhook.url,
         "events": webhook_events(&webhook.events),
         "active": webhook.active,
@@ -187,6 +202,9 @@ fn webhook_response(webhook: WebhookSubscription) -> Value {
 fn webhook_insert_response(webhook: &WebhookSubscriptionInsert) -> Value {
     json!({
         "id": webhook.id,
+        "tenant_id": webhook.tenant_id,
+        "project_id": webhook.project_id,
+        "service": webhook.service,
         "url": webhook.url,
         "events": webhook.events,
         "secret": webhook.secret,
@@ -209,10 +227,24 @@ fn webhook_endpoint(webhook: WebhookSubscription) -> WebhookEndpoint {
 
 fn parse_webhook_create(
     attrs: Map<String, Value>,
+    tenant_id: &str,
+    project_id: &str,
 ) -> Result<WebhookSubscriptionInsert, Box<ProblemDetails>> {
     let mut errors: ValidationErrors = ValidationErrors::new();
     let url = required_string(&attrs, "url", &mut errors);
     let events = required_string_array(&attrs, "events", &mut errors);
+    let service = match attrs.get("service") {
+        Some(Value::String(value)) if !value.trim().is_empty() => Some(value.trim().to_owned()),
+        Some(Value::String(_)) => {
+            errors.insert("service".to_owned(), vec!["can't be blank".to_owned()]);
+            None
+        }
+        Some(Value::Null) | None => None,
+        Some(_) => {
+            errors.insert("service".to_owned(), vec!["must be a string".to_owned()]);
+            None
+        }
+    };
 
     if !errors.is_empty() {
         return Err(Box::new(validation_detail_problem(
@@ -250,6 +282,9 @@ fn parse_webhook_create(
 
     Ok(WebhookSubscriptionInsert {
         id: canary_core::ids::WebhookId::generate().into_string(),
+        tenant_id: tenant_id.to_owned(),
+        project_id: project_id.to_owned(),
+        service,
         url,
         events,
         secret: canary_core::secrets::webhook_secret(),
