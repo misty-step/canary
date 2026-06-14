@@ -129,8 +129,14 @@ case "$method $path" in
     write_response 200 '{"status":"revoked"}'
     ;;
   "POST /api/v1/targets")
+    expected_target_url="${EXPECT_TARGET_URL:-http://canary.test/healthz}"
+    actual_target_url="$(jq -r '.url // ""' <<<"$body")"
+    if [[ "$actual_target_url" != "$expected_target_url" ]]; then
+      write_response 422 "{\"detail\":\"unexpected target url $actual_target_url\"}"
+      exit 0
+    fi
     touch "$CURL_STATE/target-active"
-    write_response 201 '{"id":"TGT-test","name":"canary-write-path-test-target","service":"canary-write-path-test","url":"http://canary.test/healthz","method":"GET","interval_ms":60000,"timeout_ms":5000,"expected_status":"200","active":true,"created_at":"2026-06-12T20:00:00Z"}'
+    write_response 201 "$(jq -cn --arg url "$actual_target_url" '{id:"TGT-test",name:"canary-write-path-test-target",service:"canary-write-path-test",url:$url,method:"GET",interval_ms:60000,timeout_ms:5000,expected_status:"200",active:true,created_at:"2026-06-12T20:00:00Z"}')"
     ;;
   "GET /api/v1/targets")
     if [[ "$auth" == sk_* ]]; then
@@ -398,9 +404,10 @@ assert_contains "$BODY" "Missing required command: curl" "missing curl names dep
 
 echo "Test 4: stubbed rehearsal emits sanitized JSON receipt"
 setup_stubs
-OUTPUT=$(env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin "$SCRIPT" --prefix test --webhook-url https://example.com/hook --app canary-test --json)
+OUTPUT=$(env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin EXPECT_TARGET_URL=http://127.0.0.1:4000/healthz "$SCRIPT" --prefix test --webhook-url https://example.com/hook --target-url http://127.0.0.1:4000/healthz --app canary-test --json)
 assert_jq "$OUTPUT" '.status == "ok"' "receipt status ok"
 assert_jq "$OUTPUT" '.resources.cleaned_target_id == "TGT-test"' "records target id"
+assert_jq "$OUTPUT" '[.steps[] | select(.name == "target_create")][0].response.url == "http://127.0.0.1:4000/healthz"' "uses custom target URL"
 assert_jq "$OUTPUT" '.resources.revoked_key_id == "KEY-test"' "records revoked key id"
 assert_jq "$OUTPUT" '.resources.immutable_webhook_delivery_id == "DLV-test"' "records delivery id"
 assert_jq "$OUTPUT" '[.steps[] | select(.name == "dr_status" and .status == 0)] | length == 1' "records dr-status success"

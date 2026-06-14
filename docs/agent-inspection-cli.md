@@ -68,8 +68,15 @@ nonzero when coverage gaps remain, so agents can inspect the failure details.
 
 `doctor` is the fastest "who watches Canary?" command. It probes `/healthz`,
 `/readyz`, the global report, service status, incidents, dogfood coverage,
-recent `service=canary` errors, and the external `canary-watchman` monitor
-created by `bin/canary-witness`. The witness line is:
+recent `service=canary` errors, worker lifecycle readiness, and the external
+`canary-watchman` monitor created by `bin/canary-witness`. The worker readiness
+line is derived from `/readyz` and should look like:
+
+```text
+worker_readiness: ready 5 workers, 0 failing
+```
+
+The witness line is:
 
 - `observed`: the scheduled witness has checked in; the line includes the last
   check-in status and timestamp.
