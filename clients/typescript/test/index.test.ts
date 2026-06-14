@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { initCanary, captureException, captureMessage, checkIn } from "../src/index";
+import { initCanary, captureException, captureMessage, checkIn, captureEvent } from "../src/index";
 
 describe("initCanary + captureException", () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
@@ -239,15 +239,70 @@ describe("checkIn", () => {
   });
 });
 
+describe("captureEvent", () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    fetchSpy = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: "EVT-1",
+          service: "test-svc",
+          event: "telemetry.event",
+          name: "signup.completed",
+          severity: "info",
+          summary: "Signup completed",
+          attributes: { email: "[EMAIL]" },
+          retention_class: "standard",
+          privacy_policy: "redacted",
+          sampling_policy: "unsampled",
+          created_at: "2026-06-14T00:00:00Z",
+        }),
+        { status: 201 }
+      )
+    );
+    globalThis.fetch = fetchSpy;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("sends scrubbed analytics events", async () => {
+    initCanary({
+      endpoint: "https://canary.test",
+      apiKey: "sk_test_abc",
+      service: "test-svc",
+    });
+
+    await captureEvent({
+      name: "signup.completed",
+      summary: "Signup completed for alice@example.com",
+      attributes: { email: "alice@example.com", plan: "pro" },
+    });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(fetchSpy.mock.calls[0][0]).toBe("https://canary.test/api/v1/events");
+    expect(body.service).toBe("test-svc");
+    expect(body.name).toBe("signup.completed");
+    expect(body.summary).toBe("Signup completed for [EMAIL]");
+    expect(body.attributes).toEqual({ email: "[EMAIL]", plan: "pro" });
+  });
+});
+
 describe("uninitialized capture helpers", () => {
   it("return null before initCanary runs", async () => {
     vi.resetModules();
-    const { captureException, captureMessage, checkIn } = await import("../src/index");
+    const { captureException, captureMessage, checkIn, captureEvent } = await import("../src/index");
 
     await expect(captureException(new Error("boom"))).resolves.toBeNull();
     await expect(captureMessage("boom")).resolves.toBeNull();
     await expect(
       checkIn({ monitor: "test", status: "alive" })
+    ).resolves.toBeNull();
+    await expect(
+      captureEvent({ name: "test.event", summary: "test" })
     ).resolves.toBeNull();
   });
 });

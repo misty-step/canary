@@ -7,7 +7,7 @@ use canary_cli::{
     Window, doctor_report, dogfood_strict_failure_count, encode, find_repo_root,
     integration_discover, integration_enroll, integration_patch, integration_plan,
     integration_status, json_envelope, print_json, print_lines, resolve_endpoint_without_config,
-    run_dogfood_inventory, summarize_claims, summarize_doctor, summarize_dogfood,
+    run_dogfood_inventory, summarize_claims, summarize_doctor, summarize_dogfood, summarize_event,
     summarize_incidents, summarize_integration, summarize_monitors, summarize_query,
     summarize_report, summarize_services, summarize_targets, summarize_timeline, tool_manifest,
 };
@@ -48,6 +48,8 @@ enum Commands {
     Monitors,
     /// Inspect dogfood coverage.
     Dogfood(DogfoodArgs),
+    /// Capture bounded analytics events.
+    Events(EventsArgs),
     /// Coordinate agentic remediation claims.
     Claims(ClaimsArgs),
     /// Discover, plan, patch, and enroll application integrations.
@@ -111,6 +113,38 @@ enum DogfoodCommand {
 struct DogfoodAuditArgs {
     #[arg(long)]
     strict: bool,
+}
+
+#[derive(Debug, Args)]
+struct EventsArgs {
+    #[command(subcommand)]
+    command: EventsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum EventsCommand {
+    /// Capture one analytics event.
+    Capture(EventCaptureArgs),
+}
+
+#[derive(Debug, Args)]
+struct EventCaptureArgs {
+    #[arg(long)]
+    service: String,
+    #[arg(long)]
+    name: String,
+    #[arg(long)]
+    summary: String,
+    #[arg(long, default_value = "info")]
+    severity: String,
+    #[arg(long = "attribute")]
+    attributes: Vec<String>,
+    #[arg(long, default_value = "standard")]
+    retention_class: String,
+    #[arg(long, default_value = "redacted")]
+    privacy_policy: String,
+    #[arg(long, default_value = "unsampled")]
+    sampling_policy: String,
 }
 
 #[derive(Debug, Args)]
@@ -394,7 +428,10 @@ fn run_http_command(
     config_path: Option<PathBuf>,
     mode: RenderMode,
 ) -> Result<()> {
-    let config = Config::resolve(endpoint, api_key, config_path)?;
+    let config = match &command {
+        Commands::Events(_) => Config::resolve_for_ingest(endpoint, api_key, config_path)?,
+        _ => Config::resolve(endpoint, api_key, config_path)?,
+    };
     let client = ApiClient::new(config)?;
 
     match command {
@@ -479,6 +516,7 @@ fn run_http_command(
                 summarize_monitors,
             )
         }
+        Commands::Events(args) => run_events_command(args, &client, mode),
         Commands::Claims(args) => run_claims_command(args, &client, mode),
         Commands::Doctor => {
             let cwd = env::current_dir().map_err(|source| CliError::Io {
@@ -499,6 +537,51 @@ fn run_http_command(
             unreachable!("handled before HTTP setup")
         }
     }
+}
+
+fn run_events_command(args: EventsArgs, client: &ApiClient, mode: RenderMode) -> Result<()> {
+    match args.command {
+        EventsCommand::Capture(args) => {
+            let response = client.post_auth_json(
+                "/api/v1/events",
+                &json!({
+                    "service": args.service,
+                    "name": args.name,
+                    "summary": args.summary,
+                    "severity": args.severity,
+                    "attributes": parse_attributes(&args.attributes)?,
+                    "retention_class": args.retention_class,
+                    "privacy_policy": args.privacy_policy,
+                    "sampling_policy": args.sampling_policy,
+                }),
+            )?;
+            render(
+                "events capture",
+                client.endpoint(),
+                response,
+                mode,
+                summarize_event,
+            )
+        }
+    }
+}
+
+fn parse_attributes(attributes: &[String]) -> Result<serde_json::Map<String, serde_json::Value>> {
+    let mut object = serde_json::Map::new();
+    for attribute in attributes {
+        let Some((key, value)) = attribute.split_once('=') else {
+            return Err(CliError::Message(format!(
+                "attribute must be key=value: {attribute}"
+            )));
+        };
+        if key.is_empty() {
+            return Err(CliError::Message(
+                "attribute key must not be empty".to_owned(),
+            ));
+        }
+        object.insert(key.to_owned(), serde_json::Value::String(value.to_owned()));
+    }
+    Ok(object)
 }
 
 fn run_claims_command(args: ClaimsArgs, client: &ApiClient, mode: RenderMode) -> Result<()> {

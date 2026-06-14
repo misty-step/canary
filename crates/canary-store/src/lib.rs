@@ -23,6 +23,7 @@ mod rate_limits;
 mod retention;
 mod schema;
 mod seeds;
+mod telemetry;
 mod webhook_deliveries;
 
 pub use annotations::{
@@ -65,6 +66,7 @@ pub use retention::{
     RetentionPrune, RetentionPruneBatch, RetentionPruneBatchReport, RetentionPruneReport,
     RetentionPruneTable,
 };
+pub use telemetry::{TelemetryEventError, TelemetryEventInsert, TelemetryEventResult};
 pub use webhook_deliveries::{
     WebhookDeliveryInsert, WebhookDeliveryListOptions, WebhookDeliveryPageError,
     WebhookDeliveryPageOptions, WebhookDeliveryPageResult, WebhookDeliveryRow,
@@ -138,6 +140,14 @@ impl Store {
     /// Commit one validated error ingest transaction.
     pub fn commit_error_ingest(&mut self, ingest: ErrorIngest) -> Result<ErrorIngestCommit> {
         ingest::commit(&mut self.connection, ingest)
+    }
+
+    /// Persist one bounded analytics event as a timeline signal.
+    pub fn insert_telemetry_event(
+        &mut self,
+        event: TelemetryEventInsert,
+    ) -> TelemetryEventResult<canary_core::query::TelemetryEvent> {
+        telemetry::insert_event(&self.connection, event)
     }
 
     /// Correlate one post-commit signal into Canary's incident graph.
@@ -4312,7 +4322,13 @@ mod tests {
         assert_eq!(first.returned_count, 1);
         assert_eq!(first.service.as_deref(), Some("alpha"));
         assert_eq!(first.events[0].id, "EVT-b");
+        assert_eq!(first.events[0].signal_kind, "operational");
+        assert_eq!(first.events[0].signal_name, None);
         assert_eq!(first.events[0].payload["event"], "error.new_class");
+        assert_eq!(first.events[0].attributes, json!({}));
+        assert_eq!(first.events[0].retention_class, "standard");
+        assert_eq!(first.events[0].privacy_policy, "system");
+        assert_eq!(first.events[0].sampling_policy, "unsampled");
         assert!(first.cursor.is_some());
 
         let second = query::timeline_at(
@@ -4396,6 +4412,71 @@ mod tests {
             ),
             Err(TimelineQueryError::InvalidEventType(invalid)) if invalid == vec!["canary.ping"]
         ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn telemetry_events_are_typed_timeline_signals()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        let event = store.insert_telemetry_event(TelemetryEventInsert {
+            id: EventId::from_str("EVT-telemetry001")?,
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: "checkout".to_owned(),
+            name: "checkout.completed".to_owned(),
+            severity: "info".to_owned(),
+            summary: "Checkout completed".to_owned(),
+            attributes_json: json!({"plan": "pro", "amount": 42}).to_string(),
+            retention_class: "standard".to_owned(),
+            privacy_policy: "redacted".to_owned(),
+            sampling_policy: "sampled:0.25".to_owned(),
+            created_at: "2026-05-28T20:59:50Z".to_owned(),
+        })?;
+
+        assert_eq!(event.event, "telemetry.event");
+        assert_eq!(event.name, "checkout.completed");
+        assert_eq!(event.attributes["plan"], "pro");
+
+        let timeline = query::timeline_at(
+            &store.connection,
+            "24h",
+            TimelineQueryOptions {
+                event_type: Some("telemetry.event".to_owned()),
+                ..TimelineQueryOptions::default()
+            },
+            OffsetDateTime::parse("2026-05-28T21:00:00Z", &Rfc3339)?,
+        )?;
+
+        assert_eq!(timeline.returned_count, 1);
+        assert_eq!(timeline.events[0].id, "EVT-telemetry001");
+        assert_eq!(timeline.events[0].event, "telemetry.event");
+        assert_eq!(timeline.events[0].signal_kind, "analytics_event");
+        assert_eq!(
+            timeline.events[0].signal_name.as_deref(),
+            Some("checkout.completed")
+        );
+        assert_eq!(timeline.events[0].attributes["amount"], 42);
+        assert_eq!(timeline.events[0].retention_class, "standard");
+        assert_eq!(timeline.events[0].privacy_policy, "redacted");
+        assert_eq!(timeline.events[0].sampling_policy, "sampled:0.25");
+
+        let invalid = store.insert_telemetry_event(TelemetryEventInsert {
+            id: EventId::from_str("EVT-telemetry002")?,
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: "checkout".to_owned(),
+            name: "".to_owned(),
+            severity: "debug".to_owned(),
+            summary: "invalid".to_owned(),
+            attributes_json: "[]".to_owned(),
+            retention_class: "forever".to_owned(),
+            privacy_policy: "unknown".to_owned(),
+            sampling_policy: "".to_owned(),
+            created_at: "2026-05-28T20:59:51Z".to_owned(),
+        });
+        assert!(matches!(invalid, Err(TelemetryEventError::Validation(_))));
 
         Ok(())
     }

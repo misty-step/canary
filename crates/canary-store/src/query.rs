@@ -729,7 +729,9 @@ pub(crate) fn timeline_at(
         .filter(|project_id| !project_id.is_empty());
 
     let mut sql = String::from(
-        "SELECT id, service, event, entity_type, entity_ref, severity, summary, payload, created_at
+        "SELECT id, service, event, signal_kind, signal_name, entity_type, entity_ref, severity,
+                summary, payload, attributes, retention_class, privacy_policy, sampling_policy,
+                created_at
          FROM service_events
          WHERE created_at >= ?",
     );
@@ -767,17 +769,25 @@ pub(crate) fn timeline_at(
 
     let mut statement = connection.prepare(&sql)?;
     let rows = statement.query_map(params_from_iter(filters), |row| {
-        let payload_json: String = row.get(7)?;
+        let payload_json: String = row.get(9)?;
+        let attributes_json: String = row.get(10)?;
         Ok(TimelineEvent {
             id: row.get(0)?,
             service: row.get(1)?,
             event: row.get(2)?,
-            entity_type: row.get(3)?,
-            entity_ref: row.get(4)?,
-            severity: row.get(5)?,
-            summary: row.get(6)?,
+            signal_kind: row.get(3)?,
+            signal_name: row.get(4)?,
+            entity_type: row.get(5)?,
+            entity_ref: row.get(6)?,
+            severity: row.get(7)?,
+            summary: row.get(8)?,
             payload: safe_decode_json(Some(payload_json)).unwrap_or(Value::Null),
-            created_at: row.get(8)?,
+            attributes: safe_decode_json(Some(attributes_json))
+                .unwrap_or_else(|| Value::Object(Default::default())),
+            retention_class: row.get(11)?,
+            privacy_policy: row.get(12)?,
+            sampling_policy: row.get(13)?,
+            created_at: row.get(14)?,
         })
     })?;
     let mut rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;

@@ -25,6 +25,16 @@ export interface CheckInPayload {
   context?: Record<string, unknown>;
 }
 
+export interface EventPayload {
+  name: string;
+  summary: string;
+  severity?: "info" | "warning" | "error";
+  attributes?: Record<string, unknown>;
+  retention_class?: "ephemeral" | "standard" | "audit";
+  privacy_policy?: "redacted" | "public" | "sensitive";
+  sampling_policy?: string;
+}
+
 export interface CanaryResponse {
   id: string;
   group_hash: string;
@@ -39,15 +49,31 @@ export interface CheckInResponse {
   sequence: number;
 }
 
+export interface EventResponse {
+  id: string;
+  service: string;
+  event: "telemetry.event";
+  name: string;
+  severity: "info" | "warning" | "error";
+  summary: string;
+  attributes: Record<string, unknown>;
+  retention_class: "ephemeral" | "standard" | "audit";
+  privacy_policy: "redacted" | "public" | "sensitive";
+  sampling_policy: string;
+  created_at: string;
+}
+
 export interface CanaryClient {
   send(payload: ErrorPayload): Promise<CanaryResponse | null>;
   checkIn(payload: CheckInPayload): Promise<CheckInResponse | null>;
+  event(payload: EventPayload): Promise<EventResponse | null>;
   readonly pending: number;
 }
 
 export function createClient(opts: ClientOptions): CanaryClient {
   const endpoint = opts.endpoint.replace(/\/$/, "");
   const errorsUrl = `${endpoint}/api/v1/errors`;
+  const eventsUrl = `${endpoint}/api/v1/events`;
   const checkInsUrl = `${endpoint}/api/v1/check-ins`;
   const maxQueue = opts.maxQueue ?? 10;
   let inflight = 0;
@@ -92,9 +118,32 @@ export function createClient(opts: ClientOptions): CanaryClient {
     }
   }
 
+  async function event(payload: EventPayload): Promise<EventResponse | null> {
+    if (inflight >= maxQueue) return null;
+    inflight++;
+
+    const body = JSON.stringify({
+      service: opts.service,
+      severity: "info",
+      retention_class: "standard",
+      privacy_policy: "redacted",
+      sampling_policy: "unsampled",
+      ...payload,
+    });
+
+    try {
+      return await attempt<EventResponse>(eventsUrl, opts.apiKey, body, 1);
+    } catch {
+      return null;
+    } finally {
+      inflight--;
+    }
+  }
+
   return {
     send,
     checkIn,
+    event,
     get pending() {
       return inflight;
     },

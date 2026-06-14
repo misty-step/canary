@@ -24,7 +24,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const LEGACY_FIXTURE: &str = "tests/fixtures/legacy_schema.db";
 const POPULATED_LEGACY_FIXTURE: &str = "tests/fixtures/legacy_read_models.db";
-const RUST_SCHEMA_VERSION: u32 = 2026061306;
+const RUST_SCHEMA_VERSION: u32 = 2026061401;
 
 const LEGACY_MIGRATIONS: &[&str] = &[
     "20260314000001",

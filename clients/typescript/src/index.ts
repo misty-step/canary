@@ -1,8 +1,8 @@
 import { createClient, type CanaryClient, type CanaryResponse } from "./client";
-import type { CheckInPayload, CheckInResponse } from "./client";
+import type { CheckInPayload, CheckInResponse, EventPayload, EventResponse } from "./client";
 import { scrub, scrubObject, type ScrubRule } from "./scrub";
 
-export type { CanaryResponse, CheckInPayload, CheckInResponse, ScrubRule };
+export type { CanaryResponse, CheckInPayload, CheckInResponse, EventPayload, EventResponse, ScrubRule };
 
 export interface InitOptions {
   endpoint: string;
@@ -71,6 +71,18 @@ export async function checkIn(
     ...payload,
     summary: scrubPii ? scrub(payload.summary, scrubRules) : payload.summary,
     context: scrubPii ? scrubObject(payload.context, scrubRules) : payload.context,
+  });
+}
+
+export async function captureEvent(
+  payload: EventPayload
+): Promise<EventResponse | null> {
+  if (!client) return null;
+
+  return client.event({
+    ...payload,
+    summary: scrubPii ? scrub(payload.summary, scrubRules)! : payload.summary,
+    attributes: scrubPii ? scrubObject(payload.attributes, scrubRules) : payload.attributes,
   });
 }
 

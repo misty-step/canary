@@ -16,7 +16,10 @@ use canary_http::problem_details::{
     ProblemDetails, internal_problem, invalid_report_cursor_problem, invalid_report_limit_problem,
     invalid_string_param_problem, invalid_window_problem,
 };
-use canary_store::{IncidentListOptions, QueryError, RecentTransition, SearchResult};
+use canary_store::{
+    IncidentListOptions, QueryError, RecentTransition, SearchResult, TimelineQueryError,
+    TimelineQueryOptions,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -100,6 +103,24 @@ pub(crate) async fn report(
             Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
             Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
         };
+    let recent_events = match store.timeline(
+        window,
+        TimelineQueryOptions {
+            tenant_id: Some(key.tenant_id.clone()),
+            project_id: Some(key.project_id.clone()),
+            service: key.service.clone(),
+            limit: Some("10".to_owned()),
+            event_type: Some("telemetry.event".to_owned()),
+            ..TimelineQueryOptions::default()
+        },
+    ) {
+        Ok(events) => events.events,
+        Err(TimelineQueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
+        Err(TimelineQueryError::InvalidLimit)
+        | Err(TimelineQueryError::InvalidCursor)
+        | Err(TimelineQueryError::InvalidEventType(_))
+        | Err(TimelineQueryError::Sqlite(_)) => return problem_response(internal_problem()),
+    };
     let mut search_results = match params.q.as_deref() {
         Some(query) => {
             match store.search_errors_scoped(query, window, &key.tenant_id, &key.project_id) {
@@ -149,6 +170,7 @@ pub(crate) async fn report(
         "error_groups": error_groups.iter().map(error_group_response).collect::<Vec<_>>(),
         "incidents": incidents,
         "recent_transitions": transitions.iter().map(recent_transition_response).collect::<Vec<_>>(),
+        "recent_events": recent_events,
         "truncated": truncated,
         "cursor": cursor,
     });
