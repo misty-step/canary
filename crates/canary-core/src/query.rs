@@ -811,6 +811,10 @@ pub struct TimelineEvent {
     pub service: String,
     /// Business event name.
     pub event: String,
+    /// Signal family for agent routing.
+    pub signal_kind: String,
+    /// Consumer-supplied signal name, when this is a telemetry event.
+    pub signal_name: Option<String>,
     /// Subject type.
     pub entity_type: String,
     /// Subject id, when present.
@@ -821,6 +825,41 @@ pub struct TimelineEvent {
     pub summary: String,
     /// Decoded JSON payload.
     pub payload: Value,
+    /// Decoded event attributes.
+    pub attributes: Value,
+    /// Retention class applied to this signal.
+    pub retention_class: String,
+    /// Privacy policy applied before persistence.
+    pub privacy_policy: String,
+    /// Sampling policy reported by the producer.
+    pub sampling_policy: String,
+    /// Creation timestamp.
+    pub created_at: String,
+}
+
+/// Successful response for `POST /api/v1/events`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TelemetryEvent {
+    /// Event row id.
+    pub id: String,
+    /// Service name.
+    pub service: String,
+    /// Stable timeline event family, currently `telemetry.event`.
+    pub event: String,
+    /// Consumer event name.
+    pub name: String,
+    /// Event severity.
+    pub severity: String,
+    /// Deterministic bounded summary.
+    pub summary: String,
+    /// Decoded event attributes.
+    pub attributes: Value,
+    /// Retention class applied to this signal.
+    pub retention_class: String,
+    /// Privacy policy applied before persistence.
+    pub privacy_policy: String,
+    /// Sampling policy reported by the producer.
+    pub sampling_policy: String,
     /// Creation timestamp.
     pub created_at: String,
 }
@@ -1644,11 +1683,17 @@ mod tests {
                     id: "EVT-a".to_owned(),
                     service: "alpha".to_owned(),
                     event: "error.new_class".to_owned(),
+                    signal_kind: "operational".to_owned(),
+                    signal_name: None,
                     entity_type: "error_group".to_owned(),
                     entity_ref: Some("group-a".to_owned()),
                     severity: Some("error".to_owned()),
                     summary: "summary".to_owned(),
                     payload: serde_json::json!({"event": "error.new_class"}),
+                    attributes: serde_json::json!({}),
+                    retention_class: "standard".to_owned(),
+                    privacy_policy: "system".to_owned(),
+                    sampling_policy: "unsampled".to_owned(),
                     created_at: "2026-05-28T20:59:50Z".to_owned(),
                 }],
                 Some("alpha".to_owned()),

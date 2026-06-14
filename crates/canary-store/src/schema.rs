@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rusqlite::Connection;
 
 /// Current Rust schema version.
-pub const SCHEMA_VERSION: u32 = 2026061306;
+pub const SCHEMA_VERSION: u32 = 2026061401;
 
 pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
@@ -13,6 +13,7 @@ pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     add_bootstrap_ownership_columns(&transaction)?;
     scope_error_group_identity(&transaction)?;
     backfill_service_scope_columns(&transaction)?;
+    add_service_event_telemetry_columns(&transaction)?;
     scope_monitor_name_index(&transaction)?;
     scope_incident_open_service_index(&transaction)?;
     validate_schema_columns(&transaction)?;
@@ -343,6 +344,46 @@ fn scope_error_group_identity(connection: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+fn add_service_event_telemetry_columns(connection: &Connection) -> rusqlite::Result<()> {
+    add_text_column_if_missing(
+        connection,
+        "service_events",
+        "signal_kind",
+        "TEXT NOT NULL DEFAULT 'operational' CHECK (signal_kind IN ('operational', 'analytics_event'))",
+    )?;
+    add_text_column_if_missing(connection, "service_events", "signal_name", "TEXT")?;
+    add_text_column_if_missing(
+        connection,
+        "service_events",
+        "attributes",
+        "TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(attributes) AND json_type(attributes) = 'object')",
+    )?;
+    add_text_column_if_missing(
+        connection,
+        "service_events",
+        "retention_class",
+        "TEXT NOT NULL DEFAULT 'standard' CHECK (retention_class IN ('ephemeral', 'standard', 'audit'))",
+    )?;
+    add_text_column_if_missing(
+        connection,
+        "service_events",
+        "privacy_policy",
+        "TEXT NOT NULL DEFAULT 'system' CHECK (privacy_policy IN ('system', 'redacted', 'public', 'sensitive'))",
+    )?;
+    add_text_column_if_missing(
+        connection,
+        "service_events",
+        "sampling_policy",
+        "TEXT NOT NULL DEFAULT 'unsampled' CHECK (length(trim(sampling_policy)) > 0)",
+    )?;
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS service_events_signal_kind_created_at_id_index
+         ON service_events(signal_kind, created_at, id)",
+        [],
+    )?;
+    Ok(())
+}
+
 fn error_group_identity_is_scoped(connection: &Connection) -> rusqlite::Result<bool> {
     let mut statement = connection.prepare("PRAGMA table_info(\"error_groups\")")?;
     let rows = statement.query_map([], |row| {
@@ -629,10 +670,16 @@ CREATE TABLE IF NOT EXISTS service_events (
   project_id TEXT NOT NULL DEFAULT 'PROJECT-bootstrap',
   service TEXT NOT NULL,
   event TEXT NOT NULL,
+  signal_kind TEXT NOT NULL DEFAULT 'operational' CHECK (signal_kind IN ('operational', 'analytics_event')),
+  signal_name TEXT,
   entity_type TEXT NOT NULL,
   entity_ref TEXT,
   severity TEXT,
   summary TEXT NOT NULL,
+  attributes TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(attributes) AND json_type(attributes) = 'object'),
+  retention_class TEXT NOT NULL DEFAULT 'standard' CHECK (retention_class IN ('ephemeral', 'standard', 'audit')),
+  privacy_policy TEXT NOT NULL DEFAULT 'system' CHECK (privacy_policy IN ('system', 'redacted', 'public', 'sensitive')),
+  sampling_policy TEXT NOT NULL DEFAULT 'unsampled' CHECK (length(trim(sampling_policy)) > 0),
   payload TEXT NOT NULL,
   created_at TEXT NOT NULL
 );

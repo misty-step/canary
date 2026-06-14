@@ -8,6 +8,7 @@
       "summary": "Register webhooks as wake-up hints, then treat the timeline as the durable source of truth for correctness.",
       "flow": [
         "Create a remediation claim before starting automated triage or repair work on an incident, error_group, target, or monitor.",
+        "Use POST /api/v1/events only for bounded operational analytics that help triage; do not encode analytics as errors.",
         "Create a webhook subscription for the business events that should wake the agent.",
         "Persist the last processed timeline cursor after each successful polling cycle.",
         "When a webhook arrives, poll GET /api/v1/timeline from the last persisted cursor.",
@@ -71,7 +72,8 @@
             "WebhookCreateResponse",
             "ApiKeyCreateResponse",
             "SimpleStatusResponse",
-            "RemediationClaim"
+            "RemediationClaim",
+            "TelemetryEvent"
           ]
         },
         {
@@ -128,6 +130,34 @@
           "remediation_claim.expired",
           "remediation_claim.released"
         ]
+      },
+      "telemetry_model": {
+        "summary": "Canary owns errors, health checks, check-ins, incidents, annotations, remediation claims, and bounded analytics events that help agents triage operational state.",
+        "native_signals": [
+          "errors",
+          "health",
+          "check_ins",
+          "incidents",
+          "annotations",
+          "remediation_claims",
+          "telemetry.event"
+        ],
+        "bridge_only_signals": [
+          "metrics",
+          "logs",
+          "traces"
+        ],
+        "non_goals": [
+          "general BI dashboards",
+          "unbounded log search",
+          "high-cardinality metrics storage",
+          "raw trace warehousing"
+        ],
+        "event_defaults": {
+          "retention_class": "standard",
+          "privacy_policy": "redacted",
+          "sampling_policy": "unsampled"
+        }
       }
     }
   },
@@ -150,6 +180,9 @@
     },
     {
       "name": "Errors"
+    },
+    {
+      "name": "Telemetry"
     },
     {
       "name": "Report"
@@ -2071,9 +2104,9 @@
             "description": "Active claim conflict. The body includes current_claim.",
             "content": {
               "application/json": {
-	                "schema": {
-	                  "$ref": "#/components/schemas/RemediationClaimConflictProblem"
-	                }
+                "schema": {
+                  "$ref": "#/components/schemas/RemediationClaimConflictProblem"
+                }
               }
             }
           },
@@ -2249,6 +2282,61 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/events": {
+      "post": {
+        "tags": [
+          "Telemetry"
+        ],
+        "summary": "Ingest a bounded analytics event",
+        "description": "Stores a typed analytics event as a telemetry.event timeline row. Use this for low-volume operational/product signals that help agents triage; do not send logs, metrics, traces, or raw PII.",
+        "x-agent-guidance": {
+          "when_to_call": "Call when a consuming app or agent needs to record a low-volume typed event that helps correlate user flows, deploys, or agent work with errors, health, and incidents.",
+          "trust": "The caller owns redaction before ingest. Canary enforces size, shape, scoped API keys, and service authority, but retention_class and privacy_policy are policy labels until downstream retention/privacy automation consumes them.",
+          "next": "Read /api/v1/report for recent_events or replay /api/v1/timeline?event_type=telemetry.event with a cursor to verify the event and correlate it with incidents, errors, health, claims, and annotations."
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TelemetryEventRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Telemetry event stored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TelemetryEvent"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLargeProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalProblem"
+          }
+        },
+        "x-canary-required-scope": "ingest-only"
       }
     }
   },
@@ -2436,7 +2524,8 @@
           "remediation_claim.updated",
           "remediation_claim.expired",
           "remediation_claim.released",
-          "annotation.added"
+          "annotation.added",
+          "telemetry.event"
         ]
       },
       "WebhookEvent": {
@@ -4957,7 +5046,8 @@
           "incidents",
           "recent_transitions",
           "truncated",
-          "cursor"
+          "cursor",
+          "recent_events"
         ],
         "properties": {
           "status": {
@@ -5016,6 +5106,12 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/SearchResult"
+            }
+          },
+          "recent_events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TimelineEvent"
             }
           }
         }
@@ -5076,7 +5172,13 @@
           "severity",
           "summary",
           "payload",
-          "created_at"
+          "created_at",
+          "signal_kind",
+          "signal_name",
+          "attributes",
+          "retention_class",
+          "privacy_policy",
+          "sampling_policy"
         ],
         "properties": {
           "id": {
@@ -5094,7 +5196,8 @@
               "error_group",
               "target",
               "monitor",
-              "incident"
+              "incident",
+              "telemetry_event"
             ]
           },
           "entity_ref": {
@@ -5118,6 +5221,43 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "signal_kind": {
+            "type": "string",
+            "enum": [
+              "operational",
+              "analytics_event"
+            ]
+          },
+          "signal_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "attributes": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "retention_class": {
+            "type": "string",
+            "enum": [
+              "ephemeral",
+              "standard",
+              "audit"
+            ]
+          },
+          "privacy_policy": {
+            "type": "string",
+            "enum": [
+              "system",
+              "redacted",
+              "public",
+              "sensitive"
+            ]
+          },
+          "sampling_policy": {
+            "type": "string"
           }
         }
       },
@@ -5712,6 +5852,135 @@
         "properties": {
           "owner": {
             "type": "string"
+          }
+        }
+      },
+      "TelemetryRetentionClass": {
+        "type": "string",
+        "enum": [
+          "ephemeral",
+          "standard",
+          "audit"
+        ]
+      },
+      "TelemetryPrivacyPolicy": {
+        "type": "string",
+        "enum": [
+          "redacted",
+          "public",
+          "sensitive"
+        ]
+      },
+      "TelemetryEventRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "service",
+          "name",
+          "summary"
+        ],
+        "properties": {
+          "service": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Consumer event name such as checkout.completed."
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "error"
+            ],
+            "default": "info"
+          },
+          "attributes": {
+            "type": "object",
+            "additionalProperties": true,
+            "default": {}
+          },
+          "retention_class": {
+            "$ref": "#/components/schemas/TelemetryRetentionClass",
+            "default": "standard"
+          },
+          "privacy_policy": {
+            "$ref": "#/components/schemas/TelemetryPrivacyPolicy",
+            "default": "redacted"
+          },
+          "sampling_policy": {
+            "type": "string",
+            "minLength": 1,
+            "default": "unsampled"
+          }
+        }
+      },
+      "TelemetryEvent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "service",
+          "event",
+          "name",
+          "severity",
+          "summary",
+          "attributes",
+          "retention_class",
+          "privacy_policy",
+          "sampling_policy",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "event": {
+            "type": "string",
+            "const": "telemetry.event"
+          },
+          "name": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "error"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          },
+          "attributes": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "retention_class": {
+            "$ref": "#/components/schemas/TelemetryRetentionClass"
+          },
+          "privacy_policy": {
+            "$ref": "#/components/schemas/TelemetryPrivacyPolicy"
+          },
+          "sampling_policy": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       }

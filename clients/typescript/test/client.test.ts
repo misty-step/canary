@@ -250,4 +250,43 @@ describe("createClient", () => {
     expect(body.status).toBe("ok");
     expect(body.context).toEqual({ duration_ms: 1200 });
   });
+
+  it("sends analytics events to /api/v1/events with safe defaults", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          id: "EVT-telemetry01",
+          service: "test-app",
+          event: "telemetry.event",
+          name: "checkout.completed",
+          severity: "info",
+          summary: "Checkout completed",
+          attributes: { plan: "pro" },
+          retention_class: "standard",
+          privacy_policy: "redacted",
+          sampling_policy: "unsampled",
+          created_at: "2026-06-14T00:00:00Z",
+        }),
+        { status: 201 }
+      )
+    );
+
+    const client = createClient(opts);
+    const result = await client.event({
+      name: "checkout.completed",
+      summary: "Checkout completed",
+      attributes: { plan: "pro" },
+    });
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toBe("https://canary.test/api/v1/events");
+    const body = JSON.parse(init.body);
+    expect(body.service).toBe("test-app");
+    expect(body.name).toBe("checkout.completed");
+    expect(body.retention_class).toBe("standard");
+    expect(body.privacy_policy).toBe("redacted");
+    expect(body.sampling_policy).toBe("unsampled");
+    expect(result?.event).toBe("telemetry.event");
+  });
 });

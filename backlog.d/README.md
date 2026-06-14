@@ -41,7 +41,7 @@
 | 042 | Runtime pressure and freshness operations | P0 | done | L |
 | 040 | Universal integration and enrollment engine | P0 | done | XL |
 | 043 | Agentic remediation claim protocol | P1 | done | L |
-| 044 | Telemetry and analytics signal model | P1 | ready | XL |
+| 044 | Telemetry and analytics signal model | P1 | done | XL |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
 
@@ -95,9 +95,8 @@
 
 ### Active order (2026-06-13)
 
-039, 041, 042, 040, and 043 are delivered. 044 is the remaining ready P1
-product-shaping epic: it defines the telemetry/analytics signal model before
-Canary broadens ingest surfaces.
+039, 041, 042, 040, 043, and 044 are delivered. No ready Lane 6 items remain;
+only explicitly blocked items stay visible.
 
 020 stays blocked on Adminifi URLs; 010 stays blocked on the downstream
 bitterblossom triage sprite, but the new Lane 6 foundations now precede any
@@ -208,6 +207,11 @@ parity backlog items were retired during the Rust scorched-earth migration.
   query/report/incident/annotation surfacing, lifecycle webhooks, CLI/MCP
   helpers, fail-closed claim row validation, and OpenAPI guidance for agentic
   remediation handoff.
+- 2026-06-14: Delivered 044. Canary now has a typed native analytics event
+  model with bounded storage, timeline/report correlation, scoped event
+  webhooks, TypeScript SDK and CLI/MCP capture helpers, and OpenAPI guidance;
+  metrics, logs, and traces remain explicit bridge-only responsibilities until
+  an OpenTelemetry integration is designed.
 
 ## Status
 

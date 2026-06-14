@@ -63,6 +63,8 @@ pub type Result<T> = std::result::Result<T, CliError>;
 pub struct FileConfig {
     /// Base Canary endpoint.
     pub endpoint: Option<String>,
+    /// Ingest-scoped API key.
+    pub ingest_api_key: Option<String>,
     /// Read-scoped API key.
     pub read_api_key: Option<String>,
     /// Admin-scoped API key.
@@ -87,6 +89,24 @@ impl Config {
         key_flag: Option<String>,
         config_path: Option<PathBuf>,
     ) -> Result<Self> {
+        Self::resolve_with_mode(endpoint_flag, key_flag, config_path, KeyMode::Read)
+    }
+
+    /// Resolve config from flags, environment, and local JSON for ingest/write commands.
+    pub fn resolve_for_ingest(
+        endpoint_flag: Option<String>,
+        key_flag: Option<String>,
+        config_path: Option<PathBuf>,
+    ) -> Result<Self> {
+        Self::resolve_with_mode(endpoint_flag, key_flag, config_path, KeyMode::Ingest)
+    }
+
+    fn resolve_with_mode(
+        endpoint_flag: Option<String>,
+        key_flag: Option<String>,
+        config_path: Option<PathBuf>,
+        mode: KeyMode,
+    ) -> Result<Self> {
         let file_config = read_file_config(config_path)?;
         let endpoint = first_non_empty([
             endpoint_flag,
@@ -96,20 +116,39 @@ impl Config {
         ])
         .unwrap_or_else(|| DEFAULT_ENDPOINT.to_owned());
 
-        let key_sources = [
-            ("--api-key", key_flag),
-            (
-                "CANARY_ADMIN_API_KEY",
-                env::var("CANARY_ADMIN_API_KEY").ok(),
-            ),
-            ("CANARY_ADMIN_KEY", env::var("CANARY_ADMIN_KEY").ok()),
-            ("CANARY_READ_API_KEY", env::var("CANARY_READ_API_KEY").ok()),
-            ("CANARY_READ_KEY", env::var("CANARY_READ_KEY").ok()),
-            ("config.admin_api_key", file_config.admin_api_key),
-            ("config.read_api_key", file_config.read_api_key),
-            ("config.api_key", file_config.api_key),
-            ("CANARY_API_KEY", env::var("CANARY_API_KEY").ok()),
-        ];
+        let key_sources = match mode {
+            KeyMode::Read => vec![
+                ("--api-key", key_flag),
+                (
+                    "CANARY_ADMIN_API_KEY",
+                    env::var("CANARY_ADMIN_API_KEY").ok(),
+                ),
+                ("CANARY_ADMIN_KEY", env::var("CANARY_ADMIN_KEY").ok()),
+                ("CANARY_READ_API_KEY", env::var("CANARY_READ_API_KEY").ok()),
+                ("CANARY_READ_KEY", env::var("CANARY_READ_KEY").ok()),
+                ("config.admin_api_key", file_config.admin_api_key),
+                ("config.read_api_key", file_config.read_api_key),
+                ("config.api_key", file_config.api_key),
+                ("CANARY_API_KEY", env::var("CANARY_API_KEY").ok()),
+            ],
+            KeyMode::Ingest => vec![
+                ("--api-key", key_flag),
+                (
+                    "CANARY_INGEST_API_KEY",
+                    env::var("CANARY_INGEST_API_KEY").ok(),
+                ),
+                ("CANARY_INGEST_KEY", env::var("CANARY_INGEST_KEY").ok()),
+                (
+                    "CANARY_ADMIN_API_KEY",
+                    env::var("CANARY_ADMIN_API_KEY").ok(),
+                ),
+                ("CANARY_ADMIN_KEY", env::var("CANARY_ADMIN_KEY").ok()),
+                ("config.ingest_api_key", file_config.ingest_api_key),
+                ("config.admin_api_key", file_config.admin_api_key),
+                ("config.api_key", file_config.api_key),
+                ("CANARY_API_KEY", env::var("CANARY_API_KEY").ok()),
+            ],
+        };
 
         let mut api_key = None;
         let mut api_key_source = None;
@@ -144,10 +183,16 @@ impl Config {
     fn api_key(&self) -> Result<&str> {
         self.api_key.as_deref().ok_or_else(|| {
             CliError::Message(
-                "missing Canary read/admin API key; set CANARY_ADMIN_API_KEY, CANARY_ADMIN_KEY, CANARY_API_KEY, CANARY_READ_API_KEY, CANARY_READ_KEY, --api-key, or config api_key".to_owned(),
+                "missing Canary API key; set --api-key, CANARY_ADMIN_API_KEY, CANARY_ADMIN_KEY, CANARY_INGEST_API_KEY, CANARY_INGEST_KEY, CANARY_READ_API_KEY, CANARY_READ_KEY, CANARY_API_KEY, or config api_key".to_owned(),
             )
         })
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum KeyMode {
+    Read,
+    Ingest,
 }
 
 /// Resolve an endpoint for local-only commands without reading config files.
@@ -397,6 +442,26 @@ pub fn summarize_claims(value: &Value) -> Vec<String> {
             format!("state: {}", string_field(value, "state")),
         ]
     }
+}
+
+/// Summarize a telemetry event write receipt.
+pub fn summarize_event(value: &Value) -> Vec<String> {
+    vec![
+        format!("id: {}", string_field(value, "id")),
+        format!("service: {}", string_field(value, "service")),
+        format!("event: {}", string_field(value, "event")),
+        format!("name: {}", string_field(value, "name")),
+        format!("severity: {}", string_field(value, "severity")),
+        format!(
+            "retention_class: {}",
+            string_field(value, "retention_class")
+        ),
+        format!("privacy_policy: {}", string_field(value, "privacy_policy")),
+        format!(
+            "sampling_policy: {}",
+            string_field(value, "sampling_policy")
+        ),
+    ]
 }
 
 /// Summarize timeline events.
@@ -2600,6 +2665,11 @@ pub fn tool_manifest() -> Vec<ToolSpec> {
             input_schema: json!({"type":"object","properties":{}}),
         },
         ToolSpec {
+            name: "canary_event_capture",
+            description: "Capture one bounded analytics event as a telemetry.event timeline row.",
+            input_schema: json!({"type":"object","required":["service","name","summary"],"properties":{"service":{"type":"string"},"name":{"type":"string"},"summary":{"type":"string"},"severity":{"type":"string","enum":["info","warning","error"]},"attributes":{"type":"object"},"retention_class":{"type":"string","enum":["ephemeral","standard","audit"]},"privacy_policy":{"type":"string","enum":["redacted","public","sensitive"]},"sampling_policy":{"type":"string"}}}),
+        },
+        ToolSpec {
             name: "canary_claims_list",
             description: "List remediation claims for one Canary subject.",
             input_schema: json!({"type":"object","required":["subject_type","subject_id"],"properties":{"subject_type":{"type":"string","enum":["incident","error_group","target","monitor"]},"subject_id":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":50},"cursor":{"type":"string"}}}),
@@ -2689,6 +2759,29 @@ mod tests {
         assert_eq!(report["status"], "configured");
         assert_eq!(report["monitor"], "canary-watchman");
         assert_eq!(report["mode"], "ttl");
+    }
+
+    #[test]
+    fn ingest_config_prefers_ingest_key_over_read_key()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = temp_project("ingest-config")?;
+        let config_path = root.join("config.json");
+        fs::write(
+            &config_path,
+            r#"{"endpoint":"https://canary.example","read_api_key":"sk_read","ingest_api_key":"sk_ingest","admin_api_key":"sk_admin"}"#,
+        )?;
+
+        let read_config = Config::resolve(None, None, Some(config_path.clone()))?;
+        let ingest_config = Config::resolve_for_ingest(None, None, Some(config_path))?;
+
+        assert_eq!(read_config.api_key()?, "sk_admin");
+        assert_eq!(ingest_config.api_key()?, "sk_ingest");
+        assert_eq!(
+            ingest_config.redacted_key(),
+            "config.ingest_api_key: redacted"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]
@@ -3291,6 +3384,7 @@ Vercel CLI completed
         assert!(names.contains("canary_integrate_plan"));
         assert!(names.contains("canary_integrate_patch"));
         assert!(names.contains("canary_integrate_enroll"));
+        assert!(names.contains("canary_event_capture"));
         assert!(names.contains("canary_claims_list"));
         assert!(names.contains("canary_claim_get"));
         assert!(names.contains("canary_claim_create"));
@@ -3303,6 +3397,10 @@ Vercel CLI completed
         assert_eq!(
             tool_by_name["canary_claim_get"].input_schema["required"],
             json!(["claim_id"])
+        );
+        assert_eq!(
+            tool_by_name["canary_event_capture"].input_schema["required"],
+            json!(["service", "name", "summary"])
         );
         assert_eq!(
             tool_by_name["canary_claim_create"].input_schema["required"],

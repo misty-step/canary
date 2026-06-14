@@ -41,6 +41,7 @@ mod server_time;
 mod service_onboarding_routes;
 mod target_probes;
 mod target_request;
+mod telemetry_routes;
 mod tls_scan;
 mod webhook_delivery;
 mod webhook_delivery_routes;
@@ -103,6 +104,7 @@ pub use target_probes::{
     TargetProbeOptions, TargetProbeOutcome, TargetProbeRuntime, TargetProbeRuntimeError,
     run_target_probe_once, validate_target_configuration, validate_target_probe_interval_ms,
 };
+use telemetry_routes::create_event;
 pub use tls_scan::{
     TlsExpiryScanLifecycle, TlsExpiryScanLifecycleConfig, TlsExpiryScanLifecycleReport,
     TlsExpiryScanLifecycleWorker, TlsExpiryScanRuntimeError, run_tls_expiry_scan_once,
@@ -125,6 +127,7 @@ pub fn ingest_router(state: IngestState) -> Router {
     Router::new()
         .route("/metrics", get(metrics))
         .route("/api/v1/errors", post(create_error))
+        .route("/api/v1/events", post(create_event))
         .route("/api/v1/check-ins", post(create_check_in))
         .route("/api/v1/query", get(query_errors))
         .route("/api/v1/report", get(report))
@@ -305,6 +308,7 @@ mod tests {
     static AUTHENTICATED_ROUTE_SPECS: &[AuthenticatedRouteSpec] = &[
         auth_route("GET", "/metrics", "/metrics", "admin"),
         auth_route("POST", "/api/v1/errors", "/api/v1/errors", "ingest-only"),
+        auth_route("POST", "/api/v1/events", "/api/v1/events", "ingest-only"),
         auth_route(
             "POST",
             "/api/v1/check-ins",
@@ -1486,6 +1490,33 @@ mod tests {
     }
 
     #[test]
+    fn openapi_telemetry_events_are_contract_visible() -> Result<(), Box<dyn Error>> {
+        let document: Value = serde_json::from_str(OPENAPI_JSON)?;
+        let business_events = document
+            .pointer("/components/schemas/BusinessEvent/enum")
+            .and_then(Value::as_array)
+            .ok_or("missing BusinessEvent enum")?;
+        assert!(
+            business_events
+                .iter()
+                .any(|event| event.as_str() == Some("telemetry.event")),
+            "BusinessEvent must include telemetry.event"
+        );
+        let entity_types = document
+            .pointer("/components/schemas/TimelineEvent/properties/entity_type/enum")
+            .and_then(Value::as_array)
+            .ok_or("missing TimelineEvent.entity_type enum")?;
+        assert!(
+            entity_types
+                .iter()
+                .any(|entity_type| entity_type.as_str() == Some("telemetry_event")),
+            "TimelineEvent.entity_type must include telemetry_event"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn openapi_agent_guide_covers_cold_start_and_write_back() -> Result<(), Box<dyn Error>> {
         let document: Value = serde_json::from_str(OPENAPI_JSON)?;
         let guide = document
@@ -1581,6 +1612,7 @@ mod tests {
             ("GET", "/api/v1/timeline"),
             ("GET", "/api/v1/incidents/{id}"),
             ("POST", "/api/v1/check-ins"),
+            ("POST", "/api/v1/events"),
             ("POST", "/api/v1/incidents/{incident_id}/annotations"),
             ("POST", "/api/v1/groups/{group_hash}/annotations"),
             ("POST", "/api/v1/annotations"),
@@ -5091,6 +5123,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn telemetry_event_ingest_correlates_to_timeline_and_report() -> Result<(), Box<dyn Error>>
+    {
+        let router = ingest_router(test_ingest_state()?);
+        let response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/events",
+                INGEST_KEY,
+                r#"{
+                    "service":"checkout",
+                    "name":"checkout.completed",
+                    "summary":"Checkout completed",
+                    "severity":"info",
+                    "attributes":{"plan":"pro","amount":42},
+                    "retention_class":"standard",
+                    "privacy_policy":"redacted",
+                    "sampling_policy":"sampled:0.25"
+                }"#,
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["event"], "telemetry.event");
+        assert_eq!(body["name"], "checkout.completed");
+        assert_eq!(body["attributes"]["plan"], "pro");
+
+        let timeline = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/timeline?service=checkout&event_type=telemetry.event&limit=1",
+            )?)
+            .await?;
+        let timeline_status = timeline.status();
+        let timeline_body = json_body(timeline).await?;
+
+        assert_eq!(timeline_status, StatusCode::OK);
+        assert_eq!(timeline_body["returned_count"], 1);
+        assert_eq!(timeline_body["events"][0]["event"], "telemetry.event");
+        assert_eq!(timeline_body["events"][0]["signal_kind"], "analytics_event");
+        assert_eq!(
+            timeline_body["events"][0]["signal_name"],
+            "checkout.completed"
+        );
+        assert_eq!(timeline_body["events"][0]["attributes"]["amount"], 42);
+        assert_eq!(timeline_body["events"][0]["privacy_policy"], "redacted");
+
+        let report = router
+            .clone()
+            .oneshot(read_request(READ_KEY, "/api/v1/report?window=1h")?)
+            .await?;
+        let report_status = report.status();
+        let report_body = json_body(report).await?;
+
+        assert_eq!(report_status, StatusCode::OK);
+        assert_eq!(
+            report_body["recent_events"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            report_body["recent_events"][0]["signal_name"],
+            "checkout.completed"
+        );
+
+        let invalid = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/events",
+                INGEST_KEY,
+                r#"{"service":"checkout","name":"","summary":"bad","attributes":[]}"#,
+            )?)
+            .await?;
+        let invalid_status = invalid.status();
+        let invalid_body = json_body(invalid).await?;
+        assert_eq!(invalid_status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(invalid_body["code"], "validation_error");
+        assert_eq!(
+            invalid_body["errors"]["attributes"],
+            json!(["must be an object"])
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn timeline_rejects_invalid_params_and_wrong_scope() -> Result<(), Box<dyn Error>> {
         let cases = [
             (
@@ -7552,6 +7673,122 @@ mod tests {
         assert_eq!(body["bound_service"], "linejam");
         assert_eq!(body["requested_service"], "vanity");
         assert_eq!(error_count(&state)?, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn telemetry_event_webhooks_keep_caller_owner_and_service_scope()
+    -> Result<(), Box<dyn Error>> {
+        let mut store = Store::open_in_memory()?;
+        store.migrate()?;
+        store.insert_api_key(ApiKeyInsert {
+            id: "KEY-linejam-ingest".to_owned(),
+            name: "linejam ingest".to_owned(),
+            key_prefix: OTHER_INGEST_KEY.chars().take(API_KEY_PREFIX_LEN).collect(),
+            key_hash: bcrypt::hash(OTHER_INGEST_KEY, TEST_BCRYPT_COST)?,
+            created_at: "2026-05-28T20:00:00Z".to_owned(),
+            revoked_at: None,
+            scope: "ingest-only".to_owned(),
+            tenant_id: "TENANT-alpha".to_owned(),
+            project_id: "PROJECT-web".to_owned(),
+            service: Some("linejam".to_owned()),
+        })?;
+        let mut matching = webhook_subscription_insert(
+            "WHK-linejam",
+            "https://example.test/linejam",
+            vec!["telemetry.event".to_owned()],
+            "test-webhook-secret",
+            true,
+            "2026-05-28T20:00:00Z",
+        );
+        matching.tenant_id = "TENANT-alpha".to_owned();
+        matching.project_id = "PROJECT-web".to_owned();
+        matching.service = Some("linejam".to_owned());
+        store.insert_webhook_subscription(matching)?;
+        store.insert_webhook_subscription(webhook_subscription_insert(
+            "WHK-bootstrap",
+            "https://example.test/bootstrap",
+            vec!["telemetry.event".to_owned()],
+            "test-webhook-secret",
+            true,
+            "2026-05-28T20:00:00Z",
+        ))?;
+        let scheduler = Arc::new(RecordingScheduler::default());
+        let state = IngestState::new_with_webhook_scheduler(
+            store,
+            IngestConfig::default(),
+            scheduler.clone(),
+        );
+
+        let response = ingest_router(state.clone())
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/events",
+                OTHER_INGEST_KEY,
+                r#"{"service":"linejam","name":"agent.workflow.completed","summary":"done"}"#,
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let jobs = scheduler.jobs()?;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].webhook_id, "WHK-linejam");
+        assert_eq!(jobs[0].event, "telemetry.event");
+        assert_eq!(jobs[0].payload["tenant_id"], "TENANT-alpha");
+        assert_eq!(jobs[0].payload["project_id"], "PROJECT-web");
+        assert_eq!(jobs[0].payload["service"], "linejam");
+
+        let store = state.lock_store().map_err(|_| "store lock poisoned")?;
+        let deliveries = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
+            event: Some("telemetry.event".to_owned()),
+            ..Default::default()
+        })?;
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].webhook_id, "WHK-linejam");
+        assert_eq!(deliveries[0].tenant_id, "TENANT-alpha");
+        assert_eq!(deliveries[0].project_id, "PROJECT-web");
+        assert_eq!(deliveries[0].service.as_deref(), Some("linejam"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn service_bound_ingest_key_cannot_emit_events_for_another_service()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let raw_key = "sk_live_linejam_event_bound_secret";
+        {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            store.insert_api_key(ApiKeyInsert {
+                id: "KEY-linejam-event-bound".to_owned(),
+                name: "linejam event ingest".to_owned(),
+                key_prefix: raw_key.chars().take(API_KEY_PREFIX_LEN).collect(),
+                key_hash: bcrypt::hash(raw_key, TEST_BCRYPT_COST)?,
+                created_at: "2026-05-28T20:00:00Z".to_owned(),
+                revoked_at: None,
+                scope: "ingest-only".to_owned(),
+                tenant_id: "TENANT-alpha".to_owned(),
+                project_id: "PROJECT-web".to_owned(),
+                service: Some("linejam".to_owned()),
+            })?;
+        }
+
+        let response = ingest_router(state.clone())
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/events",
+                raw_key,
+                r#"{"service":"vanity","name":"signup.completed","summary":"spoofed"}"#,
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "insufficient_scope");
+        assert_eq!(body["bound_service"], "linejam");
+        assert_eq!(body["requested_service"], "vanity");
 
         Ok(())
     }
