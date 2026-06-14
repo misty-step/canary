@@ -1,7 +1,7 @@
 # Add a typed agentic remediation claim protocol
 
 Priority: P1
-Status: ready
+Status: done
 Estimate: L
 
 ## Goal
