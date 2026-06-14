@@ -123,6 +123,35 @@ describe("createClient", () => {
     ).resolves.toBeNull();
   });
 
+  it("retries once on transient HTTP status", async () => {
+    fetchSpy
+      .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: "ERR-retried",
+            group_hash: "retry-hash",
+            is_new_class: false,
+          }),
+          { status: 201 }
+        )
+      );
+
+    const client = createClient(opts);
+    const result = await client.send({
+      error_class: "Error",
+      message: "server retry",
+      severity: "error",
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({
+      id: "ERR-retried",
+      group_hash: "retry-hash",
+      is_new_class: false,
+    });
+  });
+
   it("returns null when inflight reaches maxQueue", async () => {
     // Never resolve — simulate slow network
     fetchSpy.mockImplementation(
@@ -186,5 +215,39 @@ describe("createClient", () => {
     expect(body.severity).toBe("warning");
     expect(body.stack_trace).toBe("at foo:1");
     expect(body.context).toEqual({ userId: "u1" });
+  });
+
+  it("sends monitor check-ins to /api/v1/check-ins", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          monitor_id: "MON-1",
+          check_in_id: "CHK-1",
+          state: "up",
+          observed_at: "2026-06-14T00:00:00Z",
+          sequence: 1,
+        }),
+        { status: 201 }
+      )
+    );
+
+    const client = createClient({ ...opts, environment: "production" });
+    const result = await client.checkIn({
+      monitor: "test-app-cron",
+      status: "ok",
+      check_in_id: "run-1",
+      summary: "nightly job complete",
+      context: { duration_ms: 1200 },
+    });
+
+    expect(result?.monitor_id).toBe("MON-1");
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toBe("https://canary.test/api/v1/check-ins");
+    expect(init.headers["Authorization"]).toBe("Bearer sk_test_abc123");
+    const body = JSON.parse(init.body);
+    expect(body.service).toBe("test-app");
+    expect(body.monitor).toBe("test-app-cron");
+    expect(body.status).toBe("ok");
+    expect(body.context).toEqual({ duration_ms: 1200 });
   });
 });

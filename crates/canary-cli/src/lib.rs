@@ -5,7 +5,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use reqwest::blocking::Client;
@@ -310,7 +310,12 @@ pub struct IntegrationEnrollRequest {
     pub interval_ms: Option<i64>,
     /// Redact returned secret material.
     pub redact: bool,
+    /// Optional local project root whose receipt should be updated after enrollment.
+    pub receipt_root: Option<PathBuf>,
 }
+
+/// Local integration receipt filename.
+const INTEGRATION_RECEIPT_PATH: &str = ".canary/integration.json";
 
 /// Render a stable JSON command envelope.
 pub fn json_envelope(command: &str, endpoint: &str, response: Value) -> Value {
@@ -460,9 +465,31 @@ pub fn integration_discover(input: &IntegrationInput) -> Result<Value> {
     let package_manager = detect_package_manager(&project_root);
     let framework = detect_framework(&project_root, package.as_ref());
     let platform = detect_platform(&project_root);
-    let env_names = discover_env_names(&project_root)?;
+    let platform_env = discover_platform_env(&project_root, platform);
+    let local_env_names = discover_env_names(&project_root)?;
     let code_paths = discover_code_paths(&project_root)?;
     let health_routes = discover_health_routes(&project_root);
+    let receipt = integration_receipt(&project_root).ok();
+    let receipt_env_names = receipt
+        .as_ref()
+        .and_then(|value| value.get("env_names"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|name| valid_env_name(name))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let platform_env_names = platform_env
+        .get("env_names")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let declared_env_names = merge_env_names(&local_env_names, &receipt_env_names);
+    let env_names = merge_env_names(&declared_env_names, &platform_env_names);
     let canary_present = code_paths
         .iter()
         .any(|path| path.get("kind").and_then(Value::as_str) == Some("canary"));
@@ -493,6 +520,7 @@ pub fn integration_discover(input: &IntegrationInput) -> Result<Value> {
         "production_url": input.production_url,
         "health_route": health_routes.first().cloned(),
         "health_routes": health_routes,
+        "integration_receipt": receipt,
         "signals": {
             "package_json": package_json.map(|path| path.display().to_string()),
             "canary_sdk_dependency": package_has_dependency(package.as_ref(), "@canary-obs/sdk"),
@@ -503,7 +531,12 @@ pub fn integration_discover(input: &IntegrationInput) -> Result<Value> {
             "sentry_code_paths": code_paths.iter().filter(|path| path.get("kind").and_then(Value::as_str) == Some("sentry")).cloned().collect::<Vec<_>>(),
             "canary_present": canary_present,
             "sentry_present": sentry_present,
-            "env_names": env_names,
+            "env_names": env_names.clone(),
+            "local_env_names": local_env_names,
+            "receipt_env_names": receipt_env_names,
+            "platform_env": platform_env,
+            "declared_env_names": declared_env_names,
+            "platform_env_names": platform_env_names,
             "canary_env_names": canary_env_names,
             "sentry_env_names": sentry_env_names,
             "csp_mentions_connect_src": file_contains(&project_root.join("next.config.js"), "connect-src")
@@ -530,7 +563,8 @@ pub fn integration_plan(input: &IntegrationInput) -> Result<Value> {
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     let production_url = input.production_url.as_deref();
-    let health_url = production_url.map(|url| format!("{}/api/health", url.trim_end_matches('/')));
+    let coverage_mode = coverage_mode(framework, discovery.get("health_routes"));
+    let health_url = planned_health_url(production_url, coverage_mode);
     let canary_dep = discovery
         .pointer("/signals/canary_sdk_dependency")
         .and_then(Value::as_bool)
@@ -618,6 +652,14 @@ pub fn integration_plan(input: &IntegrationInput) -> Result<Value> {
         "health_url": health_url,
         "blocked_reason": if health_url.is_some() { Value::Null } else { json!("pass --production-url to compute the health URL") }
     }));
+    let receipt_present = receipt_is_present(discovery.get("integration_receipt"));
+
+    actions.push(json!({
+        "kind": "integration_receipt",
+        "status": if receipt_present { "present" } else { "needed" },
+        "description": "Write .canary/integration.json so future agents can reconcile local, platform, and live Canary state.",
+        "executor": "receipt"
+    }));
     actions.push(json!({
         "kind": "webhook_subscription",
         "status": "manual",
@@ -625,14 +667,23 @@ pub fn integration_plan(input: &IntegrationInput) -> Result<Value> {
         "executor": "admin-api",
         "events": ["error.new_class", "incident.opened", "health_check.failed"]
     }));
+    actions.push(json!({
+        "kind": "non_http_monitor_templates",
+        "status": "available",
+        "description": "Cron, worker, desktop, and CLI check-in monitor templates are ready for non-HTTP runtimes.",
+        "executor": "agent"
+    }));
 
     Ok(json!({
         "schema_version": 1,
         "target": target.display().to_string(),
         "service": service,
         "framework": framework,
+        "coverage_mode": coverage_mode,
         "can_patch": path_exists && framework == "nextjs",
         "discovery": discovery,
+        "static_site": static_site_artifacts(service, production_url, coverage_mode),
+        "monitor_templates": monitor_templates(service, &input.endpoint),
         "actions": actions,
         "commands": {
             "patch": format!("bin/canary integrate patch {} --service {} --endpoint {}", shell_arg(&target.display().to_string()), shell_arg(service), shell_arg(&input.endpoint)),
@@ -678,6 +729,10 @@ pub fn integration_patch(input: &IntegrationInput) -> Result<Value> {
         &global_error_path(&root),
         &global_error_source(service),
     )?);
+    changes.push(write_integration_receipt(
+        &root,
+        &patch_integration_receipt_value(&root, input, &plan),
+    )?);
 
     Ok(json!({
         "schema_version": 1,
@@ -705,11 +760,477 @@ pub fn integration_enroll(client: &ApiClient, request: &IntegrationEnrollRequest
         object.insert("interval_ms".to_owned(), json!(interval_ms));
     }
     let response = client.post_auth_json("/api/v1/service-onboarding", &body)?;
+    if let Some(root) = &request.receipt_root {
+        write_integration_receipt(
+            root,
+            &enrollment_receipt_value(client.endpoint(), request, &response),
+        )?;
+    }
     if request.redact {
         Ok(redact_secret_value(response))
     } else {
         Ok(response)
     }
+}
+
+/// Merge local scan, receipt, live Canary, and dogfood evidence into one coverage verdict.
+pub fn integration_status(
+    client: &ApiClient,
+    input: &IntegrationInput,
+    repo_root: &Path,
+) -> Result<Value> {
+    let discovery = integration_discover(input)?;
+    let plan = integration_plan(input)?;
+    let service = discovery
+        .get("service")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let targets = live_probe(|| client.get_auth_json("/api/v1/targets"));
+    let monitors = live_probe(|| client.get_auth_json("/api/v1/monitors"));
+    let webhooks = live_probe(|| client.get_auth_json("/api/v1/webhooks"));
+    let query = live_probe(|| {
+        client.get_auth_json(&format!(
+            "/api/v1/query?service={}&window=1h",
+            encode(service)
+        ))
+    });
+    let dogfood = run_dogfood_inventory(repo_root, false)
+        .map(|response| json!({"ok": true, "response": response}))
+        .unwrap_or_else(|error| json!({"ok": false, "error": redact_text(&error.to_string())}));
+    let receipt = discovery
+        .get("integration_receipt")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let target = live_collection_service_match(&targets, "targets", service);
+    let monitor = live_collection_service_match(&monitors, "monitors", service);
+    let verdict = integration_coverage_verdict(
+        service, &discovery, &targets, &monitors, &webhooks, &query, &dogfood,
+    );
+    let plan = reconcile_plan_with_live_state(&plan, target.as_ref(), monitor.as_ref());
+
+    Ok(json!({
+        "schema_version": 1,
+        "service": service,
+        "framework": discovery.get("framework").cloned().unwrap_or_else(|| json!("unknown")),
+        "coverage": verdict,
+        "discovery": discovery,
+        "plan": plan,
+        "receipt": receipt,
+        "live": {
+            "targets": targets,
+            "monitors": monitors,
+            "webhooks": webhooks,
+            "query": query
+        },
+        "dogfood": dogfood
+    }))
+}
+
+fn live_probe(fetch: impl FnOnce() -> Result<Value>) -> Value {
+    match fetch() {
+        Ok(response) => json!({"ok": true, "response": response}),
+        Err(error) => json!({"ok": false, "error": redact_text(&error.to_string())}),
+    }
+}
+
+fn reconcile_plan_with_live_state(
+    plan: &Value,
+    target: Option<&Value>,
+    monitor: Option<&Value>,
+) -> Value {
+    let mut plan = plan.clone();
+    if let Some(actions) = plan.get_mut("actions").and_then(Value::as_array_mut) {
+        for action in actions {
+            if action.get("kind").and_then(Value::as_str) == Some("target_enrollment")
+                && (target.is_some() || monitor.is_some())
+                && let Some(object) = action.as_object_mut()
+            {
+                object.insert("status".to_owned(), json!("present"));
+                object.insert("executor".to_owned(), json!("none"));
+                object.insert(
+                    "live_evidence".to_owned(),
+                    json!({
+                        "target_id": target.and_then(|item| item.get("id")).and_then(Value::as_str),
+                        "monitor_id": monitor.and_then(|item| item.get("id")).and_then(Value::as_str)
+                    }),
+                );
+            }
+        }
+    }
+    plan
+}
+
+fn coverage_mode(framework: &str, health_routes: Option<&Value>) -> &'static str {
+    if framework == "nextjs" {
+        "nextjs"
+    } else if health_routes
+        .and_then(Value::as_array)
+        .is_some_and(|routes| !routes.is_empty())
+    {
+        "http"
+    } else {
+        "static"
+    }
+}
+
+fn planned_health_url(production_url: Option<&str>, coverage_mode: &str) -> Option<String> {
+    production_url.map(|url| {
+        let base = url.trim_end_matches('/');
+        if coverage_mode == "static" {
+            base.to_owned()
+        } else {
+            format!("{base}/api/health")
+        }
+    })
+}
+
+fn static_site_artifacts(
+    service: &str,
+    production_url: Option<&str>,
+    coverage_mode: &str,
+) -> Value {
+    if coverage_mode != "static" {
+        return Value::Null;
+    }
+    let health_url = planned_health_url(production_url, coverage_mode);
+    json!({
+        "mode": "static",
+        "target_url": health_url,
+        "no_code_path": health_url.map(|url| format!("bin/canary integrate enroll --service {} --url {} --project-root .", shell_arg(service), shell_arg(&url))),
+        "vercel_function": {
+            "path": "api/health.ts",
+            "source": "export default function handler(_req, res) { res.status(200).json({ status: 'ok' }); }\n"
+        },
+        "browser_capture_warning": "Only use a constrained ingest-only/public key in browser code; never expose admin, read, or server ingest keys.",
+        "browser_capture_snippet": format!(
+            "<script type=\"module\">import {{ initCanary }} from 'https://esm.sh/@canary-obs/sdk'; import {{ installBrowserErrorObservers }} from 'https://esm.sh/@canary-obs/sdk/nextjs'; initCanary({{ endpoint: window.NEXT_PUBLIC_CANARY_ENDPOINT, apiKey: window.NEXT_PUBLIC_CANARY_API_KEY, service: '{}', environment: 'production' }}); installBrowserErrorObservers();</script>",
+            js_string_literal_body(service)
+        )
+    })
+}
+
+fn monitor_templates(service: &str, endpoint: &str) -> Value {
+    json!([
+        monitor_template(
+            service,
+            endpoint,
+            "cron",
+            "schedule",
+            3_600_000,
+            "Nightly or hourly jobs that should complete on a fixed cadence.",
+            ["in_progress", "ok", "error"]
+        ),
+        monitor_template(
+            service,
+            endpoint,
+            "worker",
+            "ttl",
+            300_000,
+            "Long-running workers that should stay fresh while the process is alive.",
+            ["alive", "error"]
+        ),
+        monitor_template(
+            service,
+            endpoint,
+            "desktop",
+            "ttl",
+            900_000,
+            "Desktop app states that are only live while the user explicitly has work in progress.",
+            ["alive", "error"]
+        ),
+        monitor_template(
+            service,
+            endpoint,
+            "cli",
+            "schedule",
+            86_400_000,
+            "Recurring CLI tasks, audits, or local automation runs.",
+            ["in_progress", "ok", "error"]
+        )
+    ])
+}
+
+fn monitor_template<const N: usize>(
+    service: &str,
+    endpoint: &str,
+    runtime: &str,
+    mode: &str,
+    expected_every_ms: i64,
+    description: &str,
+    statuses: [&str; N],
+) -> Value {
+    let monitor = format!("{service}-{runtime}");
+    let statuses = statuses.to_vec();
+    let create_payload = json!({
+        "name": monitor,
+        "service": service,
+        "mode": mode,
+        "expected_every_ms": expected_every_ms
+    })
+    .to_string();
+    let check_in_payload = json!({
+        "monitor": monitor,
+        "status": statuses[0],
+        "summary": format!("{runtime} check-in")
+    })
+    .to_string();
+    json!({
+        "runtime": runtime,
+        "description": description,
+        "monitor": monitor,
+        "mode": mode,
+        "expected_every_ms": expected_every_ms,
+        "create_monitor": format!(
+            "curl -fsS -X POST {}/api/v1/monitors -H 'Authorization: Bearer $CANARY_ADMIN_API_KEY' -H 'Content-Type: application/json' -d {}",
+            endpoint.trim_end_matches('/'),
+            shell_arg(&create_payload)
+        ),
+        "check_in": format!(
+            "curl -fsS -X POST {}/api/v1/check-ins -H 'Authorization: Bearer $CANARY_API_KEY' -H 'Content-Type: application/json' -d {}",
+            endpoint.trim_end_matches('/'),
+            shell_arg(&check_in_payload)
+        ),
+        "statuses": statuses
+    })
+}
+
+fn integration_receipt(root: &Path) -> Result<Value> {
+    read_json_file(&root.join(INTEGRATION_RECEIPT_PATH))
+}
+
+fn receipt_is_present(receipt: Option<&Value>) -> bool {
+    receipt.is_some_and(|value| !value.is_null())
+}
+
+fn write_integration_receipt(root: &Path, value: &Value) -> Result<Value> {
+    let path = root.join(INTEGRATION_RECEIPT_PATH);
+    write_json_file(&path, value)?;
+    Ok(json!({"path": path.display().to_string(), "status": "updated"}))
+}
+
+fn patch_integration_receipt_value(root: &Path, input: &IntegrationInput, plan: &Value) -> Value {
+    let mut planned = integration_receipt_value(input, plan, None);
+    let Ok(existing) = integration_receipt(root) else {
+        return planned;
+    };
+    if existing.get("service") != planned.get("service")
+        || existing.get("verification_status").and_then(Value::as_str) != Some("verified")
+    {
+        return planned;
+    }
+
+    for field in [
+        "target_id",
+        "monitor_ids",
+        "webhook_ids",
+        "api_key_id",
+        "verification_status",
+        "last_verified_at",
+    ] {
+        if let Some(value) = existing.get(field).filter(|value| !value.is_null()) {
+            planned[field] = value.clone();
+        }
+    }
+    if planned.get("health_url").is_some_and(Value::is_null)
+        && let Some(value) = existing.get("health_url").filter(|value| !value.is_null())
+    {
+        planned["health_url"] = value.clone();
+    }
+    planned
+}
+
+fn integration_receipt_value(
+    input: &IntegrationInput,
+    plan: &Value,
+    enroll: Option<&Value>,
+) -> Value {
+    let service = plan
+        .get("service")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let coverage_mode = plan
+        .get("coverage_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("nextjs");
+    let health_url = planned_health_url(input.production_url.as_deref(), coverage_mode);
+    let target_id = enroll
+        .and_then(|value| value.pointer("/target/id"))
+        .and_then(Value::as_str);
+    let api_key_id = enroll
+        .and_then(|value| value.pointer("/api_key/id"))
+        .and_then(Value::as_str);
+
+    json!({
+        "schema_version": 1,
+        "service": service,
+        "environment": "production",
+        "canary_endpoint": input.endpoint,
+        "health_url": health_url,
+        "target_id": target_id,
+        "monitor_ids": [],
+        "webhook_ids": [],
+        "api_key_id": api_key_id,
+        "verification_status": if target_id.is_some() || api_key_id.is_some() { "verified" } else { "planned" },
+        "env_names": [
+            DEFAULT_INTEGRATION_ENDPOINT_ENV,
+            DEFAULT_INTEGRATION_SERVER_KEY_ENV,
+            DEFAULT_INTEGRATION_PUBLIC_ENDPOINT_ENV,
+            DEFAULT_INTEGRATION_PUBLIC_KEY_ENV
+        ],
+        "verification_commands": [
+            format!("bin/canary integrate status {} --service {} --json", shell_arg(&input.target.display().to_string()), shell_arg(service)),
+            format!("bin/canary errors {} --window 1h --json", shell_arg(service))
+        ],
+        "last_verified_at": now_unix_timestamp_string()
+    })
+}
+
+fn enrollment_receipt_value(
+    endpoint: &str,
+    request: &IntegrationEnrollRequest,
+    enroll: &Value,
+) -> Value {
+    let target_id = enroll.pointer("/target/id").and_then(Value::as_str);
+    let api_key_id = enroll.pointer("/api_key/id").and_then(Value::as_str);
+
+    json!({
+        "schema_version": 1,
+        "service": request.service,
+        "environment": request.environment,
+        "canary_endpoint": endpoint,
+        "health_url": request.url,
+        "target_id": target_id,
+        "monitor_ids": [],
+        "webhook_ids": [],
+        "api_key_id": api_key_id,
+        "verification_status": "verified",
+        "env_names": [
+            DEFAULT_INTEGRATION_ENDPOINT_ENV,
+            DEFAULT_INTEGRATION_SERVER_KEY_ENV,
+            DEFAULT_INTEGRATION_PUBLIC_ENDPOINT_ENV,
+            DEFAULT_INTEGRATION_PUBLIC_KEY_ENV
+        ],
+        "verification_commands": [
+            format!("bin/canary integrate status . --service {} --json", shell_arg(&request.service)),
+            format!("bin/canary errors {} --window 1h --json", shell_arg(&request.service))
+        ],
+        "last_verified_at": now_unix_timestamp_string()
+    })
+}
+
+fn now_unix_timestamp_string() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_owned())
+}
+
+fn integration_coverage_verdict(
+    service: &str,
+    discovery: &Value,
+    targets: &Value,
+    monitors: &Value,
+    webhooks: &Value,
+    query: &Value,
+    dogfood: &Value,
+) -> Value {
+    let local_capture = discovery
+        .pointer("/signals/canary_present")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || discovery
+            .pointer("/signals/canary_sdk_dependency")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || receipt_is_present(discovery.get("integration_receipt"));
+    let target = live_collection_contains_service(targets, "targets", service);
+    let monitor = live_collection_contains_service(monitors, "monitors", service);
+    let webhook = live_collection_non_empty(webhooks, "webhooks");
+    let query_readback = query.get("ok").and_then(Value::as_bool).unwrap_or(false)
+        && query
+            .pointer("/response/service")
+            .and_then(Value::as_str)
+            .is_none_or(|queried_service| queried_service == service);
+    let dogfood_state = dogfood_service_state(dogfood, service);
+    let mut failures = Vec::new();
+
+    if !local_capture {
+        failures.push(json!({"kind": "local_capture", "message": "no local Canary SDK, bespoke capture, or integration receipt found"}));
+    }
+    if !target && !monitor {
+        failures.push(json!({"kind": "health_coverage", "message": "no live target or monitor matched the service"}));
+    }
+    if !query_readback {
+        failures.push(
+            json!({"kind": "query_readback", "message": "Canary query readback was unavailable"}),
+        );
+    }
+
+    let status = if failures.is_empty() {
+        "covered"
+    } else if local_capture || target || monitor {
+        "partial"
+    } else {
+        "missing"
+    };
+
+    json!({
+        "status": status,
+        "local_capture": local_capture,
+        "target_enrolled": target,
+        "monitor_enrolled": monitor,
+        "webhook_configured": webhook,
+        "query_readback": query_readback,
+        "dogfood_state": dogfood_state,
+        "strict_failures": failures
+    })
+}
+
+fn live_collection_contains_service(probe: &Value, key: &str, service: &str) -> bool {
+    live_collection_service_match(probe, key, service).is_some()
+}
+
+fn live_collection_service_match(probe: &Value, key: &str, service: &str) -> Option<Value> {
+    probe
+        .pointer(&format!("/response/{key}"))
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| {
+                    string_field(item, "service") == service
+                        || string_field(item, "name") == service
+                })
+                .cloned()
+        })
+}
+
+fn live_collection_non_empty(probe: &Value, key: &str) -> bool {
+    probe
+        .pointer(&format!("/response/{key}"))
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+}
+
+fn dogfood_service_state(dogfood: &Value, service: &str) -> Value {
+    [
+        "/response/services",
+        "/response/registry",
+        "/response/surfaces",
+    ]
+    .into_iter()
+    .filter_map(|pointer| dogfood.pointer(pointer).and_then(Value::as_array))
+    .flat_map(|items| items.iter())
+    .find(|item| string_field(item, "service") == service)
+    .map(|item| {
+        item.get("state")
+            .or_else(|| item.get("registry_state"))
+            .or_else(|| item.get("coverage"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned()
+    })
+    .map_or(Value::Null, Value::String)
 }
 
 /// Summarize an integration discovery/plan/patch/enroll response.
@@ -718,7 +1239,13 @@ pub fn summarize_integration(value: &Value) -> Vec<String> {
         format!("service: {}", string_field(value, "service")),
         format!("framework: {}", string_field(value, "framework")),
     ];
-    if let Some(actions) = value.get("actions").and_then(Value::as_array) {
+    if let Some(coverage) = value.get("coverage") {
+        lines.push(format!("coverage: {}", string_field(coverage, "status")));
+        lines.push(format!(
+            "strict_failures: {}",
+            array_len(coverage, "strict_failures")
+        ));
+    } else if let Some(actions) = value.get("actions").and_then(Value::as_array) {
         lines.push(format!("actions: {}", actions.len()));
         lines.extend(actions.iter().map(|action| {
             format!(
@@ -821,6 +1348,93 @@ fn detect_platform(root: &Path) -> &'static str {
     }
 }
 
+fn discover_platform_env(root: &Path, platform: &str) -> Value {
+    match platform {
+        "vercel" => discover_vercel_env(root),
+        "fly" => json!({
+            "ok": false,
+            "source": "fly",
+            "reason": "fly env-name listing is not implemented"
+        }),
+        _ => json!({
+            "ok": false,
+            "source": platform,
+            "reason": "unsupported platform"
+        }),
+    }
+}
+
+fn discover_vercel_env(root: &Path) -> Value {
+    let output = match Command::new("vercel")
+        .current_dir(root)
+        .arg("env")
+        .arg("list")
+        .arg("production")
+        .arg("--format")
+        .arg("json")
+        .arg("--cwd")
+        .arg(root)
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => {
+            return json!({
+                "ok": false,
+                "source": "vercel",
+                "reason": error.to_string()
+            });
+        }
+    };
+    if !output.status.success() {
+        return json!({
+            "ok": false,
+            "source": "vercel",
+            "status": output
+                .status
+                .code()
+                .map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+            "stderr": redact_text(&String::from_utf8_lossy(&output.stderr))
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let env_names = match vercel_env_names_from_stdout(&stdout) {
+        Ok(names) => names,
+        Err(reason) => {
+            return json!({
+                "ok": false,
+                "source": "vercel",
+                "reason": reason
+            });
+        }
+    };
+
+    json!({
+        "ok": true,
+        "source": "vercel",
+        "environment": "production",
+        "env_names": env_names
+    })
+}
+
+fn vercel_env_names_from_stdout(stdout: &str) -> std::result::Result<Vec<String>, String> {
+    let Some(json_start) = stdout.find('{') else {
+        return Err("vercel env list did not return JSON".to_owned());
+    };
+    let mut deserializer = serde_json::Deserializer::from_str(&stdout[json_start..]);
+    let parsed = Value::deserialize(&mut deserializer).map_err(|error| error.to_string())?;
+    Ok(parsed
+        .get("envs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("key").and_then(Value::as_str))
+        .filter(|name| valid_env_name(name))
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>())
+}
+
 fn package_has_dependency(package: Option<&Value>, name: &str) -> bool {
     package.is_some_and(|package| {
         [
@@ -867,6 +1481,16 @@ fn discover_env_names(root: &Path) -> Result<Vec<String>> {
     Ok(names.into_iter().collect())
 }
 
+fn merge_env_names(local: &[String], receipt: &[String]) -> Vec<String> {
+    local
+        .iter()
+        .chain(receipt.iter())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn valid_env_name(name: &str) -> bool {
     !name.is_empty()
         && name
@@ -907,7 +1531,7 @@ fn discover_code_paths(root: &Path) -> Result<Vec<Value>> {
             {
                 continue;
             }
-            if path.is_dir() {
+            if path.is_dir() && !path.is_symlink() {
                 queue.push_back(path);
                 continue;
             }
@@ -921,7 +1545,15 @@ fn discover_code_paths(root: &Path) -> Result<Vec<Value>> {
                 .unwrap_or(path.as_path())
                 .display()
                 .to_string();
-            if body.contains("@canary-obs/sdk") || body.contains("initCanary") {
+            if body.contains("@canary-obs/sdk")
+                || body.contains("initCanary")
+                || body.contains("CANARY_API_KEY")
+                || body.contains("CANARY_ENDPOINT")
+                || body.contains("NEXT_PUBLIC_CANARY_API_KEY")
+                || body.contains("NEXT_PUBLIC_CANARY_ENDPOINT")
+                || body.contains("/api/v1/errors")
+                || body.contains("/api/v1/check-ins")
+            {
                 paths.push(json!({"kind": "canary", "path": rel}));
             } else if body.contains("@sentry/")
                 || body.contains("Sentry.")
@@ -941,20 +1573,93 @@ fn is_source_like(path: &Path) -> bool {
 }
 
 fn discover_health_routes(root: &Path) -> Vec<Value> {
-    let mut routes = Vec::new();
+    let mut routes = BTreeSet::new();
     for (path, route) in [
         ("app/api/health/route.ts", "/api/health"),
         ("app/api/health/route.tsx", "/api/health"),
+        ("src/app/api/health/route.ts", "/api/health"),
+        ("src/app/api/health/route.tsx", "/api/health"),
         ("pages/api/health.ts", "/api/health"),
         ("pages/api/health.js", "/api/health"),
+        ("src/pages/api/health.ts", "/api/health"),
+        ("src/pages/api/health.js", "/api/health"),
         ("app/health/route.ts", "/health"),
         ("app/health/route.tsx", "/health"),
+        ("src/app/health/route.ts", "/health"),
+        ("src/app/health/route.tsx", "/health"),
     ] {
         if root.join(path).is_file() {
-            routes.push(json!({"path": path, "route": route}));
+            routes.insert((path.to_owned(), route.to_owned()));
         }
     }
+    for app_root in ["app", "src/app"] {
+        discover_app_health_route_groups(root, app_root, &mut routes);
+    }
     routes
+        .into_iter()
+        .map(|(path, route)| json!({"path": path, "route": route}))
+        .collect()
+}
+
+fn discover_app_health_route_groups(
+    root: &Path,
+    app_root: &str,
+    routes: &mut BTreeSet<(String, String)>,
+) {
+    let base = root.join(app_root);
+    if !base.is_dir() {
+        return;
+    }
+    let mut queue = VecDeque::from([base]);
+    while let Some(dir) = queue.pop_front() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && !path.is_symlink() {
+                queue.push_back(path);
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !matches!(
+                file_name,
+                "route.ts" | "route.tsx" | "route.js" | "route.jsx"
+            ) {
+                continue;
+            }
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
+            let parts = relative
+                .iter()
+                .filter_map(|part| part.to_str())
+                .collect::<Vec<_>>();
+            if parts.len() < 5
+                || parts[parts.len() - 3] != "api"
+                || parts[parts.len() - 2] != "health"
+            {
+                continue;
+            }
+            let Some(app_index) = parts.iter().position(|part| *part == "app") else {
+                continue;
+            };
+            let api_index = parts.len() - 3;
+            let route_prefix = parts
+                .iter()
+                .skip(app_index + 1)
+                .take(api_index.saturating_sub(app_index + 1))
+                .filter(|part| !part.starts_with('(') && !part.ends_with(')'))
+                .map(|part| format!("/{part}"))
+                .collect::<String>();
+            routes.insert((
+                relative.display().to_string(),
+                format!("{route_prefix}/api/health"),
+            ));
+        }
+    }
 }
 
 fn file_contains(path: &Path, needle: &str) -> bool {
@@ -1002,6 +1707,14 @@ fn shell_arg(value: &str) -> String {
     } else {
         format!("'{}'", value.replace('\'', "'\\''"))
     }
+}
+
+fn js_string_literal_body(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 fn instrumentation_path(root: &Path) -> PathBuf {
@@ -1063,6 +1776,12 @@ fn update_package_dependency(root: &Path) -> Result<Value> {
 
 fn write_json_file(path: &Path, value: &Value) -> Result<()> {
     let body = format!("{}\n", serde_json::to_string_pretty(value)?);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| CliError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
     fs::write(path, body).map_err(|source| CliError::Io {
         path: path.to_path_buf(),
         source,
@@ -1844,6 +2563,11 @@ pub fn tool_manifest() -> Vec<ToolSpec> {
             input_schema: json!({"type":"object","required":["path_or_project"],"properties":{"path_or_project":{"type":"string"},"service":{"type":"string"},"production_url":{"type":"string"},"platform_project":{"type":"string"}}}),
         },
         ToolSpec {
+            name: "canary_integrate_status",
+            description: "Merge local scan, integration receipt, live Canary state, query readback, webhooks, and dogfood evidence into one coverage verdict.",
+            input_schema: json!({"type":"object","required":["path_or_project"],"properties":{"path_or_project":{"type":"string"},"service":{"type":"string"},"production_url":{"type":"string"},"platform_project":{"type":"string"}}}),
+        },
+        ToolSpec {
             name: "canary_integrate_plan",
             description: "Emit a reviewable Canary integration patch and enrollment plan.",
             input_schema: json!({"type":"object","required":["path_or_project"],"properties":{"path_or_project":{"type":"string"},"service":{"type":"string"},"production_url":{"type":"string"},"platform_project":{"type":"string"}}}),
@@ -1856,7 +2580,7 @@ pub fn tool_manifest() -> Vec<ToolSpec> {
         ToolSpec {
             name: "canary_integrate_enroll",
             description: "Create a Canary health target and scoped ingest key for a deployed service; redacts the one-time key by default.",
-            input_schema: json!({"type":"object","required":["service","url"],"properties":{"service":{"type":"string"},"url":{"type":"string"},"environment":{"type":"string"},"interval_ms":{"type":"integer"},"show_secret":{"type":"boolean","default":false}}}),
+            input_schema: json!({"type":"object","required":["service","url"],"properties":{"service":{"type":"string"},"url":{"type":"string"},"environment":{"type":"string"},"interval_ms":{"type":"integer"},"project_root":{"type":"string"},"show_secret":{"type":"boolean","default":false}}}),
         },
     ]
 }
@@ -2014,6 +2738,7 @@ mod tests {
         assert!(has_action(actions, "global_error_capture", "needed"));
         assert!(has_action(actions, "env_names", "needed"));
         assert!(has_action(actions, "target_enrollment", "needed"));
+        assert!(has_action(actions, "integration_receipt", "needed"));
         assert_eq!(
             action(actions, "target_enrollment")?["health_url"],
             "https://www.timeismoney.works/api/health"
@@ -2054,6 +2779,185 @@ mod tests {
     }
 
     #[test]
+    fn integration_discovery_finds_src_app_route_groups_and_bespoke_canary_code()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = temp_project("grouped-health")?;
+        fs::write(
+            root.join("package.json"),
+            r#"{"dependencies":{"next":"15.0.0"}}"#,
+        )?;
+        fs::create_dir_all(root.join("src/app/(app)/api/health"))?;
+        fs::write(
+            root.join("src/app/(app)/api/health/route.ts"),
+            "export function GET() { return Response.json({ status: 'ok' }); }\n",
+        )?;
+        fs::create_dir_all(root.join("src/lib"))?;
+        fs::write(
+            root.join("src/lib/canary-reporter.ts"),
+            "export const endpoint = process.env.CANARY_ENDPOINT;\nfetch(`${endpoint}/api/v1/errors`);\n",
+        )?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&root, root.join("src/lib/loop"))?;
+
+        let discovery = integration_discover(&IntegrationInput {
+            target: root.clone(),
+            service: Some("chrondle".to_owned()),
+            production_url: Some("https://www.chrondle.app".to_owned()),
+            platform_project: None,
+            endpoint: DEFAULT_ENDPOINT.to_owned(),
+        })?;
+
+        assert_eq!(
+            discovery["health_routes"],
+            json!([{"path": "src/app/(app)/api/health/route.ts", "route": "/api/health"}])
+        );
+        assert_eq!(discovery["signals"]["canary_present"], true);
+        assert_eq!(
+            discovery["signals"]["canary_code_paths"],
+            json!([{"kind": "canary", "path": "src/lib/canary-reporter.ts"}])
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn integration_discovery_merges_receipt_env_names()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = temp_project("receipt-env")?;
+        fs::create_dir_all(root.join(".canary"))?;
+        fs::write(
+            root.join(INTEGRATION_RECEIPT_PATH),
+            r#"{"schema_version":1,"service":"vanity","last_verified_at":"1781380800","env_names":["CANARY_ENDPOINT","CANARY_API_KEY"]}"#,
+        )?;
+
+        let discovery = integration_discover(&IntegrationInput {
+            target: root.clone(),
+            service: Some("vanity".to_owned()),
+            production_url: None,
+            platform_project: None,
+            endpoint: DEFAULT_ENDPOINT.to_owned(),
+        })?;
+
+        assert_eq!(
+            discovery["signals"]["declared_env_names"],
+            json!(["CANARY_API_KEY", "CANARY_ENDPOINT"])
+        );
+        assert_eq!(discovery["signals"]["platform_env_names"], json!([]));
+        assert_eq!(
+            discovery["signals"]["canary_env_names"],
+            json!(["CANARY_API_KEY", "CANARY_ENDPOINT"])
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn vercel_env_parser_extracts_names_without_values()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let stdout = r#"Retrieving project...
+{
+  "envs": [
+    {"key": "CANARY_ENDPOINT", "type": "encrypted"},
+    {"key": "CANARY_API_KEY", "type": "encrypted"},
+    {"key": "lowercase_ignored", "type": "plain"}
+  ]
+}
+Vercel CLI completed
+"#;
+
+        let names = vercel_env_names_from_stdout(stdout)?;
+
+        assert_eq!(names, vec!["CANARY_API_KEY", "CANARY_ENDPOINT"]);
+        Ok(())
+    }
+
+    #[test]
+    fn integration_plan_uses_static_site_health_target_without_code_patch()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = temp_project("static")?;
+        fs::write(root.join("index.html"), "<h1>static</h1>")?;
+
+        let plan = integration_plan(&IntegrationInput {
+            target: root.clone(),
+            service: Some("trump-goggles-splash".to_owned()),
+            production_url: Some("https://trumpgoggles.com".to_owned()),
+            platform_project: Some("trump-goggles".to_owned()),
+            endpoint: DEFAULT_ENDPOINT.to_owned(),
+        })?;
+        let actions = plan["actions"].as_array().ok_or("missing actions")?;
+
+        assert_eq!(plan["framework"], "unknown");
+        assert_eq!(plan["coverage_mode"], "static");
+        assert_eq!(plan["can_patch"], false);
+        assert_eq!(
+            action(actions, "target_enrollment")?["health_url"],
+            "https://trumpgoggles.com"
+        );
+        assert_eq!(
+            plan["static_site"]["target_url"],
+            "https://trumpgoggles.com"
+        );
+        assert!(
+            plan["static_site"]["browser_capture_snippet"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("NEXT_PUBLIC_CANARY_API_KEY")
+        );
+        assert!(
+            plan["static_site"]["browser_capture_snippet"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("@canary-obs/sdk/nextjs")
+        );
+        assert!(
+            plan["static_site"]["browser_capture_warning"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("never expose admin")
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn integration_plan_includes_non_http_monitor_templates()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = temp_project("monitors")?;
+        fs::write(root.join("package.json"), r#"{"dependencies":{}}"#)?;
+
+        let plan = integration_plan(&IntegrationInput {
+            target: root.clone(),
+            service: Some("worker-app".to_owned()),
+            production_url: None,
+            platform_project: None,
+            endpoint: "https://canary.example".to_owned(),
+        })?;
+        let templates = plan["monitor_templates"]
+            .as_array()
+            .ok_or("missing monitor templates")?;
+
+        assert_eq!(templates.len(), 4);
+        assert!(templates.iter().any(|template| {
+            template["runtime"] == "cron"
+                && template["mode"] == "schedule"
+                && template["check_in"]
+                    .as_str()
+                    .is_some_and(|command| command.contains("/api/v1/check-ins"))
+        }));
+        assert!(
+            templates
+                .iter()
+                .any(|template| { template["runtime"] == "desktop" && template["mode"] == "ttl" })
+        );
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn integration_patch_adds_nextjs_files_and_refuses_foreign_overwrites()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let root = temp_project("patch")?;
@@ -2078,6 +2982,7 @@ mod tests {
         let instrumentation = fs::read_to_string(root.join("instrumentation.ts"))?;
         let health = fs::read_to_string(root.join("app/api/health/route.ts"))?;
         let global_error = fs::read_to_string(root.join("app/global-error.tsx"))?;
+        let receipt = read_json_file(&root.join(INTEGRATION_RECEIPT_PATH))?;
 
         assert!(package.contains("@canary-obs/sdk"));
         assert_eq!(instrumentation, "export function register() {}\n");
@@ -2091,6 +2996,58 @@ mod tests {
                 .is_some_and(|path| path.ends_with("instrumentation.ts"))
                 && change["status"] == "skipped"
         }));
+        assert!(changes.iter().any(|change| {
+            change["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with(INTEGRATION_RECEIPT_PATH))
+                && change["status"] == "updated"
+        }));
+        assert_eq!(receipt["service"], "vanity");
+        assert_eq!(receipt["health_url"], "https://www.phaedrus.io/api/health");
+        assert_eq!(receipt["verification_status"], "planned");
+        assert_eq!(receipt["target_id"], Value::Null);
+        assert_eq!(
+            receipt["env_names"],
+            json!([
+                "CANARY_ENDPOINT",
+                "CANARY_API_KEY",
+                "NEXT_PUBLIC_CANARY_ENDPOINT",
+                "NEXT_PUBLIC_CANARY_API_KEY"
+            ])
+        );
+
+        write_integration_receipt(
+            &root,
+            &json!({
+                "schema_version": 1,
+                "service": "vanity",
+                "environment": "production",
+                "canary_endpoint": DEFAULT_ENDPOINT,
+                "health_url": "https://www.phaedrus.io/api/health",
+                "target_id": "TGT-existing",
+                "monitor_ids": ["MON-existing"],
+                "webhook_ids": ["WHK-existing"],
+                "api_key_id": "KEY-existing",
+                "verification_status": "verified",
+                "env_names": ["CANARY_ENDPOINT", "CANARY_API_KEY"],
+                "verification_commands": [],
+                "last_verified_at": "1781380800"
+            }),
+        )?;
+        integration_patch(&IntegrationInput {
+            target: root.clone(),
+            service: Some("vanity".to_owned()),
+            production_url: Some("https://www.phaedrus.io".to_owned()),
+            platform_project: None,
+            endpoint: DEFAULT_ENDPOINT.to_owned(),
+        })?;
+        let preserved_receipt = read_json_file(&root.join(INTEGRATION_RECEIPT_PATH))?;
+        assert_eq!(preserved_receipt["verification_status"], "verified");
+        assert_eq!(preserved_receipt["target_id"], "TGT-existing");
+        assert_eq!(preserved_receipt["monitor_ids"], json!(["MON-existing"]));
+        assert_eq!(preserved_receipt["webhook_ids"], json!(["WHK-existing"]));
+        assert_eq!(preserved_receipt["api_key_id"], "KEY-existing");
+        assert_eq!(preserved_receipt["last_verified_at"], "1781380800");
 
         fs::remove_dir_all(root)?;
         Ok(())
@@ -2169,6 +3126,91 @@ mod tests {
     }
 
     #[test]
+    fn integration_coverage_verdict_merges_local_live_query_and_dogfood_evidence() {
+        let discovery = json!({
+            "signals": {
+                "canary_present": true,
+                "canary_sdk_dependency": false
+            }
+        });
+        let targets = json!({"ok": true, "response": {"targets": [{"service": "linejam"}]}});
+        let monitors = json!({"ok": true, "response": {"monitors": []}});
+        let webhooks = json!({"ok": true, "response": {"webhooks": [{"id": "WHK-1"}]}});
+        let query = json!({"ok": true, "response": {"service": "linejam", "total_errors": 0}});
+        let dogfood = json!({"ok": true, "response": {"services": [{"service": "linejam", "state": "active"}]}});
+
+        let verdict = integration_coverage_verdict(
+            "linejam", &discovery, &targets, &monitors, &webhooks, &query, &dogfood,
+        );
+
+        assert_eq!(verdict["status"], "covered");
+        assert_eq!(verdict["target_enrolled"], true);
+        assert_eq!(verdict["webhook_configured"], true);
+        assert_eq!(verdict["query_readback"], true);
+        assert_eq!(verdict["dogfood_state"], "active");
+        assert_eq!(verdict["strict_failures"], json!([]));
+    }
+
+    #[test]
+    fn status_plan_reconciliation_marks_live_enrollment_present() {
+        let plan = json!({
+            "actions": [
+                {
+                    "kind": "target_enrollment",
+                    "status": "needed",
+                    "executor": "enroll"
+                }
+            ]
+        });
+        let target = json!({"id": "TGT-1", "service": "linejam"});
+
+        let reconciled = reconcile_plan_with_live_state(&plan, Some(&target), None);
+
+        assert_eq!(reconciled["actions"][0]["status"], "present");
+        assert_eq!(reconciled["actions"][0]["executor"], "none");
+        assert_eq!(
+            reconciled["actions"][0]["live_evidence"]["target_id"],
+            "TGT-1"
+        );
+    }
+
+    #[test]
+    fn integration_coverage_does_not_count_null_receipt_as_local_capture() {
+        let discovery = json!({
+            "integration_receipt": null,
+            "signals": {
+                "canary_present": false,
+                "canary_sdk_dependency": false
+            }
+        });
+        let targets = json!({"ok": true, "response": {"targets": []}});
+        let monitors = json!({"ok": true, "response": {"monitors": []}});
+        let webhooks = json!({"ok": true, "response": {"webhooks": []}});
+        let query = json!({"ok": true, "response": {"service": "linejam", "total_errors": 0}});
+        let dogfood = json!({"ok": true, "response": {"registry": []}});
+
+        let verdict = integration_coverage_verdict(
+            "linejam", &discovery, &targets, &monitors, &webhooks, &query, &dogfood,
+        );
+
+        assert_eq!(verdict["status"], "missing");
+        assert_eq!(verdict["local_capture"], false);
+    }
+
+    #[test]
+    fn dogfood_state_reads_registry_and_surface_inventory_shapes() {
+        let registry = json!({"ok": true, "response": {"registry": [
+            {"service": "chrondle", "state": "active"}
+        ]}});
+        let surfaces = json!({"ok": true, "response": {"surfaces": [
+            {"service": "misty-step", "coverage": "covered"}
+        ]}});
+
+        assert_eq!(dogfood_service_state(&registry, "chrondle"), "active");
+        assert_eq!(dogfood_service_state(&surfaces, "misty-step"), "covered");
+    }
+
+    #[test]
     fn mcp_manifest_exposes_integration_tools() {
         let manifest = tool_manifest();
         let names = manifest
@@ -2177,6 +3219,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert!(names.contains("canary_integrate_discover"));
+        assert!(names.contains("canary_integrate_status"));
         assert!(names.contains("canary_integrate_plan"));
         assert!(names.contains("canary_integrate_patch"));
         assert!(names.contains("canary_integrate_enroll"));

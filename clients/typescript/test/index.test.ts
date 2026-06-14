@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { initCanary, captureException, captureMessage } from "../src/index";
+import { initCanary, captureException, captureMessage, checkIn } from "../src/index";
 
 describe("initCanary + captureException", () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
@@ -192,12 +192,62 @@ describe("captureMessage", () => {
   });
 });
 
+describe("checkIn", () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    fetchSpy = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          monitor_id: "MON-1",
+          check_in_id: "CHK-1",
+          state: "up",
+          observed_at: "2026-06-14T00:00:00Z",
+          sequence: 1,
+        }),
+        { status: 201 }
+      )
+    );
+    globalThis.fetch = fetchSpy;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("sends scrubbed monitor check-ins", async () => {
+    initCanary({
+      endpoint: "https://canary.test",
+      apiKey: "sk_test_abc",
+      service: "test-svc",
+    });
+
+    await checkIn({
+      monitor: "test-svc-cron",
+      status: "ok",
+      summary: "job complete for alice@example.com",
+      context: { owner: "alice@example.com" },
+    });
+
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toBe("https://canary.test/api/v1/check-ins");
+    const body = JSON.parse(init.body);
+    expect(body.monitor).toBe("test-svc-cron");
+    expect(body.summary).toBe("job complete for [EMAIL]");
+    expect(body.context).toEqual({ owner: "[EMAIL]" });
+  });
+});
+
 describe("uninitialized capture helpers", () => {
   it("return null before initCanary runs", async () => {
     vi.resetModules();
-    const { captureException, captureMessage } = await import("../src/index");
+    const { captureException, captureMessage, checkIn } = await import("../src/index");
 
     await expect(captureException(new Error("boom"))).resolves.toBeNull();
     await expect(captureMessage("boom")).resolves.toBeNull();
+    await expect(
+      checkIn({ monitor: "test", status: "alive" })
+    ).resolves.toBeNull();
   });
 });

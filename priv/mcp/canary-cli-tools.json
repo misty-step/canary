@@ -78,6 +78,30 @@
       "name": "canary_integrate_discover"
     },
     {
+      "description": "Merge local scan, integration receipt, live Canary state, query readback, webhooks, and dogfood evidence into one coverage verdict.",
+      "input_schema": {
+        "properties": {
+          "path_or_project": {
+            "type": "string"
+          },
+          "platform_project": {
+            "type": "string"
+          },
+          "production_url": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path_or_project"
+        ],
+        "type": "object"
+      },
+      "name": "canary_integrate_status"
+    },
+    {
       "description": "Emit a reviewable Canary integration patch and enrollment plan.",
       "input_schema": {
         "properties": {
@@ -134,6 +158,9 @@
           },
           "interval_ms": {
             "type": "integer"
+          },
+          "project_root": {
+            "type": "string"
           },
           "service": {
             "type": "string"

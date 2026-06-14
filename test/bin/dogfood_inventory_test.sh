@@ -193,6 +193,28 @@ write_local_links() {
 JSON
 }
 
+write_receipt() {
+  local root="$1" service="$2" status="$3" target_id="$4"
+  mkdir -p "$root/$service/.canary"
+  cat >"$root/$service/.canary/integration.json" <<JSON
+{
+  "schema_version": 1,
+  "service": "$service",
+  "environment": "production",
+  "canary_endpoint": "https://canary.example",
+  "health_url": "https://$service.example/api/health",
+  "target_id": $target_id,
+  "monitor_ids": [],
+  "webhook_ids": [],
+  "api_key_id": "KEY-1",
+  "verification_status": "$status",
+  "env_names": ["CANARY_ENDPOINT", "CANARY_API_KEY"],
+  "verification_commands": ["bin/canary integrate status . --service $service --json"],
+  "last_verified_at": "1781222400"
+}
+JSON
+}
+
 setup_stubbed_collectors() {
   local bin_dir="$1"
   mkdir -p "$bin_dir"
@@ -317,6 +339,8 @@ write_vercel_projects_with_rogue "$VERCEL_ROGUE"
 write_empty_vercel_projects "$VERCEL_EMPTY"
 write_fly_apps "$FLY_APPS"
 write_local_links "$LOCAL_ROOT"
+write_receipt "$LOCAL_ROOT" "bravo" "verified" '"TGT-2"'
+write_receipt "$LOCAL_ROOT" "charlie" "planned" 'null'
 
 echo "Test 1: dogfood-inventory help"
 OUTPUT=$(run_and_capture "$DOGFOOD_INVENTORY" --help)
@@ -331,7 +355,9 @@ assert_json_equals "$OUTPUT" ".summary.blocked" "1" "json counts blocked service
 assert_json_equals "$OUTPUT" ".summary.ignored" "1" "json counts ignored services"
 assert_json_equals "$OUTPUT" ".summary.strict_failures" "0" "strict fixture has no failures"
 assert_json_equals "$OUTPUT" ".surfaces[] | select(.service == \"alpha\") | .local_link_seen" "true" "local Vercel link is joined to registry service"
-assert_json_equals "$OUTPUT" ".surfaces[] | select(.service == \"bravo\") | .coverage" "partial" "pending service is partial"
+assert_json_equals "$OUTPUT" ".surfaces[] | select(.service == \"bravo\") | .receipt_seen" "true" "verified receipt is joined to registry service"
+assert_json_equals "$OUTPUT" ".surfaces[] | select(.service == \"charlie\") | .receipt_seen" "true" "planned receipt is visible in inventory"
+assert_json_equals "$OUTPUT" ".surfaces[] | select(.service == \"charlie\") | .coverage" "blocked" "planned receipt does not create coverage"
 
 echo "Test 3: dogfood-inventory strict fails on unregistered deployment"
 OUTPUT=$(run_failure "$DOGFOOD_INVENTORY" --manifest "$MANIFEST" --vercel-projects "misty-step=$VERCEL_ROGUE" --vercel-projects "adminifi-growth=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT" --requested alpha,bravo,canary-self --now 2026-06-12T00:00:00Z --strict)

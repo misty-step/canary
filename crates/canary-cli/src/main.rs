@@ -5,11 +5,11 @@ use std::{env, path::PathBuf, process::ExitCode};
 use canary_cli::{
     ApiClient, CliError, Config, IntegrationEnrollRequest, IntegrationInput, RenderMode, Result,
     Window, doctor_report, dogfood_strict_failure_count, encode, find_repo_root,
-    integration_discover, integration_enroll, integration_patch, integration_plan, json_envelope,
-    print_json, print_lines, resolve_endpoint_without_config, run_dogfood_inventory,
-    summarize_doctor, summarize_dogfood, summarize_incidents, summarize_integration,
-    summarize_monitors, summarize_query, summarize_report, summarize_services, summarize_targets,
-    summarize_timeline, tool_manifest,
+    integration_discover, integration_enroll, integration_patch, integration_plan,
+    integration_status, json_envelope, print_json, print_lines, resolve_endpoint_without_config,
+    run_dogfood_inventory, summarize_doctor, summarize_dogfood, summarize_incidents,
+    summarize_integration, summarize_monitors, summarize_query, summarize_report,
+    summarize_services, summarize_targets, summarize_timeline, tool_manifest,
 };
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
@@ -119,6 +119,8 @@ struct IntegrateArgs {
 
 #[derive(Debug, Subcommand)]
 enum IntegrateCommand {
+    /// Merge local, receipt, platform, live Canary, and dogfood evidence into one verdict.
+    Status(IntegrateProjectArgs),
     /// Discover local integration state without reading secret values.
     Discover(IntegrateProjectArgs),
     /// Emit a reviewable patch/enrollment plan.
@@ -150,6 +152,8 @@ struct IntegrateEnrollArgs {
     environment: String,
     #[arg(long)]
     interval_ms: Option<i64>,
+    #[arg(long)]
+    project_root: Option<PathBuf>,
     #[arg(long)]
     show_secret: bool,
 }
@@ -233,6 +237,24 @@ fn run_integrate_command(
                 summarize_integration,
             )
         }
+        IntegrateCommand::Status(args) => {
+            let config = Config::resolve(endpoint, api_key, config_path)?;
+            let client = ApiClient::new(config)?;
+            let cwd = env::current_dir().map_err(|source| CliError::Io {
+                path: PathBuf::from("."),
+                source,
+            })?;
+            let repo_root = find_repo_root(&cwd).unwrap_or(cwd);
+            let input = integration_input(args, client.endpoint().to_owned());
+            let response = integration_status(&client, &input, &repo_root)?;
+            render(
+                "integrate status",
+                client.endpoint(),
+                response,
+                mode,
+                summarize_integration,
+            )
+        }
         IntegrateCommand::Plan(args) => {
             let endpoint = resolve_endpoint_without_config(endpoint.as_deref());
             let input = integration_input(args, endpoint.clone());
@@ -266,6 +288,7 @@ fn run_integrate_command(
                 environment: args.environment,
                 interval_ms: args.interval_ms,
                 redact: !args.show_secret,
+                receipt_root: args.project_root,
             };
             let response = integration_enroll(&client, &request)?;
             render(
