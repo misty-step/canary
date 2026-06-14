@@ -35,6 +35,7 @@ use x509_parser::prelude::FromDer;
 
 use crate::{
     EventFanoutReport, HealthEventFanout, HealthEventSource, WorkerHealthHandle, WorkerName,
+    WorkerPressureSnapshot,
     server_time::{current_rfc3339, current_unix_millis},
     target_request::{parse_headers, validate_method, validate_url},
 };
@@ -224,6 +225,8 @@ pub struct TargetProbeLifecycleReport {
     pub loaded: usize,
     /// Due targets selected for execution.
     pub due: usize,
+    /// Maximum due lag among selected targets.
+    pub oldest_due_age_ms: Option<u64>,
     /// New probe threads launched during this lifecycle pass.
     pub launched: usize,
     /// Probe completions drained during this lifecycle pass.
@@ -343,6 +346,16 @@ impl TargetProbeLifecycle {
             .map(|(target_id, _)| target_id.clone())
             .collect::<Vec<_>>();
 
+        report.oldest_due_age_ms = self
+            .schedules
+            .iter()
+            .filter(|(target_id, schedule)| {
+                !schedule.paused
+                    && schedule.next_due_millis <= now_millis
+                    && !self.in_flight.contains(*target_id)
+            })
+            .map(|(_, schedule)| now_millis.saturating_sub(schedule.next_due_millis).max(0) as u64)
+            .max();
         report.due = due_targets.len();
         let capacity = MAX_CONCURRENT_TARGET_PROBES.saturating_sub(self.in_flight.len());
         if !should_stop() {
@@ -850,7 +863,17 @@ fn run_lifecycle_worker(
             match catch_unwind(AssertUnwindSafe(|| {
                 lifecycle.run_due_until(current_unix_millis(), || control.is_stopping())
             })) {
-                Ok(Ok(_)) => health.record_success(now),
+                Ok(Ok(report)) => health.record_success_with_pressure(
+                    now,
+                    current_unix_millis(),
+                    WorkerPressureSnapshot {
+                        due_count: report.due as u64,
+                        in_flight_count: report.in_flight as u64,
+                        oldest_due_age_ms: report.oldest_due_age_ms,
+                        backoff_or_circuit_open: report.failed > 0
+                            || report.event_fanout_failed > 0,
+                    },
+                ),
                 Ok(Err(_)) => health.record_failure("runtime_error"),
                 Err(_) => health.record_failure("panic"),
             }
@@ -1966,6 +1989,7 @@ mod tests {
             TargetProbeLifecycleReport {
                 loaded: 1,
                 due: 1,
+                oldest_due_age_ms: Some(0),
                 launched: 1,
                 in_flight: 1,
                 ..TargetProbeLifecycleReport::default()

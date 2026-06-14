@@ -118,6 +118,32 @@ write_invalid_manifest() {
 JSON
 }
 
+write_stale_manifest() {
+  local path="$1"
+  cat >"$path" <<'JSON'
+{
+  "schema_version": 1,
+  "services": [
+    {
+      "service": "stale",
+      "state": "active",
+      "platform": "vercel",
+      "platform_project": "stale",
+      "production_url": "https://stale.example",
+      "repo_path": null,
+      "health_url": "https://stale.example/api/health",
+      "monitor_mode": "http",
+      "ingest_status": "verified",
+      "last_checked_at": "2026-06-15T00:00:00Z",
+      "failure_mode": "Old evidence.",
+      "owner": "misty-step",
+      "next_action": "Finish backlog items 034 and 041."
+    }
+  ]
+}
+JSON
+}
+
 write_vercel_projects() {
   local path="$1"
   cat >"$path" <<'JSON'
@@ -276,6 +302,7 @@ assert_json_equals() {
 
 MANIFEST="$TMPDIR_TEST/manifest.json"
 INVALID_MANIFEST="$TMPDIR_TEST/invalid-manifest.json"
+STALE_MANIFEST="$TMPDIR_TEST/stale-manifest.json"
 VERCEL_PROJECTS="$TMPDIR_TEST/vercel.json"
 VERCEL_ROGUE="$TMPDIR_TEST/vercel-rogue.json"
 VERCEL_EMPTY="$TMPDIR_TEST/vercel-empty.json"
@@ -284,6 +311,7 @@ LOCAL_ROOT="$TMPDIR_TEST/workspace"
 
 write_manifest "$MANIFEST"
 write_invalid_manifest "$INVALID_MANIFEST"
+write_stale_manifest "$STALE_MANIFEST"
 write_vercel_projects "$VERCEL_PROJECTS"
 write_vercel_projects_with_rogue "$VERCEL_ROGUE"
 write_empty_vercel_projects "$VERCEL_EMPTY"
@@ -296,7 +324,7 @@ assert_contains "$OUTPUT" "Usage: bin/dogfood-inventory" "shows dogfood-inventor
 assert_contains "$OUTPUT" "--vercel-projects" "documents Vercel fixtures"
 
 echo "Test 2: dogfood-inventory emits coverage json"
-OUTPUT=$(run_and_capture "$DOGFOOD_INVENTORY" --manifest "$MANIFEST" --vercel-projects "misty-step=$VERCEL_PROJECTS" --vercel-projects "adminifi-growth=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT" --requested alpha,bravo,canary-self --json --strict)
+OUTPUT=$(run_and_capture "$DOGFOOD_INVENTORY" --manifest "$MANIFEST" --vercel-projects "misty-step=$VERCEL_PROJECTS" --vercel-projects "adminifi-growth=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT" --requested alpha,bravo,canary-self --now 2026-06-12T00:00:00Z --json --strict)
 assert_json_equals "$OUTPUT" ".summary.covered" "2" "json counts covered services"
 assert_json_equals "$OUTPUT" ".summary.partial" "1" "json counts partial services"
 assert_json_equals "$OUTPUT" ".summary.blocked" "1" "json counts blocked services"
@@ -306,7 +334,7 @@ assert_json_equals "$OUTPUT" ".surfaces[] | select(.service == \"alpha\") | .loc
 assert_json_equals "$OUTPUT" ".surfaces[] | select(.service == \"bravo\") | .coverage" "partial" "pending service is partial"
 
 echo "Test 3: dogfood-inventory strict fails on unregistered deployment"
-OUTPUT=$(run_failure "$DOGFOOD_INVENTORY" --manifest "$MANIFEST" --vercel-projects "misty-step=$VERCEL_ROGUE" --vercel-projects "adminifi-growth=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT" --requested alpha,bravo,canary-self --strict)
+OUTPUT=$(run_failure "$DOGFOOD_INVENTORY" --manifest "$MANIFEST" --vercel-projects "misty-step=$VERCEL_ROGUE" --vercel-projects "adminifi-growth=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT" --requested alpha,bravo,canary-self --now 2026-06-12T00:00:00Z --strict)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "strict unregistered deployment exits non-zero"
@@ -314,7 +342,7 @@ assert_contains "$BODY" "unregistered_deployment" "strict output names unregiste
 assert_contains "$BODY" "rogue" "strict output names rogue project"
 
 echo "Test 4: dogfood-inventory strict fails on missing requested service"
-OUTPUT=$(run_failure "$DOGFOOD_INVENTORY" --manifest "$MANIFEST" --vercel-projects "misty-step=$VERCEL_PROJECTS" --vercel-projects "adminifi-growth=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT" --requested alpha,missing --strict)
+OUTPUT=$(run_failure "$DOGFOOD_INVENTORY" --manifest "$MANIFEST" --vercel-projects "misty-step=$VERCEL_PROJECTS" --vercel-projects "adminifi-growth=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT" --requested alpha,missing --now 2026-06-12T00:00:00Z --strict)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "missing requested registry entry exits non-zero"
@@ -327,10 +355,18 @@ BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "2" "invalid registry exits non-zero"
 assert_contains "$BODY" "invalid dogfood registry shape" "invalid registry explains schema failure"
 
-echo "Test 6: dogfood-inventory supports no-fixture collector path"
+echo "Test 6: dogfood-inventory strict fails stale evidence and plural completed-ticket next actions"
+OUTPUT=$(run_failure "$DOGFOOD_INVENTORY" --manifest "$STALE_MANIFEST" --vercel-projects "misty-step=$VERCEL_EMPTY" --vercel-projects "adminifi-growth=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT" --requested stale --now 2026-06-14T00:00:00Z --max-evidence-age-hours 24 --strict)
+STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
+BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
+assert_exit_code "$STATUS" "1" "stale registry evidence exits non-zero"
+assert_contains "$BODY" "stale_registry_evidence" "strict output names stale evidence"
+assert_contains "$BODY" "completed_ticket_next_action" "strict output names completed-ticket next action"
+
+echo "Test 7: dogfood-inventory supports no-fixture collector path"
 STUB_BIN="$TMPDIR_TEST/bin"
 setup_stubbed_collectors "$STUB_BIN"
-OUTPUT=$(PATH="$STUB_BIN:$PATH" run_and_capture "$DOGFOOD_INVENTORY" --manifest "$MANIFEST" --local-root "$LOCAL_ROOT" --requested alpha,bravo,canary-self --json --strict)
+OUTPUT=$(PATH="$STUB_BIN:$PATH" run_and_capture "$DOGFOOD_INVENTORY" --manifest "$MANIFEST" --local-root "$LOCAL_ROOT" --requested alpha,bravo,canary-self --now 2026-06-12T00:00:00Z --json --strict)
 assert_json_equals "$OUTPUT" ".summary.strict_failures" "0" "stubbed live collectors satisfy strict mode"
 assert_json_equals "$OUTPUT" ".collector_errors | length" "0" "stubbed live collectors avoid collector errors"
 assert_json_equals "$OUTPUT" ".surfaces[] | select(.service == \"canary-self\") | .deployment_seen" "true" "stubbed Fly collector joins active self service"

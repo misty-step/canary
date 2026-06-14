@@ -12,9 +12,9 @@
       "monitor_mode": "http",
       "ingest_status": "verified",
       "last_checked_at": "2026-06-11T19:38:19Z",
-      "failure_mode": "Self HTTP liveness is enrolled; independent witness and worker-readiness proof remain separate backlog work.",
+      "failure_mode": "Self HTTP liveness, worker readiness, and independent witness coverage are enrolled.",
       "owner": "misty-step",
-      "next_action": "Keep as active self-target and complete backlog items 034 and 037 for worker continuity and external witness coverage."
+      "next_action": "Keep as active self-target and monitor live worker readiness plus external witness receipts after deploys."
     },
     {
       "service": "chrondle",

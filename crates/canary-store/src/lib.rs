@@ -46,8 +46,8 @@ pub use ingest::{
     ErrorIngest, ErrorIngestCommit, ErrorIngestIds, ErrorIngestPayload, ErrorServiceEvent,
 };
 pub use oban_jobs::{
-    WebhookDeliveryJobCompletion, WebhookDeliveryJobInsert, WebhookDeliveryJobRow,
-    WebhookDeliveryJobState,
+    WebhookDeliveryJobCompletion, WebhookDeliveryJobInsert, WebhookDeliveryJobRecoveryReport,
+    WebhookDeliveryJobRow, WebhookDeliveryJobState,
 };
 pub use query::{
     ErrorGroupQueryError, ErrorGroupQueryResult, ErrorSummaryItem, IncidentListOptions, QueryError,
@@ -1000,15 +1000,38 @@ impl Store {
     /// Apply one scheduler-side completion transition for a claimed webhook job.
     pub fn complete_webhook_delivery_job(
         &mut self,
-        job_id: i64,
+        job: &WebhookDeliveryJobRow,
         completion: WebhookDeliveryJobCompletion,
-    ) -> Result<()> {
-        oban_jobs::complete_webhook_delivery_job(&mut self.connection, job_id, completion)
+    ) -> Result<bool> {
+        oban_jobs::complete_webhook_delivery_job(&mut self.connection, job, completion)
+    }
+
+    /// Recover stale executing webhook jobs back to retry/discard scheduler states.
+    pub fn recover_stale_webhook_delivery_jobs(
+        &mut self,
+        now: &str,
+        stale_before: &str,
+        limit: u32,
+    ) -> Result<WebhookDeliveryJobRecoveryReport> {
+        oban_jobs::recover_stale_webhook_delivery_jobs(
+            &mut self.connection,
+            now,
+            stale_before,
+            limit,
+        )
     }
 
     /// Return one webhook delivery job row by id.
     pub fn webhook_delivery_job(&self, job_id: i64) -> Result<Option<WebhookDeliveryJobRow>> {
         oban_jobs::webhook_delivery_job(&self.connection, job_id)
+    }
+
+    /// Return point-in-time due backlog pressure for webhook delivery jobs.
+    pub fn webhook_delivery_due_summary(
+        &self,
+        now: &str,
+    ) -> Result<oban_jobs::WebhookDeliveryJobDueSummary> {
+        oban_jobs::webhook_delivery_due_summary(&self.connection, now)
     }
 
     /// Gather a point-in-time Prometheus metrics snapshot.
@@ -2044,19 +2067,15 @@ mod tests {
             now: "2026-05-28T20:00:00Z".to_owned(),
             max_attempts: 4,
         })?;
-        assert_eq!(
-            store
-                .claim_due_webhook_delivery_jobs("2026-05-28T20:00:00Z", 1)?
-                .len(),
-            1
-        );
+        let claimed = store.claim_due_webhook_delivery_jobs("2026-05-28T20:00:00Z", 1)?;
+        assert_eq!(claimed.len(), 1);
 
-        store.complete_webhook_delivery_job(
-            job,
+        assert!(store.complete_webhook_delivery_job(
+            &claimed[0],
             WebhookDeliveryJobCompletion::Retry {
                 scheduled_at: "2026-05-28T20:00:06Z".to_owned(),
             },
-        )?;
+        )?);
         let retry = store
             .webhook_delivery_job(job)?
             .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
@@ -2071,12 +2090,12 @@ mod tests {
 
         let claimed_again = store.claim_due_webhook_delivery_jobs("2026-05-28T20:00:06Z", 1)?;
         assert_eq!(claimed_again[0].attempt, 2);
-        store.complete_webhook_delivery_job(
-            job,
+        assert!(store.complete_webhook_delivery_job(
+            &claimed_again[0],
             WebhookDeliveryJobCompletion::Complete {
                 now: "2026-05-28T20:00:07Z".to_owned(),
             },
-        )?;
+        )?);
         assert_eq!(
             store
                 .webhook_delivery_job(job)?
@@ -2096,12 +2115,14 @@ mod tests {
             now: "2026-05-28T20:01:00Z".to_owned(),
             max_attempts: 1,
         })?;
-        store.complete_webhook_delivery_job(
-            discarded,
+        let claimed_discard = store.claim_due_webhook_delivery_jobs("2026-05-28T20:01:01Z", 1)?;
+        assert_eq!(claimed_discard[0].id, discarded);
+        assert!(store.complete_webhook_delivery_job(
+            &claimed_discard[0],
             WebhookDeliveryJobCompletion::Discard {
                 now: "2026-05-28T20:01:01Z".to_owned(),
             },
-        )?;
+        )?);
         assert_eq!(
             store
                 .webhook_delivery_job(discarded)?
@@ -2109,6 +2130,219 @@ mod tests {
                 .state,
             WebhookDeliveryJobState::Discarded
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_completion_rejects_lost_execution_lease() -> Result<()> {
+        let mut store = migrated_store()?;
+        let job = store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+            args: json!({
+                "webhook_id": "WHK-test",
+                "payload": {"sequence": 10},
+                "event": "error.new_class",
+                "delivery_id": "DLV-lost-lease"
+            }),
+            scheduled_at: "2026-05-28T20:00:00Z".to_owned(),
+            now: "2026-05-28T20:00:00Z".to_owned(),
+            max_attempts: 4,
+        })?;
+        let stale_claim = store.claim_due_webhook_delivery_jobs("2026-05-28T20:00:01Z", 1)?;
+        assert_eq!(stale_claim[0].id, job);
+
+        let recovery = store.recover_stale_webhook_delivery_jobs(
+            "2026-05-28T20:02:00Z",
+            "2026-05-28T20:01:00Z",
+            10,
+        )?;
+        assert_eq!(recovery.recovered, 1);
+
+        assert!(!store.complete_webhook_delivery_job(
+            &stale_claim[0],
+            WebhookDeliveryJobCompletion::Complete {
+                now: "2026-05-28T20:02:01Z".to_owned(),
+            },
+        )?);
+        let recovered = store
+            .webhook_delivery_job(job)?
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        assert_eq!(recovered.state, WebhookDeliveryJobState::Scheduled);
+        assert_eq!(recovered.scheduled_at, "2026-05-28T20:02:00Z");
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_recovery_respects_stale_cutoff_boundary() -> Result<()> {
+        let mut store = migrated_store()?;
+        let fresh_job = store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+            args: json!({
+                "webhook_id": "WHK-test",
+                "payload": {"sequence": 11},
+                "event": "error.new_class",
+                "delivery_id": "DLV-fresh-executing"
+            }),
+            scheduled_at: "2026-05-28T20:00:00Z".to_owned(),
+            now: "2026-05-28T20:00:00Z".to_owned(),
+            max_attempts: 4,
+        })?;
+        let cutoff_job = store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+            args: json!({
+                "webhook_id": "WHK-test",
+                "payload": {"sequence": 12},
+                "event": "error.new_class",
+                "delivery_id": "DLV-cutoff-executing"
+            }),
+            scheduled_at: "2026-05-28T20:00:00Z".to_owned(),
+            now: "2026-05-28T20:00:00Z".to_owned(),
+            max_attempts: 4,
+        })?;
+        let claimed = store.claim_due_webhook_delivery_jobs("2026-05-28T20:00:30Z", 10)?;
+        assert_eq!(claimed.len(), 2);
+
+        let before_cutoff = store.recover_stale_webhook_delivery_jobs(
+            "2026-05-28T20:01:00Z",
+            "2026-05-28T20:00:29Z",
+            10,
+        )?;
+        assert_eq!(before_cutoff.recovered, 0);
+        assert_eq!(
+            store
+                .webhook_delivery_job(fresh_job)?
+                .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?
+                .state,
+            WebhookDeliveryJobState::Executing
+        );
+
+        let at_cutoff = store.recover_stale_webhook_delivery_jobs(
+            "2026-05-28T20:01:30Z",
+            "2026-05-28T20:00:30Z",
+            10,
+        )?;
+        assert_eq!(at_cutoff.recovered, 2);
+        for job in [fresh_job, cutoff_job] {
+            let recovered = store
+                .webhook_delivery_job(job)?
+                .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+            assert_eq!(recovered.state, WebhookDeliveryJobState::Scheduled);
+            assert_eq!(recovered.scheduled_at, "2026-05-28T20:01:30Z");
+        }
+        let due_summary = store.webhook_delivery_due_summary("2026-05-28T20:01:30Z")?;
+        assert_eq!(due_summary.in_flight_count, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_due_summary_counts_in_flight_executing_leases() -> Result<()> {
+        let mut store = migrated_store()?;
+        let job = store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+            args: json!({
+                "webhook_id": "WHK-test",
+                "payload": {"sequence": 13},
+                "event": "error.new_class",
+                "delivery_id": "DLV-in-flight"
+            }),
+            scheduled_at: "2026-05-28T20:00:00Z".to_owned(),
+            now: "2026-05-28T20:00:00Z".to_owned(),
+            max_attempts: 4,
+        })?;
+        assert_eq!(
+            store.claim_due_webhook_delivery_jobs("2026-05-28T20:00:01Z", 1)?[0].id,
+            job
+        );
+
+        let summary = store.webhook_delivery_due_summary("2026-05-28T20:00:02Z")?;
+        assert_eq!(summary.due_count, 0);
+        assert_eq!(summary.in_flight_count, 1);
+        assert_eq!(summary.oldest_scheduled_at, None);
+
+        let row = store
+            .webhook_delivery_job(job)?
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        assert!(store.complete_webhook_delivery_job(
+            &row,
+            WebhookDeliveryJobCompletion::Complete {
+                now: "2026-05-28T20:00:03Z".to_owned(),
+            },
+        )?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn webhook_delivery_jobs_recover_stale_executing_leases() -> Result<()> {
+        let mut store = migrated_store()?;
+        let retry_job = store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+            args: json!({
+                "webhook_id": "WHK-test",
+                "payload": {"sequence": 7},
+                "event": "error.new_class",
+                "delivery_id": "DLV-stale-retry"
+            }),
+            scheduled_at: "2026-05-28T20:00:00Z".to_owned(),
+            now: "2026-05-28T20:00:00Z".to_owned(),
+            max_attempts: 4,
+        })?;
+        let discard_job = store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+            args: json!({
+                "webhook_id": "WHK-test",
+                "payload": {"sequence": 8},
+                "event": "error.new_class",
+                "delivery_id": "DLV-stale-discard"
+            }),
+            scheduled_at: "2026-05-28T20:00:00Z".to_owned(),
+            now: "2026-05-28T20:00:00Z".to_owned(),
+            max_attempts: 1,
+        })?;
+
+        assert_eq!(
+            store
+                .claim_due_webhook_delivery_jobs("2026-05-28T20:00:01Z", 10)?
+                .len(),
+            2
+        );
+        let report = store.recover_stale_webhook_delivery_jobs(
+            "2026-05-28T20:02:00Z",
+            "2026-05-28T20:01:00Z",
+            10,
+        )?;
+
+        assert_eq!(
+            report,
+            WebhookDeliveryJobRecoveryReport {
+                recovered: 2,
+                retried: 1,
+                discarded: 1,
+            }
+        );
+        let retry = store
+            .webhook_delivery_job(retry_job)?
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        assert_eq!(retry.state, WebhookDeliveryJobState::Scheduled);
+        assert_eq!(retry.scheduled_at, "2026-05-28T20:02:00Z");
+        let claimed_again = store.claim_due_webhook_delivery_jobs("2026-05-28T20:02:00Z", 10)?;
+        assert_eq!(claimed_again.len(), 1);
+        assert_eq!(claimed_again[0].id, retry_job);
+        assert_eq!(claimed_again[0].attempt, 2);
+
+        assert_eq!(
+            store
+                .webhook_delivery_job(discard_job)?
+                .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?
+                .state,
+            WebhookDeliveryJobState::Discarded
+        );
+        let errors: String = store.connection.query_row(
+            "SELECT errors FROM oban_jobs WHERE id = ?1",
+            params![discard_job],
+            |row| row.get(0),
+        )?;
+        let errors: Value =
+            serde_json::from_str(&errors).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        assert_eq!(errors[0]["reason"], "stale_executing_recovered");
+        assert_eq!(errors[0]["stale_before"], "2026-05-28T20:01:00Z");
 
         Ok(())
     }

@@ -2223,9 +2223,16 @@
         "required": [
           "name",
           "state",
+          "health",
           "last_success_at",
+          "last_success_age_ms",
           "failure_count",
-          "last_error_class"
+          "consecutive_failures",
+          "last_error_class",
+          "due_count",
+          "in_flight_count",
+          "oldest_due_age_ms",
+          "backoff_or_circuit_open"
         ],
         "properties": {
           "name": {
@@ -2245,6 +2252,16 @@
               "stopped"
             ]
           },
+          "health": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "stale",
+              "failing",
+              "pressured",
+              "stopped"
+            ]
+          },
           "last_success_at": {
             "type": [
               "string",
@@ -2252,7 +2269,18 @@
             ],
             "format": "date-time"
           },
+          "last_success_age_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
           "failure_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "consecutive_failures": {
             "type": "integer",
             "minimum": 0
           },
@@ -2262,6 +2290,24 @@
               "null"
             ],
             "description": "Sanitized failure class such as runtime_error or panic; never a raw error message."
+          },
+          "due_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "in_flight_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "oldest_due_age_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "backoff_or_circuit_open": {
+            "type": "boolean"
           }
         }
       },

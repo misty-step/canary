@@ -17,6 +17,7 @@ reset_env() {
   unset AWS_REGION
   unset AWS_ENDPOINT_URL_S3
   unset LITESTREAM_STUB_CREATE_DB
+  unset CANARY_REQUIRE_LITESTREAM
   unset CANARY_BIN
 }
 
@@ -185,8 +186,24 @@ assert_contains "$OUTPUT" "EXEC:/app/bin/canary-server" \
 assert_not_contains "$OUTPUT" "litestream replicate" \
   "does not run litestream replicate when creds missing"
 
-# --- Test 6: All vars set → starts via litestream ---
-echo "Test 6: Full config starts via litestream"
+# --- Test 6: Required Litestream fails closed when creds are missing ---
+echo "Test 6: Required Litestream fails closed when creds are missing"
+reset_env
+setup_stubs
+export BUCKET_NAME="my-bucket"
+export CANARY_REQUIRE_LITESTREAM=1
+OUTPUT=$(run_entrypoint_failure)
+STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
+BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
+assert_exit_code "$STATUS" "1" \
+  "required Litestream exits non-zero when creds are missing"
+assert_contains "$BODY" "Litestream replication required" \
+  "reports required Litestream startup failure"
+assert_not_contains "$BODY" "EXEC:/app/bin/canary-server" \
+  "does not start app directly when Litestream is required"
+
+# --- Test 7: All vars set → starts via litestream ---
+echo "Test 7: Full config starts via litestream"
 reset_env
 setup_stubs
 export BUCKET_NAME="my-bucket"
@@ -198,8 +215,8 @@ assert_contains "$OUTPUT" "EXEC:litestream replicate" \
 assert_contains "$OUTPUT" "-exec /app/bin/canary-server" \
   "replicates the Rust server binary"
 
-# --- Test 7: Missing DB triggers restore before startup ---
-echo "Test 7: Missing DB restores from Litestream before startup"
+# --- Test 8: Missing DB triggers restore before startup ---
+echo "Test 8: Missing DB restores from Litestream before startup"
 reset_env
 setup_stubs without_db
 export BUCKET_NAME="my-bucket"
@@ -215,8 +232,8 @@ assert_contains "$OUTPUT" "EXEC:litestream replicate" \
 assert_not_contains "$OUTPUT" "did not materialize" \
   "does not warn when restore materializes the database"
 
-# --- Test 8: Missing DB fails closed when restore does not materialize ---
-echo "Test 8: Missing DB fails closed when restore does not materialize"
+# --- Test 9: Missing DB fails closed when restore does not materialize ---
+echo "Test 9: Missing DB fails closed when restore does not materialize"
 reset_env
 setup_stubs without_db
 export BUCKET_NAME="my-bucket"
@@ -232,8 +249,8 @@ assert_contains "$BODY" "Litestream restore did not materialize $CANARY_DB_PATH"
 assert_not_contains "$BODY" "EXEC:litestream replicate" \
   "does not start via litestream after a restore miss"
 
-# --- Test 9: Existing DB skips restore ---
-echo "Test 9: Existing DB skips restore"
+# --- Test 10: Existing DB skips restore ---
+echo "Test 10: Existing DB skips restore"
 reset_env
 setup_stubs
 export BUCKET_NAME="my-bucket"

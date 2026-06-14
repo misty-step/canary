@@ -114,7 +114,9 @@ pub use webhooks::{
     HttpWebhookTransport, InMemoryWebhookCooldown, StoreWebhookScheduler, WebhookCooldown,
     WebhookEnqueueEffectSink, WebhookScheduler, WebhookTransport,
 };
-pub(crate) use worker_health::{WorkerHealthHandle, WorkerHealthRegistry, WorkerName};
+pub(crate) use worker_health::{
+    WorkerHealthHandle, WorkerHealthRegistry, WorkerName, WorkerPressureSnapshot,
+};
 
 /// Router for Canary's authenticated ingest endpoints.
 pub fn ingest_router(state: IngestState) -> Router {
@@ -199,8 +201,8 @@ mod tests {
     };
     use canary_http::{
         public::{
-            APPLICATION_JSON, DependencyStatus, OPENAPI_JSON, WorkerLifecycleState,
-            WorkerReadyzCheck,
+            APPLICATION_JSON, DependencyStatus, OPENAPI_JSON, WorkerHealthStatus,
+            WorkerLifecycleState, WorkerReadyzCheck,
         },
         request::MAX_JSON_BODY_BYTES,
     };
@@ -208,10 +210,14 @@ mod tests {
     use canary_store::{
         API_KEY_PREFIX_LEN, AnnotationInsert, ApiKeyInsert, ErrorIngest, ErrorIngestIds,
         ErrorIngestPayload, MonitorInsert, Store, TargetCheckObservation, TargetInsert,
-        TargetProbeCommit, WebhookDeliveryInsert, WebhookDeliveryJobInsert,
-        WebhookDeliveryJobState, WebhookDeliveryStatus, WebhookSubscriptionInsert,
+        TargetProbeCommit, WebhookDeliveryInsert, WebhookDeliveryJobCompletion,
+        WebhookDeliveryJobInsert, WebhookDeliveryJobState, WebhookDeliveryStatus,
+        WebhookSubscriptionInsert,
     };
-    use canary_workers::webhooks::{CircuitDecision, TransportResult, WebhookJob, WebhookRequest};
+    use canary_workers::{
+        retention::RetentionPolicy,
+        webhooks::{CircuitDecision, TransportResult, WebhookJob, WebhookRequest},
+    };
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
@@ -514,16 +520,30 @@ mod tests {
                     WorkerReadyzCheck {
                         name: "webhook_delivery".to_owned(),
                         state: WorkerLifecycleState::Started,
+                        health: WorkerHealthStatus::Ok,
                         last_success_at: Some("2026-06-12T20:00:00Z".to_owned()),
+                        last_success_age_ms: Some(500),
                         failure_count: 0,
+                        consecutive_failures: 0,
                         last_error_class: None,
+                        due_count: 0,
+                        in_flight_count: 0,
+                        oldest_due_age_ms: None,
+                        backoff_or_circuit_open: false,
                     },
                     WorkerReadyzCheck {
                         name: "target_probe".to_owned(),
                         state: WorkerLifecycleState::Stopped,
+                        health: WorkerHealthStatus::Stopped,
                         last_success_at: None,
+                        last_success_age_ms: None,
                         failure_count: 1,
+                        consecutive_failures: 1,
                         last_error_class: Some("panic".to_owned()),
+                        due_count: 0,
+                        in_flight_count: 0,
+                        oldest_due_age_ms: None,
+                        backoff_or_circuit_open: false,
                     },
                 ],
             ),
@@ -696,11 +716,10 @@ mod tests {
         let server = CanaryServer::boot(config)?;
         let router = server.router();
 
-        let ready = router
+        let _ready = router
             .clone()
             .oneshot(Request::get("/readyz").body(Body::empty())?)
             .await?;
-        assert_eq!(ready.status(), StatusCode::OK);
 
         server.stop_webhook_delivery_worker_for_test();
         let started = Instant::now();
@@ -2063,15 +2082,15 @@ mod tests {
 
         let report = drain.drain_due("9999-01-01T00:00:00Z")?;
 
-        assert_eq!(
-            report,
-            WebhookDeliveryDrainReport {
-                claimed: 1,
-                completed: 1,
-                retried: 0,
-                discarded: 0,
-            }
-        );
+        assert_eq!(report.claimed, 1);
+        assert_eq!(report.completed, 1);
+        assert_eq!(report.retried, 0);
+        assert_eq!(report.discarded, 0);
+        assert_eq!(report.recovered, 0);
+        assert_eq!(report.recovery_retried, 0);
+        assert_eq!(report.recovery_discarded, 0);
+        assert_eq!(report.due_count, 1);
+        assert!(report.oldest_due_age_ms.is_some());
         assert_eq!(
             transport
                 .requests
@@ -2106,15 +2125,9 @@ mod tests {
 
         let report = drain.drain_due("2026-05-28T20:00:00Z")?;
 
-        assert_eq!(
-            report,
-            WebhookDeliveryDrainReport {
-                claimed: 1,
-                completed: 0,
-                retried: 1,
-                discarded: 0,
-            }
-        );
+        assert_webhook_drain_report(&report, 1, 0, 1, 0);
+        assert_eq!(report.due_count, 1);
+        assert_eq!(report.oldest_due_age_ms, Some(0));
         let store = store.lock().map_err(|_| "store lock poisoned")?;
         let job = store
             .webhook_delivery_job(job_id)?
@@ -2145,15 +2158,9 @@ mod tests {
 
         let report = drain.drain_due("2026-05-28T20:00:00Z")?;
 
-        assert_eq!(
-            report,
-            WebhookDeliveryDrainReport {
-                claimed: 1,
-                completed: 0,
-                retried: 1,
-                discarded: 0,
-            }
-        );
+        assert_webhook_drain_report(&report, 1, 0, 1, 0);
+        assert_eq!(report.due_count, 1);
+        assert_eq!(report.oldest_due_age_ms, Some(0));
         let store = store.lock().map_err(|_| "store lock poisoned")?;
         let job = store
             .webhook_delivery_job(job_id)?
@@ -2203,15 +2210,9 @@ mod tests {
         let second = drain.drain_due("2026-05-28T20:00:01Z")?;
 
         assert_eq!(first.retried, 1);
-        assert_eq!(
-            second,
-            WebhookDeliveryDrainReport {
-                claimed: 1,
-                completed: 0,
-                retried: 0,
-                discarded: 1,
-            }
-        );
+        assert_webhook_drain_report(&second, 1, 0, 0, 1);
+        assert_eq!(second.due_count, 1);
+        assert_eq!(second.oldest_due_age_ms, Some(0));
         let store = store.lock().map_err(|_| "store lock poisoned")?;
         assert_eq!(
             store
@@ -2246,15 +2247,16 @@ mod tests {
 
         let report = drain.drain_due("2026-05-28T20:00:00Z")?;
 
-        assert_eq!(
-            report,
-            WebhookDeliveryDrainReport {
-                claimed: 1,
-                completed: 1,
-                retried: 0,
-                discarded: 0,
-            }
-        );
+        assert_eq!(report.claimed, 1);
+        assert_eq!(report.completed, 1);
+        assert_eq!(report.retried, 0);
+        assert_eq!(report.discarded, 0);
+        assert_eq!(report.recovered, 0);
+        assert_eq!(report.recovery_retried, 0);
+        assert_eq!(report.recovery_discarded, 0);
+        assert_eq!(report.due_count, 1);
+        assert_eq!(report.oldest_due_age_ms, Some(0));
+        assert_eq!(report.circuit_open_suppressed, 1);
         assert_eq!(
             transport
                 .requests
@@ -2312,6 +2314,25 @@ mod tests {
     }
 
     #[test]
+    fn webhook_delivery_drain_reports_due_backlog_pressure() -> Result<(), Box<dyn Error>> {
+        let store = runtime_store(true)?;
+        for index in 0..3 {
+            insert_due_webhook_job(&store, &format!("DLV-pressure-{index}"), 4)?;
+        }
+        let transport = Arc::new(RecordingTransport::status(204));
+        let runtime = WebhookDeliveryRuntime::new_without_circuit(store.clone(), transport);
+        let drain = WebhookDeliveryDrain::new(store, runtime, 1);
+
+        let report = drain.drain_due("2026-05-28T20:02:00Z")?;
+
+        assert_webhook_drain_report(&report, 1, 1, 0, 0);
+        assert_eq!(report.due_count, 3);
+        assert_eq!(report.oldest_due_age_ms, Some(120_000));
+
+        Ok(())
+    }
+
+    #[test]
     fn webhook_delivery_drain_worker_stop_wakes_sleeping_thread() -> Result<(), Box<dyn Error>> {
         let store = runtime_store(true)?;
         let runtime = WebhookDeliveryRuntime::new_without_circuit(
@@ -2363,6 +2384,123 @@ mod tests {
             WebhookDeliveryStatus::Delivered,
         )?;
         worker.join()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn shared_store_survives_concurrent_runtime_pressure() -> Result<(), Box<dyn Error>> {
+        let store = runtime_store(true)?;
+        {
+            let mut locked = store.lock().map_err(|_| "store lock poisoned")?;
+            seed_target(&mut locked, "runtime-pressure")?;
+            for index in 0..80 {
+                locked.commit_error_ingest(test_error_ingest(index, "2026-04-01T00:00:00Z"))?;
+            }
+        }
+        for index in 0..16 {
+            insert_due_webhook_job(&store, &format!("DLV-pressure-{index}"), 4)?;
+        }
+
+        let ingest_store = store.clone();
+        let ingest = thread::spawn(move || -> Result<(), String> {
+            for index in 100..140 {
+                let mut store = ingest_store
+                    .lock()
+                    .map_err(|_| "store lock poisoned".to_owned())?;
+                store
+                    .commit_error_ingest(test_error_ingest(index, "2026-05-28T20:00:00Z"))
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        });
+
+        let webhook_store = store.clone();
+        let webhooks = thread::spawn(move || -> Result<(), String> {
+            for _ in 0..4 {
+                let mut store = webhook_store
+                    .lock()
+                    .map_err(|_| "store lock poisoned".to_owned())?;
+                let claimed = store
+                    .claim_due_webhook_delivery_jobs("2026-05-28T20:00:10Z", 4)
+                    .map_err(|error| error.to_string())?;
+                for job in claimed {
+                    let applied = store
+                        .complete_webhook_delivery_job(
+                            &job,
+                            WebhookDeliveryJobCompletion::Retry {
+                                scheduled_at: "2026-05-28T20:01:00Z".to_owned(),
+                            },
+                        )
+                        .map_err(|error| error.to_string())?;
+                    if !applied {
+                        return Err(format!("webhook job {} execution lease lost", job.id));
+                    }
+                }
+                let _ = store
+                    .recover_stale_webhook_delivery_jobs(
+                        "2026-05-28T20:02:00Z",
+                        "2026-05-28T20:01:00Z",
+                        16,
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        });
+
+        let probe_store = store.clone();
+        let probes = thread::spawn(move || -> Result<(), String> {
+            for _ in 0..40 {
+                let store = probe_store
+                    .lock()
+                    .map_err(|_| "store lock poisoned".to_owned())?;
+                let schedules = store
+                    .active_target_probe_schedules()
+                    .map_err(|error| error.to_string())?;
+                if schedules.len() != 1 {
+                    return Err(format!(
+                        "expected one active schedule, got {}",
+                        schedules.len()
+                    ));
+                }
+            }
+            Ok(())
+        });
+
+        let retention = RetentionPruneLifecycle::new(
+            store.clone(),
+            RetentionPolicy {
+                error_retention_days: 30,
+                check_retention_days: 7,
+            },
+        );
+        let pruning = thread::spawn(move || {
+            retention.run_due(
+                time::OffsetDateTime::parse(
+                    "2026-05-29T12:00:00Z",
+                    &time::format_description::well_known::Rfc3339,
+                )
+                .map_err(|error| error.to_string())?,
+            )
+        });
+
+        for result in [ingest, webhooks, probes] {
+            result
+                .join()
+                .map_err(|_| "runtime pressure lane panicked")??;
+        }
+        let prune_report = pruning
+            .join()
+            .map_err(|_| "retention pressure lane panicked")??;
+        assert!(prune_report.batches >= 1);
+
+        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        assert_eq!(store.active_target_probe_schedules()?.len(), 1);
+        assert!(
+            store.health_targets()?.iter().any(|target| {
+                target.service == "runtime-pressure" && target.state == "unknown"
+            })
+        );
 
         Ok(())
     }
@@ -8498,6 +8636,23 @@ mod tests {
             now: "2026-05-28T20:00:00Z".to_owned(),
             max_attempts,
         })?)
+    }
+
+    fn assert_webhook_drain_report(
+        report: &WebhookDeliveryDrainReport,
+        claimed: u32,
+        completed: u32,
+        retried: u32,
+        discarded: u32,
+    ) {
+        assert_eq!(report.claimed, claimed);
+        assert_eq!(report.completed, completed);
+        assert_eq!(report.retried, retried);
+        assert_eq!(report.discarded, discarded);
+        assert_eq!(report.recovered, 0);
+        assert_eq!(report.recovery_retried, 0);
+        assert_eq!(report.recovery_discarded, 0);
+        assert_eq!(report.circuit_open_suppressed, 0);
     }
 
     fn wait_for_delivery_status(

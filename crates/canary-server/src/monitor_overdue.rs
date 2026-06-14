@@ -19,9 +19,11 @@ use canary_store::{MonitorOverdueCandidate, Store};
 use canary_workers::health::{
     HealthPlanError, MonitorMode, MonitorOverdueSnapshot, ObservationContext, plan_monitor_overdue,
 };
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     EventFanoutReport, HealthEventFanout, HealthEventSource, WorkerHealthHandle, WorkerName,
+    WorkerPressureSnapshot,
     server_time::{current_rfc3339, current_unix_millis},
 };
 
@@ -103,6 +105,8 @@ impl Default for MonitorOverdueLifecycleConfig {
 pub struct MonitorOverdueLifecycleReport {
     /// Candidate rows loaded from the store.
     pub loaded: usize,
+    /// Age in milliseconds of the oldest loaded overdue deadline.
+    pub oldest_due_age_ms: Option<u64>,
     /// Candidates that produced no transition.
     pub noop: usize,
     /// Candidates that committed an overdue transition.
@@ -145,6 +149,7 @@ impl MonitorOverdueLifecycle {
         let candidates = self.load_candidates()?;
         let mut report = MonitorOverdueLifecycleReport {
             loaded: candidates.len(),
+            oldest_due_age_ms: oldest_monitor_due_age_ms(now_millis, &candidates),
             ..MonitorOverdueLifecycleReport::default()
         };
 
@@ -396,7 +401,18 @@ fn run_lifecycle_worker(
             match catch_unwind(AssertUnwindSafe(|| {
                 lifecycle.run_due(now.clone(), current_unix_millis())
             })) {
-                Ok(Ok(_)) => health.record_success(now),
+                Ok(Ok(report)) => health.record_success_with_pressure(
+                    now,
+                    current_unix_millis(),
+                    WorkerPressureSnapshot {
+                        due_count: report.loaded as u64,
+                        in_flight_count: 0,
+                        oldest_due_age_ms: report.oldest_due_age_ms,
+                        backoff_or_circuit_open: report.failed > 0
+                            || report.event_fanout_failed > 0
+                            || report.interrupted,
+                    },
+                ),
                 Ok(Err(_)) => {
                     control.record_failure();
                     health.record_failure("runtime_error");
@@ -428,6 +444,25 @@ fn monitor_overdue_snapshot(candidate: MonitorOverdueCandidate) -> Option<Monito
         deadline_at: candidate.deadline_at,
         first_missed_at: candidate.first_missed_at,
     })
+}
+
+fn oldest_monitor_due_age_ms(
+    now_millis: i64,
+    candidates: &[MonitorOverdueCandidate],
+) -> Option<u64> {
+    candidates
+        .iter()
+        .filter_map(|candidate| candidate.deadline_at.as_deref())
+        .filter_map(|deadline| OffsetDateTime::parse(deadline, &Rfc3339).ok())
+        .map(|deadline| {
+            let deadline_millis = deadline
+                .unix_timestamp()
+                .saturating_mul(1_000)
+                .saturating_add(i64::from(deadline.millisecond()));
+            now_millis.saturating_sub(deadline_millis)
+        })
+        .map(|age| age.max(0) as u64)
+        .max()
 }
 
 fn monitor_mode(value: &str) -> Option<MonitorMode> {
@@ -524,6 +559,7 @@ mod tests {
             degraded,
             MonitorOverdueLifecycleReport {
                 loaded: 1,
+                oldest_due_age_ms: Some(0),
                 noop: 0,
                 transitioned: 1,
                 failed: 0,
@@ -536,6 +572,7 @@ mod tests {
             waiting,
             MonitorOverdueLifecycleReport {
                 loaded: 1,
+                oldest_due_age_ms: Some(0),
                 noop: 1,
                 transitioned: 0,
                 failed: 0,
@@ -646,6 +683,7 @@ mod tests {
             report,
             MonitorOverdueLifecycleReport {
                 loaded: 2,
+                oldest_due_age_ms: Some(0),
                 noop: 0,
                 transitioned: 1,
                 failed: 0,

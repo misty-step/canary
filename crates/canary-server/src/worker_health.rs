@@ -6,10 +6,10 @@
 
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
 };
 
-use canary_http::public::{WorkerLifecycleState, WorkerReadyzCheck};
+use canary_http::public::{WorkerHealthStatus, WorkerLifecycleState, WorkerReadyzCheck};
 
 /// Stable names for lifecycle workers exposed through readiness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +35,20 @@ impl WorkerName {
             Self::MonitorOverdue => "monitor_overdue",
             Self::RetentionPrune => "retention_prune",
             Self::TlsExpiryScan => "tls_scan",
+        }
+    }
+
+    const fn stale_after_ms(self) -> i64 {
+        match self {
+            Self::WebhookDelivery | Self::TargetProbe | Self::MonitorOverdue => 30_000,
+            Self::RetentionPrune | Self::TlsExpiryScan => 25 * 60 * 60 * 1_000,
+        }
+    }
+
+    const fn pressure_after_ms(self) -> u64 {
+        match self {
+            Self::WebhookDelivery | Self::TargetProbe | Self::MonitorOverdue => 120_000,
+            Self::RetentionPrune | Self::TlsExpiryScan => 25 * 60 * 60 * 1_000,
         }
     }
 }
@@ -96,14 +110,19 @@ impl WorkerHealthRegistry {
 
     /// Return snapshots in stable worker order.
     pub fn snapshot(&self) -> Vec<WorkerReadyzCheck> {
+        self.snapshot_at(0)
+    }
+
+    /// Return snapshots in stable worker order with last-success ages relative to now.
+    pub fn snapshot_at(&self, now_unix_ms: i64) -> Vec<WorkerReadyzCheck> {
         LIFECYCLE_WORKERS
             .into_iter()
             .map(|name| match name {
-                WorkerName::WebhookDelivery => self.webhook_delivery.snapshot(),
-                WorkerName::TargetProbe => self.target_probe.snapshot(),
-                WorkerName::MonitorOverdue => self.monitor_overdue.snapshot(),
-                WorkerName::RetentionPrune => self.retention_prune.snapshot(),
-                WorkerName::TlsExpiryScan => self.tls_expiry_scan.snapshot(),
+                WorkerName::WebhookDelivery => self.webhook_delivery.snapshot_at(now_unix_ms),
+                WorkerName::TargetProbe => self.target_probe.snapshot_at(now_unix_ms),
+                WorkerName::MonitorOverdue => self.monitor_overdue.snapshot_at(now_unix_ms),
+                WorkerName::RetentionPrune => self.retention_prune.snapshot_at(now_unix_ms),
+                WorkerName::TlsExpiryScan => self.tls_expiry_scan.snapshot_at(now_unix_ms),
             })
             .collect()
     }
@@ -121,6 +140,19 @@ pub struct WorkerHealthHandle {
     inner: Arc<WorkerHealthInner>,
 }
 
+/// Last-observed work pressure for a lifecycle pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkerPressureSnapshot {
+    /// Work items due at the last observed lifecycle pass.
+    pub due_count: u64,
+    /// Work items still in flight at the last observed lifecycle pass.
+    pub in_flight_count: u64,
+    /// Milliseconds by which the oldest due work item is overdue, when known.
+    pub oldest_due_age_ms: Option<u64>,
+    /// Whether the pass saw backoff, circuit-open, or interruption pressure.
+    pub backoff_or_circuit_open: bool,
+}
+
 impl WorkerHealthHandle {
     /// Build an isolated health handle.
     pub fn new(name: WorkerName) -> Self {
@@ -130,6 +162,8 @@ impl WorkerHealthHandle {
                 started: AtomicBool::new(false),
                 stopped: AtomicBool::new(true),
                 failure_count: AtomicU64::new(0),
+                consecutive_failures: AtomicU64::new(0),
+                last_success_unix_ms: AtomicI64::new(-1),
                 details: Mutex::new(WorkerHealthDetails::default()),
             }),
         }
@@ -146,11 +180,23 @@ impl WorkerHealthHandle {
         self.inner.stopped.store(true, Ordering::SeqCst);
     }
 
-    /// Record one successful lifecycle pass.
-    pub fn record_success(&self, observed_at: String) {
+    /// Record one successful lifecycle pass and its pressure summary.
+    pub fn record_success_with_pressure(
+        &self,
+        observed_at: String,
+        observed_unix_ms: i64,
+        pressure: WorkerPressureSnapshot,
+    ) {
         self.mark_started();
+        self.inner.consecutive_failures.store(0, Ordering::SeqCst);
+        if observed_unix_ms >= 0 {
+            self.inner
+                .last_success_unix_ms
+                .store(observed_unix_ms, Ordering::SeqCst);
+        }
         if let Ok(mut details) = self.inner.details.lock() {
             details.last_success_at = Some(observed_at);
+            details.pressure = pressure;
         }
     }
 
@@ -158,6 +204,9 @@ impl WorkerHealthHandle {
     pub fn record_failure(&self, error_class: &'static str) {
         self.mark_started();
         self.inner.failure_count.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .consecutive_failures
+            .fetch_add(1, Ordering::SeqCst);
         if let Ok(mut details) = self.inner.details.lock() {
             details.last_error_class = Some(error_class.to_owned());
         }
@@ -165,6 +214,11 @@ impl WorkerHealthHandle {
 
     /// Return the public readiness snapshot for this worker.
     pub fn snapshot(&self) -> WorkerReadyzCheck {
+        self.snapshot_at(0)
+    }
+
+    /// Return the public readiness snapshot for this worker relative to a live clock.
+    pub fn snapshot_at(&self, now_unix_ms: i64) -> WorkerReadyzCheck {
         let state = if self.inner.started.load(Ordering::SeqCst)
             && !self.inner.stopped.load(Ordering::SeqCst)
         {
@@ -178,13 +232,31 @@ impl WorkerHealthHandle {
             .lock()
             .map(|details| details.clone())
             .unwrap_or_default();
+        let failure_count = self.inner.failure_count.load(Ordering::SeqCst);
+        let consecutive_failures = self.inner.consecutive_failures.load(Ordering::SeqCst);
+        let last_success_unix_ms = self.inner.last_success_unix_ms.load(Ordering::SeqCst);
+        let last_success_age_ms = age_ms(now_unix_ms, last_success_unix_ms);
+        let health = health_status(
+            self.inner.name,
+            state,
+            last_success_age_ms,
+            consecutive_failures,
+            details.pressure,
+        );
 
         WorkerReadyzCheck {
             name: self.inner.name.as_str().to_owned(),
             state,
+            health,
             last_success_at: details.last_success_at,
-            failure_count: self.inner.failure_count.load(Ordering::SeqCst),
+            last_success_age_ms,
+            failure_count,
+            consecutive_failures,
             last_error_class: details.last_error_class,
+            due_count: details.pressure.due_count,
+            in_flight_count: details.pressure.in_flight_count,
+            oldest_due_age_ms: details.pressure.oldest_due_age_ms,
+            backoff_or_circuit_open: details.pressure.backoff_or_circuit_open,
         }
     }
 }
@@ -195,6 +267,8 @@ struct WorkerHealthInner {
     started: AtomicBool,
     stopped: AtomicBool,
     failure_count: AtomicU64,
+    consecutive_failures: AtomicU64,
+    last_success_unix_ms: AtomicI64,
     details: Mutex<WorkerHealthDetails>,
 }
 
@@ -202,6 +276,42 @@ struct WorkerHealthInner {
 struct WorkerHealthDetails {
     last_success_at: Option<String>,
     last_error_class: Option<String>,
+    pressure: WorkerPressureSnapshot,
+}
+
+fn age_ms(now_unix_ms: i64, then_unix_ms: i64) -> Option<u64> {
+    if now_unix_ms < 0 || then_unix_ms < 0 {
+        return None;
+    }
+    Some(now_unix_ms.saturating_sub(then_unix_ms).max(0) as u64)
+}
+
+fn health_status(
+    name: WorkerName,
+    state: WorkerLifecycleState,
+    last_success_age_ms: Option<u64>,
+    consecutive_failures: u64,
+    pressure: WorkerPressureSnapshot,
+) -> WorkerHealthStatus {
+    if !matches!(state, WorkerLifecycleState::Started) {
+        return WorkerHealthStatus::Stopped;
+    }
+    if consecutive_failures >= 3 {
+        return WorkerHealthStatus::Failing;
+    }
+    match last_success_age_ms {
+        Some(age) if age > name.stale_after_ms() as u64 => return WorkerHealthStatus::Stale,
+        None => return WorkerHealthStatus::Stale,
+        _ => {}
+    }
+    if pressure.backoff_or_circuit_open
+        || pressure
+            .oldest_due_age_ms
+            .is_some_and(|age| age > name.pressure_after_ms())
+    {
+        return WorkerHealthStatus::Pressured;
+    }
+    WorkerHealthStatus::Ok
 }
 
 #[cfg(test)]
@@ -237,19 +347,88 @@ mod tests {
         assert_eq!(worker.snapshot().state, WorkerLifecycleState::Stopped);
 
         worker.mark_started();
-        worker.record_success("2026-06-12T20:00:00Z".to_owned());
+        worker.record_success_with_pressure(
+            "2026-06-12T20:00:00Z".to_owned(),
+            1_000,
+            WorkerPressureSnapshot {
+                due_count: 2,
+                in_flight_count: 1,
+                oldest_due_age_ms: Some(250),
+                backoff_or_circuit_open: false,
+            },
+        );
         worker.record_failure("panic");
-        let started = worker.snapshot();
+        let started = worker.snapshot_at(1_500);
 
         assert_eq!(started.state, WorkerLifecycleState::Started);
+        assert_eq!(started.health, WorkerHealthStatus::Ok);
         assert_eq!(
             started.last_success_at.as_deref(),
             Some("2026-06-12T20:00:00Z")
         );
+        assert_eq!(started.last_success_age_ms, Some(500));
         assert_eq!(started.failure_count, 1);
+        assert_eq!(started.consecutive_failures, 1);
         assert_eq!(started.last_error_class.as_deref(), Some("panic"));
+        assert_eq!(started.due_count, 2);
+        assert_eq!(started.in_flight_count, 1);
+        assert_eq!(started.oldest_due_age_ms, Some(250));
 
         worker.mark_stopped();
-        assert_eq!(worker.snapshot().state, WorkerLifecycleState::Stopped);
+        let stopped = worker.snapshot_at(1_500);
+        assert_eq!(stopped.state, WorkerLifecycleState::Stopped);
+        assert_eq!(stopped.health, WorkerHealthStatus::Stopped);
+    }
+
+    #[test]
+    fn worker_health_marks_stale_repeated_failures_and_pressure_not_ready() {
+        let worker = WorkerHealthHandle::new(WorkerName::TargetProbe);
+        worker.record_success_with_pressure(
+            "2026-06-12T20:00:00Z".to_owned(),
+            1_000,
+            WorkerPressureSnapshot::default(),
+        );
+        assert_eq!(worker.snapshot_at(1_500).health, WorkerHealthStatus::Ok);
+        assert_eq!(worker.snapshot_at(31_001).health, WorkerHealthStatus::Stale);
+
+        worker.record_success_with_pressure(
+            "2026-06-12T20:00:31Z".to_owned(),
+            31_000,
+            WorkerPressureSnapshot {
+                oldest_due_age_ms: Some(121_000),
+                ..WorkerPressureSnapshot::default()
+            },
+        );
+        assert_eq!(
+            worker.snapshot_at(31_500).health,
+            WorkerHealthStatus::Pressured
+        );
+
+        worker.record_success_with_pressure(
+            "2026-06-12T20:00:31Z".to_owned(),
+            31_000,
+            WorkerPressureSnapshot {
+                backoff_or_circuit_open: true,
+                ..WorkerPressureSnapshot::default()
+            },
+        );
+        assert_eq!(
+            worker.snapshot_at(31_500).health,
+            WorkerHealthStatus::Pressured
+        );
+
+        worker.record_success_with_pressure(
+            "2026-06-12T20:00:32Z".to_owned(),
+            32_000,
+            WorkerPressureSnapshot::default(),
+        );
+        worker.record_failure("runtime_error");
+        worker.record_failure("runtime_error");
+        assert_eq!(worker.snapshot_at(32_500).health, WorkerHealthStatus::Ok);
+        worker.record_failure("runtime_error");
+        assert_eq!(
+            worker.snapshot_at(32_500).health,
+            WorkerHealthStatus::Failing
+        );
     }
 }

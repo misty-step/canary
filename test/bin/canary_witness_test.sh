@@ -57,12 +57,14 @@ write_response() {
   printf '%s %s' "$status" "$latency"
 }
 
+READY_BODY='{"status":"ready","checks":{"database":"ok","supervisor":"ok","workers":[{"name":"webhook_delivery","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:53Z","last_success_age_ms":250,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":0,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"target_probe","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:55Z","last_success_age_ms":100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":1,"in_flight_count":0,"oldest_due_age_ms":0,"backoff_or_circuit_open":false},{"name":"monitor_overdue","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:55Z","last_success_age_ms":100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":0,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"retention_prune","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:23Z","last_success_age_ms":32100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":1,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"tls_scan","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:23Z","last_success_age_ms":32100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":2,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false}]}}'
+
 case "${STUB_SCENARIO:?}:$method:$url" in
   healthy:GET:https://canary.example/healthz)
     write_response 200 0.010 '{"status":"ok"}'
     ;;
   healthy:GET:https://canary.example/readyz)
-    write_response 200 0.020 '{"status":"ready","checks":{"database":"ok","supervisor":"ok","workers":[{"name":"webhook_delivery","state":"started","last_success_at":"2026-06-14T02:07:53Z","failure_count":0,"last_error_class":null},{"name":"target_probe","state":"started","last_success_at":"2026-06-14T02:07:55Z","failure_count":0,"last_error_class":null},{"name":"monitor_overdue","state":"started","last_success_at":"2026-06-14T02:07:55Z","failure_count":0,"last_error_class":null},{"name":"retention_prune","state":"started","last_success_at":"2026-06-14T02:07:23Z","failure_count":0,"last_error_class":null},{"name":"tls_scan","state":"started","last_success_at":"2026-06-14T02:07:23Z","failure_count":0,"last_error_class":null}]}}'
+    write_response 200 0.020 "$READY_BODY"
     ;;
   healthy:GET:https://canary.example/api/v1/query?service=canary\&window=1h)
     write_response 200 0.030 '{"service":"canary","window":"1h","summary":"0 errors in canary in the last 1h.","total_errors":0,"groups":[]}'
@@ -91,7 +93,7 @@ case "${STUB_SCENARIO:?}:$method:$url" in
     exit 7
     ;;
   unreachable:GET:https://canary.example/readyz)
-    write_response 200 0.020 '{"status":"ready","checks":{"database":"ok","supervisor":"ok","workers":[{"name":"webhook_delivery","state":"started","last_success_at":"2026-06-14T02:07:53Z","failure_count":0,"last_error_class":null},{"name":"target_probe","state":"started","last_success_at":"2026-06-14T02:07:55Z","failure_count":0,"last_error_class":null},{"name":"monitor_overdue","state":"started","last_success_at":"2026-06-14T02:07:55Z","failure_count":0,"last_error_class":null},{"name":"retention_prune","state":"started","last_success_at":"2026-06-14T02:07:23Z","failure_count":0,"last_error_class":null},{"name":"tls_scan","state":"started","last_success_at":"2026-06-14T02:07:23Z","failure_count":0,"last_error_class":null}]}}'
+    write_response 200 0.020 "$READY_BODY"
     ;;
   unreachable:GET:https://canary.example/api/v1/query?service=canary\&window=1h)
     write_response 200 0.030 '{"service":"canary","window":"1h","summary":"0 errors in canary in the last 1h.","total_errors":0,"groups":[]}'

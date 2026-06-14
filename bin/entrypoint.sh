@@ -20,6 +20,11 @@ else
   fi
 fi
 
+if [ "${CANARY_REQUIRE_LITESTREAM:-0}" = "1" ] && [ "$LITESTREAM_READY" != "1" ]; then
+  echo "ERROR: Litestream replication required but backup configuration is incomplete" >&2
+  exit 1
+fi
+
 # Restore from Litestream if DB doesn't exist locally
 if [ ! -f "$DB_PATH" ] && [ "$LITESTREAM_READY" = "1" ]; then
   echo "Restoring database from Litestream..."

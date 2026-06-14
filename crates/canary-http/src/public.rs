@@ -121,12 +121,26 @@ pub struct WorkerReadyzCheck {
     pub name: String,
     /// Whether the worker thread is currently running.
     pub state: WorkerLifecycleState,
+    /// Derived health classification for readiness policy.
+    pub health: WorkerHealthStatus,
     /// Last successful lifecycle pass timestamp.
     pub last_success_at: Option<String>,
+    /// Milliseconds since the last successful lifecycle pass, when known.
+    pub last_success_age_ms: Option<u64>,
     /// Count of runtime errors or panics observed by the worker loop.
     pub failure_count: u64,
+    /// Consecutive runtime failures since the last successful lifecycle pass.
+    pub consecutive_failures: u64,
     /// Last non-secret failure class observed by the worker loop.
     pub last_error_class: Option<String>,
+    /// Work items due at the last observed lifecycle pass.
+    pub due_count: u64,
+    /// Work items still in flight at the last observed lifecycle pass.
+    pub in_flight_count: u64,
+    /// Milliseconds by which the oldest due work item is overdue, when known.
+    pub oldest_due_age_ms: Option<u64>,
+    /// Whether the last observed pass saw backoff, circuit-open, or interruption pressure.
+    pub backoff_or_circuit_open: bool,
 }
 
 /// Background worker lifecycle state.
@@ -136,6 +150,22 @@ pub enum WorkerLifecycleState {
     /// Worker thread is running.
     Started,
     /// Worker thread has stopped.
+    Stopped,
+}
+
+/// Background worker readiness health classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerHealthStatus {
+    /// Worker is started, fresh, and below pressure thresholds.
+    Ok,
+    /// Worker has not completed a successful pass recently enough.
+    Stale,
+    /// Worker has crossed the repeated-failure threshold.
+    Failing,
+    /// Worker is alive but work pressure is above policy.
+    Pressured,
+    /// Worker thread is stopped.
     Stopped,
 }
 
@@ -158,9 +188,10 @@ pub fn readyz_response(
 ) -> PublicResponse<ReadyzResponse> {
     let all_ok = matches!(database, DependencyStatus::Ok)
         && matches!(supervisor, DependencyStatus::Ok)
-        && workers
-            .iter()
-            .all(|worker| matches!(worker.state, WorkerLifecycleState::Started));
+        && workers.iter().all(|worker| {
+            matches!(worker.state, WorkerLifecycleState::Started)
+                && matches!(worker.health, WorkerHealthStatus::Ok)
+        });
     let status = if all_ok { 200 } else { 503 };
     let body_status = if all_ok {
         ReadyzStatus::Ready
@@ -254,16 +285,30 @@ mod tests {
                 WorkerReadyzCheck {
                     name: "webhook_delivery".to_owned(),
                     state: WorkerLifecycleState::Started,
+                    health: WorkerHealthStatus::Ok,
                     last_success_at: Some("2026-06-12T20:00:00Z".to_owned()),
+                    last_success_age_ms: Some(500),
                     failure_count: 0,
+                    consecutive_failures: 0,
                     last_error_class: None,
+                    due_count: 0,
+                    in_flight_count: 0,
+                    oldest_due_age_ms: None,
+                    backoff_or_circuit_open: false,
                 },
                 WorkerReadyzCheck {
                     name: "target_probe".to_owned(),
                     state: WorkerLifecycleState::Stopped,
+                    health: WorkerHealthStatus::Stopped,
                     last_success_at: None,
+                    last_success_age_ms: None,
                     failure_count: 2,
+                    consecutive_failures: 2,
                     last_error_class: Some("panic".to_owned()),
+                    due_count: 0,
+                    in_flight_count: 0,
+                    oldest_due_age_ms: None,
+                    backoff_or_circuit_open: false,
                 },
             ],
         );
@@ -274,8 +319,41 @@ mod tests {
         assert_eq!(body["checks"]["workers"][0]["name"], "webhook_delivery");
         assert_eq!(body["checks"]["workers"][0]["state"], "started");
         assert_eq!(body["checks"]["workers"][1]["state"], "stopped");
+        assert_eq!(body["checks"]["workers"][1]["health"], "stopped");
         assert_eq!(body["checks"]["workers"][1]["last_error_class"], "panic");
         assert_eq!(body["checks"]["workers"][1].get("last_error"), None);
+    }
+
+    #[test]
+    fn readyz_marks_unhealthy_started_workers_not_ready() {
+        for health in [
+            WorkerHealthStatus::Stale,
+            WorkerHealthStatus::Failing,
+            WorkerHealthStatus::Pressured,
+        ] {
+            let response = readyz_response(
+                DependencyStatus::Ok,
+                DependencyStatus::Ok,
+                vec![WorkerReadyzCheck {
+                    name: "webhook_delivery".to_owned(),
+                    state: WorkerLifecycleState::Started,
+                    health,
+                    last_success_at: Some("2026-06-12T20:00:00Z".to_owned()),
+                    last_success_age_ms: Some(120_000),
+                    failure_count: 3,
+                    consecutive_failures: 3,
+                    last_error_class: Some("runtime_error".to_owned()),
+                    due_count: 12,
+                    in_flight_count: 0,
+                    oldest_due_age_ms: Some(90_000),
+                    backoff_or_circuit_open: true,
+                }],
+            );
+            let body = serde_json::to_value(response.body).unwrap_or(Value::Null);
+
+            assert_eq!(response.status, 503);
+            assert_eq!(body["status"], "not_ready");
+        }
     }
 
     #[test]
@@ -300,6 +378,23 @@ mod tests {
         assert_eq!(
             document["components"]["schemas"]["ReadyzResponse"]["properties"]["checks"]["required"],
             json!(["database", "supervisor", "workers"])
+        );
+        assert_eq!(
+            document["components"]["schemas"]["WorkerReadyzCheck"]["required"],
+            json!([
+                "name",
+                "state",
+                "health",
+                "last_success_at",
+                "last_success_age_ms",
+                "failure_count",
+                "consecutive_failures",
+                "last_error_class",
+                "due_count",
+                "in_flight_count",
+                "oldest_due_age_ms",
+                "backoff_or_circuit_open"
+            ])
         );
     }
 

@@ -19,8 +19,8 @@ use canary_workers::retention::{RetentionPolicy, plan_retention_prune};
 use time::OffsetDateTime;
 
 use crate::{
-    WorkerHealthHandle, WorkerName,
-    server_time::{current_utc, format_rfc3339},
+    WorkerHealthHandle, WorkerName, WorkerPressureSnapshot,
+    server_time::{current_unix_millis, current_utc, format_rfc3339},
 };
 
 /// Configuration for the retention prune lifecycle worker.
@@ -321,7 +321,18 @@ fn run_lifecycle_worker(
             match catch_unwind(AssertUnwindSafe(|| {
                 lifecycle.run_due_until(now, || control.is_stopping())
             })) {
-                Ok(Ok(_)) => health.record_success(format_rfc3339(now)),
+                Ok(Ok(report)) => health.record_success_with_pressure(
+                    format_rfc3339(now),
+                    current_unix_millis(),
+                    WorkerPressureSnapshot {
+                        due_count: report.errors_deleted
+                            + report.service_events_deleted
+                            + report.target_checks_deleted,
+                        in_flight_count: 0,
+                        oldest_due_age_ms: None,
+                        backoff_or_circuit_open: report.interrupted,
+                    },
+                ),
                 Ok(Err(_)) => {
                     control.record_failure();
                     health.record_failure("runtime_error");

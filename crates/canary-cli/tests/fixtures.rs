@@ -84,11 +84,11 @@ fn doctor_summary_includes_watchman_and_self_errors() {
                     "database": "ok",
                     "supervisor": "ok",
                     "workers": [
-                        {"name": "webhook_delivery", "state": "started", "last_success_at": "2026-06-14T02:07:53Z", "failure_count": 0, "last_error_class": null},
-                        {"name": "target_probe", "state": "started", "last_success_at": "2026-06-14T02:07:55Z", "failure_count": 0, "last_error_class": null},
-                        {"name": "monitor_overdue", "state": "started", "last_success_at": "2026-06-14T02:07:55Z", "failure_count": 0, "last_error_class": null},
-                        {"name": "retention_prune", "state": "started", "last_success_at": "2026-06-14T02:07:23Z", "failure_count": 0, "last_error_class": null},
-                        {"name": "tls_scan", "state": "started", "last_success_at": "2026-06-14T02:07:23Z", "failure_count": 0, "last_error_class": null}
+                        {"name": "webhook_delivery", "state": "started", "health": "ok", "last_success_at": "2026-06-14T02:07:53Z", "last_success_age_ms": 250, "failure_count": 0, "consecutive_failures": 0, "last_error_class": null, "due_count": 0, "in_flight_count": 0, "oldest_due_age_ms": null, "backoff_or_circuit_open": false},
+                        {"name": "target_probe", "state": "started", "health": "ok", "last_success_at": "2026-06-14T02:07:55Z", "last_success_age_ms": 100, "failure_count": 0, "consecutive_failures": 0, "last_error_class": null, "due_count": 1, "in_flight_count": 0, "oldest_due_age_ms": 0, "backoff_or_circuit_open": false},
+                        {"name": "monitor_overdue", "state": "started", "health": "ok", "last_success_at": "2026-06-14T02:07:55Z", "last_success_age_ms": 100, "failure_count": 0, "consecutive_failures": 0, "last_error_class": null, "due_count": 0, "in_flight_count": 0, "oldest_due_age_ms": null, "backoff_or_circuit_open": false},
+                        {"name": "retention_prune", "state": "started", "health": "ok", "last_success_at": "2026-06-14T02:07:23Z", "last_success_age_ms": 32100, "failure_count": 0, "consecutive_failures": 0, "last_error_class": null, "due_count": 1, "in_flight_count": 0, "oldest_due_age_ms": null, "backoff_or_circuit_open": false},
+                        {"name": "tls_scan", "state": "started", "health": "ok", "last_success_at": "2026-06-14T02:07:23Z", "last_success_age_ms": 32100, "failure_count": 0, "consecutive_failures": 0, "last_error_class": null, "due_count": 2, "in_flight_count": 0, "oldest_due_age_ms": null, "backoff_or_circuit_open": false}
                     ]
                 }
             }}
@@ -104,16 +104,20 @@ fn doctor_summary_includes_watchman_and_self_errors() {
         },
         "canary_errors": {"ok": true, "summary": ["summary: 0 errors in canary in the last 1h."]},
         "incidents": {"ok": true, "summary": ["summary: 0 open incidents"]},
+        "dr": {
+            "status": {"ok": true, "stdout": "/data/canary.db: ok"},
+            "restore_receipt": {"ok": true, "path": "docs/architecture/rust-cutover-evidence-2026-06-06.md"}
+        },
         "dogfood": {"ok": true, "summary": ["covered: 4"]},
         "worker_readiness": {
             "available": true,
             "status": "ready",
             "workers": [
-                {"name": "webhook_delivery", "state": "started", "failure_count": 0},
-                {"name": "target_probe", "state": "started", "failure_count": 0},
-                {"name": "monitor_overdue", "state": "started", "failure_count": 0},
-                {"name": "retention_prune", "state": "started", "failure_count": 0},
-                {"name": "tls_scan", "state": "started", "failure_count": 0}
+                {"name": "webhook_delivery", "state": "started", "health": "ok", "failure_count": 0},
+                {"name": "target_probe", "state": "started", "health": "ok", "failure_count": 0},
+                {"name": "monitor_overdue", "state": "started", "health": "ok", "failure_count": 0},
+                {"name": "retention_prune", "state": "started", "health": "ok", "failure_count": 0},
+                {"name": "tls_scan", "state": "started", "health": "ok", "failure_count": 0}
             ]
         }
     });
@@ -133,4 +137,52 @@ fn doctor_summary_includes_watchman_and_self_errors() {
             .iter()
             .any(|line| line == "worker_readiness: ready 5 workers, 0 failing")
     );
+    assert!(
+        lines.iter().any(|line| line
+            == "dr: litestream ok, restore_receipt=docs/architecture/rust-cutover-evidence-2026-06-06.md")
+    );
+}
+
+#[test]
+fn doctor_summary_flags_missing_restore_receipt_and_worker_health_schema() {
+    let value = json!({
+        "endpoint": "https://canary.example",
+        "key": "CANARY_API_KEY: redacted",
+        "key_scope": "admin",
+        "reachability": {
+            "healthz": {"ok": true, "response": {"status": "ok"}},
+            "readyz": {"ok": true, "response": {"status": "ready"}}
+        },
+        "summary": {"ok": true, "summary": ["summary: Canary healthy"]},
+        "services": {"ok": true, "summary": ["summary: all surfaces healthy"]},
+        "witness": {"status": "missing", "monitor": "canary-watchman"},
+        "canary_errors": {"ok": true, "summary": ["summary: 0 errors in canary in the last 1h."]},
+        "incidents": {"ok": true, "summary": ["summary: 0 open incidents"]},
+        "dr": {
+            "status": {"ok": true, "stdout": "/data/canary.db: ok"},
+            "restore_receipt": {
+                "ok": false,
+                "path": "docs/backup-restore-dr.md",
+                "reason": "no architecture DR receipt found"
+            }
+        },
+        "dogfood": {"ok": true, "summary": ["covered: 4"]},
+        "worker_readiness": {
+            "available": true,
+            "status": "ready",
+            "worker_count": 1,
+            "failing_workers": 1,
+            "schema_missing_health_fields": 1,
+            "workers": [
+                {"name": "webhook_delivery", "state": "started", "failure_count": 0}
+            ]
+        }
+    });
+
+    let lines = summarize_doctor(&value);
+    assert!(lines.iter().any(|line| line
+        == "dr: litestream ok, restore_receipt_missing: no architecture DR receipt found, fallback=docs/backup-restore-dr.md"));
+    assert!(lines.iter().any(
+        |line| line == "worker_readiness: ready 1 workers, 1 failing, 1 missing health fields"
+    ));
 }
