@@ -39,7 +39,7 @@
 | 038 | One-command integration agent | high | done | XL |
 | 041 | Live integration verification harness | P0 | done | L |
 | 042 | Runtime pressure and freshness operations | P0 | done | L |
-| 040 | Universal integration and enrollment engine | P0 | ready | XL |
+| 040 | Universal integration and enrollment engine | P0 | done | XL |
 | 043 | Agentic remediation claim protocol | P1 | ready | L |
 | 044 | Telemetry and analytics signal model | P1 | ready | XL |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
@@ -95,11 +95,10 @@
 
 ### Active order (2026-06-13)
 
-039, 041, and 042 are delivered. 040 is the next P0 foundation: the universal
-integration/enrollment engine can now rely on trustworthy integration receipts,
-fresh worker readiness, stale-job recovery, DR evidence, and dogfood evidence
-freshness. 043 and 044 are P1 product-shaping epics that should not block the
-P0 foundation, but they define the agentic-remediation and analytics direction.
+039, 041, 042, and 040 are delivered. 043 and 044 are the remaining ready P1
+product-shaping epics: 043 defines deterministic claim/ownership state for
+agentic remediation, and 044 defines the telemetry/analytics signal model
+before Canary broadens ingest surfaces.
 
 020 stays blocked on Adminifi URLs; 010 stays blocked on the downstream
 bitterblossom triage sprite, but the new Lane 6 foundations now precede any
@@ -198,6 +197,12 @@ parity backlog items were retired during the Rust scorched-earth migration.
   expires in strict mode; and the server test suite covers single-writer
   contention across ingest, probe scheduling, webhook delivery, and retention
   pruning.
+- 2026-06-14: Delivered 040. `bin/canary integrate status` now reconciles local
+  scan, receipt, platform env-name evidence, live Canary state, query readback,
+  webhook state, and dogfood inventory into a coverage verdict; integration
+  patch/enroll writes reviewable receipts; static/Vercel and non-HTTP runtimes
+  get concrete coverage paths; and the TypeScript SDK now carries the Next.js,
+  Sentry, browser, health, and check-in helpers needed by arbitrary consumers.
 
 ## Status
 

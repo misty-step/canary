@@ -120,12 +120,14 @@ REGISTRY_JSON="$TMPDIR_INVENTORY/registry.json"
 VERCEL_JSON="$TMPDIR_INVENTORY/vercel.jsonl"
 FLY_JSON="$TMPDIR_INVENTORY/fly.jsonl"
 LOCAL_JSON="$TMPDIR_INVENTORY/local.jsonl"
+RECEIPTS_JSON="$TMPDIR_INVENTORY/receipts.jsonl"
 ERRORS_JSON="$TMPDIR_INVENTORY/errors.jsonl"
 SUMMARY_JSON="$TMPDIR_INVENTORY/summary.json"
 
 : >"$VERCEL_JSON"
 : >"$FLY_JSON"
 : >"$LOCAL_JSON"
+: >"$RECEIPTS_JSON"
 : >"$ERRORS_JSON"
 
 jq -e '
@@ -286,6 +288,40 @@ for root in "${LOCAL_ROOTS[@]}"; do
       '{source:$source, repo_path:$repo_path, platform:$platform, platform_project:$platform_project}'
   done < <(find "$root" -maxdepth 4 -path '*/.vercel/project.json' -type f 2>/dev/null) \
     | jq -c 'select(.platform_project != null and .platform_project != "")' >>"$LOCAL_JSON"
+
+  while IFS= read -r receipt_file; do
+    repo_path="$(cd "$(dirname "$receipt_file")/.." && pwd)"
+    if ! jq -e '
+      .schema_version == 1
+      and (.service | type == "string" and length > 0)
+      and (.last_verified_at | type == "string" and length > 0)
+    ' "$receipt_file" >/dev/null; then
+      append_error "receipt:$receipt_file" "invalid integration receipt shape"
+      continue
+    fi
+    jq -c \
+      --arg source "integration_receipt" \
+      --arg path "$receipt_file" \
+      --arg repo_path "$repo_path" '
+        {
+          source: $source,
+          path: $path,
+          repo_path: $repo_path,
+          service: .service,
+          environment: (.environment // null),
+          canary_endpoint: (.canary_endpoint // null),
+          health_url: (.health_url // null),
+          target_id: (.target_id // null),
+          monitor_ids: (.monitor_ids // []),
+          webhook_ids: (.webhook_ids // []),
+          api_key_id: (.api_key_id // null),
+          verification_status: (.verification_status // "unknown"),
+          env_names: (.env_names // []),
+          verification_commands: (.verification_commands // []),
+          last_verified_at: .last_verified_at
+        }
+      ' "$receipt_file" >>"$RECEIPTS_JSON"
+  done < <(find "$root" -maxdepth 5 -path '*/.canary/integration.json' -type f 2>/dev/null)
 done
 
 jq -s \
@@ -293,6 +329,7 @@ jq -s \
   --slurpfile vercel "$VERCEL_JSON" \
   --slurpfile fly "$FLY_JSON" \
   --slurpfile local "$LOCAL_JSON" \
+  --slurpfile receipts "$RECEIPTS_JSON" \
   --slurpfile errors "$ERRORS_JSON" \
   --arg requested "$REQUESTED" \
   --argjson now_epoch "$NOW_EPOCH" \
@@ -300,19 +337,39 @@ jq -s \
   --argjson done_backlog_items "$DONE_BACKLOG_ITEMS" \
   --arg window "$WINDOW" '
   def checked_epoch($value): try ($value | fromdateiso8601) catch null;
+  def receipt_epoch($receipt):
+    if $receipt == null then null
+    else
+      ($receipt.last_verified_at | tostring) as $verified
+      | if ($verified | test("^[0-9]+$")) then ($verified | tonumber) else checked_epoch($verified) end
+    end;
   def stale_evidence($svc):
     (checked_epoch($svc.last_checked_at)) as $checked
     | ($checked == null)
       or ($checked > $now_epoch)
       or (($now_epoch - $checked) > ($max_evidence_age_hours * 3600));
+  def stale_receipt($receipt):
+    (receipt_epoch($receipt)) as $checked
+    | ($checked == null)
+      or ($checked > $now_epoch)
+      or (($now_epoch - $checked) > ($max_evidence_age_hours * 3600));
+  def evidence_age_hours($receipt; $svc):
+    (if $receipt != null then receipt_epoch($receipt) else checked_epoch($svc.last_checked_at) end) as $checked
+    | if $checked == null then null else (($now_epoch - $checked) / 3600 | floor) end;
   def completed_ticket_reference($svc):
     ($svc.next_action // "") as $next
     | any($done_backlog_items[]; . as $done |
         ($next | test("(#0*" + $done + "\\b)|(ticket\\s+0*" + $done + "\\b)|(backlog items?\\b[^.\\n;]*\\b0*" + $done + "\\b)"; "i"))
       );
-  def coverage_for($svc):
+  def receipt_covers($receipt):
+    $receipt != null
+    and (stale_receipt($receipt) | not)
+    and ($receipt.verification_status == "verified")
+    and (($receipt.target_id != null) or (($receipt.monitor_ids // []) | length > 0));
+  def coverage_for($svc; $receipt):
     if $svc.state == "ignored" or $svc.state == "suspended" then "ignored"
     elif $svc.state == "blocked" then "blocked"
+    elif $svc.state == "active" and receipt_covers($receipt) then "covered"
     elif $svc.state == "active" and (($svc.ingest_status == "verified" or $svc.ingest_status == "not_applicable") and ($svc.health_url != null or $svc.monitor_mode != "http")) then "covered"
     elif $svc.state == "active" then "partial"
     elif $svc.state == "pending" or $svc.state == "follow_on" then "partial"
@@ -323,18 +380,22 @@ jq -s \
     (.deployments[]? | select(.platform == $svc.platform and .platform_project == ($svc.platform_project // $svc.service))) // null;
   def local_match($svc):
     (.local_links[]? | select(.platform_project == ($svc.platform_project // $svc.service) or (.repo_path != null and .repo_path == $svc.repo_path))) // null;
+  def receipt_match($svc):
+    (.integration_receipts[]? | select(.service == $svc.service or (.repo_path != null and .repo_path == $svc.repo_path))) // null;
   {
     window: $window,
     requested_services: ($requested | split(",") | map(select(length > 0))),
     registry: $registry,
     deployments: ($vercel + $fly),
     local_links: $local,
+    integration_receipts: $receipts,
     collector_errors: $errors
   }
   | .surfaces = [
       .registry[] as $svc
       | (deployment_match($svc)) as $deploy
       | (local_match($svc)) as $local
+      | (receipt_match($svc)) as $receipt
       | {
           service: $svc.service,
           owner: $svc.owner,
@@ -342,19 +403,20 @@ jq -s \
           platform_project: ($svc.platform_project // $svc.service),
           production_url: ($svc.production_url // ($deploy.production_url // null)),
           repo_path: ($svc.repo_path // ($local.repo_path // null)),
-          health_url: $svc.health_url,
-          monitor_mode: $svc.monitor_mode,
+          health_url: ($receipt.health_url // $svc.health_url),
+          monitor_mode: (if (($receipt.monitor_ids // []) | length) > 0 then "check_in" else $svc.monitor_mode end),
           ingest_status: $svc.ingest_status,
           registry_state: $svc.state,
-          coverage: coverage_for($svc),
-          last_checked_at: $svc.last_checked_at,
+          coverage: coverage_for($svc; $receipt),
+          last_checked_at: ($receipt.last_verified_at // $svc.last_checked_at),
           failure_mode: $svc.failure_mode,
           next_action: $svc.next_action,
-          evidence_stale: stale_evidence($svc),
-          evidence_age_hours: (
-            (checked_epoch($svc.last_checked_at)) as $checked
-            | if $checked == null then null else (($now_epoch - $checked) / 3600 | floor) end
-          ),
+          evidence_source: (if $receipt != null then "integration_receipt" else "registry" end),
+          evidence_stale: (if $receipt != null then stale_receipt($receipt) else stale_evidence($svc) end),
+          evidence_age_hours: evidence_age_hours($receipt; $svc),
+          integration_receipt: $receipt,
+          receipt_seen: ($receipt != null),
+          receipt_stale: (if $receipt != null then stale_receipt($receipt) else null end),
           completed_ticket_next_action: completed_ticket_reference($svc),
           deployment_seen: ($deploy != null),
           local_link_seen: ($local != null),
@@ -411,13 +473,43 @@ jq -s \
           reasons: ["unregistered_local_link"]
         }
     ]
+  | .surfaces += [
+      .integration_receipts[] as $receipt
+      | select([.registry[] | select(.service == $receipt.service or (.repo_path != null and .repo_path == $receipt.repo_path))] | length == 0)
+      | {
+          service: $receipt.service,
+          owner: null,
+          platform: "unknown",
+          platform_project: $receipt.service,
+          production_url: null,
+          repo_path: $receipt.repo_path,
+          health_url: $receipt.health_url,
+          monitor_mode: (if (($receipt.monitor_ids // []) | length) > 0 then "check_in" else "http" end),
+          ingest_status: "partial",
+          registry_state: null,
+          coverage: (if receipt_covers($receipt) then "partial" else "blocked" end),
+          last_checked_at: $receipt.last_verified_at,
+          failure_mode: "Integration receipt exists but the service is missing from the Canary dogfood registry.",
+          next_action: "Classify this receipt-backed integration in priv/dogfood/owned_services.json.",
+          evidence_source: "integration_receipt",
+          evidence_stale: stale_receipt($receipt),
+          evidence_age_hours: evidence_age_hours($receipt; null),
+          integration_receipt: $receipt,
+          receipt_seen: true,
+          receipt_stale: stale_receipt($receipt),
+          deployment_seen: false,
+          local_link_seen: false,
+          reasons: ["unregistered_integration_receipt"]
+        }
+    ]
   | .strict_failures = (
       ([.collector_errors[]? | {kind:"collector_error", source:.source, message:.message}])
       + ([.surfaces[] | select(.registry_state == "active" and (.platform == "vercel" or .platform == "fly") and (.deployment_seen | not)) | {kind:"missing_active_deployment", service:.service, platform:.platform, platform_project:.platform_project}])
       + ([.surfaces[] | select((.reasons // []) | index("unregistered_deployment")) | {kind:"unregistered_deployment", platform:.platform, platform_project:.platform_project, owner:.owner}])
       + ([.surfaces[] | select((.reasons // []) | index("unregistered_local_link")) | {kind:"unregistered_local_link", platform_project:.platform_project, repo_path:.repo_path}])
+      + ([.surfaces[] | select((.reasons // []) | index("unregistered_integration_receipt")) | {kind:"unregistered_integration_receipt", service:.service, repo_path:.repo_path}])
       + ([.requested_services[] as $wanted | select([.registry[].service] | index($wanted) | not) | {kind:"missing_requested_registry_entry", service:$wanted}])
-      + ([.surfaces[] | select(.registry_state != "ignored" and .evidence_stale) | {kind:"stale_registry_evidence", service:.service, platform:.platform, platform_project:.platform_project, last_checked_at:.last_checked_at, evidence_age_hours:.evidence_age_hours}])
+      + ([.surfaces[] | select(.registry_state != "ignored" and .evidence_stale) | {kind:(if .evidence_source == "integration_receipt" then "stale_integration_receipt" else "stale_registry_evidence" end), service:.service, platform:.platform, platform_project:.platform_project, source:.evidence_source, last_checked_at:.last_checked_at, evidence_age_hours:.evidence_age_hours}])
       + ([.surfaces[] | select(.completed_ticket_next_action) | {kind:"completed_ticket_next_action", service:.service, next_action:.next_action}])
     )
   | .summary = {

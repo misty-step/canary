@@ -4,14 +4,21 @@ Agents should prefer the reviewable setup loop before hand-editing snippets:
 
 ```bash
 bin/canary integrate discover /path/to/app --production-url https://app.example.com --json
+bin/canary integrate status /path/to/app --service my-app --production-url https://app.example.com --json
 bin/canary integrate plan /path/to/app --service my-app --production-url https://app.example.com --json
 bin/canary integrate patch /path/to/app --service my-app --json
-bin/canary integrate enroll --service my-app --url https://app.example.com/api/health --json
+bin/canary integrate enroll --service my-app --url https://app.example.com/api/health --project-root /path/to/app --json
 ```
 
 The `discover` and `plan` phases report env var names only. `enroll` redacts the
 one-time ingest key by default; use `--show-secret` only for a secure secret
 handoff.
+
+`patch` writes a planned `.canary/integration.json`, and
+`enroll --project-root` updates the same receipt to verified state with
+target/API-key IDs after hosted enrollment. Treat that receipt as reviewable
+state for future agents: `integrate status` reads it alongside live Canary
+targets, monitors, webhooks, query readback, and dogfood registry evidence.
 
 ## Step 1: Install
 
@@ -121,11 +128,11 @@ size, origin, and rate-limit controls you use for other public write endpoints.
 ```typescript
 "use client";
 import { useEffect } from "react";
-import { captureException } from "@canary-obs/sdk";
+import { captureNextGlobalError } from "@canary-obs/sdk/nextjs";
 
 export default function GlobalError({ error }: { error: Error }) {
   useEffect(() => {
-    captureException(error);
+    captureNextGlobalError(error);
   }, [error]);
 
   return (
@@ -143,14 +150,49 @@ export default function GlobalError({ error }: { error: Error }) {
 ```typescript
 "use client";
 import { useEffect } from "react";
-import { captureException } from "@canary-obs/sdk";
+import { captureNextErrorBoundary } from "@canary-obs/sdk/nextjs";
 
 export default function Error({ error }: { error: Error }) {
   useEffect(() => {
-    captureException(error);
+    captureNextErrorBoundary(error);
   }, [error]);
 
   return <h1>Something went wrong</h1>;
+}
+```
+
+For global browser observers in a client provider:
+
+```typescript
+"use client";
+import { useEffect } from "react";
+import { installBrowserErrorObservers } from "@canary-obs/sdk/nextjs";
+
+export function CanaryBrowserObservers() {
+  useEffect(() => installBrowserErrorObservers(), []);
+  return null;
+}
+```
+
+For Sentry migrations or dual-write windows:
+
+```typescript
+import * as Sentry from "@sentry/nextjs";
+import { captureSentryEvent } from "@canary-obs/sdk/nextjs";
+
+Sentry.addEventProcessor((event) => {
+  void captureSentryEvent(event);
+  return event;
+});
+```
+
+For a generated health route:
+
+```typescript
+import { canaryHealthResponse } from "@canary-obs/sdk/nextjs";
+
+export function GET() {
+  return canaryHealthResponse();
 }
 ```
 
@@ -171,7 +213,26 @@ try {
 captureMessage("deployment complete", { severity: "info" });
 ```
 
-## Step 6: Verify
+## Step 6: Non-HTTP monitor check-ins
+
+For cron jobs, workers, desktop active sessions, and CLI automations, create a
+Canary monitor from `bin/canary integrate plan --json`, then report check-ins:
+
+```typescript
+import { checkIn } from "@canary-obs/sdk";
+
+await checkIn({
+  monitor: "my-app-cron",
+  status: "ok",
+  summary: "nightly job complete",
+  context: { duration_ms: 1200 },
+});
+```
+
+Use `status: "alive"` for TTL-style worker/session freshness, and
+`"in_progress"`, `"ok"`, or `"error"` for scheduled runs.
+
+## Step 7: Verify
 
 ```bash
 curl -H "Authorization: Bearer $CANARY_API_KEY" \
