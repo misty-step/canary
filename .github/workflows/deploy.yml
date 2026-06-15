@@ -10,6 +10,9 @@ concurrency:
   group: deploy
   cancel-in-progress: false
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   core:
     if: github.event.workflow_run.conclusion == 'success'

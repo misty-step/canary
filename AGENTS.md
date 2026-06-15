@@ -77,7 +77,7 @@ User-ratified composition: **`/settle → /refactor → /code-review → merge`.
 
 ## Self-monitoring
 
-Canary reports its own errors through the Rust runtime direct-ingest path, no HTTP loopback. Query Canary itself (`GET /api/v1/query?service=canary&window=5m`) for post-deploy signal.
+Canary reports its own errors through the Rust runtime direct-ingest path, no HTTP loopback. Query Canary itself (`GET /api/v1/query?service=canary&window=1h`) for post-deploy signal.
 
 ## Deploy (operational crib)
 
