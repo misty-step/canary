@@ -69,11 +69,60 @@ nonzero when coverage gaps remain, so agents can inspect the failure details.
 `doctor` is the fastest "who watches Canary?" command. It probes `/healthz`,
 `/readyz`, the global report, service status, incidents, dogfood coverage,
 recent `service=canary` errors, worker lifecycle readiness, and the external
-`canary-watchman` monitor created by `bin/canary-witness`. The worker readiness
-line is derived from `/readyz` and should look like:
+`canary-watchman` monitor created by `bin/canary-witness`.
+
+The doctor envelope's `response` object includes an operator verdict:
+
+```json
+{
+  "verdict": {
+    "overall": "degraded",
+    "blocking_signals": [
+      "canary-watchman down; last alive check-in was 720000 ms ago"
+    ],
+    "next_operator_action": "Run `gh workflow run \"Canary Witness\" --ref master`; then inspect the latest witness receipt and rerun `bin/canary doctor --json`.",
+    "witness_age_ms": 720000,
+    "open_canary_incident": {
+      "id": "INC-example",
+      "service": "canary",
+      "state": "open"
+    },
+    "worker_pressure": {
+      "status": "ready",
+      "pressured_workers": 0,
+      "failing_workers": 0,
+      "workers": []
+    },
+    "dogfood_gap_count": 3,
+    "receipt_run_references": {
+      "ok": true,
+      "workflow": "Canary Witness",
+      "runs": []
+    }
+  }
+}
+```
+
+`overall` is `healthy` only when the public routes are reachable, authenticated
+readback works, the external witness is observed as up, no `service=canary`
+incident is open, and workers are not failing or pressured. `degraded` means an
+agent can still inspect Canary but has work to do. `unable` means Canary cannot
+produce enough authenticated self-watch evidence to trust the rest of the
+report. Dogfood gaps are counted in the verdict but are not by themselves a
+runtime blocker.
+
+The worker readiness line is derived from `/readyz` and should look like:
 
 ```text
 worker_readiness: ready 5 workers, 0 failing
+```
+
+If a worker reports `health: pressured`, the route can still be ready. Doctor
+reports that as operational pressure rather than counting the same worker as
+both ready and failing:
+
+```text
+worker_readiness: ready 5 workers, 0 failing, 1 pressured
 ```
 
 `doctor` also surfaces DR evidence:
@@ -99,6 +148,16 @@ The witness line is:
 
 The witness runbook and GitHub Actions receipt contract live in
 `docs/canary-witness.md`.
+
+Doctor discovers the latest GitHub Actions witness runs with:
+
+```bash
+gh run list --workflow "Canary Witness" --branch master --limit 3 --json databaseId,status,conclusion,createdAt,updatedAt,url,event,workflowName
+```
+
+If the GitHub CLI or auth is unavailable, the verdict still returns the
+replacement command plus the receipt artifact convention
+`canary-witness-<run_id>`.
 
 ## Integration Agent
 
@@ -148,3 +207,10 @@ secret-manager handoff.
 `bin/canary mcp-manifest` emits the generated tool manifest. MCP tools should shell
 out to the CLI and reuse the same JSON schemas rather than reimplementing route
 semantics.
+
+The manifest covers the drill-down surfaces an agent needs after
+`canary_doctor`: summary, services, errors, incidents, timeline, targets,
+monitors, dogfood audit, witness, DR status, event capture, remediation claims,
+and integration discovery/status/plan/patch/enroll. If a future MCP server does
+not implement a tool directly, it must preserve the manifest replacement
+command so agents can shell out to the CLI.
