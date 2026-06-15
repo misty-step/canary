@@ -9,9 +9,6 @@ concurrency:
   group: canary-witness
   cancel-in-progress: false
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   witness:
     runs-on: ubuntu-latest
@@ -27,7 +24,7 @@ jobs:
       ISSUE_TITLE: "Canary witness failed"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Run external witness
         id: check
@@ -67,7 +64,7 @@ jobs:
 
       - name: Upload witness receipt
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: canary-witness-${{ github.run_id }}
           path: ${{ runner.temp }}/canary-witness-receipt.json
