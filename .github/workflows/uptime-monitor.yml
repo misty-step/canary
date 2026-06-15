@@ -9,6 +9,9 @@ concurrency:
   group: canary-witness
   cancel-in-progress: false
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   witness:
     runs-on: ubuntu-latest
@@ -56,9 +59,11 @@ jobs:
 
           STATUS=$(jq -r '.status // "unknown"' "$RUNNER_TEMP/canary-witness-receipt.json")
           OBSERVED_AT=$(jq -r '.observed_at // "unknown"' "$RUNNER_TEMP/canary-witness-receipt.json")
-          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
-          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
-          echo "observed_at=$OBSERVED_AT" >> "$GITHUB_OUTPUT"
+          {
+            echo "exit_code=$EXIT_CODE"
+            echo "status=$STATUS"
+            echo "observed_at=$OBSERVED_AT"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Upload witness receipt
         if: always()
@@ -149,4 +154,9 @@ jobs:
       - name: Fail workflow if witness failed
         if: steps.check.outputs.exit_code != '0'
         run: |
-          exit "${{ steps.check.outputs.exit_code }}"
+          exit_code="${{ steps.check.outputs.exit_code }}"
+          if [ "$exit_code" -lt 0 ] || [ "$exit_code" -gt 255 ]; then
+            echo "Invalid witness exit code: $exit_code" >&2
+            exit 1
+          fi
+          exit "$exit_code"
