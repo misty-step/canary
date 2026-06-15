@@ -42,6 +42,11 @@
 | 040 | Universal integration and enrollment engine | P0 | done | XL |
 | 043 | Agentic remediation claim protocol | P1 | done | L |
 | 044 | Telemetry and analytics signal model | P1 | done | XL |
+| 045 | Self-watch operator verdict | P0 | ready | L |
+| 046 | Dogfood value receipts | P0 | ready | L |
+| 047 | Alert-plane reliability and SLO burn-rate | P0 | ready | XL |
+| 048 | Responder rich-context safety gate | P0 | pending | XL |
+| 049 | Integration evidence and capture gaps | P1 | pending | XL |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
 
@@ -51,11 +56,11 @@
 001 (annotations) ──┐
                     ├──→ 010 (ramp pattern) ──→ north star
 002 (timeline)   ──┘        ↑
-                    bb/011 (triage sprite) ──┘
+                    Bitterblossom incident-responder workload ──┘
                             ↑
 012 (delivery ledger) ──────┘  load-bearing for agent consumers
-003 (non-fatal webhooks) — prerequisite for sprite reliability
-004 (correlation paths) — prerequisite for sprite signal quality
+003 (non-fatal webhooks) — prerequisite for responder reliability
+004 (correlation paths) — prerequisite for responder signal quality
 006 (query split) — enables cleaner annotation-aware queries
 007 (dogfooding) — validates 001+002 on real workloads and unblocks 009
 009 (desktop health semantics) — selects the non-HTTP model and unblocks 021
@@ -77,43 +82,63 @@
 040 (universal integration/enrollment engine) — builds on 039/041/042 to make arbitrary app onboarding state-aware, framework-neutral, and receipt-backed
 044 (telemetry/analytics signal model) — defines what analytics/log/metric/event signals Canary owns or bridges before adding broad ingest surfaces
 043 (agentic remediation claim protocol) — shipped; typed claims now add deterministic ownership/claim state for downstream triage agents
+045 (self-watch operator verdict) — makes Canary's own watchman state one actionable agent-readable verdict, including witness, worker pressure, incidents, dogfood gaps, and next operator action
+046 (dogfood value receipts) — turns coverage into per-service value proof: current signal, owner/claim, action, outcome, stale evidence, and verification receipt
+047 (alert-plane reliability/SLO burn-rate) — separates route readiness from alerting ability, adds check-in skew safety, and introduces SLO/error-budget feedback
+048 (responder rich-context safety gate) — narrows responder authority and redacts/audits rich context before arbitrary-user auto-triage
+049 (integration evidence/capture gaps) — closes residual post-040 overclaiming gaps: synthetic readback, service-specific webhooks, safe browser capture, platform env parity, integrate apply, and MCP wrapper
 
 022 (contract hygiene) ──── ships independently; restores summary invariant + supervision-tree collapse
-023 (incident detail API) ──→ Canary-side substrate for bb/011 (and thus 010 ramp pattern)
+023 (incident detail API) ──→ Canary-side substrate for the Bitterblossom responder workload (and thus 010 ramp pattern)
 024 (signal-agnostic annotations) ──→ blocked on 023; completes the Ramp-loop writable-metadata primitive
+045 ──→ 046 ──→ 047 ──→ 048 ──→ Bitterblossom 055 ──→ 049 ──→ 010
 ```
 
 ## Execution Lanes
 
-**Lane 1 (agent readiness):** 012 (delivery ledger) → bb/011 (triage sprite) → 010 (ramp)
-  · **023 (incident detail API) → 024 (signal-agnostic annotations)** land the Canary-side substrate bb/011 consumes
+**Lane 1 (agent readiness):** 012 (delivery ledger) → Bitterblossom incident-responder workload → 010 (ramp)
+  · **023 (incident detail API) → 024 (signal-agnostic annotations)** land the Canary-side substrate the responder workload consumes
 **Lane 2 (contract + observability):** 011 (OpenAPI) + 013 (metrics) — parallel, no deps · **030 (agent contract safety)** depends on 011 + 012 and tightens the existing contract for autonomous consumers · **031 (agent replay determinism)** shipped the malformed replay/query/health contract errors · **032 (live Rust write-path evidence)** proves the Rust production surface beyond read-only smoke
 **Lane 3 (structural):** 006 (query split) → 005 (connect-a-service) · **022 (contract hygiene + shallow-module collapse)** — ship first of the active set; unblocks nothing but restores the summary invariant and sheds ~300 LOC of drift
 **Lane 4 (hardening):** 008, 014, 016, 017, 018, 019 (independent, small, can ship anytime) · **034 (worker lifecycle readiness oracle)** hardens the Rust background-worker proof surface
 **Lane 5 (dogfood coverage):** 020 (Adminifi HTTP surface verification) · **033 (deployed service registry lifecycle)** shipped the managed registry substrate · **035 (deployed app Canary coverage)** makes every active owned deployment covered or explicitly blocked · **036 (agent-native inspection surface)** gives agents the operating view · **037 (watch the watchmen)** proves Canary externally · **038 (one-command integration agent)** removes setup friction
-**Lane 6 (arbitrary-app productization):** 039 (external-user security/privacy foundation) → 041 (live integration verification harness) + 042 (runtime pressure/freshness ops) → 040 (universal integration/enrollment engine) → 043 (agentic remediation claim protocol) + 044 (telemetry/analytics signal model) → 010 (Ramp pattern, once downstream triage sprite exists)
+**Lane 6 (arbitrary-app productization):** 039 (external-user security/privacy foundation) → 041 (live integration verification harness) + 042 (runtime pressure/freshness ops) → 040 (universal integration/enrollment engine) → 043 (agentic remediation claim protocol) + 044 (telemetry/analytics signal model) → **048 (responder rich-context safety gate)** → Bitterblossom **055 (canary/incident responder template)** → **049 (integration evidence/capture gaps)** → 010 (Ramp pattern)
+**Lane 7 (product feedback loop):** **045 (self-watch operator verdict)** → **046 (dogfood value receipts)** → **047 (alert-plane reliability/SLO burn-rate)** — turns Canary dogfooding from coverage checks into value, alertability, and operator-action proof
 
-### Active order (2026-06-13)
+### Active order (2026-06-15)
 
-039, 041, 042, 040, 043, and 044 are delivered. No ready Lane 6 items remain;
-only explicitly blocked items stay visible.
+045 is the best next pickup because live production Canary currently reports
+`canary-watchman` down while `/readyz` is route-ready; the operator verdict must
+explain that state and give an agent a next action. Then ship 046 to turn
+dogfood coverage into per-service value receipts, and 047 to add alert-plane and
+SLO/error-budget feedback.
 
-020 stays blocked on Adminifi URLs; 010 stays blocked on the downstream
-bitterblossom triage sprite, but the new Lane 6 foundations now precede any
-claim that Canary is ready for arbitrary external users.
+048 stays pending until the self-watch/value/SLO loops settle, because
+arbitrary-user rich-context responders need those contracts to avoid
+over-authorizing. After 048, the cross-repo pickup is Bitterblossom
+`/Users/phaedrus/Development/bitterblossom/backlog.d/055-workload-template-portfolio.md`
+child 2, the canary/incident responder template. 049 follows that responder
+template and closes residual integration evidence gaps without redoing shipped
+040 enrollment work. 020 stays blocked on Adminifi URLs. 010 stays blocked on
+that downstream Bitterblossom responder workload, but the new Lane 7 and
+responder-safety foundations now precede any claim that Canary is ready for
+arbitrary external users.
 
 022 + 023 landed on 2026-04-21. 024 landed on 2026-04-22. 026 landed on
 2026-04-23 — Ramp
-substrate now complete; bb/011 unblocks the north star. Elixir-era lint and
-parity backlog items were retired during the Rust scorched-earth migration.
-010 stays blocked on bb/011. 020 stays blocked on Adminifi URLs.
+substrate now complete. The downstream Bitterblossom responder workload
+unblocks the north star. Elixir-era lint and parity backlog items were retired
+during the Rust scorched-earth migration. 010 stays blocked on that
+Bitterblossom workload. 020 stays blocked on Adminifi URLs.
 
 ## Migration Notes
 
 - Consolidated from `.backlog.d/` on 2026-03-30. Legacy items archived to `.backlog.d/_done/`.
 - `.backlog.d/006` (monorepo bootstrap) archived as shipped — commit `c87f28f`.
 - `.backlog.d/008` (monitor generation spike) superseded by 010-ramp-pattern.
-- Bitterblossom triage sprite tracked at `bitterblossom/backlog.d/011-canary-triage-sprite.md`.
+- The old Bitterblossom triage sprite path `bitterblossom/backlog.d/011-canary-triage-sprite.md`
+  is stale; the active blocker is Bitterblossom `055` child 2, the
+  canary/incident responder template that uses Canary claims and annotations.
 - 2026-04-02: Added 012–015 from multi-AI architecture audit. Promoted 006, 011 to high.
 - 2026-04-21: Added 022–024 from grooming investigation (three parallel investigators: archaeologist / strategist / scout). Three themes: contract hygiene, incident-as-atomic-agent-unit, signal-agnostic annotations. 022 ready to ship first; 023 + 024 land the Canary-side substrate for the ramp pattern.
 - 2026-05-19: Groomed stale active backlog. Archived 025 as subsumed by #026
@@ -123,8 +148,8 @@ parity backlog items were retired during the Rust scorched-earth migration.
   webhook diagnostics without crossing the responder boundary.
 - 2026-05-24: Groomed toward usefulness/elegance: promoted #030, added #031
   for deterministic replay/health/readiness boundary failures, and clarified
-  that #010 is now blocked on the downstream bitterblossom triage sprite rather
-  than Canary-side annotation/timeline substrate.
+  that #010 is now blocked on the downstream Bitterblossom responder workload
+  rather than Canary-side annotation/timeline substrate.
 - 2026-06-07: Retired Elixir-era active backlog items during the Rust
   scorched-earth migration; Rust-owned Dagger, OpenAPI, and cargo tests are now
   the active contract surfaces.
@@ -212,6 +237,17 @@ parity backlog items were retired during the Rust scorched-earth migration.
   webhooks, TypeScript SDK and CLI/MCP capture helpers, and OpenAPI guidance;
   metrics, logs, and traces remain explicit bridge-only responsibilities until
   an OpenTelemetry integration is designed.
+- 2026-06-15: Strategic research/groom for dogfooding, self-watch, product
+  feedback, alerting, and auto-triage boundaries. Added 045-049. Live evidence:
+  `bin/canary summary --json` reported Canary unhealthy because
+  `canary-watchman` was down; `bin/canary doctor --json` showed route readiness
+  plus stale witness/check-in and worker pressure; `bin/canary dogfood audit
+  --strict --json` found 35 strict failures including unregistered deployments,
+  stale registry evidence, and completed-ticket next actions. External research
+  supported SLO burn-rate alerting and the Sentry-style split where the
+  observability product owns rich context while external agents own code
+  mutation. Updated 010 to depend on a Bitterblossom incident-responder workload
+  using Canary claims, not the stale archived `bb/011` sprite.
 
 ## Status
 

@@ -19,15 +19,21 @@ Canary generates monitors per code change, auto-triages alerts, and proposes fix
 - [ ] State on monitor prevents duplicate work
 
 ## Notes
-Blocked on: triage sprite in bitterblossom (`bb/011-canary-triage-sprite.md`).
+Blocked on: Bitterblossom's canary/incident responder template, tracked in
+`/Users/phaedrus/Development/bitterblossom/backlog.d/055-workload-template-portfolio.md`
+and named in `/Users/phaedrus/Development/bitterblossom/project.md` under the
+workload roadmap. That workload consumes Canary webhooks, replays
+timeline/report state, creates remediation claims, and writes
+annotations/evidence back to Canary. The older `bb/011` triage-sprite reference
+is stale; that ticket was archived as abandoned in Bitterblossom, and Canary now
+has remediation claims that replace the old annotation-lease design.
 Reference: "How we made Ramp Sheets self-maintaining" (Ramp Labs, 2026-03-23).
 Current state: Canary-side prerequisites for annotations, timeline replay,
-incident detail, and signal-agnostic write-back have landed. `#030` and `#031`
-make the remaining agent contract and replay boundaries machine-verifiable
-before the downstream triage sprite closes the loop.
-Next step: ship the bitterblossom triage sprite, then close the loop so the
-triaging agent can propose fixes while Canary remains the observability
-substrate.
+incident detail, signal-agnostic write-back, remediation claims, telemetry
+events, dogfood inspection, and one-command integration foundations have landed.
+Next step: shape and ship the Bitterblossom `055` canary/incident responder
+template so the triaging agent can claim work, propose fixes, and verify
+outcomes while Canary remains the observability substrate.
 
 Source: spellbook simplification session 2026-03-25.
 Refined: grooming session 2026-03-30 — decided annotations over triage state machine.

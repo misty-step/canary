@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canary feedback loop groom - 2026-06-15</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #1b1d21;
+      --muted: #5c6470;
+      --line: #d8dde5;
+      --band: #f5f7fa;
+      --accent: #0f766e;
+      --warn: #9a3412;
+      --risk: #991b1b;
+    }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+      background: white;
+    }
+    main {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 32px 28px 56px;
+    }
+    h1, h2, h3 {
+      line-height: 1.15;
+      margin: 0;
+    }
+    h1 {
+      font-size: 34px;
+      margin-bottom: 8px;
+    }
+    h2 {
+      font-size: 22px;
+      margin-top: 34px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--line);
+    }
+    h3 {
+      font-size: 16px;
+      margin-bottom: 8px;
+    }
+    p {
+      margin: 8px 0 0;
+    }
+    .lede {
+      color: var(--muted);
+      font-size: 17px;
+      max-width: 860px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 16px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: white;
+    }
+    .band {
+      background: var(--band);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      margin-top: 16px;
+    }
+    .tag {
+      display: inline-block;
+      color: white;
+      background: var(--accent);
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 12px;
+      font-weight: 700;
+      margin-right: 6px;
+    }
+    .tag.warn { background: var(--warn); }
+    .tag.risk { background: var(--risk); }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin-top: 14px;
+      font-size: 14px;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 9px 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: var(--band);
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.95em;
+      background: #f1f3f6;
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    ol, ul {
+      margin-top: 8px;
+      padding-left: 22px;
+    }
+    li + li {
+      margin-top: 5px;
+    }
+    @media (max-width: 760px) {
+      main { padding: 24px 18px 44px; }
+      h1 { font-size: 28px; }
+      .grid { grid-template-columns: 1fr; }
+      table { font-size: 13px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Canary feedback loop groom</h1>
+  <p class="lede">Ambitious product and architecture direction for dogfooding Canary, watching Canary itself, proving value to consuming applications, and connecting Canary to auto-triage without making Canary an agent runtime.</p>
+
+  <section class="band">
+    <h2>Thesis</h2>
+    <p><span class="tag">Decision</span>Canary should remain the deep observability and context module: ingest, health, incidents, timelines, claims, annotations, query/read models, webhooks, and agent-native inspection. Auto-triage should run as a Bitterblossom workload over Canary's stable interfaces, not inside Canary and not as a separate bespoke microservice until Bitterblossom proves insufficient.</p>
+    <p><span class="tag warn">Gap</span>The current product feedback loop can say "covered" and "unhealthy", but it does not yet produce a durable value receipt that answers: what did Canary detect, who or what acted, what changed, and how did Canary prove the fix worked?</p>
+  </section>
+
+  <h2>Live Evidence</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>Self-watch is working but noisy</h3>
+      <p><code>bin/canary summary --json</code> reported <code>status: unhealthy</code> with <code>canary-watchman</code> down. <code>bin/canary doctor --json</code> showed <code>/healthz</code> ok, <code>/readyz</code> ready, one pressured worker, stale witness check-in, and an open Canary incident.</p>
+    </div>
+    <div class="card">
+      <h3>Dogfood registry drift is visible</h3>
+      <p><code>bin/canary dogfood audit --strict --json</code> failed with 35 strict failures: unregistered deployments, stale registry evidence, and completed-ticket next actions. The tool catches drift, but the next-action loop is not yet closed.</p>
+    </div>
+    <div class="card">
+      <h3>Agent surfaces exist</h3>
+      <p>The CLI exposes summary, services, errors, incidents, timeline, targets, monitors, dogfood, events, claims, integrate, doctor, and MCP manifest. OpenAPI includes agent guidance for webhooks, timeline replay, incident detail, claims, annotations, and telemetry.</p>
+    </div>
+    <div class="card">
+      <h3>Integration still overclaims</h3>
+      <p>Reviewer evidence found receipts can be marked verified after target/key creation without synthetic ingest or check-in readback, global webhook presence can satisfy coverage, and browser capture still lacks a safe public relay/DSN story.</p>
+    </div>
+  </div>
+
+  <h2>External Prior Art</h2>
+  <table>
+    <tr><th>Source</th><th>Useful lesson</th><th>Implication for Canary</th></tr>
+    <tr>
+      <td><a href="https://sre.google/workbook/alerting-on-slos/">Google SRE Workbook, alerting on SLOs</a></td>
+      <td>Alert on user-impacting budget burn, not every threshold crossing. Multi-window burn-rate alerts balance precision, recall, detection time, and reset time.</td>
+      <td>Add SLO/error-budget views and alert-plane oracles. Health checks alone are too shallow.</td>
+    </tr>
+    <tr>
+      <td><a href="https://docs.sentry.io/product/ai-in-sentry/seer/">Sentry Seer docs</a></td>
+      <td>The observability product provides rich issue context and ownership controls; AI debugging can hand off to external coding agents.</td>
+      <td>Canary should own context and claim protocol; Bitterblossom should own reactive code-changing work.</td>
+    </tr>
+    <tr>
+      <td><a href="https://opentelemetry.io/docs/concepts/observability-primer/">OpenTelemetry observability docs</a></td>
+      <td>Shared signal language matters; logs, metrics, traces, and events should have clear semantic boundaries.</td>
+      <td>Keep Canary's native/bridge split. Do bounded operational events and links, not SQLite as a telemetry warehouse.</td>
+    </tr>
+  </table>
+
+  <h2>World-Class Target</h2>
+  <ol>
+    <li><strong>Agent control tower:</strong> one command returns overall verdict, blocking signals, witness age, worker pressure, dogfood gap count, open canary incidents, receipt links, and next operator action.</li>
+    <li><strong>Dogfood value receipt:</strong> every owned service has a current receipt showing coverage, current health, errors/incidents, active claim owner, last triage action, and last verified outcome.</li>
+    <li><strong>SLO and alert-plane reliability:</strong> Canary distinguishes "route is ready" from "Canary can still alert and create useful work"; witness fails on alert-delivery impairment and sustained pressure.</li>
+    <li><strong>Safe responder boundary:</strong> responder agents get service-bound read plus narrow responder-write authority, redacted context manifests, receiver conformance tests, and read-audit events.</li>
+    <li><strong>Closed integration loop:</strong> integration cannot claim verified until platform env, health, target/monitor, synthetic ingest/check-in, service-specific webhook, and query readback have all been proven.</li>
+    <li><strong>Bitterblossom triage workload:</strong> signed webhook wakes Bitterblossom, Bitterblossom replays timeline, claims incident/error group, investigates in repo, writes annotations/evidence, and verifies via Canary readback.</li>
+  </ol>
+
+  <h2>Backlog Emissions</h2>
+  <table>
+    <tr><th>ID</th><th>Priority</th><th>Outcome</th><th>Why now</th></tr>
+    <tr>
+      <td><code>045</code></td>
+      <td>P0</td>
+      <td>Self-watch operator verdict</td>
+      <td>Canary is currently unhealthy because the external witness check-in is stale; the product needs to explain this in one agent-ready verdict.</td>
+    </tr>
+    <tr>
+      <td><code>046</code></td>
+      <td>P0</td>
+      <td>Dogfood value receipts</td>
+      <td>Coverage without outcome proof is not enough. Canary should prove value service by service.</td>
+    </tr>
+    <tr>
+      <td><code>047</code></td>
+      <td>P0</td>
+      <td>Alert-plane reliability and SLO burn-rate</td>
+      <td>Health checks and readiness can be green while the alerting plane is impaired or noisy.</td>
+    </tr>
+    <tr>
+      <td><code>048</code></td>
+      <td>P0</td>
+      <td>Responder rich-context safety gate</td>
+      <td>Arbitrary-user auto-triage needs least privilege, redaction, and read audit before rich context leaves Canary.</td>
+    </tr>
+    <tr>
+      <td><code>049</code></td>
+      <td>P1</td>
+      <td>Integration evidence and capture gaps</td>
+      <td>The shipped enrollment engine still has residual proof gaps: synthetic readback, service-specific webhooks, safe browser capture, platform env parity, integrate apply, and MCP wrapper.</td>
+    </tr>
+    <tr>
+      <td><code>010</code> update</td>
+      <td>blocked</td>
+      <td>Ramp pattern reframed around Bitterblossom 055</td>
+      <td>The old <code>bb/011</code> blocker is stale; the active dependency is Bitterblossom <code>055</code> child 2, the canary/incident responder template using Canary claims.</td>
+    </tr>
+  </table>
+
+  <h2>Recommended Sequence</h2>
+  <ol>
+    <li>Ship <code>045</code>: sharpen self-watch immediately because live Canary is degraded right now.</li>
+    <li>Ship <code>046</code>: make dogfood value visible, then use it to prioritize consuming-app fixes.</li>
+    <li>Ship <code>047</code>: add SLO and alert-plane oracles so alerting becomes useful instead of merely noisy.</li>
+    <li>Ship <code>048</code>: unlock safe arbitrary-user responder context and authority.</li>
+    <li>Shape/deliver Bitterblossom <code>055</code> child 2: the canary/incident responder template dependency for <code>010</code>.</li>
+    <li>Ship <code>049</code>: close integration evidence gaps after the safety, value, and responder contracts are stable.</li>
+  </ol>
+</main>
+</body>
+</html>
