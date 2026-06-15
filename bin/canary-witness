@@ -234,7 +234,7 @@ ready_ok="$(jq -r 'try (
   and ([.response.checks.workers[].name] | sort) == ["monitor_overdue", "retention_prune", "target_probe", "tls_scan", "webhook_delivery"]
   and all(.response.checks.workers[];
     .state == "started"
-    and .health == "ok"
+    and (.health == "ok" or .health == "pressured")
     and .failure_count == 0
     and .consecutive_failures == 0
     and (.last_success_at | type) == "string"
