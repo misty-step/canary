@@ -12,12 +12,17 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 /// Default hosted Canary endpoint used when no endpoint is configured.
 pub const DEFAULT_ENDPOINT: &str = "https://canary-obs.fly.dev";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const WITNESS_MONITOR_NAME: &str = "canary-watchman";
+const WITNESS_WORKFLOW_NAME: &str = "Canary Witness";
+const WITNESS_WORKFLOW_BRANCH: &str = "master";
+const WITNESS_ARTIFACT_PATTERN: &str = "canary-witness-<run_id>";
+const WITNESS_RUN_LIST_COMMAND: &str = "gh run list --workflow \"Canary Witness\" --branch master --limit 3 --json databaseId,status,conclusion,createdAt,updatedAt,url,event,workflowName";
 const DEFAULT_INTEGRATION_ENDPOINT_ENV: &str = "CANARY_ENDPOINT";
 const DEFAULT_INTEGRATION_SERVER_KEY_ENV: &str = "CANARY_API_KEY";
 const DEFAULT_INTEGRATION_PUBLIC_ENDPOINT_ENV: &str = "NEXT_PUBLIC_CANARY_ENDPOINT";
@@ -1985,11 +1990,25 @@ pub fn doctor_report(client: &ApiClient, repo_root: &Path) -> Value {
     let incidents = auth_probe(client, "/api/v1/incidents");
     let canary_errors = auth_probe(client, "/api/v1/query?service=canary&window=1h");
     let witness = witness_monitor_report(&status, &monitors);
+    let witness_runs = witness_run_references(repo_root);
     let dogfood = match run_dogfood_inventory(repo_root, false) {
         Ok(value) => json!({"ok": true, "summary": summarize_dogfood(&value), "response": value}),
         Err(error) => json!({"ok": false, "error": error.to_string()}),
     };
     let dr = dr_evidence_report(repo_root);
+    let worker_readiness = worker_readiness_report(&readyz);
+    let verdict = doctor_verdict(
+        &healthz,
+        &readyz,
+        &report,
+        &incidents,
+        &canary_errors,
+        &witness,
+        &worker_readiness,
+        &dogfood,
+        &witness_runs,
+        current_unix_ms(),
+    );
 
     json!({
         "schema_version": 1,
@@ -2010,7 +2029,8 @@ pub fn doctor_report(client: &ApiClient, repo_root: &Path) -> Value {
         "witness": witness,
         "dr": dr,
         "dogfood": dogfood,
-        "worker_readiness": worker_readiness_report(&readyz)
+        "worker_readiness": worker_readiness,
+        "verdict": verdict
     })
 }
 
@@ -2021,6 +2041,23 @@ pub fn summarize_doctor(value: &Value) -> Vec<String> {
         format!("key: {}", string_field(value, "key")),
         format!("key_scope: {}", string_field(value, "key_scope")),
     ];
+    lines.push(format!(
+        "verdict: {}",
+        verdict_summary(value.get("verdict"))
+    ));
+    if let Some(blocking) = value
+        .get("verdict")
+        .and_then(|verdict| verdict.get("blocking_signals"))
+        .and_then(Value::as_array)
+        .filter(|signals| !signals.is_empty())
+    {
+        let signals = blocking
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("; ");
+        lines.push(format!("verdict_blocking: {signals}"));
+    }
     for key in ["healthz", "readyz"] {
         let probe = value
             .get("reachability")
@@ -2052,6 +2089,471 @@ pub fn summarize_doctor(value: &Value) -> Vec<String> {
         worker_readiness_summary(value.get("worker_readiness"))
     ));
     lines
+}
+
+#[allow(clippy::too_many_arguments)]
+fn doctor_verdict(
+    healthz: &Value,
+    readyz: &Value,
+    summary: &Value,
+    incidents: &Value,
+    canary_errors: &Value,
+    witness: &Value,
+    worker_readiness: &Value,
+    dogfood: &Value,
+    receipt_run_references: &Value,
+    now_unix_ms: u64,
+) -> Value {
+    let mut blocking_signals = Vec::new();
+    let mut unable = false;
+
+    if !probe_ok(healthz) {
+        unable = true;
+        blocking_signals.push(format!(
+            "/healthz unavailable: {}",
+            string_field(healthz, "error")
+        ));
+    }
+    if !probe_ok(readyz) {
+        unable = true;
+        blocking_signals.push(format!(
+            "/readyz unavailable: {}",
+            string_field(readyz, "error")
+        ));
+    }
+    if !probe_ok(summary) {
+        unable = true;
+        blocking_signals.push(format!(
+            "authenticated summary unavailable: {}",
+            string_field(summary, "error")
+        ));
+    }
+    if !probe_ok(canary_errors) {
+        unable = true;
+        blocking_signals.push(format!(
+            "canary error readback unavailable: {}",
+            string_field(canary_errors, "error")
+        ));
+    }
+    if !probe_ok(incidents) {
+        unable = true;
+        blocking_signals.push(format!(
+            "incident readback unavailable: {}",
+            string_field(incidents, "error")
+        ));
+    }
+
+    let witness_age_ms = witness_age_ms(witness, now_unix_ms);
+    if let Some(signal) = witness_blocking_signal(witness, witness_age_ms) {
+        blocking_signals.push(signal);
+    }
+    if string_field(witness, "status") == "unavailable" {
+        unable = true;
+    }
+
+    let open_canary_incident = open_canary_incident(incidents);
+    if let Some(incident) = &open_canary_incident {
+        let id = string_field(incident, "id");
+        let title = incident
+            .get("title")
+            .or_else(|| incident.get("summary"))
+            .and_then(Value::as_str)
+            .unwrap_or("untitled");
+        blocking_signals.push(format!("open Canary incident {id}: {title}"));
+    }
+
+    let worker_pressure = worker_pressure_report(worker_readiness);
+    if !worker_readiness
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        unable = true;
+        blocking_signals.push(format!(
+            "worker readiness unavailable: {}",
+            string_field(worker_readiness, "reason")
+        ));
+    }
+    let failing_workers = worker_pressure
+        .get("failing_workers")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let pressured_workers = worker_pressure
+        .get("pressured_workers")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if failing_workers > 0 {
+        blocking_signals.push(format!(
+            "{} worker(s) failing: {}",
+            failing_workers,
+            worker_names(&worker_pressure, "failing")
+        ));
+    }
+    if pressured_workers > 0 {
+        blocking_signals.push(format!(
+            "worker pressure: {}",
+            worker_names(&worker_pressure, "pressured")
+        ));
+    }
+
+    let canary_error_total = canary_error_total(canary_errors);
+    if canary_error_total > 0 {
+        blocking_signals.push(format!(
+            "{canary_error_total} recent service=canary error(s)"
+        ));
+    }
+
+    let dogfood_gap_count = dogfood_gap_count(dogfood);
+    let overall = if unable {
+        "unable"
+    } else if blocking_signals.is_empty() {
+        "healthy"
+    } else {
+        "degraded"
+    };
+    let next_operator_action = next_operator_action(
+        overall,
+        witness,
+        failing_workers,
+        pressured_workers,
+        canary_error_total,
+        dogfood_gap_count,
+        open_canary_incident.as_ref(),
+    );
+
+    json!({
+        "overall": overall,
+        "blocking_signals": blocking_signals,
+        "next_operator_action": next_operator_action,
+        "witness_age_ms": witness_age_ms,
+        "open_canary_incident": open_canary_incident.unwrap_or(Value::Null),
+        "worker_pressure": worker_pressure,
+        "dogfood_gap_count": dogfood_gap_count,
+        "receipt_run_references": receipt_run_references
+    })
+}
+
+fn next_operator_action(
+    overall: &str,
+    witness: &Value,
+    failing_workers: u64,
+    pressured_workers: u64,
+    canary_error_total: u64,
+    dogfood_gap_count: usize,
+    open_canary_incident: Option<&Value>,
+) -> String {
+    if overall == "unable" {
+        return "Restore `bin/canary doctor --json` evidence first: verify `/healthz`, `/readyz`, and read/admin API credentials, then rerun the doctor.".to_owned();
+    }
+    if witness_needs_operator(witness) {
+        return "Run `gh workflow run \"Canary Witness\" --ref master`; then inspect the latest witness receipt and rerun `bin/canary doctor --json`.".to_owned();
+    }
+    if let Some(incident) = open_canary_incident {
+        return format!(
+            "Investigate open Canary incident {}; inspect `bin/canary incidents --open --json` and rerun `bin/canary doctor --json` after remediation.",
+            string_field(incident, "id")
+        );
+    }
+    if failing_workers > 0 || pressured_workers > 0 {
+        return "Inspect `/readyz` worker pressure and drain the named backlog before rerunning `bin/canary doctor --json`.".to_owned();
+    }
+    if canary_error_total > 0 {
+        return "Run `bin/canary errors canary --window 1h --json`, fix the newest error class, and rerun `bin/canary doctor --json`.".to_owned();
+    }
+    if dogfood_gap_count > 0 {
+        return "No runtime blocker; run `bin/canary dogfood audit --strict --json` and close the reported coverage gaps.".to_owned();
+    }
+    "No immediate operator action; keep the external witness and scheduled deploy monitors running."
+        .to_owned()
+}
+
+fn witness_blocking_signal(witness: &Value, witness_age_ms: Option<u64>) -> Option<String> {
+    let monitor = string_field(witness, "monitor");
+    match string_field(witness, "status").as_str() {
+        "observed" => {
+            let state = string_field(witness, "state");
+            if state == "up" {
+                return None;
+            }
+            let last_status = string_field(witness, "last_check_in_status");
+            Some(match witness_age_ms {
+                Some(age) => {
+                    format!("{monitor} {state}; last {last_status} check-in was {age} ms ago")
+                }
+                None => format!("{monitor} {state}; last {last_status} check-in age unknown"),
+            })
+        }
+        "configured" => Some(format!(
+            "{monitor} configured but no external check-in has been observed"
+        )),
+        "missing" => Some(format!("{monitor} monitor is missing")),
+        "unavailable" => Some(format!("{monitor} monitor readback is unavailable")),
+        other => Some(format!("{monitor} witness status is {other}")),
+    }
+}
+
+fn witness_needs_operator(witness: &Value) -> bool {
+    match string_field(witness, "status").as_str() {
+        "observed" => string_field(witness, "state") != "up",
+        "configured" | "missing" | "unavailable" => true,
+        _ => true,
+    }
+}
+
+fn witness_age_ms(witness: &Value, now_unix_ms: u64) -> Option<u64> {
+    let timestamp = witness
+        .get("last_check_in_at")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty() && *value != "unknown")?;
+    let observed = rfc3339_unix_ms(timestamp)?;
+    Some(now_unix_ms.saturating_sub(observed))
+}
+
+fn rfc3339_unix_ms(input: &str) -> Option<u64> {
+    let parsed = OffsetDateTime::parse(input, &Rfc3339).ok()?;
+    let seconds = u64::try_from(parsed.unix_timestamp()).ok()?;
+    seconds
+        .checked_mul(1_000)?
+        .checked_add(u64::from(parsed.nanosecond() / 1_000_000))
+}
+
+fn current_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+fn open_canary_incident(incidents: &Value) -> Option<Value> {
+    incidents
+        .get("response")
+        .and_then(|response| response.get("incidents"))
+        .or_else(|| incidents.get("incidents"))
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|incident| {
+            incident.get("service").and_then(Value::as_str) == Some("canary")
+                && incident_is_open(incident)
+        })
+        .cloned()
+}
+
+fn incident_is_open(incident: &Value) -> bool {
+    !matches!(
+        incident
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("open"),
+        "resolved" | "closed" | "dismissed"
+    )
+}
+
+fn canary_error_total(canary_errors: &Value) -> u64 {
+    canary_errors
+        .get("response")
+        .and_then(|response| response.get("total_errors"))
+        .or_else(|| canary_errors.get("total_errors"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+fn dogfood_gap_count(dogfood: &Value) -> usize {
+    dogfood.get("response").map_or_else(
+        || dogfood_strict_failure_count(dogfood),
+        dogfood_strict_failure_count,
+    )
+}
+
+fn worker_pressure_report(worker_readiness: &Value) -> Value {
+    if !worker_readiness
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return json!({
+            "status": "unavailable",
+            "pressured_workers": 0,
+            "failing_workers": 0,
+            "reason": string_field(worker_readiness, "reason"),
+            "workers": []
+        });
+    }
+
+    let workers = worker_readiness
+        .get("workers")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let pressured = workers
+        .iter()
+        .filter(|worker| worker_is_pressured(worker))
+        .map(worker_pressure_detail)
+        .collect::<Vec<_>>();
+    let failing = workers
+        .iter()
+        .filter(|worker| worker_is_failing(worker))
+        .map(worker_pressure_detail)
+        .collect::<Vec<_>>();
+    let status = if !failing.is_empty() {
+        "failing"
+    } else if !pressured.is_empty() {
+        "pressured"
+    } else {
+        worker_readiness
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("ready")
+    };
+
+    json!({
+        "status": status,
+        "pressured_workers": pressured.len(),
+        "failing_workers": failing.len(),
+        "workers": pressured,
+        "failing": failing
+    })
+}
+
+fn worker_names(worker_pressure: &Value, key: &str) -> String {
+    let field = if key == "failing" {
+        "failing"
+    } else {
+        "workers"
+    };
+    let names = worker_pressure
+        .get(field)
+        .and_then(Value::as_array)
+        .map(|workers| {
+            workers
+                .iter()
+                .filter_map(|worker| worker.get("name").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if names.is_empty() {
+        "unknown".to_owned()
+    } else {
+        names.join(", ")
+    }
+}
+
+fn worker_pressure_detail(worker: &Value) -> Value {
+    json!({
+        "name": string_field(worker, "name"),
+        "state": string_field(worker, "state"),
+        "health": string_field(worker, "health"),
+        "failure_count": worker.get("failure_count").and_then(Value::as_u64).unwrap_or(0),
+        "consecutive_failures": worker.get("consecutive_failures").and_then(Value::as_u64).unwrap_or(0),
+        "due_count": worker.get("due_count").and_then(Value::as_u64).unwrap_or(0),
+        "in_flight_count": worker.get("in_flight_count").and_then(Value::as_u64).unwrap_or(0),
+        "oldest_due_age_ms": worker.get("oldest_due_age_ms").cloned().unwrap_or(Value::Null),
+        "backoff_or_circuit_open": worker.get("backoff_or_circuit_open").and_then(Value::as_bool).unwrap_or(false)
+    })
+}
+
+fn worker_is_pressured(worker: &Value) -> bool {
+    worker.get("state").and_then(Value::as_str) == Some("started")
+        && worker.get("health").and_then(Value::as_str) == Some("pressured")
+}
+
+fn worker_is_failing(worker: &Value) -> bool {
+    if worker.get("state").and_then(Value::as_str) != Some("started") {
+        return true;
+    }
+    !matches!(
+        worker.get("health").and_then(Value::as_str),
+        Some("ok" | "pressured")
+    )
+}
+
+fn witness_run_references(repo_root: &Path) -> Value {
+    let mut command = Command::new("gh");
+    command
+        .current_dir(repo_root)
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("GH_NO_UPDATE_NOTIFIER", "1")
+        .args([
+            "run",
+            "list",
+            "--workflow",
+            WITNESS_WORKFLOW_NAME,
+            "--branch",
+            WITNESS_WORKFLOW_BRANCH,
+            "--limit",
+            "3",
+            "--json",
+            "databaseId,status,conclusion,createdAt,updatedAt,url,event,workflowName",
+        ]);
+
+    match command.output() {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            match serde_json::from_str::<Value>(&stdout) {
+                Ok(Value::Array(runs)) => json!({
+                    "ok": true,
+                    "workflow": WITNESS_WORKFLOW_NAME,
+                    "branch": WITNESS_WORKFLOW_BRANCH,
+                    "command": WITNESS_RUN_LIST_COMMAND,
+                    "artifact_name_pattern": WITNESS_ARTIFACT_PATTERN,
+                    "runs": runs.into_iter().map(enrich_witness_run).collect::<Vec<_>>()
+                }),
+                Ok(value) => json!({
+                    "ok": false,
+                    "workflow": WITNESS_WORKFLOW_NAME,
+                    "command": WITNESS_RUN_LIST_COMMAND,
+                    "artifact_name_pattern": WITNESS_ARTIFACT_PATTERN,
+                    "reason": "gh returned non-array JSON",
+                    "response": value
+                }),
+                Err(error) => json!({
+                    "ok": false,
+                    "workflow": WITNESS_WORKFLOW_NAME,
+                    "command": WITNESS_RUN_LIST_COMMAND,
+                    "artifact_name_pattern": WITNESS_ARTIFACT_PATTERN,
+                    "reason": format!("could not parse gh run list JSON: {error}")
+                }),
+            }
+        }
+        Ok(output) => json!({
+            "ok": false,
+            "workflow": WITNESS_WORKFLOW_NAME,
+            "branch": WITNESS_WORKFLOW_BRANCH,
+            "command": WITNESS_RUN_LIST_COMMAND,
+            "artifact_name_pattern": WITNESS_ARTIFACT_PATTERN,
+            "reason": redact_text(&String::from_utf8_lossy(&output.stderr))
+        }),
+        Err(error) => json!({
+            "ok": false,
+            "workflow": WITNESS_WORKFLOW_NAME,
+            "branch": WITNESS_WORKFLOW_BRANCH,
+            "command": WITNESS_RUN_LIST_COMMAND,
+            "artifact_name_pattern": WITNESS_ARTIFACT_PATTERN,
+            "reason": error.to_string()
+        }),
+    }
+}
+
+fn enrich_witness_run(mut run: Value) -> Value {
+    if let Some(object) = run.as_object_mut()
+        && let Some(id) = object.get("databaseId").and_then(Value::as_u64)
+    {
+        object.insert(
+            "artifact_name".to_owned(),
+            Value::String(format!("canary-witness-{id}")),
+        );
+    }
+    run
+}
+
+fn verdict_summary(value: Option<&Value>) -> String {
+    let Some(value) = value else {
+        return "missing".to_owned();
+    };
+    format!(
+        "{}; next: {}",
+        string_field(value, "overall"),
+        string_field(value, "next_operator_action")
+    )
 }
 
 fn dr_evidence_report(repo_root: &Path) -> Value {
@@ -2403,15 +2905,11 @@ fn worker_readiness_report(readyz_probe: &Value) -> Value {
         .count();
     let failing_workers = workers
         .iter()
-        .filter(|worker| {
-            worker.get("state").and_then(Value::as_str) != Some("started")
-                || worker.get("health").and_then(Value::as_str) != Some("ok")
-                || worker
-                    .get("failure_count")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0)
-                    > 0
-        })
+        .filter(|worker| worker_is_failing(worker))
+        .count();
+    let pressured_workers = workers
+        .iter()
+        .filter(|worker| worker_is_pressured(worker))
         .count();
 
     json!({
@@ -2422,6 +2920,7 @@ fn worker_readiness_report(readyz_probe: &Value) -> Value {
             .unwrap_or("unknown"),
         "worker_count": workers.len(),
         "failing_workers": failing_workers,
+        "pressured_workers": pressured_workers,
         "schema_missing_health_fields": schema_missing_health_fields,
         "workers": workers
     })
@@ -2519,15 +3018,21 @@ fn worker_readiness_summary(value: Option<&Value>) -> String {
                 .map_or(0, |workers| {
                     workers
                         .iter()
-                        .filter(|worker| {
-                            worker.get("state").and_then(Value::as_str) != Some("started")
-                                || worker.get("health").and_then(Value::as_str) != Some("ok")
-                                || worker
-                                    .get("failure_count")
-                                    .and_then(Value::as_i64)
-                                    .unwrap_or(0)
-                                    > 0
-                        })
+                        .filter(|worker| worker_is_failing(worker))
+                        .count() as i64
+                })
+        });
+    let pressured_workers = value
+        .get("pressured_workers")
+        .and_then(Value::as_i64)
+        .unwrap_or_else(|| {
+            value
+                .get("workers")
+                .and_then(Value::as_array)
+                .map_or(0, |workers| {
+                    workers
+                        .iter()
+                        .filter(|worker| worker_is_pressured(worker))
                         .count() as i64
                 })
         });
@@ -2535,22 +3040,19 @@ fn worker_readiness_summary(value: Option<&Value>) -> String {
         .get("schema_missing_health_fields")
         .and_then(Value::as_i64)
         .unwrap_or(0);
-    if missing_health > 0 {
-        format!(
-            "{} {} workers, {} failing, {} missing health fields",
-            string_field(value, "status"),
-            worker_count,
-            failing_workers,
-            missing_health
-        )
-    } else {
-        format!(
-            "{} {} workers, {} failing",
-            string_field(value, "status"),
-            worker_count,
-            failing_workers
-        )
+    let mut summary = format!(
+        "{} {} workers, {} failing",
+        string_field(value, "status"),
+        worker_count,
+        failing_workers
+    );
+    if pressured_workers > 0 {
+        summary.push_str(&format!(", {pressured_workers} pressured"));
     }
+    if missing_health > 0 {
+        summary.push_str(&format!(", {missing_health} missing health fields"));
+    }
+    summary
 }
 
 fn dr_summary(value: Option<&Value>) -> String {
@@ -2660,9 +3162,49 @@ pub fn tool_manifest() -> Vec<ToolSpec> {
             input_schema: json!({"type":"object","required":["service"],"properties":{"service":{"type":"string"},"window":{"type":"string","enum":["1h","6h","24h","7d","30d"]}}}),
         },
         ToolSpec {
+            name: "canary_services",
+            description: "List target and monitor service states from `bin/canary services`.",
+            input_schema: json!({"type":"object","properties":{"state":{"type":"string","enum":["up","degraded","down","unknown"]},"window":{"type":"string","enum":["1h","6h","24h","7d","30d"]}}}),
+        },
+        ToolSpec {
+            name: "canary_incidents",
+            description: "Inspect active incidents from `bin/canary incidents`; use this after doctor reports an open Canary incident.",
+            input_schema: json!({"type":"object","properties":{"open":{"type":"boolean","default":true}}}),
+        },
+        ToolSpec {
+            name: "canary_timeline",
+            description: "Inspect timeline events globally or for one service.",
+            input_schema: json!({"type":"object","properties":{"service":{"type":"string"},"window":{"type":"string","enum":["1h","6h","24h","7d","30d"]},"limit":{"type":"integer","minimum":1,"maximum":100}}}),
+        },
+        ToolSpec {
+            name: "canary_targets",
+            description: "List configured HTTP uptime targets.",
+            input_schema: json!({"type":"object","properties":{}}),
+        },
+        ToolSpec {
+            name: "canary_monitors",
+            description: "List configured non-HTTP monitors and check-in watchers.",
+            input_schema: json!({"type":"object","properties":{}}),
+        },
+        ToolSpec {
             name: "canary_doctor",
             description: "Run the agent-oriented Canary doctor check.",
             input_schema: json!({"type":"object","properties":{}}),
+        },
+        ToolSpec {
+            name: "canary_witness",
+            description: "Inspect the external `canary-watchman` state and GitHub Actions receipt refs; replacement command: `bin/canary doctor --json | jq '.response.witness,.response.verdict.receipt_run_references'`.",
+            input_schema: json!({"type":"object","properties":{}}),
+        },
+        ToolSpec {
+            name: "canary_dr_status",
+            description: "Inspect DR/Litestream evidence surfaced by doctor; replacement command: `bin/canary doctor --json | jq '.response.dr'`.",
+            input_schema: json!({"type":"object","properties":{}}),
+        },
+        ToolSpec {
+            name: "canary_dogfood_audit",
+            description: "Run deployed-service dogfood coverage audit; strict mode exits nonzero after printing JSON gaps.",
+            input_schema: json!({"type":"object","properties":{"strict":{"type":"boolean","default":false}}}),
         },
         ToolSpec {
             name: "canary_event_capture",
@@ -2759,6 +3301,130 @@ mod tests {
         assert_eq!(report["status"], "configured");
         assert_eq!(report["monitor"], "canary-watchman");
         assert_eq!(report["mode"], "ttl");
+    }
+
+    #[test]
+    fn doctor_verdict_degrades_for_stale_down_watchman_even_when_routes_ready() {
+        let healthz = json!({"ok": true, "response": {"status": "ok"}});
+        let readyz = json!({"ok": true, "response": {"status": "ready"}});
+        let summary = json!({"ok": true, "summary": ["summary: Canary healthy"]});
+        let incidents = json!({
+            "ok": true,
+            "response": {
+                "incidents": [{
+                    "id": "INC-witness",
+                    "service": "canary",
+                    "state": "open",
+                    "title": "Canary witness failed"
+                }]
+            }
+        });
+        let canary_errors = json!({
+            "ok": true,
+            "response": {
+                "service": "canary",
+                "total_errors": 0
+            }
+        });
+        let witness = json!({
+            "status": "observed",
+            "monitor": "canary-watchman",
+            "state": "down",
+            "last_check_in_status": "alive",
+            "last_check_in_at": "2026-06-15T22:00:00Z",
+            "expected_every_ms": 600000
+        });
+        let worker_readiness = json!({
+            "available": true,
+            "status": "ready",
+            "worker_count": 5,
+            "failing_workers": 0,
+            "pressured_workers": 0,
+            "workers": []
+        });
+        let dogfood = json!({
+            "ok": true,
+            "response": {
+                "strict_failures": [
+                    {"kind": "missing_readback", "service": "vanity"},
+                    {"kind": "missing_target", "service": "linejam"}
+                ]
+            }
+        });
+        let receipt_runs = json!({
+            "ok": true,
+            "workflow": "Canary Witness",
+            "runs": [{
+                "databaseId": 123456,
+                "status": "completed",
+                "conclusion": "failure",
+                "url": "https://github.com/example/canary/actions/runs/123456",
+                "artifact_name": "canary-witness-123456"
+            }]
+        });
+
+        let verdict = doctor_verdict(
+            &healthz,
+            &readyz,
+            &summary,
+            &incidents,
+            &canary_errors,
+            &witness,
+            &worker_readiness,
+            &dogfood,
+            &receipt_runs,
+            1_781_561_520_000,
+        );
+
+        assert_eq!(verdict["overall"], "degraded");
+        assert_eq!(verdict["witness_age_ms"], 720000);
+        assert_eq!(verdict["open_canary_incident"]["id"], "INC-witness");
+        assert_eq!(verdict["dogfood_gap_count"], 2);
+        assert_eq!(
+            verdict["receipt_run_references"]["runs"][0]["artifact_name"],
+            "canary-witness-123456"
+        );
+        assert!(
+            verdict["blocking_signals"]
+                .as_array()
+                .is_some_and(|signals| signals.iter().any(|signal| signal
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("canary-watchman down")))
+        );
+        assert!(
+            verdict["next_operator_action"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("gh workflow run")
+        );
+    }
+
+    #[test]
+    fn worker_readiness_keeps_pressured_workers_separate_from_failures() {
+        let readyz = json!({
+            "ok": true,
+            "response": {
+                "status": "ready",
+                "checks": {
+                    "workers": [
+                        {"name": "webhook_delivery", "state": "started", "health": "pressured", "failure_count": 0, "due_count": 5, "oldest_due_age_ms": 120000},
+                        {"name": "target_probe", "state": "started", "health": "ok", "failure_count": 0}
+                    ]
+                }
+            }
+        });
+
+        let report = worker_readiness_report(&readyz);
+
+        assert_eq!(report["status"], "ready");
+        assert_eq!(report["worker_count"], 2);
+        assert_eq!(report["failing_workers"], 0);
+        assert_eq!(report["pressured_workers"], 1);
+        assert_eq!(
+            worker_readiness_summary(Some(&report)),
+            "ready 2 workers, 0 failing, 1 pressured"
+        );
     }
 
     #[test]

@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canary Self-Watch Operator Verdict</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #182016;
+      --muted: #5d6559;
+      --line: #cfd6c9;
+      --paper: #f8faf5;
+      --panel: #ffffff;
+      --accent: #1b6f5f;
+      --warn: #a15300;
+      --bad: #9b1c31;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--paper);
+      color: var(--ink);
+      line-height: 1.45;
+    }
+    main {
+      width: min(1180px, calc(100vw - 48px));
+      margin: 0 auto;
+      padding: 40px 0 56px;
+    }
+    header {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
+      gap: 28px;
+      align-items: start;
+      padding-bottom: 28px;
+      border-bottom: 1px solid var(--line);
+    }
+    h1 {
+      margin: 0 0 16px;
+      font-size: 42px;
+      line-height: 1.04;
+      letter-spacing: 0;
+    }
+    h2 {
+      margin: 0 0 12px;
+      font-size: 18px;
+      letter-spacing: 0;
+    }
+    p { margin: 0 0 12px; }
+    .summary {
+      font-size: 18px;
+      color: var(--muted);
+      max-width: 760px;
+    }
+    .panel, .callout {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+    }
+    .callout {
+      border-left: 4px solid var(--accent);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 28px;
+    }
+    .wide { grid-column: span 2; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+      background: #eef3ea;
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    ul { margin: 0; padding-left: 20px; }
+    li + li { margin-top: 7px; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      text-align: left;
+      vertical-align: top;
+      border-top: 1px solid var(--line);
+      padding: 10px 8px;
+    }
+    th { color: var(--muted); font-weight: 650; }
+    .tag {
+      display: inline-block;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 12px;
+      color: var(--muted);
+      margin-right: 6px;
+    }
+    .bad { color: var(--bad); }
+    .warn { color: var(--warn); }
+    @media (max-width: 850px) {
+      header, .grid { grid-template-columns: 1fr; }
+      .wide { grid-column: auto; }
+      main { width: min(100vw - 28px, 1180px); padding-top: 24px; }
+      h1 { font-size: 32px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <section>
+      <span class="tag">Backlog 045</span><span class="tag">operator surface</span><span class="tag">agent-first</span>
+      <h1>Self-Watch Operator Verdict</h1>
+      <p class="summary">
+        Make <code>bin/canary doctor</code> answer the first operator question:
+        can Canary watch itself right now, what evidence proves that, and what
+        should the next agent do without opening a dashboard?
+      </p>
+    </section>
+    <aside class="callout">
+      <h2>Chosen Design</h2>
+      <p>
+        Add one derived <code>doctor.verdict</code> object assembled from the
+        existing doctor probes. Keep HTTP routes, store writes, workers, and the
+        witness runtime unchanged.
+      </p>
+      <p>
+        This keeps the interface deep: callers ask one question and receive a
+        compact control-tower answer, while detailed probe evidence remains
+        available underneath.
+      </p>
+    </aside>
+  </header>
+
+  <section class="grid">
+    <article class="panel">
+      <h2>Outcome</h2>
+      <ul>
+        <li><code>doctor --json</code> includes <code>verdict.overall</code>, blocking signals, witness age, open Canary incident, worker pressure, dogfood gap count, receipt/run refs, and next action.</li>
+        <li><code>doctor</code> text prints a compact verdict and keeps existing probe lines.</li>
+        <li>Worker <code>pressured</code> means ready with operational pressure, not double-counted as failed.</li>
+      </ul>
+    </article>
+    <article class="panel">
+      <h2>Assumptions</h2>
+      <ul>
+        <li>The CLI may shell out for operator evidence, as it already does for DR and dogfood inventory.</li>
+        <li>GitHub Actions witness run discovery is best-effort and must fail open with the replacement command.</li>
+        <li>Open incidents for service <code>canary</code> are self-watch blockers; unrelated service incidents stay visible below the verdict.</li>
+      </ul>
+    </article>
+    <article class="panel">
+      <h2>Stop Conditions</h2>
+      <ul>
+        <li>The verdict can be produced without a new server route or schema migration.</li>
+        <li>Fixture tests cover stale witness, worker pressure, MCP drill-down names, and live-shape actionability.</li>
+        <li>Live <code>bin/canary doctor --json</code> and text output produce usable operator guidance.</li>
+      </ul>
+    </article>
+
+    <article class="panel wide">
+      <h2>Verification Surface</h2>
+      <table>
+        <thead>
+          <tr><th>Layer</th><th>Command or artifact</th><th>What it proves</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Red test</td><td><code>cargo test -p canary-cli doctor_</code></td><td>Verdict semantics fail before implementation and pass after.</td></tr>
+          <tr><td>CLI fixtures</td><td><code>cargo test -p canary-cli --test fixtures</code></td><td>Text summary and manifest stay agent-readable.</td></tr>
+          <tr><td>Repo gate</td><td><code>./bin/validate</code></td><td>Full local acceptance across Rust, TS client, scripts, Docker smoke, and scans.</td></tr>
+          <tr><td>Live QA</td><td><code>bin/canary doctor --json</code>, <code>bin/canary doctor</code>, <code>bin/canary mcp-manifest</code></td><td>Production Canary reports a real operator verdict without secret leakage.</td></tr>
+          <tr><td>Fresh review</td><td>Diff plus ticket oracle only</td><td>Critic tries to refute semantics, security, and agent usability before landing.</td></tr>
+        </tbody>
+      </table>
+    </article>
+
+    <article class="panel">
+      <h2>Risks</h2>
+      <ul>
+        <li><span class="warn">Clock parsing:</span> witness age needs RFC3339 parsing and must degrade to <code>null</code> rather than panic.</li>
+        <li><span class="warn">GH auth:</span> witness run discovery may be unavailable locally; verdict must still include commands.</li>
+        <li><span class="bad">False health:</span> a ready route with down witness is not healthy; the verdict must prefer self-watch evidence.</li>
+      </ul>
+    </article>
+    <article class="panel wide">
+      <h2>Alternatives Rejected</h2>
+      <table>
+        <thead><tr><th>Alternative</th><th>Why not now</th></tr></thead>
+        <tbody>
+          <tr><td>New server endpoint</td><td>Broadens production surface for a derived operator view that the CLI can compute from existing routes.</td></tr>
+          <tr><td>Dashboard-first UI</td><td>The first citizen is an agent; CLI JSON is lower friction and easier to MCP-wrap.</td></tr>
+          <tr><td>Webhook to Bitterblossom first</td><td>Downstream triage is separate backlog work. Canary still needs to expose the watch state cleanly.</td></tr>
+        </tbody>
+      </table>
+    </article>
+  </section>
+</main>
+</body>
+</html>

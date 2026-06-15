@@ -1,0 +1,141 @@
+{
+  "endpoint": "https://canary.example",
+  "key": "CANARY_API_KEY: redacted",
+  "key_scope": "admin",
+  "reachability": {
+    "healthz": {
+      "ok": true,
+      "response": {
+        "status": "ok"
+      }
+    },
+    "readyz": {
+      "ok": true,
+      "response": {
+        "status": "ready"
+      }
+    }
+  },
+  "summary": {
+    "ok": true,
+    "summary": [
+      "summary: Canary healthy"
+    ]
+  },
+  "services": {
+    "ok": true,
+    "summary": [
+      "summary: Canary has degraded surfaces"
+    ]
+  },
+  "witness": {
+    "status": "observed",
+    "monitor": "canary-watchman",
+    "state": "down",
+    "last_check_in_status": "alive",
+    "last_check_in_at": "2026-06-15T22:00:00Z",
+    "expected_every_ms": 600000
+  },
+  "canary_errors": {
+    "ok": true,
+    "summary": [
+      "summary: 0 errors in canary in the last 1h."
+    ],
+    "response": {
+      "service": "canary",
+      "total_errors": 0
+    }
+  },
+  "incidents": {
+    "ok": true,
+    "summary": [
+      "summary: 1 open incident"
+    ],
+    "response": {
+      "incidents": [
+        {
+          "id": "INC-witness",
+          "service": "canary",
+          "state": "open",
+          "title": "Canary witness failed",
+          "opened_at": "2026-06-15T22:10:00Z"
+        }
+      ]
+    }
+  },
+  "dr": {
+    "status": {
+      "ok": true,
+      "stdout": "/data/canary.db: ok"
+    },
+    "restore_receipt": {
+      "ok": true,
+      "path": "docs/architecture/restore-drill-evidence-2026-06-14.md"
+    }
+  },
+  "dogfood": {
+    "ok": true,
+    "summary": [
+      "covered: 4",
+      "strict_failures: 2"
+    ],
+    "response": {
+      "strict_failures": [
+        {
+          "kind": "missing_readback",
+          "service": "vanity"
+        },
+        {
+          "kind": "missing_target",
+          "service": "linejam"
+        }
+      ]
+    }
+  },
+  "worker_readiness": {
+    "available": true,
+    "status": "ready",
+    "worker_count": 5,
+    "failing_workers": 0,
+    "pressured_workers": 0,
+    "schema_missing_health_fields": 0,
+    "workers": []
+  },
+  "verdict": {
+    "overall": "degraded",
+    "blocking_signals": [
+      "canary-watchman down; last alive check-in was 720000 ms ago",
+      "open Canary incident INC-witness: Canary witness failed"
+    ],
+    "next_operator_action": "Run `gh workflow run \"Canary Witness\" --ref master`; then inspect the latest witness receipt and rerun `bin/canary doctor --json`.",
+    "witness_age_ms": 720000,
+    "open_canary_incident": {
+      "id": "INC-witness",
+      "service": "canary",
+      "state": "open",
+      "title": "Canary witness failed"
+    },
+    "worker_pressure": {
+      "status": "ready",
+      "pressured_workers": 0,
+      "failing_workers": 0,
+      "workers": []
+    },
+    "dogfood_gap_count": 2,
+    "receipt_run_references": {
+      "ok": true,
+      "workflow": "Canary Witness",
+      "command": "gh run list --workflow \"Canary Witness\" --branch master --limit 3 --json databaseId,status,conclusion,createdAt,updatedAt,url,event,workflowName",
+      "artifact_name_pattern": "canary-witness-<run_id>",
+      "runs": [
+        {
+          "databaseId": 123456,
+          "status": "completed",
+          "conclusion": "failure",
+          "url": "https://github.com/example/canary/actions/runs/123456",
+          "artifact_name": "canary-witness-123456"
+        }
+      ]
+    }
+  }
+}

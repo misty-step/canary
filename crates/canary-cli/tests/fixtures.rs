@@ -3,6 +3,7 @@
 use canary_cli::{
     dogfood_strict_failure_count, summarize_doctor, summarize_dogfood, summarize_incidents,
     summarize_monitors, summarize_query, summarize_report, summarize_targets, summarize_timeline,
+    tool_manifest,
 };
 use serde_json::{Value, json};
 
@@ -185,4 +186,102 @@ fn doctor_summary_flags_missing_restore_receipt_and_worker_health_schema() {
     assert!(lines.iter().any(
         |line| line == "worker_readiness: ready 1 workers, 1 failing, 1 missing health fields"
     ));
+}
+
+#[test]
+fn doctor_watchman_down_fixture_stays_actionable() -> Result<(), Box<dyn std::error::Error>> {
+    let value = fixture(include_str!("fixtures/doctor_watchman_down.json"))?;
+    let lines = summarize_doctor(&value);
+
+    assert_eq!(value["verdict"]["overall"], "degraded");
+    assert_eq!(value["verdict"]["witness_age_ms"], 720000);
+    assert_eq!(
+        value["verdict"]["open_canary_incident"]["id"],
+        "INC-witness"
+    );
+    assert!(
+        value["verdict"]["next_operator_action"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("gh workflow run")
+    );
+    assert!(lines.iter().any(|line| line
+        == "verdict: degraded; next: Run `gh workflow run \"Canary Witness\" --ref master`; then inspect the latest witness receipt and rerun `bin/canary doctor --json`."));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("canary-watchman down"))
+    );
+
+    Ok(())
+}
+
+#[test]
+fn doctor_summary_reports_worker_pressure_separately() {
+    let value = json!({
+        "endpoint": "https://canary.example",
+        "key": "CANARY_API_KEY: redacted",
+        "key_scope": "admin",
+        "reachability": {
+            "healthz": {"ok": true, "response": {"status": "ok"}},
+            "readyz": {"ok": true, "response": {"status": "ready"}}
+        },
+        "summary": {"ok": true, "summary": ["summary: Canary healthy"]},
+        "services": {"ok": true, "summary": ["summary: all surfaces healthy"]},
+        "witness": {"status": "observed", "monitor": "canary-watchman", "state": "up", "last_check_in_status": "alive", "last_check_in_at": "2026-06-15T22:00:00Z"},
+        "canary_errors": {"ok": true, "summary": ["summary: 0 errors in canary in the last 1h."]},
+        "incidents": {"ok": true, "summary": ["summary: 0 open incidents"]},
+        "dr": {
+            "status": {"ok": true, "stdout": "/data/canary.db: ok"},
+            "restore_receipt": {"ok": true, "path": "docs/architecture/restore-drill-evidence-2026-06-14.md"}
+        },
+        "dogfood": {"ok": true, "summary": ["covered: 4"]},
+        "worker_readiness": {
+            "available": true,
+            "status": "ready",
+            "worker_count": 2,
+            "failing_workers": 0,
+            "pressured_workers": 1,
+            "schema_missing_health_fields": 0,
+            "workers": [
+                {"name": "webhook_delivery", "state": "started", "health": "pressured", "failure_count": 0},
+                {"name": "target_probe", "state": "started", "health": "ok", "failure_count": 0}
+            ]
+        },
+        "verdict": {
+            "overall": "degraded",
+            "blocking_signals": ["worker pressure: webhook_delivery"],
+            "next_operator_action": "Inspect `/readyz` worker pressure and drain the named backlog before rerunning `bin/canary doctor --json`."
+        }
+    });
+
+    let lines = summarize_doctor(&value);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "worker_readiness: ready 2 workers, 0 failing, 1 pressured")
+    );
+    assert!(lines.iter().any(|line| line
+        == "verdict: degraded; next: Inspect `/readyz` worker pressure and drain the named backlog before rerunning `bin/canary doctor --json`."));
+}
+
+#[test]
+fn mcp_manifest_exposes_operator_drilldowns() {
+    let names = tool_manifest()
+        .iter()
+        .map(|tool| tool.name)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for name in [
+        "canary_services",
+        "canary_incidents",
+        "canary_timeline",
+        "canary_targets",
+        "canary_monitors",
+        "canary_dogfood_audit",
+        "canary_witness",
+        "canary_dr_status",
+    ] {
+        assert!(names.contains(name), "missing {name}");
+    }
 }
