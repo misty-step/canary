@@ -58,6 +58,7 @@ write_response() {
 }
 
 READY_BODY='{"status":"ready","checks":{"database":"ok","supervisor":"ok","workers":[{"name":"webhook_delivery","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:53Z","last_success_age_ms":250,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":0,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"target_probe","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:55Z","last_success_age_ms":100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":1,"in_flight_count":0,"oldest_due_age_ms":0,"backoff_or_circuit_open":false},{"name":"monitor_overdue","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:55Z","last_success_age_ms":100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":0,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"retention_prune","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:23Z","last_success_age_ms":32100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":1,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"tls_scan","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:23Z","last_success_age_ms":32100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":2,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false}]}}'
+PRESSURED_READY_BODY='{"status":"ready","checks":{"database":"ok","supervisor":"ok","workers":[{"name":"webhook_delivery","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:53Z","last_success_age_ms":250,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":0,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"target_probe","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:55Z","last_success_age_ms":100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":1,"in_flight_count":0,"oldest_due_age_ms":0,"backoff_or_circuit_open":false},{"name":"monitor_overdue","state":"started","health":"pressured","last_success_at":"2026-06-14T02:07:55Z","last_success_age_ms":100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":1,"in_flight_count":0,"oldest_due_age_ms":7200000,"backoff_or_circuit_open":false},{"name":"retention_prune","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:23Z","last_success_age_ms":32100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":1,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"tls_scan","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:23Z","last_success_age_ms":32100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":2,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false}]}}'
 
 case "${STUB_SCENARIO:?}:$method:$url" in
   healthy:GET:https://canary.example/healthz)
@@ -70,6 +71,23 @@ case "${STUB_SCENARIO:?}:$method:$url" in
     write_response 200 0.030 '{"service":"canary","window":"1h","summary":"0 errors in canary in the last 1h.","total_errors":0,"groups":[]}'
     ;;
   healthy:POST:https://canary.example/api/v1/check-ins)
+    if ! jq -e '.monitor == "canary-watchman" and .status == "alive"' <<<"$data" >/dev/null; then
+      printf 'invalid check-in payload: %s\n' "$data" >&2
+      exit 95
+    fi
+    write_response 201 0.040 '{"monitor":"canary-watchman","status":"alive"}'
+    ;;
+
+  pressured:GET:https://canary.example/healthz)
+    write_response 200 0.010 '{"status":"ok"}'
+    ;;
+  pressured:GET:https://canary.example/readyz)
+    write_response 200 0.020 "$PRESSURED_READY_BODY"
+    ;;
+  pressured:GET:https://canary.example/api/v1/query?service=canary\&window=1h)
+    write_response 200 0.030 '{"service":"canary","window":"1h","summary":"0 errors in canary in the last 1h.","total_errors":0,"groups":[]}'
+    ;;
+  pressured:POST:https://canary.example/api/v1/check-ins)
     if ! jq -e '.monitor == "canary-watchman" and .status == "alive"' <<<"$data" >/dev/null; then
       printf 'invalid check-in payload: %s\n' "$data" >&2
       exit 95
@@ -180,6 +198,19 @@ assert_json_equals "$receipt" '.probes.healthz.response.status' 'ok' "healthy re
 assert_json_equals "$receipt" '.probes.readyz.response.status' 'ready' "healthy records readyz"
 assert_json_equals "$receipt" '.probes.canary_query.response.total_errors' '0' "healthy records canary query"
 assert_json_equals "$receipt" '.check_in.http_status' '201' "healthy sends check-in"
+
+receipt="$TMPDIR_TEST/pressured.json"
+STUB_SCENARIO=pressured run_success "pressured ready witness exits zero" \
+  "$WITNESS" \
+    --endpoint https://canary.example \
+    --read-api-key read-key \
+    --ingest-api-key ingest-key \
+    --receipt "$receipt" \
+    --require-check-in \
+    --json
+assert_json_equals "$receipt" '.status' 'healthy' "pressured ready receipt status"
+assert_json_equals "$receipt" '.probes.readyz.response.checks.workers[] | select(.name == "monitor_overdue") | .health' 'pressured' "pressured ready records worker pressure"
+assert_json_equals "$receipt" '.check_in.http_status' '201' "pressured ready sends check-in"
 
 receipt="$TMPDIR_TEST/degraded.json"
 STUB_SCENARIO=degraded run_failure "degraded witness exits nonzero" \
