@@ -5,7 +5,10 @@
 
 use axum::{
     Router,
-    http::header::{CONTENT_TYPE, HeaderName},
+    http::{
+        Method,
+        header::{AUTHORIZATION, CONTENT_TYPE, HeaderName},
+    },
     routing::{delete, get, patch, post},
 };
 #[cfg(test)]
@@ -109,6 +112,7 @@ pub use tls_scan::{
     TlsExpiryScanLifecycle, TlsExpiryScanLifecycleConfig, TlsExpiryScanLifecycleReport,
     TlsExpiryScanLifecycleWorker, TlsExpiryScanRuntimeError, run_tls_expiry_scan_once,
 };
+use tower_http::cors::{Any, CorsLayer};
 pub use webhook_delivery::{
     InMemoryWebhookCircuit, WebhookCircuit, WebhookDeliveryDrain, WebhookDeliveryDrainReport,
     WebhookDeliveryDrainWorker, WebhookDeliveryRuntime,
@@ -124,10 +128,16 @@ pub(crate) use worker_health::{
 
 /// Router for Canary's authenticated ingest endpoints.
 pub fn ingest_router(state: IngestState) -> Router {
-    Router::new()
+    Router::<IngestState>::new()
         .route("/metrics", get(metrics))
-        .route("/api/v1/errors", post(create_error))
-        .route("/api/v1/events", post(create_event))
+        .route(
+            "/api/v1/errors",
+            post(create_error).layer(browser_ingest_cors_layer()),
+        )
+        .route(
+            "/api/v1/events",
+            post(create_event).layer(browser_ingest_cors_layer()),
+        )
         .route("/api/v1/check-ins", post(create_check_in))
         .route("/api/v1/query", get(query_errors))
         .route("/api/v1/report", get(report))
@@ -178,6 +188,13 @@ pub fn ingest_router(state: IngestState) -> Router {
         .route("/api/v1/targets/{id}/pause", post(pause_target))
         .route("/api/v1/targets/{id}/resume", post(resume_target))
         .with_state(state)
+}
+
+fn browser_ingest_cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::POST, Method::OPTIONS])
+        .allow_headers([AUTHORIZATION, CONTENT_TYPE])
 }
 
 /// Headers set by the public adapter.
@@ -1643,6 +1660,91 @@ mod tests {
             .await?;
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn browser_ingest_routes_answer_cors_preflight() -> Result<(), Box<dyn Error>> {
+        for path in ["/api/v1/errors", "/api/v1/events"] {
+            let response = ingest_router(test_ingest_state()?)
+                .oneshot(
+                    Request::builder()
+                        .method(Method::OPTIONS)
+                        .uri(path)
+                        .header("origin", "https://www.chrondle.app")
+                        .header("access-control-request-method", "POST")
+                        .header(
+                            "access-control-request-headers",
+                            "authorization,content-type",
+                        )
+                        .body(Body::empty())?,
+                )
+                .await?;
+
+            assert!(response.status().is_success(), "{path}");
+            let headers = response.headers();
+            assert_eq!(
+                headers.get("access-control-allow-origin"),
+                Some(&HeaderValue::from_static("*")),
+                "{path}"
+            );
+            let allow_methods = headers
+                .get("access-control-allow-methods")
+                .ok_or("missing allowed methods")?
+                .to_str()?;
+            assert!(allow_methods.contains("POST"), "{path}");
+            let allow_headers = headers
+                .get("access-control-allow-headers")
+                .ok_or("missing allowed headers")?
+                .to_str()?
+                .to_ascii_lowercase();
+            assert!(allow_headers.contains("authorization"), "{path}");
+            assert!(allow_headers.contains("content-type"), "{path}");
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn browser_ingest_post_includes_cors_response_header() -> Result<(), Box<dyn Error>> {
+        let response = ingest_router(test_ingest_state()?)
+            .oneshot(
+                Request::post("/api/v1/errors")
+                    .header("authorization", format!("Bearer {INGEST_KEY}"))
+                    .header("origin", "https://www.chrondle.app")
+                    .header(CONTENT_TYPE, APPLICATION_JSON)
+                    .body(Body::from(valid_error_body()))?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            response.headers().get("access-control-allow-origin"),
+            Some(&HeaderValue::from_static("*"))
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_routes_do_not_gain_browser_cors() -> Result<(), Box<dyn Error>> {
+        let response = ingest_router(test_ingest_state()?)
+            .oneshot(
+                Request::get("/api/v1/query?service=test-svc")
+                    .header("authorization", format!("Bearer {READ_KEY}"))
+                    .header("origin", "https://www.chrondle.app")
+                    .body(Body::empty())?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none()
+        );
 
         Ok(())
     }
