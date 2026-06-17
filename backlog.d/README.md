@@ -42,7 +42,7 @@
 | 040 | Universal integration and enrollment engine | P0 | done | XL |
 | 043 | Agentic remediation claim protocol | P1 | done | L |
 | 044 | Telemetry and analytics signal model | P1 | done | XL |
-| 045 | Self-watch operator verdict | P0 | ready | L |
+| 045 | Self-watch operator verdict | P0 | done | L |
 | 046 | Dogfood value receipts | P0 | ready | L |
 | 047 | Alert-plane reliability and SLO burn-rate | P0 | ready | XL |
 | 048 | Responder rich-context safety gate | P0 | pending | XL |
@@ -91,7 +91,7 @@
 022 (contract hygiene) ──── ships independently; restores summary invariant + supervision-tree collapse
 023 (incident detail API) ──→ Canary-side substrate for the Bitterblossom responder workload (and thus 010 ramp pattern)
 024 (signal-agnostic annotations) ──→ blocked on 023; completes the Ramp-loop writable-metadata primitive
-045 ──→ 046 ──→ 047 ──→ 048 ──→ Bitterblossom 055 ──→ 049 ──→ 010
+046 ──→ 047 ──→ 048 ──→ Bitterblossom 055 ──→ 049 ──→ 010
 ```
 
 ## Execution Lanes
@@ -103,15 +103,16 @@
 **Lane 4 (hardening):** 008, 014, 016, 017, 018, 019 (independent, small, can ship anytime) · **034 (worker lifecycle readiness oracle)** hardens the Rust background-worker proof surface
 **Lane 5 (dogfood coverage):** 020 (Adminifi HTTP surface verification) · **033 (deployed service registry lifecycle)** shipped the managed registry substrate · **035 (deployed app Canary coverage)** makes every active owned deployment covered or explicitly blocked · **036 (agent-native inspection surface)** gives agents the operating view · **037 (watch the watchmen)** proves Canary externally · **038 (one-command integration agent)** removes setup friction
 **Lane 6 (arbitrary-app productization):** 039 (external-user security/privacy foundation) → 041 (live integration verification harness) + 042 (runtime pressure/freshness ops) → 040 (universal integration/enrollment engine) → 043 (agentic remediation claim protocol) + 044 (telemetry/analytics signal model) → **048 (responder rich-context safety gate)** → Bitterblossom **055 (canary/incident responder template)** → **049 (integration evidence/capture gaps)** → 010 (Ramp pattern)
-**Lane 7 (product feedback loop):** **045 (self-watch operator verdict)** → **046 (dogfood value receipts)** → **047 (alert-plane reliability/SLO burn-rate)** — turns Canary dogfooding from coverage checks into value, alertability, and operator-action proof
+**Lane 7 (product feedback loop):** 045 (self-watch operator verdict) shipped → **046 (dogfood value receipts)** → **047 (alert-plane reliability/SLO burn-rate)** — turns Canary dogfooding from coverage checks into value, alertability, and operator-action proof
 
-### Active order (2026-06-15)
+### Active order (2026-06-17)
 
-045 is the best next pickup because live production Canary currently reports
-`canary-watchman` down while `/readyz` is route-ready; the operator verdict must
-explain that state and give an agent a next action. Then ship 046 to turn
-dogfood coverage into per-service value receipts, and 047 to add alert-plane and
-SLO/error-budget feedback.
+045 shipped in PR #163 (commit b0c43b5). `bin/canary doctor --json` now emits
+an actionable verdict with blocking signals, witness age, open incident, worker
+pressure, dogfood gaps, and next operator action. MCP manifest covers all
+required drill-downs. 046 is the best next pickup to turn dogfood coverage into
+per-service value receipts, then 047 for alert-plane and SLO/error-budget
+feedback.
 
 048 stays pending until the self-watch/value/SLO loops settle, because
 arbitrary-user rich-context responders need those contracts to avoid
@@ -248,6 +249,15 @@ Bitterblossom workload. 020 stays blocked on Adminifi URLs.
   observability product owns rich context while external agents own code
   mutation. Updated 010 to depend on a Bitterblossom incident-responder workload
   using Canary claims, not the stale archived `bb/011` sprite.
+- 2026-06-17: Delivered 045. `bin/canary doctor --json` now emits a `verdict`
+  object with `overall`, `blocking_signals`, `next_operator_action`,
+  `witness_age_ms`, `open_canary_incident`, `worker_pressure`,
+  `dogfood_gap_count`, and `receipt_run_references`. Pressured workers are
+  separate from failing workers. MCP manifest covers summary, errors, services,
+  incidents, timeline, targets, monitors, doctor, witness, DR status, and
+  dogfood audit. Fixture `doctor_watchman_down.json` proves the live
+  `readyz ok + witness down + open incident` shape stays actionable. Shipped in
+  PR #163 (commit b0c43b5).
 
 ## Status
 
