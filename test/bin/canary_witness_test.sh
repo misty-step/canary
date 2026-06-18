@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-WITNESS="$ROOT/bin/canary-witness"
+WITNESS=(bash "$ROOT/bin/canary-witness")
 TMPDIR_TEST="$(mktemp -d)"
 PASS=0
 FAIL=0
@@ -57,6 +57,22 @@ write_response() {
   printf '%s %s' "$status" "$latency"
 }
 
+assert_check_in_payload() {
+  if ! jq -e '.monitor == "canary-watchman" and .status == "alive"' <<<"$data" >/dev/null; then
+    printf 'invalid check-in payload: %s\n' "$data" >&2
+    exit 95
+  fi
+  if [[ -n "${CHECK_IN_TTL_EXPECTED:-}" ]]; then
+    if ! jq -e --argjson ttl "$CHECK_IN_TTL_EXPECTED" '.ttl_ms == $ttl' <<<"$data" >/dev/null; then
+      printf 'invalid check-in ttl payload: %s\n' "$data" >&2
+      exit 96
+    fi
+  elif ! jq -e 'has("ttl_ms") | not' <<<"$data" >/dev/null; then
+    printf 'expected no ttl_ms in payload: %s\n' "$data" >&2
+    exit 97
+  fi
+}
+
 READY_BODY='{"status":"ready","checks":{"database":"ok","supervisor":"ok","workers":[{"name":"webhook_delivery","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:53Z","last_success_age_ms":250,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":0,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"target_probe","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:55Z","last_success_age_ms":100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":1,"in_flight_count":0,"oldest_due_age_ms":0,"backoff_or_circuit_open":false},{"name":"monitor_overdue","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:55Z","last_success_age_ms":100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":0,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"retention_prune","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:23Z","last_success_age_ms":32100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":1,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"tls_scan","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:23Z","last_success_age_ms":32100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":2,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false}]}}'
 PRESSURED_READY_BODY='{"status":"ready","checks":{"database":"ok","supervisor":"ok","workers":[{"name":"webhook_delivery","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:53Z","last_success_age_ms":250,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":0,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"target_probe","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:55Z","last_success_age_ms":100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":1,"in_flight_count":0,"oldest_due_age_ms":0,"backoff_or_circuit_open":false},{"name":"monitor_overdue","state":"started","health":"pressured","last_success_at":"2026-06-14T02:07:55Z","last_success_age_ms":100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":1,"in_flight_count":0,"oldest_due_age_ms":7200000,"backoff_or_circuit_open":false},{"name":"retention_prune","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:23Z","last_success_age_ms":32100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":1,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"tls_scan","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:23Z","last_success_age_ms":32100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":2,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false}]}}'
 
@@ -71,10 +87,7 @@ case "${STUB_SCENARIO:?}:$method:$url" in
     write_response 200 0.030 '{"service":"canary","window":"1h","summary":"0 errors in canary in the last 1h.","total_errors":0,"groups":[]}'
     ;;
   healthy:POST:https://canary.example/api/v1/check-ins)
-    if ! jq -e '.monitor == "canary-watchman" and .status == "alive"' <<<"$data" >/dev/null; then
-      printf 'invalid check-in payload: %s\n' "$data" >&2
-      exit 95
-    fi
+    assert_check_in_payload
     write_response 201 0.040 '{"monitor":"canary-watchman","status":"alive"}'
     ;;
 
@@ -88,10 +101,7 @@ case "${STUB_SCENARIO:?}:$method:$url" in
     write_response 200 0.030 '{"service":"canary","window":"1h","summary":"0 errors in canary in the last 1h.","total_errors":0,"groups":[]}'
     ;;
   pressured:POST:https://canary.example/api/v1/check-ins)
-    if ! jq -e '.monitor == "canary-watchman" and .status == "alive"' <<<"$data" >/dev/null; then
-      printf 'invalid check-in payload: %s\n' "$data" >&2
-      exit 95
-    fi
+    assert_check_in_payload
     write_response 201 0.040 '{"monitor":"canary-watchman","status":"alive"}'
     ;;
 
@@ -185,8 +195,10 @@ run_failure() {
 setup_fake_curl
 
 receipt="$TMPDIR_TEST/healthy.json"
-STUB_SCENARIO=healthy run_success "healthy witness exits zero" \
-  "$WITNESS" \
+run_success "healthy witness exits zero" \
+  env \
+    STUB_SCENARIO=healthy \
+    "${WITNESS[@]}" \
     --endpoint https://canary.example \
     --read-api-key read-key \
     --ingest-api-key ingest-key \
@@ -199,9 +211,27 @@ assert_json_equals "$receipt" '.probes.readyz.response.status' 'ready' "healthy 
 assert_json_equals "$receipt" '.probes.canary_query.response.total_errors' '0' "healthy records canary query"
 assert_json_equals "$receipt" '.check_in.http_status' '201' "healthy sends check-in"
 
+receipt="$TMPDIR_TEST/healthy-ttl.json"
+run_success "healthy witness sends configured ttl" \
+  env \
+    CHECK_IN_TTL_EXPECTED=7200000 \
+    STUB_SCENARIO=healthy \
+    CANARY_WITNESS_TTL_MS=7200000 \
+    "${WITNESS[@]}" \
+      --endpoint https://canary.example \
+      --read-api-key read-key \
+      --ingest-api-key ingest-key \
+      --receipt "$receipt" \
+      --require-check-in \
+      --json
+assert_json_equals "$receipt" '.status' 'healthy' "healthy ttl receipt status"
+assert_json_equals "$receipt" '.check_in.http_status' '201' "healthy ttl sends check-in"
+
 receipt="$TMPDIR_TEST/pressured.json"
-STUB_SCENARIO=pressured run_success "pressured ready witness exits zero" \
-  "$WITNESS" \
+run_success "pressured ready witness exits zero" \
+  env \
+    STUB_SCENARIO=pressured \
+    "${WITNESS[@]}" \
     --endpoint https://canary.example \
     --read-api-key read-key \
     --ingest-api-key ingest-key \
@@ -213,8 +243,10 @@ assert_json_equals "$receipt" '.probes.readyz.response.checks.workers[] | select
 assert_json_equals "$receipt" '.check_in.http_status' '201' "pressured ready sends check-in"
 
 receipt="$TMPDIR_TEST/degraded.json"
-STUB_SCENARIO=degraded run_failure "degraded witness exits nonzero" \
-  "$WITNESS" \
+run_failure "degraded witness exits nonzero" \
+  env \
+    STUB_SCENARIO=degraded \
+    "${WITNESS[@]}" \
     --endpoint https://canary.example \
     --read-api-key read-key \
     --ingest-api-key ingest-key \
@@ -224,8 +256,10 @@ assert_json_equals "$receipt" '.status' 'degraded' "degraded receipt status"
 assert_json_equals "$receipt" '.check_in.skipped' 'true' "degraded skips check-in"
 
 receipt="$TMPDIR_TEST/unreachable.json"
-STUB_SCENARIO=unreachable run_failure "unreachable witness exits nonzero" \
-  "$WITNESS" \
+run_failure "unreachable witness exits nonzero" \
+  env \
+    STUB_SCENARIO=unreachable \
+    "${WITNESS[@]}" \
     --endpoint https://canary.example \
     --read-api-key read-key \
     --ingest-api-key ingest-key \
@@ -236,8 +270,10 @@ assert_json_equals "$receipt" '.status' 'unreachable' "unreachable receipt statu
 assert_json_equals "$receipt" '.probes.healthz.curl_exit' '7' "unreachable records curl exit"
 
 receipt="$TMPDIR_TEST/malformed.json"
-STUB_SCENARIO=malformed run_failure "malformed witness exits nonzero" \
-  "$WITNESS" \
+run_failure "malformed witness exits nonzero" \
+  env \
+    STUB_SCENARIO=malformed \
+    "${WITNESS[@]}" \
     --endpoint https://canary.example \
     --read-api-key read-key \
     --ingest-api-key ingest-key \
@@ -253,7 +289,7 @@ run_failure "required missing check-in exits nonzero" \
     -u CANARY_INGEST_API_KEY \
     -u CANARY_WITNESS_INGEST_KEY \
     STUB_SCENARIO=healthy \
-    "$WITNESS" \
+    "${WITNESS[@]}" \
     --endpoint https://canary.example \
     --read-api-key read-key \
     --receipt "$receipt" \
