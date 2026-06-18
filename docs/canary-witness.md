@@ -4,9 +4,10 @@ Canary monitors itself from two directions:
 
 - Inside Canary, the `canary-self` HTTP target checks
   `https://canary-obs.fly.dev/healthz`.
-- Outside Canary, the scheduled GitHub Actions witness runs
-  `bin/canary-witness` every five minutes and preserves a JSON receipt as a
-  workflow artifact.
+- Outside Canary, the scheduled GitHub Actions witness asks to run every five
+  minutes and preserves a JSON receipt as a workflow artifact. GitHub cron is
+  best-effort, so the production workflow sends a two-hour `ttl_ms` check-in
+  to avoid false witness-down incidents when scheduled runs are delayed.
 
 The external witness is intentionally a shell script rather than a Rust service
 because the production substrate is GitHub Actions cron. Avoiding a scheduled
@@ -34,7 +35,9 @@ When all three signals are healthy, the witness sends an ingest check-in:
 ```
 
 The check-in proves Canary can still ingest from an external observer. The
-receipt remains useful when the check-in cannot be delivered.
+receipt remains useful when the check-in cannot be delivered. When
+`CANARY_WITNESS_TTL_MS` or `--ttl-ms` is set, the check-in includes `ttl_ms`
+so Canary uses that TTL for the next deadline on TTL-mode monitors.
 
 ## GitHub Schedule
 
@@ -42,6 +45,11 @@ receipt remains useful when the check-in cannot be delivered.
 each run it uploads `canary-witness-receipt.json`. On failure it opens a GitHub
 issue labeled `canary-witness-failed`; on recovery it closes the issue. This
 notification path does not depend on Canary being reachable.
+
+The workflow keeps the cron expression at `*/5 * * * *` for best-effort
+freshness but sets `CANARY_WITNESS_TTL_MS=7200000` because observed GitHub
+scheduled runs can land roughly hourly or later. Tightening this TTL requires
+moving the witness to a scheduler that can meet the tighter cadence.
 
 Required repository secrets:
 
