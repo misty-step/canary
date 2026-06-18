@@ -1,6 +1,6 @@
 # Make Canary self-watch produce one actionable operator verdict
 
-Priority: P0 · Status: ready · Estimate: L
+Priority: P0 · Status: done · Estimate: L
 
 ## Goal
 Turn `bin/canary doctor` into the agent control-tower verdict for Canary itself, so a cold agent can see whether Canary is healthy, degraded, or unable to watch itself and what to do next.
@@ -22,3 +22,14 @@ Keep the browser dashboard dead. The output surface should be CLI JSON/text and 
 3. Add witness receipt/run discovery for GitHub Actions artifacts without requiring a human dashboard.
 4. Expand the MCP manifest to cover the inspection commands agents need for the same drill-downs.
 5. Add fixture tests for the live failure shape observed during this groom.
+
+## Closure
+Shipped in PR #163 (commit b0c43b5, 2026-06-15). `bin/canary doctor --json`
+now emits a `verdict` object with `overall`, `blocking_signals`,
+`next_operator_action`, `witness_age_ms`, `open_canary_incident`,
+`worker_pressure`, `dogfood_gap_count`, and `receipt_run_references`.
+Pressured workers are reported separately from failing workers. MCP manifest
+covers summary, errors, services, incidents, timeline, targets, monitors,
+doctor, witness, DR status, and dogfood audit. Fixture
+`doctor_watchman_down.json` + test `doctor_watchman_down_fixture_stays_actionable`
+prove the live failure shape stays actionable.
