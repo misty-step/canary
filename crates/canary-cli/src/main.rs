@@ -4,12 +4,13 @@ use std::{env, path::PathBuf, process::ExitCode};
 
 use canary_cli::{
     ApiClient, CliError, Config, IntegrationEnrollRequest, IntegrationInput, RenderMode, Result,
-    Window, doctor_report, dogfood_strict_failure_count, encode, find_repo_root,
-    integration_discover, integration_enroll, integration_patch, integration_plan,
+    Window, doctor_report, dogfood_strict_failure_count, dogfood_value_report, encode,
+    find_repo_root, integration_discover, integration_enroll, integration_patch, integration_plan,
     integration_status, json_envelope, print_json, print_lines, resolve_endpoint_without_config,
-    run_dogfood_inventory, summarize_claims, summarize_doctor, summarize_dogfood, summarize_event,
-    summarize_incidents, summarize_integration, summarize_monitors, summarize_query,
-    summarize_report, summarize_services, summarize_targets, summarize_timeline, tool_manifest,
+    run_dogfood_inventory, summarize_claims, summarize_doctor, summarize_dogfood,
+    summarize_dogfood_value, summarize_event, summarize_incidents, summarize_integration,
+    summarize_monitors, summarize_query, summarize_report, summarize_services, summarize_targets,
+    summarize_timeline, tool_manifest,
 };
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
@@ -107,12 +108,22 @@ struct DogfoodArgs {
 enum DogfoodCommand {
     /// Run deployed service coverage inventory.
     Audit(DogfoodAuditArgs),
+    /// Build one per-service value receipt from dogfood and live Canary evidence.
+    Value(DogfoodValueArgs),
 }
 
 #[derive(Debug, Args)]
 struct DogfoodAuditArgs {
     #[arg(long)]
     strict: bool,
+}
+
+#[derive(Debug, Args)]
+struct DogfoodValueArgs {
+    #[arg(long)]
+    service: String,
+    #[arg(long, default_value = "24h")]
+    window: String,
 }
 
 #[derive(Debug, Args)]
@@ -315,6 +326,25 @@ fn run() -> Result<()> {
                     )));
                 }
                 Ok(())
+            }
+            DogfoodCommand::Value(value_args) => {
+                let config = Config::resolve(endpoint, api_key, config)?;
+                let client = ApiClient::new(config)?;
+                let cwd = env::current_dir().map_err(|source| CliError::Io {
+                    path: PathBuf::from("."),
+                    source,
+                })?;
+                let repo_root = find_repo_root(&cwd)?;
+                let window = Window::parse(&value_args.window)?;
+                let response =
+                    dogfood_value_report(&client, &repo_root, &value_args.service, window)?;
+                render(
+                    "dogfood value",
+                    client.endpoint(),
+                    response,
+                    mode,
+                    summarize_dogfood_value,
+                )
             }
         },
         Commands::Integrate(args) => run_integrate_command(args, endpoint, api_key, config, mode),

@@ -43,7 +43,7 @@
 | 043 | Agentic remediation claim protocol | P1 | done | L |
 | 044 | Telemetry and analytics signal model | P1 | done | XL |
 | 045 | Self-watch operator verdict | P0 | done | L |
-| 046 | Dogfood value receipts | P0 | ready | L |
+| 046 | Dogfood value receipts | P0 | done | L |
 | 047 | Alert-plane reliability and SLO burn-rate | P0 | ready | XL |
 | 048 | Responder rich-context safety gate | P0 | pending | XL |
 | 049 | Integration evidence and capture gaps | P1 | pending | XL |
@@ -103,16 +103,15 @@
 **Lane 4 (hardening):** 008, 014, 016, 017, 018, 019 (independent, small, can ship anytime) · **034 (worker lifecycle readiness oracle)** hardens the Rust background-worker proof surface
 **Lane 5 (dogfood coverage):** 020 (Adminifi HTTP surface verification) · **033 (deployed service registry lifecycle)** shipped the managed registry substrate · **035 (deployed app Canary coverage)** makes every active owned deployment covered or explicitly blocked · **036 (agent-native inspection surface)** gives agents the operating view · **037 (watch the watchmen)** proves Canary externally · **038 (one-command integration agent)** removes setup friction
 **Lane 6 (arbitrary-app productization):** 039 (external-user security/privacy foundation) → 041 (live integration verification harness) + 042 (runtime pressure/freshness ops) → 040 (universal integration/enrollment engine) → 043 (agentic remediation claim protocol) + 044 (telemetry/analytics signal model) → **048 (responder rich-context safety gate)** → Bitterblossom **055 (canary/incident responder template)** → **049 (integration evidence/capture gaps)** → 010 (Ramp pattern)
-**Lane 7 (product feedback loop):** 045 (self-watch operator verdict) shipped → **046 (dogfood value receipts)** → **047 (alert-plane reliability/SLO burn-rate)** — turns Canary dogfooding from coverage checks into value, alertability, and operator-action proof
+**Lane 7 (product feedback loop):** 045 (self-watch operator verdict) shipped → 046 (dogfood value receipts) shipped → **047 (alert-plane reliability/SLO burn-rate)** — turns Canary dogfooding from coverage checks into value, alertability, and operator-action proof
 
 ### Active order (2026-06-17)
 
-045 shipped in PR #163 (commit b0c43b5). `bin/canary doctor --json` now emits
-an actionable verdict with blocking signals, witness age, open incident, worker
-pressure, dogfood gaps, and next operator action. MCP manifest covers all
-required drill-downs. 046 is the best next pickup to turn dogfood coverage into
-per-service value receipts, then 047 for alert-plane and SLO/error-budget
-feedback.
+045 shipped in PR #163 (commit b0c43b5). 046 shipped the per-service dogfood
+value receipt loop. `bin/canary dogfood value --service <name> --json` now
+answers what Canary proves for one service, and `doctor --json` includes
+aggregate dogfood value counts. 047 is the best next pickup for alert-plane and
+SLO/error-budget feedback.
 
 048 stays pending until the self-watch/value/SLO loops settle, because
 arbitrary-user rich-context responders need those contracts to avoid
@@ -258,6 +257,12 @@ Bitterblossom workload. 020 stays blocked on Adminifi URLs.
   dogfood audit. Fixture `doctor_watchman_down.json` proves the live
   `readyz ok + witness down + open incident` shape stays actionable. Shipped in
   PR #163 (commit b0c43b5).
+- 2026-06-18: Delivered 046. `bin/canary dogfood value --service <name>
+  --json` now builds per-service receipts from dogfood coverage plus live
+  target/monitor, error, incident, claim, annotation, and telemetry evidence.
+  Live pilot receipts distinguish `linejam` as proven from `chrondle` stale
+  registry evidence, `doctor --json` surfaces aggregate dogfood value counts,
+  and MCP exposes `canary_dogfood_value`.
 
 ## Status
 

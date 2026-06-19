@@ -279,6 +279,7 @@ fn mcp_manifest_exposes_operator_drilldowns() {
         "canary_targets",
         "canary_monitors",
         "canary_dogfood_audit",
+        "canary_dogfood_value",
         "canary_witness",
         "canary_dr_status",
     ] {

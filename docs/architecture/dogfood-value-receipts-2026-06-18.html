@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en" data-ae-mode="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dogfood Value Receipts Plan</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@100..900&amp;family=Geist+Mono:wght@100..900&amp;display=swap">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/misty-step/aesthetic@v2.5.1/aesthetic.css">
+  <style>
+    :root { --ae-accent: #1d4f43; --ae-accent-dark: #7fd6c3; }
+    .plan-wide .ae-bar, .plan-wide .ae-stage { width: min(92rem, 100% - 4rem); }
+    .hero { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(24em, 0.72fr); gap: 3em; align-items: end; }
+    .kicker { display: block; margin-bottom: 0.8em; }
+    .rule { border-top: 1px solid var(--ae-line); margin: 1.5em 0; }
+    .grid-2, .grid-3, .grid-5 { display: grid; gap: 1px; background: var(--ae-line); }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+    .cell { min-width: 0; background: var(--ae-surface); padding: 1.2em 1.35em; }
+    .wash { background: var(--ae-wash); }
+    .phase { display: grid; grid-template-columns: 8em minmax(0, 1fr) minmax(15em, 0.68fr); gap: 1.3em; border-top: 1px solid var(--ae-line); padding-top: 1em; margin-top: 1em; }
+    .phase:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+    .table-wrap { overflow-x: auto; }
+    .status { display: inline-flex; gap: 0.45em; align-items: baseline; }
+    .status svg { transform: translateY(0.15em); }
+    @media (max-width: 980px) {
+      .plan-wide .ae-bar, .plan-wide .ae-stage { width: min(100% - 2rem, 92rem); }
+      .hero, .grid-2, .grid-3, .grid-5, .phase { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<svg aria-hidden="true" style="display: none" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></symbol>
+</svg>
+
+<div class="ae-screen plan-wide">
+  <header class="ae-bar">
+    <a class="ae-name" href="#">CANARY / BACKLOG 046</a>
+    <p class="ae-chrome">dogfood value receipts execution plan</p>
+  </header>
+
+  <main class="ae-stage ae-stage-scroll">
+    <article class="ae-view">
+      <section class="hero" aria-label="Plan contract">
+        <div>
+          <p class="ae-chrome kicker">SOURCE: backlog.d/046-dogfood-value-receipts.md</p>
+          <h1 class="ae-strong">Make dogfood coverage produce per-service value receipts.</h1>
+          <p class="ae-lede">Add the smallest CLI read model that answers what Canary currently proves for one registered service, starting with linejam and chrondle. The receipt should combine existing coverage, health, errors, incidents, claims, annotations, telemetry events, and verification status without inventing a new storage system.</p>
+        </div>
+        <aside class="ae-panel">
+          <h2 class="ae-h">CHOSEN DESIGN</h2>
+          <p><span class="status"><svg class="ae-icon ae-ok"><use href="#i-check"></use></svg> Add <code>bin/canary dogfood value --service &lt;name&gt;</code> as a CLI read model over existing live probes and registry data.</span></p>
+          <div class="rule"></div>
+          <h2 class="ae-h">QUALITY SYSTEM</h2>
+          <p>Tier: substantive. Public CLI and operator workflow behavior change.</p>
+          <p>Proof: failing CLI test, focused Rust tests, live value receipts for pilots, doctor JSON summary, GitHub CI, fresh-context review.</p>
+          <div class="rule"></div>
+          <p class="ae-dim">Baseline: strict audit reports covered=4, partial=33, blocked=5, ignored=1, strict_failures=45.</p>
+          <p class="ae-dim">Stop if the receipt needs new persistence, new auth scopes, or cross-service mutation.</p>
+        </aside>
+      </section>
+
+      <section class="grid-5" aria-label="Executive contract" style="margin-top: 2em">
+        <article class="cell"><h2 class="ae-h">STANDARDS</h2><p>Agent-readable JSON, deterministic text summary, no secret output, no writes, and no responder-boundary creep.</p></article>
+        <article class="cell"><h2 class="ae-h">ACCEPTANCE</h2><p>Linejam and chrondle receipts distinguish current value proof, explicit absence, and one next action.</p></article>
+        <article class="cell"><h2 class="ae-h">VERIFY</h2><p><code>bin/canary dogfood value --service linejam --json</code>, <code>chrondle</code>, targeted tests, strict gate.</p></article>
+        <article class="cell"><h2 class="ae-h">COMMUNICATE</h2><p>Report baseline gaps, files changed, live receipts, critic result, gate result, and clean tree.</p></article>
+        <article class="cell wash"><h2 class="ae-h">STOP IF</h2><p>Live API auth missing, registry cannot identify service, strict gate fails for unrelated breakage, or reviewer finds a blocking public-surface issue.</p></article>
+      </section>
+
+      <section class="grid-3" aria-label="Current change proof" style="margin-top: 1px">
+        <article class="cell"><h2 class="ae-h">CURRENT STATE</h2><p><code>bin/canary dogfood audit --strict --json</code> fails with 45 strict failures. Existing dogfood audit proves coverage counts, but not value outcome per service.</p></article>
+        <article class="cell"><h2 class="ae-h">CHANGE SHAPE</h2><p>Extend <code>canary-cli</code> dogfood subcommands, add receipt builder/summarizer/tests, update docs, MCP manifest, and doctor verdict value summary.</p></article>
+        <article class="cell wash"><h2 class="ae-h">PROOF SURFACE</h2><p>CLI transcript JSON/text, fixture tests in <code>crates/canary-cli</code>, and final doctor JSON showing value coverage counts.</p></article>
+      </section>
+
+      <section class="grid-2" aria-label="Scope and anchors" style="margin-top: 2em">
+        <article class="cell">
+          <h2 class="ae-h">SCOPE</h2>
+          <p><strong>Goal:</strong> ship a first useful value receipt loop, not close every dogfood deployment gap.</p>
+          <p><strong>Non-goals:</strong> dashboard UI, new database tables, auto-remediation, broad registry cleanup, or arbitrary-user responder authorization.</p>
+          <p><strong>Invariants:</strong> read-only CLI behavior, scoped API keys, deterministic summaries, and responder boundary remain intact.</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">REPO ANCHORS</h2>
+          <p><code>backlog.d/046-dogfood-value-receipts.md</code> - acceptance oracle.</p>
+          <p><code>crates/canary-cli/src/main.rs</code> - CLI command routing.</p>
+          <p><code>crates/canary-cli/src/lib.rs</code> - dogfood, doctor, MCP read models.</p>
+          <p><code>priv/dogfood/owned_services.json</code> - registry contract.</p>
+        </article>
+      </section>
+
+      <section class="ae-panel" aria-label="Execution plan" style="margin-top: 2em">
+        <h2 class="ae-h">EXECUTION PLAN</h2>
+        <div class="phase"><strong class="ae-accent">1 frame</strong><p>Inspect registry entries and live API shapes for linejam and chrondle. Write the receipt schema in docs first.</p><p class="ae-dim">Evidence: baseline audit JSON and fixture fields selected.</p></div>
+        <div class="phase"><strong class="ae-accent">2 test</strong><p>Add failing tests for <code>dogfood value</code>, pilot distinction, and doctor value summary.</p><p class="ae-dim">Evidence: targeted cargo tests fail before implementation.</p></div>
+        <div class="phase"><strong class="ae-accent">3 build</strong><p>Implement a read-only receipt from existing dogfood, target, monitor, error, incident, claim, annotation, event, and integration evidence.</p><p class="ae-dim">Evidence: tests pass; live pilot receipts render.</p></div>
+        <div class="phase"><strong class="ae-accent">4 review</strong><p>Run fresh-context review on diff plus oracle using the works-critique card.</p><p class="ae-dim">Evidence: blocking findings fixed or rejected with reason.</p></div>
+        <div class="phase"><strong class="ae-accent">5 close</strong><p>Run focused tests, repo gate, live receipts, PR CI, squash merge, and post-merge doctor.</p><p class="ae-dim">Evidence: final status, remote sync, and receipt transcripts.</p></div>
+      </section>
+
+      <section class="grid-2" aria-label="Alternatives and risks" style="margin-top: 2em">
+        <article class="cell">
+          <h2 class="ae-h">ALTERNATIVES</h2>
+          <div class="table-wrap"><table class="ae-table"><thead><tr><th>option</th><th>why it helps</th><th>tradeoff</th><th>verdict</th></tr></thead><tbody>
+            <tr><td class="ae-item">CLI receipt</td><td>Fits agent-first workflow and MCP wrapping.</td><td>Less visual than dashboard.</td><td>choose</td></tr>
+            <tr><td class="ae-item">Registry cleanup first</td><td>Reduces strict failures quickly.</td><td>Still no value proof schema.</td><td>defer</td></tr>
+            <tr><td class="ae-item">New persistence</td><td>Could track history.</td><td>Unneeded for first receipt and higher blast radius.</td><td>reject</td></tr>
+          </tbody></table></div>
+        </article>
+        <article class="cell wash">
+          <h2 class="ae-h">RISKS</h2>
+          <div class="table-wrap"><table class="ae-table"><thead><tr><th>risk</th><th>mitigation</th><th>owner</th></tr></thead><tbody>
+            <tr><td>Receipt overclaims value.</td><td>Use explicit absence fields and one next action.</td><td>agent</td></tr>
+            <tr><td>Live APIs make tests brittle.</td><td>Test fixture builder logic; live CLI only for QA.</td><td>agent</td></tr>
+            <tr><td>Scope expands into all 45 gaps.</td><td>Stop at pilot receipt loop and doctor summary.</td><td>agent</td></tr>
+          </tbody></table></div>
+        </article>
+      </section>
+
+      <section class="ae-panel" aria-label="Review topology" style="margin-top: 2em">
+        <h2 class="ae-h">REVIEW TOPOLOGY</h2>
+        <div class="table-wrap"><table class="ae-table"><thead><tr><th>selected tier</th><th>why this tier fits</th><th>critic lenses</th><th>waiver / escalation</th></tr></thead><tbody>
+          <tr><td class="ae-item">substantive</td><td>Multi-file public CLI/operator workflow; reversible and read-only.</td><td>Works critique: public surface, workflow, compatibility, operations; test strategy.</td><td>Escalate if auth, privacy, or mutation surface appears.</td></tr>
+        </tbody></table></div>
+        <p><strong>Ignore:</strong> dashboard requests, style-only naming, and wholesale registry cleanup.</p>
+      </section>
+    </article>
+  </main>
+
+  <footer class="ae-bar">
+    <p class="ae-foot">Generated from <code>skills/shape/templates/html-plan.html</code>; filled directly as HTML.</p>
+  </footer>
+</div>
+</body>
+</html>
