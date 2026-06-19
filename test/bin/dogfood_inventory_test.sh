@@ -137,7 +137,7 @@ write_stale_manifest() {
       "last_checked_at": "2026-06-15T00:00:00Z",
       "failure_mode": "Old evidence.",
       "owner": "misty-step",
-      "next_action": "Finish backlog items 034 and 041."
+      "next_action": "Finish ticket 038."
     }
   ]
 }
@@ -381,7 +381,7 @@ BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "2" "invalid registry exits non-zero"
 assert_contains "$BODY" "invalid dogfood registry shape" "invalid registry explains schema failure"
 
-echo "Test 6: dogfood-inventory strict fails stale evidence and plural completed-ticket next actions"
+echo "Test 6: dogfood-inventory strict fails stale evidence and singular completed-ticket next actions"
 OUTPUT=$(run_failure "$DOGFOOD_INVENTORY" --manifest "$STALE_MANIFEST" --vercel-projects "misty-step=$VERCEL_EMPTY" --vercel-projects "adminifi-growth=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT" --requested stale --now 2026-06-14T00:00:00Z --max-evidence-age-hours 24 --strict)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)

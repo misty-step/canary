@@ -61,6 +61,32 @@ bin/dogfood-inventory \
   --strict --json
 ```
 
+## Value Receipt Command
+
+Run a value receipt when the question is what Canary currently proves for one
+registered service:
+
+```bash
+bin/canary dogfood value --service linejam --json
+```
+
+The receipt combines registry coverage with live `/api/v1/status`
+target/monitor health, error query readback, open incidents, active remediation
+claims, annotations, telemetry events, and a synthetic verification verdict. It
+returns exactly one `next_action` so downstream agents can continue without
+re-deriving registry state.
+
+Use the pilot pair as a regression check:
+
+- `linejam` should render as `value_state: proven` when its target is up, query
+  readback succeeds, and there are no current errors.
+- `chrondle` should render as `value_state: stale_registry_evidence` when live
+  readback is clean but the registry still describes the old `TypeError` flood
+  triage action.
+
+`bin/canary doctor --json` includes `response.dogfood_value` aggregate counts
+for `covered`, `stale`, `blocked`, `partial`, and `value_unproven` services.
+
 ## Registry States
 
 Each service entry has:

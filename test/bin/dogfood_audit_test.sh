@@ -231,7 +231,7 @@ write_stale_manifest() {
       "last_checked_at": "2026-06-15T00:00:00Z",
       "failure_mode": "Old evidence.",
       "owner": "misty-step",
-      "next_action": "Finish backlog items 034 and 041."
+      "next_action": "Finish ticket 038."
     }
   ]
 }
@@ -364,7 +364,7 @@ BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "invalid registry exits non-zero"
 assert_contains "$BODY" "Invalid deployed-service registry" "invalid registry explains the schema failure"
 
-echo "Test 6: dogfood-audit strict json reports stale evidence and plural completed-ticket next actions"
+echo "Test 6: dogfood-audit strict json reports stale evidence and singular completed-ticket next actions"
 setup_stubbed_curl
 OUTPUT=$(CANARY_ENDPOINT=https://canary.example CANARY_API_KEY=sk_test run_failure "$DOGFOOD_AUDIT" --manifest "$STALE_MANIFEST" --now 2026-06-14T00:00:00Z --max-evidence-age-hours 24 --strict --json)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)

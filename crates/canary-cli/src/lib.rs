@@ -27,6 +27,7 @@ const DEFAULT_INTEGRATION_ENDPOINT_ENV: &str = "CANARY_ENDPOINT";
 const DEFAULT_INTEGRATION_SERVER_KEY_ENV: &str = "CANARY_API_KEY";
 const DEFAULT_INTEGRATION_PUBLIC_ENDPOINT_ENV: &str = "NEXT_PUBLIC_CANARY_ENDPOINT";
 const DEFAULT_INTEGRATION_PUBLIC_KEY_ENV: &str = "NEXT_PUBLIC_CANARY_API_KEY";
+const DOGFOOD_VALUE_ERROR_GROUP_SUBJECT_LIMIT: usize = 3;
 
 /// Error returned by the CLI library.
 #[derive(Debug, Error)]
@@ -501,6 +502,62 @@ pub fn summarize_dogfood(value: &Value) -> Vec<String> {
     ]
 }
 
+/// Summarize a dogfood value receipt or aggregate value summary.
+pub fn summarize_dogfood_value(value: &Value) -> Vec<String> {
+    if value.get("service").is_some() {
+        return vec![
+            format!("service: {}", string_field(value, "service")),
+            format!("value_state: {}", string_field(value, "value_state")),
+            format!(
+                "coverage: {}",
+                value
+                    .pointer("/coverage/verdict")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+            ),
+            format!(
+                "health: {}",
+                value
+                    .pointer("/health/state")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+            ),
+            format!(
+                "errors: {}",
+                value
+                    .pointer("/error_counts/total")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+            ),
+            format!(
+                "incidents_open: {}",
+                value
+                    .pointer("/incident_counts/open")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+            ),
+            format!(
+                "verification: {}",
+                value
+                    .pointer("/verification/status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+            ),
+            format!("next_action: {}", string_field(value, "next_action")),
+        ];
+    }
+
+    let summary = value.get("response").unwrap_or(value);
+    vec![format!(
+        "covered: {}, stale: {}, blocked: {}, partial: {}, value_unproven: {}",
+        number_field(summary, "covered"),
+        number_field(summary, "stale"),
+        number_field(summary, "blocked"),
+        number_field(summary, "partial"),
+        number_field(summary, "value_unproven")
+    )]
+}
+
 /// Count dogfood strict-mode failures from an inventory JSON report.
 pub fn dogfood_strict_failure_count(value: &Value) -> usize {
     value
@@ -532,6 +589,33 @@ pub fn run_dogfood_inventory(repo_root: &Path, strict: bool) -> Result<Value> {
         });
     }
     serde_json::from_slice(&output.stdout).map_err(CliError::from)
+}
+
+/// Inputs for the pure dogfood value receipt builder.
+#[derive(Debug)]
+pub struct DogfoodValueInput<'a> {
+    /// Service name to explain.
+    pub service: &'a str,
+    /// Query window used for live readback.
+    pub window: &'a str,
+    /// Dogfood inventory probe, usually `{"ok": true, "response": ...}`.
+    pub dogfood: &'a Value,
+    /// Live target probe.
+    pub targets: &'a Value,
+    /// Live monitor probe.
+    pub monitors: &'a Value,
+    /// Live synthesized status probe.
+    pub status: &'a Value,
+    /// Live error query probe for the service.
+    pub query: &'a Value,
+    /// Live incident list probe.
+    pub incidents: &'a Value,
+    /// Live timeline probe for the service.
+    pub timeline: &'a Value,
+    /// Claims probes keyed by discovered subject.
+    pub claims: &'a Value,
+    /// Annotation probes keyed by discovered subject.
+    pub annotations: &'a Value,
 }
 
 /// Discover local project integration state without reading secret values.
@@ -931,6 +1015,622 @@ fn live_probe(fetch: impl FnOnce() -> Result<Value>) -> Value {
         Ok(response) => json!({"ok": true, "response": response}),
         Err(error) => json!({"ok": false, "error": redact_text(&error.to_string())}),
     }
+}
+
+/// Collect live evidence and build one dogfood value receipt.
+pub fn dogfood_value_report(
+    client: &ApiClient,
+    repo_root: &Path,
+    service: &str,
+    window: Window,
+) -> Result<Value> {
+    let dogfood = json!({"ok": true, "response": run_dogfood_inventory(repo_root, false)?});
+    let targets = live_probe(|| client.get_auth_json("/api/v1/targets"));
+    let monitors = live_probe(|| client.get_auth_json("/api/v1/monitors"));
+    let status =
+        live_probe(|| client.get_auth_json(&format!("/api/v1/status?window={}", window.as_str())));
+    let query = live_probe(|| {
+        client.get_auth_json(&format!(
+            "/api/v1/query?service={}&window={}",
+            encode(service),
+            window.as_str()
+        ))
+    });
+    let incidents = live_probe(|| client.get_auth_json("/api/v1/incidents"));
+    let timeline = live_probe(|| {
+        client.get_auth_json(&format!(
+            "/api/v1/timeline?service={}&window={}&event_type=telemetry.event&limit=10",
+            encode(service),
+            window.as_str()
+        ))
+    });
+    let subjects = dogfood_value_subjects(service, &targets, &monitors, &query, &incidents);
+    let claims = dogfood_subject_probes(client, &subjects, "claims");
+    let annotations = dogfood_subject_probes(client, &subjects, "annotations");
+
+    Ok(dogfood_value_receipt(&DogfoodValueInput {
+        service,
+        window: window.as_str(),
+        dogfood: &dogfood,
+        targets: &targets,
+        monitors: &monitors,
+        status: &status,
+        query: &query,
+        incidents: &incidents,
+        timeline: &timeline,
+        claims: &claims,
+        annotations: &annotations,
+    }))
+}
+
+fn dogfood_subject_probes(
+    client: &ApiClient,
+    subjects: &[DogfoodValueSubject],
+    kind: &str,
+) -> Value {
+    Value::Array(
+        subjects
+            .iter()
+            .map(|subject| {
+                let path = format!(
+                    "/api/v1/{kind}?subject_type={}&subject_id={}&limit=5",
+                    encode(&subject.subject_type),
+                    encode(&subject.subject_id)
+                );
+                json!({
+                    "subject_type": subject.subject_type,
+                    "subject_id": subject.subject_id,
+                    "probe": live_probe(|| client.get_auth_json(&path))
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Build a machine-readable value receipt for one dogfooded service.
+pub fn dogfood_value_receipt(input: &DogfoodValueInput<'_>) -> Value {
+    let surface = dogfood_service_entry(input.dogfood, input.service).unwrap_or_else(|| json!({}));
+    let target = live_collection_service_match(input.targets, "targets", input.service);
+    let monitor = live_collection_service_match(input.monitors, "monitors", input.service);
+    let status_target = target
+        .as_ref()
+        .and_then(|target| dogfood_status_target_match(input.status, target));
+    let status_monitor =
+        dogfood_status_monitor_match(input.status, input.service, monitor.as_ref());
+    let health_state = dogfood_health_state(
+        input.status,
+        status_target.as_ref(),
+        status_monitor.as_ref(),
+        target.as_ref(),
+        monitor.as_ref(),
+    );
+    let total_errors = input
+        .query
+        .pointer("/response/total_errors")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let error_group_count = input
+        .query
+        .pointer("/response/groups")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let service_incidents = dogfood_service_incidents(input.incidents, input.service);
+    let open_incidents = service_incidents
+        .iter()
+        .filter(|incident| dogfood_incident_is_open(incident))
+        .cloned()
+        .collect::<Vec<_>>();
+    let recent_annotations = dogfood_recent_annotations(input.annotations);
+    let recent_telemetry_events = dogfood_recent_telemetry_events(input.timeline);
+    let active_claim = dogfood_active_claim(input.claims, input.annotations);
+    let coverage = dogfood_coverage_verdict(&surface, input.service, input.dogfood);
+    let registry_state = surface
+        .get("registry_state")
+        .or_else(|| surface.get("state"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let stale_current_work = dogfood_stale_current_work(&surface, total_errors, input.query);
+    let query_ok = input
+        .query
+        .get("ok")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let health_ok = health_state == "up";
+    let verification_status =
+        dogfood_value_verification_status(&coverage, health_ok, query_ok, stale_current_work);
+    let value_state = dogfood_value_state(&coverage, health_ok, query_ok, stale_current_work);
+    let next_action = dogfood_value_next_action(
+        &surface,
+        stale_current_work,
+        &health_state,
+        total_errors,
+        input.window,
+    );
+
+    json!({
+        "schema_version": 1,
+        "service": input.service,
+        "window": input.window,
+        "value_state": value_state,
+        "coverage": {
+            "verdict": coverage,
+            "registry_state": registry_state,
+            "evidence_stale": bool_field(&surface, "evidence_stale"),
+            "receipt_seen": surface.get("receipt_seen").cloned().unwrap_or(Value::Null),
+            "receipt_stale": surface.get("receipt_stale").cloned().unwrap_or(Value::Null),
+            "completed_ticket_next_action": bool_field(&surface, "completed_ticket_next_action"),
+            "reasons": surface.get("reasons").cloned().unwrap_or_else(|| json!([]))
+        },
+        "registry": {
+            "state": registry_state,
+            "owner": surface.get("owner").cloned().unwrap_or(Value::Null),
+            "platform": surface.get("platform").cloned().unwrap_or(Value::Null),
+            "production_url": surface.get("production_url").cloned().unwrap_or(Value::Null),
+            "health_url": surface.get("health_url").cloned().unwrap_or(Value::Null),
+            "last_checked_at": surface.get("last_checked_at").cloned().unwrap_or(Value::Null),
+            "failure_mode": surface.get("failure_mode").cloned().unwrap_or(Value::Null),
+            "next_action": surface.get("next_action").cloned().unwrap_or(Value::Null)
+        },
+        "health": {
+            "state": health_state,
+            "target": target.unwrap_or(Value::Null),
+            "monitor": monitor.unwrap_or(Value::Null),
+            "status_target": status_target.unwrap_or(Value::Null),
+            "status_monitor": status_monitor.unwrap_or(Value::Null)
+        },
+        "error_counts": {
+            "ok": query_ok,
+            "total": total_errors,
+            "groups": error_group_count,
+            "window": input.window
+        },
+        "incident_counts": {
+            "total": service_incidents.len(),
+            "open": open_incidents.len()
+        },
+        "open_incidents": open_incidents,
+        "active_remediation_claim": active_claim,
+        "recent_annotations": recent_annotations,
+        "recent_telemetry_events": recent_telemetry_events,
+        "verification": {
+            "kind": "synthetic",
+            "status": verification_status,
+            "last_verified_outcome": dogfood_last_verified_outcome(input.service, input.window, &coverage, &health_state, query_ok, total_errors, stale_current_work)
+        },
+        "next_action": next_action,
+        "evidence": {
+            "dogfood": input.dogfood,
+            "targets": input.targets,
+            "monitors": input.monitors,
+            "status": input.status,
+            "query": input.query,
+            "incidents": input.incidents,
+            "timeline": input.timeline,
+            "claims": input.claims,
+            "annotations": input.annotations
+        }
+    })
+}
+
+/// Summarize value-receipt coverage from a dogfood inventory.
+pub fn dogfood_value_summary(value: &Value) -> Value {
+    let inventory = value.get("response").unwrap_or(value);
+    let summary = inventory.get("summary").unwrap_or(inventory);
+    let surfaces = inventory
+        .get("surfaces")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let stale = surfaces
+        .iter()
+        .filter(|surface| {
+            bool_field(surface, "evidence_stale")
+                || bool_field(surface, "completed_ticket_next_action")
+                || surface
+                    .get("receipt_stale")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+        })
+        .count();
+    let value_unproven = surfaces
+        .iter()
+        .filter(|surface| {
+            string_field(surface, "coverage") != "ignored"
+                && !surface
+                    .get("receipt_seen")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+        })
+        .count();
+
+    json!({
+        "covered": number_field(summary, "covered"),
+        "stale": stale,
+        "blocked": number_field(summary, "blocked"),
+        "partial": number_field(summary, "partial"),
+        "ignored": number_field(summary, "ignored"),
+        "value_unproven": value_unproven,
+        "strict_failures": dogfood_strict_failure_count(inventory)
+    })
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct DogfoodValueSubject {
+    subject_type: String,
+    subject_id: String,
+}
+
+fn dogfood_value_subjects(
+    service: &str,
+    targets: &Value,
+    monitors: &Value,
+    query: &Value,
+    incidents: &Value,
+) -> Vec<DogfoodValueSubject> {
+    let mut subjects = Vec::new();
+    let mut seen = BTreeSet::new();
+    if let Some(id) = live_collection_service_match(targets, "targets", service)
+        .and_then(|target| target.get("id").and_then(Value::as_str).map(str::to_owned))
+    {
+        push_dogfood_subject(&mut subjects, &mut seen, "target", &id);
+    }
+    if let Some(monitor) = live_collection_service_match(monitors, "monitors", service) {
+        let id = monitor
+            .get("id")
+            .or_else(|| monitor.get("name"))
+            .and_then(Value::as_str);
+        if let Some(id) = id {
+            push_dogfood_subject(&mut subjects, &mut seen, "monitor", id);
+        }
+    }
+    if let Some(groups) = query.pointer("/response/groups").and_then(Value::as_array) {
+        let mut groups = groups.iter().collect::<Vec<_>>();
+        groups.sort_by(|left, right| {
+            dogfood_group_count(right)
+                .cmp(&dogfood_group_count(left))
+                .then_with(|| {
+                    string_field(left, "group_hash").cmp(&string_field(right, "group_hash"))
+                })
+        });
+        for group in groups
+            .into_iter()
+            .take(DOGFOOD_VALUE_ERROR_GROUP_SUBJECT_LIMIT)
+        {
+            if let Some(id) = group.get("group_hash").and_then(Value::as_str) {
+                push_dogfood_subject(&mut subjects, &mut seen, "error_group", id);
+            }
+        }
+    }
+    for incident in dogfood_service_incidents(incidents, service) {
+        if let Some(id) = incident.get("id").and_then(Value::as_str) {
+            push_dogfood_subject(&mut subjects, &mut seen, "incident", id);
+        }
+    }
+    subjects
+}
+
+fn push_dogfood_subject(
+    subjects: &mut Vec<DogfoodValueSubject>,
+    seen: &mut BTreeSet<(String, String)>,
+    subject_type: &str,
+    subject_id: &str,
+) {
+    let key = (subject_type.to_owned(), subject_id.to_owned());
+    if seen.insert(key.clone()) {
+        subjects.push(DogfoodValueSubject {
+            subject_type: key.0,
+            subject_id: key.1,
+        });
+    }
+}
+
+fn dogfood_group_count(group: &Value) -> u64 {
+    ["count", "total_count", "total_errors"]
+        .into_iter()
+        .find_map(|field| group.get(field).and_then(Value::as_u64))
+        .unwrap_or(0)
+}
+
+fn dogfood_service_entry(dogfood: &Value, service: &str) -> Option<Value> {
+    [
+        "/response/surfaces",
+        "/response/registry",
+        "/response/services",
+        "/surfaces",
+        "/registry",
+        "/services",
+    ]
+    .into_iter()
+    .filter_map(|pointer| dogfood.pointer(pointer).and_then(Value::as_array))
+    .flat_map(|items| items.iter())
+    .find(|item| string_field(item, "service") == service)
+    .cloned()
+}
+
+fn dogfood_coverage_verdict(surface: &Value, service: &str, dogfood: &Value) -> String {
+    surface
+        .get("coverage")
+        .or_else(|| surface.get("state"))
+        .or_else(|| surface.get("registry_state"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            dogfood_service_state(dogfood, service)
+                .as_str()
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| "missing".to_owned())
+}
+
+fn dogfood_status_target_match(status: &Value, target: &Value) -> Option<Value> {
+    status
+        .pointer("/response/targets")
+        .or_else(|| status.get("targets"))
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| {
+                    ["id", "name", "url"].into_iter().any(|field| {
+                        string_field(item, field) == string_field(target, field)
+                            && !string_field(target, field).is_empty()
+                    })
+                })
+                .cloned()
+        })
+}
+
+fn dogfood_status_monitor_match(
+    status: &Value,
+    service: &str,
+    monitor: Option<&Value>,
+) -> Option<Value> {
+    status
+        .pointer("/response/monitors")
+        .or_else(|| status.get("monitors"))
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| {
+                    string_field(item, "service") == service
+                        || monitor.is_some_and(|monitor| {
+                            ["id", "name"].into_iter().any(|field| {
+                                string_field(item, field) == string_field(monitor, field)
+                                    && !string_field(monitor, field).is_empty()
+                            })
+                        })
+                })
+                .cloned()
+        })
+}
+
+fn dogfood_health_state(
+    status: &Value,
+    status_target: Option<&Value>,
+    status_monitor: Option<&Value>,
+    target: Option<&Value>,
+    monitor: Option<&Value>,
+) -> String {
+    if let Some(state) =
+        status_target.and_then(|target| target.get("state").and_then(Value::as_str))
+    {
+        return state.to_owned();
+    }
+    if let Some(monitor) = status_monitor {
+        if let Some(state) = monitor.get("state").and_then(Value::as_str) {
+            return state.to_owned();
+        }
+        if let Some(status) = monitor.get("last_check_in_status").and_then(Value::as_str) {
+            return match status {
+                "alive" | "ok" => "up".to_owned(),
+                other => other.to_owned(),
+            };
+        }
+    }
+    if target.is_some() || monitor.is_some() {
+        if status.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+            return "configured".to_owned();
+        }
+        return "unavailable".to_owned();
+    }
+    "missing".to_owned()
+}
+
+fn dogfood_service_incidents(incidents: &Value, service: &str) -> Vec<Value> {
+    incidents
+        .pointer("/response/incidents")
+        .or_else(|| incidents.get("incidents"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter(|incident| string_field(incident, "service") == service)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn dogfood_incident_is_open(incident: &Value) -> bool {
+    !matches!(
+        string_field(incident, "state").as_str(),
+        "resolved" | "closed" | "fixed" | "dismissed"
+    )
+}
+
+fn dogfood_recent_annotations(annotations: &Value) -> Vec<Value> {
+    annotations
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|probe| {
+            probe
+                .pointer("/probe/response/annotations")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .cloned()
+        })
+        .take(10)
+        .collect()
+}
+
+fn dogfood_recent_telemetry_events(timeline: &Value) -> Vec<Value> {
+    timeline
+        .pointer("/response/events")
+        .or_else(|| timeline.get("events"))
+        .and_then(Value::as_array)
+        .map(|events| {
+            events
+                .iter()
+                .filter(|event| string_field(event, "event") == "telemetry.event")
+                .take(10)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn dogfood_active_claim(claims: &Value, annotations: &Value) -> Value {
+    claims
+        .as_array()
+        .into_iter()
+        .chain(annotations.as_array())
+        .flatten()
+        .find_map(dogfood_probe_active_claim)
+        .unwrap_or(Value::Null)
+}
+
+fn dogfood_probe_active_claim(probe: &Value) -> Option<Value> {
+    probe
+        .pointer("/probe/response/current_claim")
+        .filter(|claim| claim.is_object())
+        .cloned()
+        .or_else(|| {
+            probe
+                .pointer("/probe/response/claims")
+                .and_then(Value::as_array)
+                .and_then(|claims| {
+                    claims
+                        .iter()
+                        .find(|claim| dogfood_claim_is_active(claim))
+                        .cloned()
+                })
+        })
+}
+
+fn dogfood_claim_is_active(claim: &Value) -> bool {
+    matches!(
+        string_field(claim, "state").as_str(),
+        "claimed" | "investigating" | "fix_proposed"
+    )
+}
+
+fn dogfood_stale_current_work(surface: &Value, total_errors: u64, query: &Value) -> bool {
+    if total_errors > 0 || !query.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        return false;
+    }
+    let text = format!(
+        "{} {}",
+        surface
+            .get("failure_mode")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        surface
+            .get("next_action")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    )
+    .to_ascii_lowercase();
+    ["typeerror", "triage", "flood", "incident"]
+        .into_iter()
+        .any(|needle| text.contains(needle))
+}
+
+fn dogfood_value_verification_status(
+    coverage: &str,
+    health_ok: bool,
+    query_ok: bool,
+    stale_current_work: bool,
+) -> &'static str {
+    if stale_current_work {
+        "needs_evidence_refresh"
+    } else if coverage == "covered" && health_ok && query_ok {
+        "verified"
+    } else if !health_ok {
+        "health_not_up"
+    } else if !query_ok {
+        "query_unavailable"
+    } else {
+        "unproven"
+    }
+}
+
+fn dogfood_value_state(
+    coverage: &str,
+    health_ok: bool,
+    query_ok: bool,
+    stale_current_work: bool,
+) -> &'static str {
+    if stale_current_work {
+        "stale_registry_evidence"
+    } else if coverage == "blocked" {
+        "blocked"
+    } else if coverage == "covered" && health_ok && query_ok {
+        "proven"
+    } else if coverage == "partial" || health_ok || query_ok {
+        "partial"
+    } else {
+        "unproven"
+    }
+}
+
+fn dogfood_value_next_action(
+    surface: &Value,
+    stale_current_work: bool,
+    health_state: &str,
+    total_errors: u64,
+    window: &str,
+) -> String {
+    let registry_action = surface
+        .get("next_action")
+        .and_then(Value::as_str)
+        .unwrap_or("Add dogfood registry coverage, live health coverage, and query readback.");
+    if stale_current_work {
+        return format!(
+            "Refresh registry evidence: live {window} readback is clean ({total_errors} errors), but the dogfood registry still carries stale triage text."
+        );
+    }
+    if !matches!(health_state, "up" | "missing") {
+        return format!(
+            "Restore live health state: /api/v1/status reports {health_state}; then rerun the value receipt."
+        );
+    }
+    registry_action.to_owned()
+}
+
+fn dogfood_last_verified_outcome(
+    service: &str,
+    window: &str,
+    coverage: &str,
+    health_state: &str,
+    query_ok: bool,
+    total_errors: u64,
+    stale_current_work: bool,
+) -> String {
+    if stale_current_work {
+        return format!(
+            "{service} live {window} query readback returned {total_errors} errors; registry action needs refresh before it can describe current work."
+        );
+    }
+    if coverage == "covered" && health_state != "missing" && query_ok {
+        return format!(
+            "{service} is {coverage}, health={health_state}, and live {window} query readback returned {total_errors} errors."
+        );
+    }
+    format!(
+        "{service} has coverage={coverage}, health={health_state}, query_ok={query_ok}; value proof is incomplete."
+    )
 }
 
 fn reconcile_plan_with_live_state(
@@ -1995,6 +2695,13 @@ pub fn doctor_report(client: &ApiClient, repo_root: &Path) -> Value {
         Ok(value) => json!({"ok": true, "summary": summarize_dogfood(&value), "response": value}),
         Err(error) => json!({"ok": false, "error": error.to_string()}),
     };
+    let dogfood_value = dogfood
+        .get("response")
+        .map(|response| {
+            let summary = dogfood_value_summary(response);
+            json!({"ok": true, "summary": summarize_dogfood_value(&summary), "response": summary})
+        })
+        .unwrap_or_else(|| json!({"ok": false, "error": string_field(&dogfood, "error")}));
     let dr = dr_evidence_report(repo_root);
     let worker_readiness = worker_readiness_report(&readyz);
     let verdict = doctor_verdict(
@@ -2029,6 +2736,7 @@ pub fn doctor_report(client: &ApiClient, repo_root: &Path) -> Value {
         "witness": witness,
         "dr": dr,
         "dogfood": dogfood,
+        "dogfood_value": dogfood_value,
         "worker_readiness": worker_readiness,
         "verdict": verdict
     })
@@ -2084,6 +2792,10 @@ pub fn summarize_doctor(value: &Value) -> Vec<String> {
         probe_summary(value.get("incidents"))
     ));
     lines.push(format!("dogfood: {}", probe_summary(value.get("dogfood"))));
+    lines.push(format!(
+        "dogfood_value: {}",
+        probe_summary(value.get("dogfood_value"))
+    ));
     lines.push(format!(
         "worker_readiness: {}",
         worker_readiness_summary(value.get("worker_readiness"))
@@ -3207,6 +3919,11 @@ pub fn tool_manifest() -> Vec<ToolSpec> {
             input_schema: json!({"type":"object","properties":{"strict":{"type":"boolean","default":false}}}),
         },
         ToolSpec {
+            name: "canary_dogfood_value",
+            description: "Build one per-service dogfood value receipt from coverage, health, errors, incidents, claims, annotations, telemetry, and verification evidence.",
+            input_schema: json!({"type":"object","required":["service"],"properties":{"service":{"type":"string"},"window":{"type":"string","enum":["1h","6h","24h","7d","30d"]}}}),
+        },
+        ToolSpec {
             name: "canary_event_capture",
             description: "Capture one bounded analytics event as a telemetry.event timeline row.",
             input_schema: json!({"type":"object","required":["service","name","summary"],"properties":{"service":{"type":"string"},"name":{"type":"string"},"summary":{"type":"string"},"severity":{"type":"string","enum":["info","warning","error"]},"attributes":{"type":"object"},"retention_class":{"type":"string","enum":["ephemeral","standard","audit"]},"privacy_policy":{"type":"string","enum":["redacted","public","sensitive"]},"sampling_policy":{"type":"string"}}}),
@@ -4038,6 +4755,227 @@ Vercel CLI completed
     }
 
     #[test]
+    fn dogfood_value_receipt_marks_reference_service_proven() {
+        let dogfood = json!({"ok": true, "response": {"surfaces": [
+            {
+                "service": "linejam",
+                "coverage": "covered",
+                "registry_state": "active",
+                "evidence_stale": true,
+                "failure_mode": "No current blocker; error budget is healthy; this is the strongest reference integration with Vercel health and Fly responder coverage.",
+                "next_action": "Keep as the reference service for webhook/responder coverage.",
+                "receipt_seen": false
+            }
+        ]}});
+        let targets = json!({"ok": true, "response": {"targets": [
+            {"id": "TGT-linejam", "service": "linejam", "url": "https://linejam.example/health", "active": true}
+        ]}});
+        let monitors = json!({"ok": true, "response": {"monitors": []}});
+        let status = json!({"ok": true, "response": {"targets": [
+            {"id": "TGT-linejam", "name": "linejam", "url": "https://linejam.example/health", "state": "up"}
+        ], "monitors": []}});
+        let query = json!({"ok": true, "response": {"service": "linejam", "window": "24h", "total_errors": 0, "groups": []}});
+        let incidents = json!({"ok": true, "response": {"incidents": [
+            {"id": "INC-other", "service": "other", "state": "open"}
+        ]}});
+        let timeline = json!({"ok": true, "response": {"events": [
+            {"id": "EVT-telemetry", "event": "telemetry.event", "service": "linejam"},
+            {"id": "EVT-error", "event": "error.ingested", "service": "linejam"}
+        ]}});
+        let claims = json!([
+            {"subject_type": "target", "subject_id": "TGT-linejam", "probe": {"ok": true, "response": {"claims": [], "current_claim": null}}}
+        ]);
+        let annotations = json!([
+            {"subject_type": "target", "subject_id": "TGT-linejam", "probe": {"ok": true, "response": {"annotations": []}}}
+        ]);
+
+        let receipt = dogfood_value_receipt(&DogfoodValueInput {
+            service: "linejam",
+            window: "24h",
+            dogfood: &dogfood,
+            targets: &targets,
+            monitors: &monitors,
+            status: &status,
+            query: &query,
+            incidents: &incidents,
+            timeline: &timeline,
+            claims: &claims,
+            annotations: &annotations,
+        });
+
+        assert_eq!(receipt["service"], "linejam");
+        assert_eq!(receipt["value_state"], "proven");
+        assert_eq!(receipt["coverage"]["verdict"], "covered");
+        assert_eq!(receipt["registry"]["state"], "active");
+        assert_eq!(receipt["health"]["state"], "up");
+        assert_eq!(receipt["error_counts"]["total"], 0);
+        assert_eq!(receipt["incident_counts"]["open"], 0);
+        assert!(receipt["active_remediation_claim"].is_null());
+        assert_eq!(
+            receipt["recent_annotations"].as_array().map(Vec::len),
+            Some(0)
+        );
+        assert_eq!(
+            receipt["recent_telemetry_events"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(receipt["verification"]["status"], "verified");
+        assert_eq!(
+            receipt["next_action"],
+            "Keep as the reference service for webhook/responder coverage."
+        );
+    }
+
+    #[test]
+    fn dogfood_value_receipt_requires_live_status_up_for_proven() {
+        let dogfood = json!({"ok": true, "response": {"surfaces": [
+            {
+                "service": "linejam",
+                "coverage": "covered",
+                "registry_state": "active",
+                "failure_mode": "Current target is under active watch.",
+                "next_action": "Keep enrolled.",
+                "receipt_seen": true
+            }
+        ]}});
+        let targets = json!({"ok": true, "response": {"targets": [
+            {"id": "TGT-linejam", "service": "linejam", "url": "https://linejam.example/health", "active": true}
+        ]}});
+        let monitors = json!({"ok": true, "response": {"monitors": []}});
+        let status = json!({"ok": true, "response": {"targets": [
+            {"id": "TGT-linejam", "name": "linejam", "url": "https://linejam.example/health", "state": "down"}
+        ], "monitors": []}});
+        let query = json!({"ok": true, "response": {"service": "linejam", "window": "24h", "total_errors": 0, "groups": []}});
+        let incidents = json!({"ok": true, "response": {"incidents": []}});
+        let timeline = json!({"ok": true, "response": {"events": []}});
+        let claims = json!([]);
+        let annotations = json!([]);
+
+        let receipt = dogfood_value_receipt(&DogfoodValueInput {
+            service: "linejam",
+            window: "24h",
+            dogfood: &dogfood,
+            targets: &targets,
+            monitors: &monitors,
+            status: &status,
+            query: &query,
+            incidents: &incidents,
+            timeline: &timeline,
+            claims: &claims,
+            annotations: &annotations,
+        });
+
+        assert_eq!(receipt["health"]["state"], "down");
+        assert_eq!(receipt["value_state"], "partial");
+        assert_eq!(receipt["verification"]["status"], "health_not_up");
+        assert_eq!(
+            receipt["next_action"],
+            "Restore live health state: /api/v1/status reports down; then rerun the value receipt."
+        );
+    }
+
+    #[test]
+    fn dogfood_value_receipt_distinguishes_stale_work_from_current_readback() {
+        let dogfood = json!({"ok": true, "response": {"surfaces": [
+            {
+                "service": "chrondle",
+                "coverage": "covered",
+                "registry_state": "active",
+                "evidence_stale": true,
+                "failure_mode": "Canary target is up, but the live 24h audit showed a high-volume TypeError group.",
+                "next_action": "Keep enrolled and triage the TypeError flood through Canary query evidence.",
+                "receipt_seen": false
+            }
+        ]}});
+        let targets = json!({"ok": true, "response": {"targets": [
+            {"id": "TGT-chrondle", "service": "chrondle", "url": "https://chrondle.example/health", "active": true}
+        ]}});
+        let empty = json!({"ok": true, "response": {"monitors": []}});
+        let status = json!({"ok": true, "response": {"targets": [
+            {"id": "TGT-chrondle", "name": "chrondle", "url": "https://chrondle.example/health", "state": "up"}
+        ], "monitors": []}});
+        let query = json!({"ok": true, "response": {"service": "chrondle", "window": "24h", "total_errors": 0, "groups": []}});
+        let incidents = json!({"ok": true, "response": {"incidents": []}});
+        let timeline = json!({"ok": true, "response": {"events": []}});
+        let claims = json!([]);
+        let annotations = json!([]);
+
+        let receipt = dogfood_value_receipt(&DogfoodValueInput {
+            service: "chrondle",
+            window: "24h",
+            dogfood: &dogfood,
+            targets: &targets,
+            monitors: &empty,
+            status: &status,
+            query: &query,
+            incidents: &incidents,
+            timeline: &timeline,
+            claims: &claims,
+            annotations: &annotations,
+        });
+
+        assert_eq!(receipt["value_state"], "stale_registry_evidence");
+        assert_eq!(receipt["error_counts"]["total"], 0);
+        assert_eq!(
+            receipt["registry"]["failure_mode"],
+            "Canary target is up, but the live 24h audit showed a high-volume TypeError group."
+        );
+        assert_eq!(receipt["verification"]["status"], "needs_evidence_refresh");
+        assert!(
+            receipt["next_action"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Refresh registry evidence")
+        );
+    }
+
+    #[test]
+    fn dogfood_value_subjects_caps_error_group_probe_fanout() {
+        let targets = json!({"ok": true, "response": {"targets": []}});
+        let monitors = json!({"ok": true, "response": {"monitors": []}});
+        let query = json!({"ok": true, "response": {"groups": [
+            {"group_hash": "grp-low", "count": 1},
+            {"group_hash": "grp-high", "count": 30},
+            {"group_hash": "grp-mid", "count": 12},
+            {"group_hash": "grp-total", "total_count": 20},
+            {"group_hash": "grp-over-limit", "count": 2}
+        ]}});
+        let incidents = json!({"ok": true, "response": {"incidents": []}});
+
+        let subjects = dogfood_value_subjects("linejam", &targets, &monitors, &query, &incidents);
+        let error_group_ids = subjects
+            .iter()
+            .filter(|subject| subject.subject_type == "error_group")
+            .map(|subject| subject.subject_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(error_group_ids, vec!["grp-high", "grp-total", "grp-mid"]);
+    }
+
+    #[test]
+    fn dogfood_value_summary_counts_value_coverage_shapes() {
+        let inventory = json!({
+            "summary": {"covered": 2, "partial": 1, "blocked": 1, "ignored": 1},
+            "surfaces": [
+                {"service": "linejam", "coverage": "covered", "evidence_stale": false, "receipt_seen": true},
+                {"service": "chrondle", "coverage": "covered", "evidence_stale": true, "receipt_seen": false},
+                {"service": "reader", "coverage": "partial", "receipt_seen": false},
+                {"service": "blocked", "coverage": "blocked", "receipt_seen": false},
+                {"service": "archive", "coverage": "ignored", "receipt_seen": false}
+            ]
+        });
+
+        let summary = dogfood_value_summary(&inventory);
+
+        assert_eq!(summary["covered"], 2);
+        assert_eq!(summary["stale"], 1);
+        assert_eq!(summary["blocked"], 1);
+        assert_eq!(summary["partial"], 1);
+        assert_eq!(summary["value_unproven"], 3);
+        assert_eq!(summary["ignored"], 1);
+    }
+
+    #[test]
     fn mcp_manifest_exposes_integration_tools() {
         let manifest = tool_manifest();
         let names = manifest
@@ -4056,10 +4994,15 @@ Vercel CLI completed
         assert!(names.contains("canary_claim_create"));
         assert!(names.contains("canary_claim_transition"));
         assert!(names.contains("canary_claim_release"));
+        assert!(names.contains("canary_dogfood_value"));
         let tool_by_name = manifest
             .iter()
             .map(|tool| (tool.name, tool))
             .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            tool_by_name["canary_dogfood_value"].input_schema["required"],
+            json!(["service"])
+        );
         assert_eq!(
             tool_by_name["canary_claim_get"].input_schema["required"],
             json!(["claim_id"])

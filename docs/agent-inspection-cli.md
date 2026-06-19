@@ -42,6 +42,7 @@ bin/canary timeline --service chrondle --window 7d --limit 20
 bin/canary targets
 bin/canary monitors
 bin/canary dogfood audit --strict
+bin/canary dogfood value --service linejam --json
 bin/canary integrate discover /path/to/app --production-url https://app.example.com --json
 bin/canary integrate plan /path/to/app --service app --production-url https://app.example.com --json
 bin/canary integrate patch /path/to/app --service app --json
@@ -66,10 +67,22 @@ Text output is deliberately compact for agent transcripts.
 `dogfood audit --strict --json` still prints the JSON report before exiting
 nonzero when coverage gaps remain, so agents can inspect the failure details.
 
+`dogfood value --service <name> --json` builds a per-service value receipt from
+the dogfood inventory plus live Canary readback: coverage verdict,
+`/api/v1/status` target or monitor health, recent error and incident counts,
+active remediation claim, recent annotations, telemetry events, synthetic
+verification status, and one next action. Use it when an agent needs to answer
+"what did Canary prove for this service?" rather than "is the service
+registered?"
+
 `doctor` is the fastest "who watches Canary?" command. It probes `/healthz`,
 `/readyz`, the global report, service status, incidents, dogfood coverage,
 recent `service=canary` errors, worker lifecycle readiness, and the external
 `canary-watchman` monitor created by `bin/canary-witness`.
+`dogfood_value` counts are diagnostic buckets, not a partition: `covered`,
+`blocked`, `partial`, and `ignored` come from the dogfood inventory summary,
+while `stale` and `value_unproven` are recomputed from per-service receipt
+fields and may overlap with coverage states.
 
 The doctor envelope's `response` object includes an operator verdict:
 
@@ -98,6 +111,16 @@ The doctor envelope's `response` object includes an operator verdict:
       "ok": true,
       "workflow": "Canary Witness",
       "runs": []
+    }
+  },
+  "dogfood_value": {
+    "ok": true,
+    "response": {
+      "covered": 4,
+      "stale": 14,
+      "blocked": 5,
+      "partial": 33,
+      "value_unproven": 42
     }
   }
 }
@@ -210,7 +233,7 @@ semantics.
 
 The manifest covers the drill-down surfaces an agent needs after
 `canary_doctor`: summary, services, errors, incidents, timeline, targets,
-monitors, dogfood audit, witness, DR status, event capture, remediation claims,
-and integration discovery/status/plan/patch/enroll. If a future MCP server does
-not implement a tool directly, it must preserve the manifest replacement
-command so agents can shell out to the CLI.
+monitors, dogfood audit, dogfood value receipts, witness, DR status, event
+capture, remediation claims, and integration discovery/status/plan/patch/enroll.
+If a future MCP server does not implement a tool directly, it must preserve the
+manifest replacement command so agents can shell out to the CLI.
