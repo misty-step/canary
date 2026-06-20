@@ -6,8 +6,10 @@ Date: 2026-06-14
 
 Canary readiness now treats background-worker health as an operational signal,
 not just thread liveness. `GET /readyz` fails when any required worker is
-stopped, stale, repeatedly failing, or pressured. Each worker snapshot exposes
-the values an agent needs to decide whether the runtime is keeping up:
+stopped, stale, or repeatedly failing. A `pressured` worker can remain
+route-ready, but doctor and the external witness treat it as impaired
+alert-plane health. Each worker snapshot exposes the values an agent needs to
+decide whether the runtime is keeping up:
 
 - `health`: `ok`, `stale`, `failing`, `pressured`, or `stopped`.
 - `last_success_at` and `last_success_age_ms`.

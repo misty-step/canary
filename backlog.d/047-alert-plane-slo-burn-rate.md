@@ -1,6 +1,6 @@
 # Prove alert-plane health separately from route readiness
 
-Priority: P0 · Status: ready · Estimate: XL
+Priority: P0 · Status: in_progress · Estimate: XL
 
 ## PRD Summary
 - User: agent responders and operators deciding whether Canary can be trusted to wake them up.
@@ -57,6 +57,17 @@ impairment driver that can be run in strict or as a dedicated ops gate.
 Why: the reliability lane found that `/readyz` intentionally treats `pressured` workers as route-ready, while the witness accepts `ok` or `pressured`. That can be appropriate for deploy readiness, but it is not enough for alerting health. The lane also found no SLO or burn-rate implementation and no check-in timestamp skew policy.
 
 External research supports multi-window burn-rate alerting as the mature SLO alerting shape. Start with coarse service classes and fixed defaults rather than bespoke thresholds per service.
+
+2026-06-20 slice: first alert-plane impairment proof is implemented on branch
+`docs/agent-first-vision`. `bin/canary doctor --json` now exposes
+`response.alert_plane`, the doctor verdict carries the same field, and
+`bin/canary-witness` exits nonzero with `alert_plane.status: "impaired"` when
+the induced fixture returns a route-ready `/readyz` response with a pressured
+worker. Evidence:
+`docs/architecture/canary-alert-plane-evidence-2026-06-20.md`. Remaining scope:
+future check-in timestamp skew policy, production-image induced impairment
+gate wiring beyond the shell fixture, SLO configuration, and burn-rate
+summaries.
 
 ## Children
 1. Define alert-plane health separately from route readiness.

@@ -21,10 +21,11 @@ is checking.
 | Signal | Route | Healthy expectation |
 |---|---|---|
 | Liveness | `GET /healthz` | HTTP 200 and `{"status":"ok"}` |
-| Readiness | `GET /readyz` | HTTP 200, `{"status":"ready"}`, database and supervisor `ok`, and all five worker lifecycle snapshots started with zero failures. Worker `health` may be `ok` or `pressured`; stale, failing, and stopped workers are unhealthy. |
+| Readiness | `GET /readyz` | HTTP 200, `{"status":"ready"}`, database and supervisor `ok`, and all five worker lifecycle snapshots started with zero failures. This is route readiness, not alert-plane health. |
+| Alert plane | `/readyz` worker snapshots | Every required worker has `health: ok`, no backoff/circuit pressure, and no stale due-work pressure. A `pressured` worker can remain route-ready, but the witness reports a degraded alert plane and does not send the healthy check-in. |
 | Error readback | `GET /api/v1/query?service=canary&window=1h` | HTTP 200, service `canary`, and numeric `total_errors` |
 
-When all three signals are healthy, the witness sends an ingest check-in:
+When all route and alert-plane signals are healthy, the witness sends an ingest check-in:
 
 ```json
 {
@@ -89,16 +90,16 @@ Actions receipt. If it is `observed`, the check-in state and timestamp are the
 current external witness evidence.
 
 `doctor` also summarizes worker lifecycle readiness from `/readyz`, for example
-`worker_readiness: ready 5 workers, 0 failing`. Treat a missing or failing
-worker readiness line as a stale inspection surface or a runtime pressure
-signal, not as a healthy witness result.
+`worker_readiness: ready 5 workers, 0 failing`, and the stricter alert-plane
+verdict, for example `alert_plane: healthy 5 workers`. Treat a missing,
+failing, or impaired alert-plane line as an operational alertability signal,
+not as a deploy-readiness signal.
 
 The witness itself now requires each `/readyz` worker to report `state:
-started`, `health: ok` or `health: pressured`, zero cumulative and consecutive
-failures, a string `last_success_at`, numeric pressure counters, and a boolean
-`backoff_or_circuit_open`. A pressured worker is still route-ready evidence; a
-worker thread that is stale, repeatedly failing, stopped, or in backoff/circuit
-open remains an unhealthy witness result.
+started`, `health: ok`, zero cumulative and consecutive failures, a string
+`last_success_at`, numeric pressure counters, and `backoff_or_circuit_open:
+false` before the alert plane is healthy. A pressured worker is still
+route-ready evidence; it is not healthy alert-plane evidence.
 
 `doctor` also prints a `dr:` line. That line reflects the operator
 `bin/dr-status --app canary-obs` Litestream check when available and points to

@@ -36,13 +36,14 @@ Each worker snapshot contains:
   interruption, or fanout pressure.
 
 `/readyz` remains unauthenticated and returns `not_ready` when the database,
-supervisor, or any worker is not ready. Worker health is not just thread
-liveness: fast workers become stale after 30 seconds without a successful pass,
-daily maintenance workers become stale after 25 hours, three consecutive
-failures mark a worker failing, and overdue work beyond the pressure threshold
-marks the worker pressured. Worker internals remain hidden behind their
-lifecycle modules; route handling only serializes the already-computed
-snapshot.
+supervisor, or any worker is stopped, stale, or failing. Worker health is not
+just thread liveness: fast workers become stale after 30 seconds without a
+successful pass, daily maintenance workers become stale after 25 hours, three
+consecutive failures mark a worker failing, and overdue work beyond the
+pressure threshold marks the worker pressured. Pressured workers remain
+route-ready, but doctor and the external witness report impaired alert-plane
+health. Worker internals remain hidden behind their lifecycle modules; route
+handling only serializes the already-computed snapshot.
 
 ## Design Notes
 

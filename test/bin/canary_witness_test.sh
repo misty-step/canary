@@ -75,6 +75,7 @@ assert_check_in_payload() {
 
 READY_BODY='{"status":"ready","checks":{"database":"ok","supervisor":"ok","workers":[{"name":"webhook_delivery","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:53Z","last_success_age_ms":250,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":0,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"target_probe","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:55Z","last_success_age_ms":100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":1,"in_flight_count":0,"oldest_due_age_ms":0,"backoff_or_circuit_open":false},{"name":"monitor_overdue","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:55Z","last_success_age_ms":100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":0,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"retention_prune","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:23Z","last_success_age_ms":32100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":1,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"tls_scan","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:23Z","last_success_age_ms":32100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":2,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false}]}}'
 PRESSURED_READY_BODY='{"status":"ready","checks":{"database":"ok","supervisor":"ok","workers":[{"name":"webhook_delivery","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:53Z","last_success_age_ms":250,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":0,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"target_probe","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:55Z","last_success_age_ms":100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":1,"in_flight_count":0,"oldest_due_age_ms":0,"backoff_or_circuit_open":false},{"name":"monitor_overdue","state":"started","health":"pressured","last_success_at":"2026-06-14T02:07:55Z","last_success_age_ms":100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":1,"in_flight_count":0,"oldest_due_age_ms":7200000,"backoff_or_circuit_open":false},{"name":"retention_prune","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:23Z","last_success_age_ms":32100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":1,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"tls_scan","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:23Z","last_success_age_ms":32100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":2,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false}]}}'
+NOT_READY_WORKERS_BODY='{"status":"not_ready","checks":{"database":"ok","supervisor":"ok","workers":[{"name":"webhook_delivery","state":"started","health":"pressured","last_success_at":"2026-06-14T02:07:53Z","last_success_age_ms":250,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":12,"in_flight_count":0,"oldest_due_age_ms":7200000,"backoff_or_circuit_open":true},{"name":"target_probe","state":"started","health":"failing","last_success_at":"2026-06-14T02:07:55Z","last_success_age_ms":100,"failure_count":3,"consecutive_failures":3,"last_error_class":"runtime_error","due_count":1,"in_flight_count":0,"oldest_due_age_ms":0,"backoff_or_circuit_open":false},{"name":"monitor_overdue","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:55Z","last_success_age_ms":100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":0,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"retention_prune","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:23Z","last_success_age_ms":32100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":1,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false},{"name":"tls_scan","state":"started","health":"ok","last_success_at":"2026-06-14T02:07:23Z","last_success_age_ms":32100,"failure_count":0,"consecutive_failures":0,"last_error_class":null,"due_count":2,"in_flight_count":0,"oldest_due_age_ms":null,"backoff_or_circuit_open":false}]}}'
 
 case "${STUB_SCENARIO:?}:$method:$url" in
   healthy:GET:https://canary.example/healthz)
@@ -103,6 +104,16 @@ case "${STUB_SCENARIO:?}:$method:$url" in
   pressured:POST:https://canary.example/api/v1/check-ins)
     assert_check_in_payload
     write_response 201 0.040 '{"monitor":"canary-watchman","status":"alive"}'
+    ;;
+
+  notready-workers:GET:https://canary.example/healthz)
+    write_response 200 0.010 '{"status":"ok"}'
+    ;;
+  notready-workers:GET:https://canary.example/readyz)
+    write_response 503 0.020 "$NOT_READY_WORKERS_BODY"
+    ;;
+  notready-workers:GET:https://canary.example/api/v1/query?service=canary\&window=1h)
+    write_response 200 0.030 '{"service":"canary","window":"1h","summary":"0 errors in canary in the last 1h.","total_errors":0,"groups":[]}'
     ;;
 
   degraded:GET:https://canary.example/healthz)
@@ -228,7 +239,7 @@ assert_json_equals "$receipt" '.status' 'healthy' "healthy ttl receipt status"
 assert_json_equals "$receipt" '.check_in.http_status' '201' "healthy ttl sends check-in"
 
 receipt="$TMPDIR_TEST/pressured.json"
-run_success "pressured ready witness exits zero" \
+run_failure "pressured ready witness exits nonzero" \
   env \
     STUB_SCENARIO=pressured \
     "${WITNESS[@]}" \
@@ -238,9 +249,28 @@ run_success "pressured ready witness exits zero" \
     --receipt "$receipt" \
     --require-check-in \
     --json
-assert_json_equals "$receipt" '.status' 'healthy' "pressured ready receipt status"
+assert_json_equals "$receipt" '.status' 'degraded' "pressured ready receipt status"
 assert_json_equals "$receipt" '.probes.readyz.response.checks.workers[] | select(.name == "monitor_overdue") | .health' 'pressured' "pressured ready records worker pressure"
-assert_json_equals "$receipt" '.check_in.http_status' '201' "pressured ready sends check-in"
+assert_json_equals "$receipt" '.alert_plane.status' 'impaired' "pressured ready records alert-plane impairment"
+assert_json_equals "$receipt" '.alert_plane.workers[] | select(.name == "monitor_overdue") | .health' 'pressured' "pressured ready names impaired worker"
+assert_json_equals "$receipt" '.check_in.skipped' 'true' "pressured ready skips check-in"
+
+receipt="$TMPDIR_TEST/notready-workers.json"
+run_failure "not-ready worker witness exits nonzero" \
+  env \
+    STUB_SCENARIO=notready-workers \
+    "${WITNESS[@]}" \
+    --endpoint https://canary.example \
+    --read-api-key read-key \
+    --ingest-api-key ingest-key \
+    --receipt "$receipt" \
+    --json
+assert_json_equals "$receipt" '.status' 'degraded' "not-ready worker receipt status"
+assert_json_equals "$receipt" '.probes.readyz.response.status' 'not_ready' "not-ready worker preserves readyz body"
+assert_json_equals "$receipt" '.alert_plane.status' 'impaired' "not-ready worker records alert-plane impairment"
+assert_json_equals "$receipt" '.alert_plane.reasons[] | select(. == "webhook_delivery backoff_or_circuit_open")' 'webhook_delivery backoff_or_circuit_open' "not-ready worker names backoff"
+assert_json_equals "$receipt" '.alert_plane.reasons[] | select(. == "target_probe failing")' 'target_probe failing' "not-ready worker names failing worker"
+assert_json_equals "$receipt" '.check_in.skipped' 'true' "not-ready worker skips check-in"
 
 receipt="$TMPDIR_TEST/degraded.json"
 run_failure "degraded witness exits nonzero" \

@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en" data-ae-mode="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canary Alert-Plane Delivery Plan</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@100..900&amp;family=Geist+Mono:wght@100..900&amp;display=swap">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/misty-step/aesthetic@v2.5.1/aesthetic.css">
+  <style>
+    :root {
+      --ae-accent: #1f6f64;
+      --ae-accent-dark: #7bd0c4;
+    }
+
+    .plan-wide .ae-bar,
+    .plan-wide .ae-stage {
+      width: min(92rem, 100% - 4rem);
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(25em, 0.72fr);
+      gap: 3em;
+      align-items: end;
+    }
+
+    .kicker {
+      display: block;
+      margin-bottom: 0.8em;
+    }
+
+    .rule {
+      border-top: 1px solid var(--ae-line);
+      margin: 1.5em 0;
+    }
+
+    .grid-2,
+    .grid-3,
+    .grid-4,
+    .grid-5 {
+      display: grid;
+      gap: 1px;
+      background: var(--ae-line);
+    }
+
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .grid-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+
+    .cell {
+      min-width: 0;
+      background: var(--ae-surface);
+      padding: 1.2em 1.35em;
+    }
+
+    .wash { background: var(--ae-wash); }
+
+    .phase {
+      display: grid;
+      grid-template-columns: 8em minmax(0, 1fr) minmax(15em, 0.68fr);
+      gap: 1.3em;
+      border-top: 1px solid var(--ae-line);
+      padding-top: 1em;
+      margin-top: 1em;
+    }
+
+    .phase:first-child {
+      border-top: 0;
+      margin-top: 0;
+      padding-top: 0;
+    }
+
+    .table-wrap { overflow-x: auto; }
+
+    .status {
+      display: inline-flex;
+      gap: 0.45em;
+      align-items: baseline;
+    }
+
+    .status svg { transform: translateY(0.15em); }
+
+    .review-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 2em;
+    }
+
+    @media (max-width: 980px) {
+      .plan-wide .ae-bar,
+      .plan-wide .ae-stage {
+        width: min(100% - 2rem, 92rem);
+      }
+
+      .hero,
+      .grid-2,
+      .grid-3,
+      .grid-4,
+      .grid-5,
+      .phase,
+      .review-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+<svg aria-hidden="true" style="display: none" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-check" viewBox="0 0 24 24">
+    <path d="M20 6 9 17l-5-5"></path>
+  </symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24">
+    <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"></path>
+    <path d="M12 9v4"></path>
+    <path d="M12 17h.01"></path>
+  </symbol>
+</svg>
+
+<div class="ae-screen plan-wide">
+  <header class="ae-bar">
+    <a class="ae-name" href="../../backlog.d/047-alert-plane-slo-burn-rate.md">BACKLOG 047 / ALERT PLANE</a>
+    <p class="ae-chrome">delivery plan opened before implementation</p>
+  </header>
+
+  <main class="ae-stage ae-stage-scroll">
+    <article class="ae-view">
+      <section class="hero" aria-label="Plan contract">
+        <div>
+          <p class="ae-chrome kicker">P0 FIRST DELIVERABLE</p>
+          <h1 class="ae-strong">Canary can be route-ready while refusing to call the alert plane healthy.</h1>
+          <p class="ae-lede">Add a stricter operational verdict over the existing worker readiness data. Keep <code>/readyz</code> as deploy readiness, then make <code>bin/canary doctor</code> and <code>bin/canary-witness</code> degrade when alert workers are pressured, in backoff, stale, failing, or otherwise unable to route events reliably.</p>
+        </div>
+        <aside class="ae-panel">
+          <h2 class="ae-h">CHOSEN DESIGN</h2>
+          <p><span class="status"><svg class="ae-icon ae-ok"><use href="#i-check"></use></svg> Derive an <code>alert_plane</code> verdict from current <code>/readyz</code> worker snapshots and expose it in doctor/witness receipts.</span></p>
+          <div class="rule"></div>
+          <h2 class="ae-h">QUALITY SYSTEM</h2>
+          <p>Standards: deterministic JSON, no new storage, no LLM request path, no change to route readiness semantics, no secret output.</p>
+          <p>Proof: shell witness fixture, CLI unit tests, fast gate, full gate, live doctor readback, and artifact-only critic.</p>
+          <div class="rule"></div>
+          <p class="ae-dim">Premise source: <code>sha256:9374c9f48c93a1e2792d45d1beb88885fb5090132a479475b24d5c5631f672ec backlog.d/047-alert-plane-slo-burn-rate.md</code></p>
+          <p class="ae-dim">Plan status: authored for rendered review before code.</p>
+        </aside>
+      </section>
+
+      <section class="grid-5" aria-label="Executive contract" style="margin-top: 2em">
+        <article class="cell">
+          <h2 class="ae-h">STANDARDS</h2>
+          <p>Small Rust/CLI diff, existing JSON envelope style, deterministic summaries, no weakening of <code>./bin/validate</code>.</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">ACCEPTANCE</h2>
+          <p>Pressured alert workers make doctor and witness non-healthy while <code>/readyz</code> remains ready.</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">VERIFY</h2>
+          <p><code>cargo test -p canary-cli</code>, <code>bash test/bin/canary_witness_test.sh</code>, <code>./bin/validate --fast</code>, <code>./bin/validate</code>.</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">COMMUNICATE</h2>
+          <p>Report the chosen next ticket, edited surfaces, witness receipt behavior, review result, gate, and tree state.</p>
+        </article>
+        <article class="cell wash">
+          <h2 class="ae-h">STOP IF</h2>
+          <p>Implementation requires persistent SLO schema, new auth scopes, or changing <code>/readyz</code> failure semantics.</p>
+        </article>
+      </section>
+
+      <section class="grid-3" aria-label="Current change proof" style="margin-top: 1px">
+        <article class="cell">
+          <h2 class="ae-h">CURRENT STATE</h2>
+          <p><code>/readyz</code> returns HTTP 200 for <code>health: pressured</code>. The witness currently treats <code>ok</code> or <code>pressured</code> as acceptable.</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">CHANGE SHAPE</h2>
+          <p>Add one alert-plane classifier reused by doctor summaries and witness jq checks. Update docs and tests to make pressure operationally degraded.</p>
+        </article>
+        <article class="cell wash">
+          <h2 class="ae-h">PROOF SURFACE</h2>
+          <p>The <code>pressured</code> fake-curl witness fixture must exit nonzero, skip check-in, and preserve the ready route response plus alert-plane reasons.</p>
+        </article>
+      </section>
+
+      <section class="grid-2" aria-label="Scope and anchors" style="margin-top: 2em">
+        <article class="cell">
+          <h2 class="ae-h">SCOPE</h2>
+          <p><strong>Goal:</strong> agents can distinguish HTTP readiness from alertability trust.</p>
+          <p><strong>Non-goals:</strong> SLO storage, burn-rate math, dashboard work, worker runtime rewrites, and monitor timestamp skew policy.</p>
+          <p><strong>Invariants:</strong> <code>/readyz</code> remains route readiness; all outputs stay deterministic; external witness remains shell-first.</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">REPO ANCHORS</h2>
+          <p><a href="../../crates/canary-http/src/public.rs">crates/canary-http/src/public.rs</a> - route readiness semantics.</p>
+          <p><a href="../../crates/canary-cli/src/lib.rs">crates/canary-cli/src/lib.rs</a> - doctor report and summaries.</p>
+          <p><a href="../../bin/canary-witness">bin/canary-witness</a> - external witness receipt and exit behavior.</p>
+          <p><a href="../../test/bin/canary_witness_test.sh">test/bin/canary_witness_test.sh</a> - induced impairment fixture.</p>
+          <p><a href="../canary-witness.md">docs/canary-witness.md</a> - operator contract.</p>
+        </article>
+      </section>
+
+      <section class="ae-panel" aria-label="Execution plan" style="margin-top: 2em">
+        <h2 class="ae-h">EXECUTION PLAN</h2>
+        <div class="phase">
+          <strong class="ae-accent">1 red</strong>
+          <p>Update docs and tests so pressured workers are alert-plane impaired, not witness-healthy.</p>
+          <p class="ae-dim">Evidence: focused CLI and witness tests fail before implementation.</p>
+        </div>
+        <div class="phase">
+          <strong class="ae-accent">2 green</strong>
+          <p>Implement the smallest shared classifier and include <code>alert_plane</code> in doctor/witness JSON and text.</p>
+          <p class="ae-dim">Evidence: focused tests pass and fake pressured receipt shows degraded status.</p>
+        </div>
+        <div class="phase">
+          <strong class="ae-accent">3 live</strong>
+          <p>Run live <code>bin/canary doctor --json</code> and preserve a redacted evidence receipt for the current production surface.</p>
+          <p class="ae-dim">Evidence: architecture receipt records alert-plane verdict from live Canary.</p>
+        </div>
+        <div class="phase">
+          <strong class="ae-accent">4 close</strong>
+          <p>Run gate, fresh artifact-only critic, commit, and report residual scope left in #047.</p>
+          <p class="ae-dim">Evidence: review receipt, <code>./bin/validate</code>, clean tree status.</p>
+        </div>
+      </section>
+
+      <section class="grid-2" aria-label="Alternatives and risks" style="margin-top: 2em">
+        <article class="cell">
+          <h2 class="ae-h">ALTERNATIVE DESIGNS</h2>
+          <div class="table-wrap">
+            <table class="ae-table">
+              <thead>
+                <tr><th>option</th><th>why it helps</th><th>tradeoff</th><th>verdict</th></tr>
+              </thead>
+              <tbody>
+                <tr><td class="ae-item">Separate alert-plane classifier</td><td>Uses existing data, keeps <code>/readyz</code> stable.</td><td>Limited to worker snapshots for this slice.</td><td>choose</td></tr>
+                <tr><td class="ae-item">Make <code>/readyz</code> fail on pressure</td><td>Simple single status.</td><td>Conflates deploy readiness and alertability, violates ticket design.</td><td>reject</td></tr>
+                <tr><td class="ae-item">Build SLO/burn-rate first</td><td>More complete #047 vision.</td><td>No induced impairment proof; bigger storage/API blast radius.</td><td>defer</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+        <article class="cell wash">
+          <h2 class="ae-h">RISKS</h2>
+          <div class="table-wrap">
+            <table class="ae-table">
+              <thead>
+                <tr><th>risk</th><th>mitigation</th><th>owner</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>False-positive witness failures for mild worker pressure.</td><td>Use existing worker pressure thresholds; do not invent tighter thresholds.</td><td>agent</td></tr>
+                <tr><td>Operators lose deploy readiness signal.</td><td>Leave <code>/readyz</code> unchanged and expose alert-plane as separate field.</td><td>agent</td></tr>
+                <tr><td>Receipt lacks the reason for non-healthy status.</td><td>Persist <code>alert_plane.reasons</code> in witness and doctor JSON.</td><td>agent</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section class="ae-panel" aria-label="Review topology" style="margin-top: 2em">
+        <h2 class="ae-h">REVIEW TOPOLOGY</h2>
+        <div class="table-wrap">
+          <table class="ae-table">
+            <thead>
+              <tr><th>selected tier</th><th>why this tier fits</th><th>critic lenses</th><th>waiver / escalation</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="ae-item">Substantive</td><td>Operator-facing CLI/witness behavior changes, but no auth/schema/data migration.</td><td>Public surface, operations, test strength.</td><td>Escalate if auth, persistent schema, or route readiness semantics change.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p><strong>Critic packet:</strong> diff plus this plan plus ticket oracle. Ask whether a production alert-plane failure could still be missed.</p>
+        <p><strong>Ignore:</strong> SLO feature requests and style-only naming feedback unless they hide a contract failure.</p>
+      </section>
+
+      <section class="review-grid" aria-label="Review and communication" style="margin-top: 2em">
+        <article class="ae-plate">
+          <p class="ae-plate-cap">REVIEW - useful attacks</p>
+          <p><span class="status"><svg class="ae-icon ae-warn"><use href="#i-alert"></use></svg> Weak separation.</span> Does any output imply route readiness and alert-plane readiness are the same?</p>
+          <p><span class="status"><svg class="ae-icon ae-warn"><use href="#i-alert"></use></svg> Weak oracle.</span> Can the pressured fixture still pass as healthy?</p>
+          <p><span class="status"><svg class="ae-icon ae-warn"><use href="#i-alert"></use></svg> Hidden state.</span> Are reasons visible without reading logs or chat?</p>
+        </article>
+        <article class="ae-plate">
+          <p class="ae-plate-cap">COMMUNICATION - agent cadence</p>
+          <p>Before edits: name #047 first-deliverable scope and current permissive witness behavior.</p>
+          <p>During edits: report docs/tests/code transitions and exact failing/passing commands.</p>
+          <p>Closeout: report live doctor receipt, review result, gate, unshipped #047 scope, and tree state.</p>
+        </article>
+      </section>
+    </article>
+  </main>
+
+  <footer class="ae-bar">
+    <p class="ae-foot">Generated for Canary #047. This plan intentionally avoids SLO/burn-rate implementation until the alert-plane impairment oracle is proven.</p>
+  </footer>
+</div>
+</body>
+</html>

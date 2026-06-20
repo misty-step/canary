@@ -120,6 +120,14 @@ fn doctor_summary_includes_watchman_and_self_errors() {
                 {"name": "retention_prune", "state": "started", "health": "ok", "failure_count": 0},
                 {"name": "tls_scan", "state": "started", "health": "ok", "failure_count": 0}
             ]
+        },
+        "alert_plane": {
+            "available": true,
+            "status": "healthy",
+            "worker_count": 5,
+            "impaired_workers": 0,
+            "workers": [],
+            "reasons": []
         }
     });
 
@@ -137,6 +145,11 @@ fn doctor_summary_includes_watchman_and_self_errors() {
         lines
             .iter()
             .any(|line| line == "worker_readiness: ready 5 workers, 0 failing")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "alert_plane: healthy 5 workers")
     );
     assert!(
         lines.iter().any(|line| line
@@ -177,6 +190,16 @@ fn doctor_summary_flags_missing_restore_receipt_and_worker_health_schema() {
             "workers": [
                 {"name": "webhook_delivery", "state": "started", "failure_count": 0}
             ]
+        },
+        "alert_plane": {
+            "available": true,
+            "status": "impaired",
+            "worker_count": 1,
+            "impaired_workers": 1,
+            "workers": [
+                {"name": "webhook_delivery", "state": "started", "health": "unknown"}
+            ],
+            "reasons": ["webhook_delivery unknown"]
         }
     });
 
@@ -186,6 +209,11 @@ fn doctor_summary_flags_missing_restore_receipt_and_worker_health_schema() {
     assert!(lines.iter().any(
         |line| line == "worker_readiness: ready 1 workers, 1 failing, 1 missing health fields"
     ));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "alert_plane: impaired 1 worker: webhook_delivery unknown")
+    );
 }
 
 #[test]
@@ -248,10 +276,20 @@ fn doctor_summary_reports_worker_pressure_separately() {
                 {"name": "target_probe", "state": "started", "health": "ok", "failure_count": 0}
             ]
         },
+        "alert_plane": {
+            "available": true,
+            "status": "impaired",
+            "worker_count": 2,
+            "impaired_workers": 1,
+            "workers": [
+                {"name": "webhook_delivery", "state": "started", "health": "pressured"}
+            ],
+            "reasons": ["webhook_delivery pressured"]
+        },
         "verdict": {
             "overall": "degraded",
-            "blocking_signals": ["worker pressure: webhook_delivery"],
-            "next_operator_action": "Inspect `/readyz` worker pressure and drain the named backlog before rerunning `bin/canary doctor --json`."
+            "blocking_signals": ["alert-plane impaired: webhook_delivery pressured"],
+            "next_operator_action": "Inspect alert-plane worker pressure and drain the named backlog before rerunning `bin/canary doctor --json`."
         }
     });
 
@@ -261,8 +299,13 @@ fn doctor_summary_reports_worker_pressure_separately() {
             .iter()
             .any(|line| line == "worker_readiness: ready 2 workers, 0 failing, 1 pressured")
     );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "alert_plane: impaired 1 worker: webhook_delivery pressured")
+    );
     assert!(lines.iter().any(|line| line
-        == "verdict: degraded; next: Inspect `/readyz` worker pressure and drain the named backlog before rerunning `bin/canary doctor --json`."));
+        == "verdict: degraded; next: Inspect alert-plane worker pressure and drain the named backlog before rerunning `bin/canary doctor --json`."));
 }
 
 #[test]
