@@ -101,6 +101,14 @@
     "schema_missing_health_fields": 0,
     "workers": []
   },
+  "alert_plane": {
+    "available": true,
+    "status": "healthy",
+    "worker_count": 5,
+    "impaired_workers": 0,
+    "workers": [],
+    "reasons": []
+  },
   "verdict": {
     "overall": "degraded",
     "blocking_signals": [

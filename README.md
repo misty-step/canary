@@ -14,6 +14,10 @@ Existing tools (Sentry, Uptime Robot) are designed around humans staring at dash
 - **Generic webhooks** — consumers define their own behavior
 - **Self-hosted** on Fly.io with SQLite + Litestream + Fly Tigris backup
 
+Read the product direction in [`VISION.md`](VISION.md). The agent UX laws and
+coordination philosophy live in
+[`docs/agent-first-identity.md`](docs/agent-first-identity.md).
+
 ## Quick Start
 
 ```bash

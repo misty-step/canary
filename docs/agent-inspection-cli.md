@@ -106,6 +106,14 @@ The doctor envelope's `response` object includes an operator verdict:
       "failing_workers": 0,
       "workers": []
     },
+    "alert_plane": {
+      "available": true,
+      "status": "healthy",
+      "worker_count": 5,
+      "impaired_workers": 0,
+      "workers": [],
+      "reasons": []
+    },
     "dogfood_gap_count": 3,
     "receipt_run_references": {
       "ok": true,
@@ -128,7 +136,7 @@ The doctor envelope's `response` object includes an operator verdict:
 
 `overall` is `healthy` only when the public routes are reachable, authenticated
 readback works, the external witness is observed as up, no `service=canary`
-incident is open, and workers are not failing or pressured. `degraded` means an
+incident is open, and `alert_plane.status` is `healthy`. `degraded` means an
 agent can still inspect Canary but has work to do. `unable` means Canary cannot
 produce enough authenticated self-watch evidence to trust the rest of the
 report. Dogfood gaps are counted in the verdict but are not by themselves a
@@ -138,14 +146,16 @@ The worker readiness line is derived from `/readyz` and should look like:
 
 ```text
 worker_readiness: ready 5 workers, 0 failing
+alert_plane: healthy 5 workers
 ```
 
 If a worker reports `health: pressured`, the route can still be ready. Doctor
-reports that as operational pressure rather than counting the same worker as
-both ready and failing:
+reports that as impaired alert-plane health rather than counting the same
+worker as both route-failing and healthy:
 
 ```text
 worker_readiness: ready 5 workers, 0 failing, 1 pressured
+alert_plane: impaired 1 worker: monitor_overdue pressured
 ```
 
 `doctor` also surfaces DR evidence:

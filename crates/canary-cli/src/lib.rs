@@ -2704,6 +2704,7 @@ pub fn doctor_report(client: &ApiClient, repo_root: &Path) -> Value {
         .unwrap_or_else(|| json!({"ok": false, "error": string_field(&dogfood, "error")}));
     let dr = dr_evidence_report(repo_root);
     let worker_readiness = worker_readiness_report(&readyz);
+    let alert_plane = alert_plane_report(&worker_readiness);
     let verdict = doctor_verdict(
         &healthz,
         &readyz,
@@ -2712,6 +2713,7 @@ pub fn doctor_report(client: &ApiClient, repo_root: &Path) -> Value {
         &canary_errors,
         &witness,
         &worker_readiness,
+        &alert_plane,
         &dogfood,
         &witness_runs,
         current_unix_ms(),
@@ -2738,6 +2740,7 @@ pub fn doctor_report(client: &ApiClient, repo_root: &Path) -> Value {
         "dogfood": dogfood,
         "dogfood_value": dogfood_value,
         "worker_readiness": worker_readiness,
+        "alert_plane": alert_plane,
         "verdict": verdict
     })
 }
@@ -2800,6 +2803,10 @@ pub fn summarize_doctor(value: &Value) -> Vec<String> {
         "worker_readiness: {}",
         worker_readiness_summary(value.get("worker_readiness"))
     ));
+    lines.push(format!(
+        "alert_plane: {}",
+        alert_plane_summary(value.get("alert_plane"))
+    ));
     lines
 }
 
@@ -2812,6 +2819,7 @@ fn doctor_verdict(
     canary_errors: &Value,
     witness: &Value,
     worker_readiness: &Value,
+    alert_plane: &Value,
     dogfood: &Value,
     receipt_run_references: &Value,
     now_unix_ms: u64,
@@ -2886,6 +2894,22 @@ fn doctor_verdict(
             string_field(worker_readiness, "reason")
         ));
     }
+    if !alert_plane
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        unable = true;
+        blocking_signals.push(format!(
+            "alert-plane unavailable: {}",
+            string_field(alert_plane, "reason")
+        ));
+    } else if string_field(alert_plane, "status") != "healthy" {
+        blocking_signals.push(format!(
+            "alert-plane impaired: {}",
+            alert_plane_reason_summary(alert_plane)
+        ));
+    }
     let failing_workers = worker_pressure
         .get("failing_workers")
         .and_then(Value::as_u64)
@@ -2899,12 +2923,6 @@ fn doctor_verdict(
             "{} worker(s) failing: {}",
             failing_workers,
             worker_names(&worker_pressure, "failing")
-        ));
-    }
-    if pressured_workers > 0 {
-        blocking_signals.push(format!(
-            "worker pressure: {}",
-            worker_names(&worker_pressure, "pressured")
         ));
     }
 
@@ -2939,6 +2957,7 @@ fn doctor_verdict(
         "next_operator_action": next_operator_action,
         "witness_age_ms": witness_age_ms,
         "open_canary_incident": open_canary_incident.unwrap_or(Value::Null),
+        "alert_plane": alert_plane,
         "worker_pressure": worker_pressure,
         "dogfood_gap_count": dogfood_gap_count,
         "receipt_run_references": receipt_run_references
@@ -2967,7 +2986,7 @@ fn next_operator_action(
         );
     }
     if failing_workers > 0 || pressured_workers > 0 {
-        return "Inspect `/readyz` worker pressure and drain the named backlog before rerunning `bin/canary doctor --json`.".to_owned();
+        return "Inspect alert-plane worker pressure and drain the named backlog before rerunning `bin/canary doctor --json`.".to_owned();
     }
     if canary_error_total > 0 {
         return "Run `bin/canary errors canary --window 1h --json`, fix the newest error class, and rerun `bin/canary doctor --json`.".to_owned();
@@ -3124,6 +3143,142 @@ fn worker_pressure_report(worker_readiness: &Value) -> Value {
         "workers": pressured,
         "failing": failing
     })
+}
+
+fn alert_plane_report(worker_readiness: &Value) -> Value {
+    if !worker_readiness
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return json!({
+            "available": false,
+            "status": "unavailable",
+            "reason": string_field(worker_readiness, "reason"),
+            "worker_count": 0,
+            "impaired_workers": 0,
+            "workers": [],
+            "reasons": []
+        });
+    }
+
+    let workers = worker_readiness
+        .get("workers")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let worker_count = worker_readiness
+        .get("worker_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(workers.len() as u64);
+    let impaired = workers
+        .iter()
+        .filter(|worker| alert_worker_is_impaired(worker))
+        .map(alert_plane_detail)
+        .collect::<Vec<_>>();
+    let reasons = impaired.iter().map(alert_plane_reason).collect::<Vec<_>>();
+    let status = if impaired.is_empty() {
+        "healthy"
+    } else {
+        "impaired"
+    };
+
+    json!({
+        "available": true,
+        "status": status,
+        "worker_count": worker_count,
+        "impaired_workers": impaired.len(),
+        "workers": impaired,
+        "reasons": reasons
+    })
+}
+
+fn alert_plane_detail(worker: &Value) -> Value {
+    json!({
+        "name": string_field(worker, "name"),
+        "state": string_field(worker, "state"),
+        "health": string_field(worker, "health"),
+        "failure_count": worker.get("failure_count").and_then(Value::as_u64).unwrap_or(0),
+        "consecutive_failures": worker.get("consecutive_failures").and_then(Value::as_u64).unwrap_or(0),
+        "due_count": worker.get("due_count").and_then(Value::as_u64).unwrap_or(0),
+        "in_flight_count": worker.get("in_flight_count").and_then(Value::as_u64).unwrap_or(0),
+        "oldest_due_age_ms": worker.get("oldest_due_age_ms").cloned().unwrap_or(Value::Null),
+        "backoff_or_circuit_open": worker.get("backoff_or_circuit_open").and_then(Value::as_bool).unwrap_or(false),
+        "reason": alert_worker_reason(worker)
+    })
+}
+
+fn alert_worker_is_impaired(worker: &Value) -> bool {
+    worker.get("state").and_then(Value::as_str) != Some("started")
+        || worker.get("health").and_then(Value::as_str) != Some("ok")
+        || worker
+            .get("failure_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
+        || worker
+            .get("consecutive_failures")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
+        || worker
+            .get("backoff_or_circuit_open")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+fn alert_worker_reason(worker: &Value) -> String {
+    let name = string_field(worker, "name");
+    let state = string_field(worker, "state");
+    let health = string_field(worker, "health");
+    if state != "started" {
+        return format!("{name} {state}");
+    }
+    if worker
+        .get("backoff_or_circuit_open")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return format!("{name} backoff_or_circuit_open");
+    }
+    if health != "ok" {
+        return format!("{name} {health}");
+    }
+    let consecutive_failures = worker
+        .get("consecutive_failures")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if consecutive_failures > 0 {
+        return format!("{name} consecutive_failures={consecutive_failures}");
+    }
+    let failure_count = worker
+        .get("failure_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if failure_count > 0 {
+        return format!("{name} failure_count={failure_count}");
+    }
+    format!("{name} impaired")
+}
+
+fn alert_plane_reason(worker: &Value) -> String {
+    worker
+        .get("reason")
+        .and_then(Value::as_str)
+        .map_or_else(|| alert_worker_reason(worker), ToOwned::to_owned)
+}
+
+fn alert_plane_reason_summary(alert_plane: &Value) -> String {
+    let reasons = alert_plane
+        .get("reasons")
+        .and_then(Value::as_array)
+        .map(|reasons| reasons.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if reasons.is_empty() {
+        "unknown".to_owned()
+    } else {
+        reasons.join(", ")
+    }
 }
 
 fn worker_names(worker_pressure: &Value, key: &str) -> String {
@@ -3490,9 +3645,33 @@ fn item_state(item: &Value) -> &str {
 }
 
 fn public_probe(client: &ApiClient, path: &str) -> Value {
-    match client.get_public_json(path) {
-        Ok(value) => json!({"ok": true, "response": value}),
-        Err(error) => json!({"ok": false, "error": error.to_string()}),
+    let url = format!("{}{}", client.endpoint(), path);
+    let response = match client.client.get(url).send() {
+        Ok(response) => response,
+        Err(error) => return json!({"ok": false, "error": error.to_string()}),
+    };
+    let status = response.status();
+    let body = match response.text() {
+        Ok(body) => body,
+        Err(error) => return json!({"ok": false, "error": error.to_string()}),
+    };
+    let parsed = serde_json::from_str::<Value>(&body);
+    match (status.is_success(), parsed) {
+        (true, Ok(value)) => json!({"ok": true, "http_status": status.as_u16(), "response": value}),
+        (true, Err(error)) => {
+            json!({"ok": false, "http_status": status.as_u16(), "error": error.to_string()})
+        }
+        (false, Ok(value)) => json!({
+            "ok": false,
+            "http_status": status.as_u16(),
+            "error": format!("GET {path} returned {status}"),
+            "response": value
+        }),
+        (false, Err(_)) => json!({
+            "ok": false,
+            "http_status": status.as_u16(),
+            "error": format!("GET {path} returned {status}: {}", redact_text(&body))
+        }),
     }
 }
 
@@ -3587,13 +3766,6 @@ fn witness_monitor_report(status_probe: &Value, monitors_probe: &Value) -> Value
 }
 
 fn worker_readiness_report(readyz_probe: &Value) -> Value {
-    if !probe_ok(readyz_probe) {
-        return json!({
-            "available": false,
-            "reason": string_field(readyz_probe, "error")
-        });
-    }
-
     let Some(response) = readyz_probe.get("response") else {
         return json!({
             "available": false,
@@ -3765,6 +3937,40 @@ fn worker_readiness_summary(value: Option<&Value>) -> String {
         summary.push_str(&format!(", {missing_health} missing health fields"));
     }
     summary
+}
+
+fn alert_plane_summary(value: Option<&Value>) -> String {
+    let Some(value) = value else {
+        return "missing".to_owned();
+    };
+    if !value
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return format!("unavailable: {}", string_field(value, "reason"));
+    }
+    let status = string_field(value, "status");
+    let worker_count = value
+        .get("worker_count")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    if status == "healthy" {
+        return format!("healthy {worker_count} workers");
+    }
+    let impaired_workers = value
+        .get("impaired_workers")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let noun = if impaired_workers == 1 {
+        "worker"
+    } else {
+        "workers"
+    };
+    format!(
+        "{status} {impaired_workers} {noun}: {}",
+        alert_plane_reason_summary(value)
+    )
 }
 
 fn dr_summary(value: Option<&Value>) -> String {
@@ -4059,6 +4265,7 @@ mod tests {
             "pressured_workers": 0,
             "workers": []
         });
+        let alert_plane = alert_plane_report(&worker_readiness);
         let dogfood = json!({
             "ok": true,
             "response": {
@@ -4088,6 +4295,7 @@ mod tests {
             &canary_errors,
             &witness,
             &worker_readiness,
+            &alert_plane,
             &dogfood,
             &receipt_runs,
             1_781_561_520_000,
@@ -4118,6 +4326,75 @@ mod tests {
     }
 
     #[test]
+    fn doctor_verdict_degrades_for_alert_plane_pressure_even_when_readyz_is_ready() {
+        let healthz = json!({"ok": true, "response": {"status": "ok"}});
+        let readyz = json!({"ok": true, "response": {"status": "ready"}});
+        let summary = json!({"ok": true, "summary": ["summary: Canary healthy"]});
+        let incidents = json!({"ok": true, "response": {"incidents": []}});
+        let canary_errors = json!({
+            "ok": true,
+            "response": {
+                "service": "canary",
+                "total_errors": 0
+            }
+        });
+        let witness = json!({
+            "status": "observed",
+            "monitor": "canary-watchman",
+            "state": "up",
+            "last_check_in_status": "alive",
+            "last_check_in_at": "2026-06-15T22:00:00Z",
+            "expected_every_ms": 600000
+        });
+        let worker_readiness = json!({
+            "available": true,
+            "status": "ready",
+            "worker_count": 2,
+            "failing_workers": 0,
+            "pressured_workers": 1,
+            "workers": [
+                {"name": "monitor_overdue", "state": "started", "health": "pressured", "failure_count": 0, "consecutive_failures": 0, "due_count": 1, "oldest_due_age_ms": 7200000, "backoff_or_circuit_open": false},
+                {"name": "target_probe", "state": "started", "health": "ok", "failure_count": 0, "consecutive_failures": 0, "due_count": 0, "oldest_due_age_ms": null, "backoff_or_circuit_open": false}
+            ]
+        });
+        let alert_plane = alert_plane_report(&worker_readiness);
+        let dogfood = json!({"ok": true, "response": {"strict_failures": []}});
+        let receipt_runs = json!({"ok": true, "runs": []});
+
+        let verdict = doctor_verdict(
+            &healthz,
+            &readyz,
+            &summary,
+            &incidents,
+            &canary_errors,
+            &witness,
+            &worker_readiness,
+            &alert_plane,
+            &dogfood,
+            &receipt_runs,
+            1_781_561_520_000,
+        );
+
+        assert_eq!(alert_plane["status"], "impaired");
+        assert_eq!(verdict["overall"], "degraded");
+        assert_eq!(verdict["alert_plane"]["status"], "impaired");
+        assert!(
+            verdict["blocking_signals"]
+                .as_array()
+                .is_some_and(|signals| signals.iter().any(|signal| signal
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("alert-plane impaired: monitor_overdue pressured")))
+        );
+        assert!(
+            verdict["next_operator_action"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("alert-plane")
+        );
+    }
+
+    #[test]
     fn worker_readiness_keeps_pressured_workers_separate_from_failures() {
         let readyz = json!({
             "ok": true,
@@ -4138,9 +4415,49 @@ mod tests {
         assert_eq!(report["worker_count"], 2);
         assert_eq!(report["failing_workers"], 0);
         assert_eq!(report["pressured_workers"], 1);
+        let alert_plane = alert_plane_report(&report);
+        assert_eq!(alert_plane["status"], "impaired");
+        assert_eq!(
+            alert_plane_summary(Some(&alert_plane)),
+            "impaired 1 worker: webhook_delivery pressured"
+        );
         assert_eq!(
             worker_readiness_summary(Some(&report)),
             "ready 2 workers, 0 failing, 1 pressured"
+        );
+    }
+
+    #[test]
+    fn alert_plane_uses_not_ready_worker_snapshots() {
+        let readyz = json!({
+            "ok": false,
+            "http_status": 503,
+            "error": "GET /readyz returned 503 Service Unavailable",
+            "response": {
+                "status": "not_ready",
+                "checks": {
+                    "workers": [
+                        {"name": "webhook_delivery", "state": "started", "health": "pressured", "failure_count": 0, "consecutive_failures": 0, "due_count": 9, "oldest_due_age_ms": 7200000, "backoff_or_circuit_open": true},
+                        {"name": "target_probe", "state": "started", "health": "failing", "failure_count": 3, "consecutive_failures": 3, "due_count": 1, "oldest_due_age_ms": 0, "backoff_or_circuit_open": false}
+                    ]
+                }
+            }
+        });
+
+        let report = worker_readiness_report(&readyz);
+        let alert_plane = alert_plane_report(&report);
+
+        assert_eq!(report["available"], true);
+        assert_eq!(report["status"], "not_ready");
+        assert_eq!(report["failing_workers"], 1);
+        assert_eq!(report["pressured_workers"], 1);
+        assert_eq!(alert_plane["status"], "impaired");
+        assert_eq!(
+            alert_plane["reasons"],
+            json!([
+                "webhook_delivery backoff_or_circuit_open",
+                "target_probe failing"
+            ])
         );
     }
 

@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canary Agent-First Positioning - 2026-06-19</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #151515;
+      --muted: #5f6368;
+      --line: #d8d8d8;
+      --wash: #f6f6f3;
+      --panel: #ffffff;
+      --accent: #0f5f6b;
+      --warn: #8a4b00;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--wash);
+      line-height: 1.45;
+    }
+
+    main {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 32px 0 56px;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(280px, 0.42fr);
+      gap: 28px;
+      align-items: end;
+      min-height: 62vh;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 28px;
+    }
+
+    h1 {
+      max-width: 860px;
+      margin: 0;
+      font-size: clamp(40px, 7vw, 92px);
+      line-height: 0.95;
+      letter-spacing: 0;
+    }
+
+    h2,
+    h3 {
+      letter-spacing: 0;
+      line-height: 1.05;
+    }
+
+    .kicker,
+    .label {
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .lede {
+      max-width: 760px;
+      color: var(--muted);
+      font-size: 20px;
+    }
+
+    .panel,
+    .cell {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      padding: 20px;
+    }
+
+    .grid {
+      display: grid;
+      gap: 1px;
+      background: var(--line);
+      border: 1px solid var(--line);
+      margin-top: 28px;
+    }
+
+    .grid > * {
+      border: 0;
+    }
+
+    .cols-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .cols-3 {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .cols-4 {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    section {
+      margin-top: 48px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      margin-top: 18px;
+    }
+
+    th,
+    td {
+      border: 1px solid var(--line);
+      padding: 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #eeeeea;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    code {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.94em;
+      background: #eeeeea;
+      padding: 0.12em 0.28em;
+    }
+
+    a {
+      color: var(--accent);
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .warn {
+      color: var(--warn);
+    }
+
+    ul {
+      padding-left: 1.2em;
+    }
+
+    @media (max-width: 860px) {
+      header,
+      .cols-2,
+      .cols-3,
+      .cols-4 {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <p class="kicker">Context packet / 2026-06-19</p>
+      <h1>Make Canary the smallest agent-first command center for production health.</h1>
+      <p class="lede">Chosen direction: tighten the identity around errors, uptime, health, incidents, timeline replay, and remediation claims. Do not chase dashboards, APM breadth, or human incident-suite parity.</p>
+    </div>
+    <aside class="panel">
+      <p class="label">Proof surface</p>
+      <p>Live repo docs, checked-in dogfood registry, deployed Canary CLI readbacks, and current competitor research.</p>
+      <p class="label">Stop conditions</p>
+      <p>Stop if vision requires a dashboard, if agent ownership is ambiguous, or if coverage is claimed without live readback.</p>
+      <p class="muted">Premise source: direct operator request in current thread. Waiver: no standalone source file for the spoken premise; current-state claims are grounded below.</p>
+    </aside>
+  </header>
+
+  <section class="grid cols-4" aria-label="current-state-summary">
+    <article class="cell">
+      <p class="label">Runtime</p>
+      <p><code>bin/canary doctor --json</code> returned <strong>healthy</strong>, no runtime blockers, workers ready.</p>
+    </article>
+    <article class="cell">
+      <p class="label">Dogfood</p>
+      <p>Registry has 4 active services, 2 pending, 5 blocked, 2 follow-on, and 1 ignored service.</p>
+    </article>
+    <article class="cell">
+      <p class="label">Usefulness</p>
+      <p>Value receipts prove <code>linejam</code>, <code>canary-self</code>, and <code>vulcan</code>; <code>chrondle</code> is live-clean but has stale registry evidence.</p>
+    </article>
+    <article class="cell">
+      <p class="label">Weakness</p>
+      <p>Doctor still reports 45 dogfood strict failures and 42 value-unproven services, so the product is useful but over-noisy at portfolio scale.</p>
+    </article>
+  </section>
+
+  <section>
+    <h2>Position</h2>
+    <div class="grid cols-3">
+      <article class="cell">
+        <h3>What Canary owns</h3>
+        <p>Error ingest, health targets, check-in monitors, incidents, timelines, signed webhooks, delivery diagnostics, annotations, remediation claims, integration receipts, and compact agent reads.</p>
+      </article>
+      <article class="cell">
+        <h3>What consumers get</h3>
+        <p>A single command/API/MCP-shaped surface for agents to learn what broke, claim the work, avoid duplicate responders, query context, and write back evidence.</p>
+      </article>
+      <article class="cell">
+        <h3>What stays out</h3>
+        <p>Dashboards, broad APM, full logs, distributed tracing, LLM evaluation, human incident rooms, repo mutation, and autonomous remediation policy.</p>
+      </article>
+    </div>
+  </section>
+
+  <section>
+    <h2>Current Use</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Service</th>
+          <th>Current state</th>
+          <th>Value Canary provides</th>
+          <th>Gap</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>canary-self</code></td>
+          <td>Active, verified, value receipt proven.</td>
+          <td>Self health target, worker readiness, external witness, doctor verdict.</td>
+          <td>Keep witness receipts fresh and visible after deploys.</td>
+        </tr>
+        <tr>
+          <td><code>linejam</code></td>
+          <td>Active, verified, value receipt proven.</td>
+          <td>Reference integration for health, ingest, and downstream responder coverage.</td>
+          <td>Use as the canonical consumer exemplar.</td>
+        </tr>
+        <tr>
+          <td><code>chrondle</code></td>
+          <td>Active and live-clean, but receipt flags stale registry evidence.</td>
+          <td>Shows Canary can prevent stale triage claims from looking current.</td>
+          <td>Refresh dogfood registry evidence and next action.</td>
+        </tr>
+        <tr>
+          <td><code>vulcan</code></td>
+          <td>Active, verified, value receipt proven with 129 errors in 24h.</td>
+          <td>Health and error visibility for Adminifi orchestrator surface.</td>
+          <td>Needs ownership consolidation and triage policy outside Canary.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Competitor Map</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Tool class</th>
+          <th>Why teams choose it</th>
+          <th>Why choose Canary instead</th>
+          <th>Source</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Sentry</td>
+          <td>Developer-first error monitoring, stack traces, release health, performance, replay, broad SDKs, and now explicit MCP/agent setup docs.</td>
+          <td>Canary is smaller, self-hosted, and treats the event/timeline/claim loop as the product instead of issue triage UI.</td>
+          <td><a href="https://sentry.io/product/error-monitoring">Sentry error monitoring</a>, <a href="https://docs.sentry.io/">Sentry docs</a></td>
+        </tr>
+        <tr>
+          <td>UptimeRobot</td>
+          <td>Hosted uptime, SSL/domain/cron checks, status pages, webhooks, and simple API automation.</td>
+          <td>Canary combines uptime with error context, incidents, claims, annotations, and agent replay in one self-hosted ledger.</td>
+          <td><a href="https://uptimerobot.com/api">UptimeRobot API</a>, <a href="https://uptimerobot.com/knowledge-hub/monitoring/what-is-uptimerobot">UptimeRobot overview</a></td>
+        </tr>
+        <tr>
+          <td>Better Stack</td>
+          <td>Hosted logs, uptime, tracing, incident management, status pages, on-call, AI SRE, and MCP positioning at lower Datadog-style cost.</td>
+          <td>Canary is intentionally smaller and owner-operated; the agent coordination state is first-class rather than one workflow among many.</td>
+          <td><a href="https://betterstack.com/">Better Stack</a>, <a href="https://betterstack.com/uptime">Better Stack uptime</a></td>
+        </tr>
+        <tr>
+          <td>Datadog / New Relic / Grafana / Honeycomb</td>
+          <td>Full-stack logs, metrics, traces, OpenTelemetry, SLOs, high-cardinality analysis, dashboards, and enterprise observability.</td>
+          <td>Canary avoids telemetry platform breadth and optimizes the first agent response to production health events.</td>
+          <td><a href="https://www.honeycomb.io/">Honeycomb</a>, <a href="https://grafana.com/docs/grafana-cloud/monitor-infrastructure/integrations/integration-reference/integration-opentelemetry">Grafana OpenTelemetry</a>, <a href="https://newrelic.com/platform/log-management">New Relic logs</a></td>
+        </tr>
+        <tr>
+          <td>PagerDuty / incident.io</td>
+          <td>Human on-call, escalation, incident rooms, workflows, customer communications, AI-assisted response, and enterprise process.</td>
+          <td>Canary is the upstream signal and coordination ledger for agents; downstream incident suites can still consume its webhooks and timeline.</td>
+          <td><a href="https://www.pagerduty.com/platform/aiops">PagerDuty AIOps</a>, <a href="https://incident.io/">incident.io</a></td>
+        </tr>
+        <tr>
+          <td>Langfuse / LLM observability</td>
+          <td>LLM traces, prompts, token cost, retrieval/tool-call visibility, evals, and human annotation for AI products.</td>
+          <td>Canary watches deployed application health. It can monitor agents as apps, but it should not become an LLM eval platform.</td>
+          <td><a href="https://langfuse.com">Langfuse</a></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Recommended Documentation Change</h2>
+    <div class="grid cols-3">
+      <article class="cell">
+        <h3><code>VISION.md</code></h3>
+        <p>Make this the canonical product promise, competitor stance, principles, and roadmap bias.</p>
+      </article>
+      <article class="cell">
+        <h3><code>docs/agent-first-identity.md</code></h3>
+        <p>Define the design laws and UX contract agents should experience across API, CLI, SDK, and MCP.</p>
+      </article>
+      <article class="cell">
+        <h3><code>README.md</code></h3>
+        <p>Link the identity docs from the project front door so future work starts with the right product frame.</p>
+      </article>
+    </div>
+  </section>
+
+  <section>
+    <h2>Oracle</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Check</th>
+          <th>Command or artifact</th>
+          <th>Expected result</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Cleanup</td>
+          <td><code>git worktree list --porcelain</code></td>
+          <td>Only <code>/Users/phaedrus/Development/canary</code> remains registered.</td>
+        </tr>
+        <tr>
+          <td>Docs compile as prose</td>
+          <td><code>rg -n "MCP server|dashboard" VISION.md docs/agent-first-identity.md README.md</code></td>
+          <td>No stale claim that Canary is not MCP-shaped; dashboard remains an explicit non-goal.</td>
+        </tr>
+        <tr>
+          <td>Live current-state evidence</td>
+          <td><code>bin/canary doctor --json</code> and <code>bin/canary dogfood value --service linejam --json</code></td>
+          <td>Canary health and dogfood usefulness claims are grounded in deployed readback.</td>
+        </tr>
+        <tr>
+          <td>Repo gate</td>
+          <td><code>./bin/validate --fast</code></td>
+          <td>Fast repo validation passes after documentation edits.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Research Source Matrix</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Lane</th>
+          <th>Status</th>
+          <th>Contribution</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Codebase</td>
+          <td>Complete</td>
+          <td><code>VISION.md</code>, <code>README.md</code>, <code>docs/agent-inspection-cli.md</code>, <code>docs/remediation-claims.md</code>, <code>priv/openapi/openapi.json</code>, and dogfood registry.</td>
+        </tr>
+        <tr>
+          <td>Live CLI</td>
+          <td>Complete</td>
+          <td><code>doctor</code>, service registry, open incidents, and active-service value receipts.</td>
+        </tr>
+        <tr>
+          <td>External retrieval</td>
+          <td>Complete</td>
+          <td>Official or near-official competitor positioning for Sentry, UptimeRobot, Better Stack, Honeycomb, Grafana, New Relic, PagerDuty, incident.io, and Langfuse.</td>
+        </tr>
+        <tr>
+          <td>Discourse / social</td>
+          <td>Skipped</td>
+          <td>Not required for the documentation decision; current official positioning was enough.</td>
+        </tr>
+        <tr>
+          <td>Repo-aware critique</td>
+          <td>Partial</td>
+          <td>Applied works-critique lens locally. Fresh external critic not dispatched because this is documentation shaping with low runtime risk.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+</main>
+</body>
+</html>
