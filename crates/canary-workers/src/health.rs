@@ -21,6 +21,8 @@ use canary_store::{
 };
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
+const MAX_MONITOR_OBSERVED_AT_FUTURE_SKEW_SECONDS: i64 = 300;
+
 /// Runtime timestamp and ids for a health observation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservationContext {
@@ -265,6 +267,8 @@ pub struct PlannedMonitorOverdue {
 pub enum HealthPlanError {
     /// The observed check-in timestamp was not RFC3339.
     InvalidObservedAt(String),
+    /// The observed check-in timestamp is beyond the accepted future clock skew.
+    ObservedAtTooFarInFuture,
 }
 
 impl fmt::Display for HealthPlanError {
@@ -273,6 +277,10 @@ impl fmt::Display for HealthPlanError {
             Self::InvalidObservedAt(value) => {
                 write!(formatter, "invalid monitor observed_at timestamp: {value}")
             }
+            Self::ObservedAtTooFarInFuture => write!(
+                formatter,
+                "monitor observed_at cannot be more than {MAX_MONITOR_OBSERVED_AT_FUTURE_SKEW_SECONDS} seconds after receipt time"
+            ),
         }
     }
 }
@@ -286,7 +294,9 @@ pub fn plan_monitor_check_in(
     context: ObservationContext,
 ) -> Result<PlannedMonitorCheckIn, HealthPlanError> {
     let state = input.status.state();
-    let deadline_at = deadline_at(&monitor, &input)?;
+    let observed_at = parse_observed_at(&input.observed_at)?;
+    reject_observed_at_after_receipt(observed_at, &context.now)?;
+    let deadline_at = deadline_at(&monitor, &input, observed_at)?;
     let transitioned = monitor.state != state;
     let transition = transitioned.then(|| MonitorTransitionEvent {
         name: monitor.name,
@@ -386,15 +396,32 @@ pub fn plan_monitor_overdue(
 fn deadline_at(
     monitor: &MonitorSnapshot,
     input: &MonitorCheckInInput,
+    observed: OffsetDateTime,
 ) -> Result<String, HealthPlanError> {
-    let observed = OffsetDateTime::parse(&input.observed_at, &Rfc3339)
-        .map_err(|_| HealthPlanError::InvalidObservedAt(input.observed_at.clone()))?;
     let deadline = observed
         + Duration::milliseconds(effective_interval_ms(monitor, input))
         + Duration::milliseconds(monitor.grace_ms);
     deadline
         .format(&Rfc3339)
         .map_err(|_| HealthPlanError::InvalidObservedAt(input.observed_at.clone()))
+}
+
+fn parse_observed_at(value: &str) -> Result<OffsetDateTime, HealthPlanError> {
+    OffsetDateTime::parse(value, &Rfc3339)
+        .map_err(|_| HealthPlanError::InvalidObservedAt(value.to_owned()))
+}
+
+fn reject_observed_at_after_receipt(
+    observed_at: OffsetDateTime,
+    receipt_time: &str,
+) -> Result<(), HealthPlanError> {
+    let Some(receipt_time) = parse_monitor_timestamp("now", receipt_time) else {
+        return Ok(());
+    };
+    if observed_at - receipt_time > Duration::seconds(MAX_MONITOR_OBSERVED_AT_FUTURE_SKEW_SECONDS) {
+        return Err(HealthPlanError::ObservedAtTooFarInFuture);
+    }
+    Ok(())
 }
 
 fn effective_interval_ms(monitor: &MonitorSnapshot, input: &MonitorCheckInInput) -> i64 {
@@ -594,6 +621,45 @@ mod tests {
             Some("2026-05-28T20:02:05Z")
         );
         assert!(plan.commit.transition.is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn monitor_check_in_rejects_observed_at_beyond_future_skew() -> Result<(), Box<dyn Error>> {
+        let mut input = check_in(MonitorCheckInStatus::Alive);
+        input.observed_at = "2026-05-28T20:05:01Z".to_owned();
+
+        let error = plan_monitor_check_in(
+            monitor(HealthState::Unknown, MonitorMode::Ttl),
+            input,
+            context()?,
+        )
+        .expect_err("future observed_at beyond skew should be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "monitor observed_at cannot be more than 300 seconds after receipt time"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn monitor_check_in_accepts_observed_at_at_future_skew_limit() -> Result<(), Box<dyn Error>> {
+        let mut input = check_in(MonitorCheckInStatus::Alive);
+        input.observed_at = "2026-05-28T20:05:00Z".to_owned();
+
+        let plan = plan_monitor_check_in(
+            monitor(HealthState::Unknown, MonitorMode::Ttl),
+            input,
+            context()?,
+        )?;
+
+        assert_eq!(
+            plan.commit.deadline_at.as_deref(),
+            Some("2026-05-28T20:07:05Z")
+        );
 
         Ok(())
     }

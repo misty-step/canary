@@ -365,12 +365,15 @@ curl -X POST https://canary-obs.fly.dev/api/v1/check-ins \
   -H "Authorization: Bearer $CANARY_INGEST_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "monitor_id": "MON-...",
-    "status": "alive"
+    "monitor": "desktop-active-timer",
+    "status": "alive",
+    "observed_at": "2026-06-20T18:00:00Z"
   }'
 ```
 
 Healthy check-ins advance the monitor state without creating error groups.
+`observed_at` is optional, but when supplied it cannot be more than five
+minutes in the future relative to Canary receipt time.
 Crash or exception telemetry still belongs on `POST /api/v1/errors`.
 
 ### Target Management

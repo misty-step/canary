@@ -2902,8 +2902,12 @@
             "type": "string"
           },
           "observed_at": {
-            "type": "string",
-            "format": "date-time"
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Optional runtime observation time. Canary rejects values more than 5 minutes in the future to prevent check-ins from deferring overdue alerts."
           },
           "ttl_ms": {
             "type": "integer",

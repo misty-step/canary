@@ -2999,6 +2999,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn monitor_check_in_rejects_future_observed_at_without_writing()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state_with_monitor("desktop-active-timer")?;
+        let router = ingest_router(state.clone());
+
+        let response = router
+            .oneshot(check_in_request(
+                INGEST_KEY,
+                r#"{"monitor":"desktop-active-timer","status":"alive","observed_at":"2999-01-01T00:00:00Z","ttl_ms":120000}"#,
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["code"], "validation_error");
+        assert_eq!(body["detail"], "observed_at is too far in the future.");
+        assert_eq!(
+            body["errors"]["observed_at"],
+            json!(["must not be more than 5 minutes in the future"])
+        );
+
+        let accepted = ingest_router(state)
+            .oneshot(check_in_request(INGEST_KEY, valid_check_in_body())?)
+            .await?;
+        let accepted_body = json_body(accepted).await?;
+        assert_eq!(accepted_body["sequence"], 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn monitor_check_in_rejects_missing_invalid_revoked_and_wrong_scope_keys()
     -> Result<(), Box<dyn Error>> {
         let cases = [

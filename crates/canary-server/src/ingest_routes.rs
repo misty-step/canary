@@ -6,14 +6,14 @@
 //! best-effort fanout after the SQLite commit.
 
 use axum::{
-    body::{Body, Bytes},
+    body::{Body, Bytes, to_bytes},
     extract::State,
-    http::{HeaderMap, Response, StatusCode},
+    http::{HeaderMap, Request, Response, StatusCode},
 };
 use canary_http::{
     problem_details::{
-        ProblemDetails, internal_problem, invalid_observed_at_problem, not_found_problem,
-        payload_too_large_problem, validation_problem,
+        ProblemDetails, future_observed_at_problem, internal_problem, invalid_observed_at_problem,
+        not_found_problem, payload_too_large_problem, validation_problem,
     },
     request::{MAX_JSON_BODY_BYTES, decode_json_object},
 };
@@ -36,7 +36,6 @@ use crate::{
 
 struct ParsedCheckIn {
     monitor_name: String,
-    observed_at: String,
     input: MonitorCheckInInput,
 }
 
@@ -108,12 +107,24 @@ pub(crate) async fn create_error(
 
 pub(crate) async fn create_check_in(
     State(state): State<IngestState>,
-    headers: HeaderMap,
-    body: Bytes,
+    request: Request<Body>,
 ) -> Response<Body> {
+    let received_at = current_rfc3339();
+    let (parts, body) = request.into_parts();
+    let headers = parts.headers;
+
     if let Err(problem) = check_content_length(&headers) {
         return problem_response(*problem);
     }
+
+    let body = match to_bytes(body, (MAX_JSON_BODY_BYTES + 1) as usize).await {
+        Ok(body) => body,
+        Err(_) => {
+            return problem_response(payload_too_large_problem(
+                "Request body exceeds 100KB limit.",
+            ));
+        }
+    };
 
     if body.len() as u64 > MAX_JSON_BODY_BYTES {
         return problem_response(payload_too_large_problem(
@@ -130,7 +141,7 @@ pub(crate) async fn create_check_in(
         Ok(attrs) => attrs,
         Err(problem) => return problem_response(*problem),
     };
-    let check_in = match parse_check_in(attrs) {
+    let check_in = match parse_check_in(attrs, &received_at) {
         Ok(check_in) => check_in,
         Err(problem) => return problem_response(*problem),
     };
@@ -157,7 +168,7 @@ pub(crate) async fn create_check_in(
         Err(_) => return problem_response(internal_problem()),
     };
     let context = ObservationContext {
-        now: check_in.observed_at.clone(),
+        now: received_at,
         now_millis: current_unix_millis(),
         event_id: canary_core::ids::EventId::generate(),
         incident_id: canary_core::ids::IncidentId::generate(),
@@ -167,6 +178,9 @@ pub(crate) async fn create_check_in(
         Ok(plan) => plan,
         Err(HealthPlanError::InvalidObservedAt(_)) => {
             return problem_response(invalid_observed_at_problem());
+        }
+        Err(HealthPlanError::ObservedAtTooFarInFuture) => {
+            return problem_response(future_observed_at_problem());
         }
     };
     let response_observed_at = plan.commit.check_in.observed_at.clone();
@@ -197,7 +211,10 @@ pub(crate) async fn create_check_in(
     )
 }
 
-fn parse_check_in(attrs: Map<String, Value>) -> Result<ParsedCheckIn, Box<ProblemDetails>> {
+fn parse_check_in(
+    attrs: Map<String, Value>,
+    received_at: &str,
+) -> Result<ParsedCheckIn, Box<ProblemDetails>> {
     let mut errors: ValidationErrors = ValidationErrors::new();
     let monitor_name = required_string(&attrs, "monitor", &mut errors);
     let status = parse_check_in_status(attrs.get("status"), &mut errors);
@@ -223,13 +240,12 @@ fn parse_check_in(attrs: Map<String, Value>) -> Result<ParsedCheckIn, Box<Proble
     };
     let observed_at = match attrs.get("observed_at") {
         Some(Value::String(value)) => value.clone(),
-        Some(Value::Null) | None => current_rfc3339(),
+        Some(Value::Null) | None => received_at.to_owned(),
         Some(_) => return Err(Box::new(invalid_observed_at_problem())),
     };
 
     Ok(ParsedCheckIn {
         monitor_name,
-        observed_at: observed_at.clone(),
         input: MonitorCheckInInput {
             id: canary_core::ids::CheckInId::generate().into_string(),
             external_id: optional_string(attrs.get("check_in_id")),

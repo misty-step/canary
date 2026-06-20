@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en" data-ae-mode="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canary 047 Completion Plan</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@100..900&amp;family=Geist+Mono:wght@100..900&amp;display=swap">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/misty-step/aesthetic@v2.5.1/aesthetic.css">
+  <style>
+    :root { --ae-accent: #1f6f64; --ae-accent-dark: #7bd0c4; }
+    .plan-wide .ae-bar, .plan-wide .ae-stage { width: min(92rem, 100% - 4rem); }
+    .hero { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(24em, 0.72fr); gap: 3em; align-items: end; }
+    .grid-2, .grid-3, .grid-4 { display: grid; gap: 1px; background: var(--ae-line); }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .cell { min-width: 0; background: var(--ae-surface); padding: 1.2em 1.35em; }
+    .wash { background: var(--ae-wash); }
+    .rule { border-top: 1px solid var(--ae-line); margin: 1.3em 0; }
+    .phase { display: grid; grid-template-columns: 8em minmax(0, 1fr) minmax(15em, 0.7fr); gap: 1.2em; border-top: 1px solid var(--ae-line); padding-top: 1em; margin-top: 1em; }
+    .phase:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+    .table-wrap { overflow-x: auto; }
+    @media (max-width: 980px) {
+      .plan-wide .ae-bar, .plan-wide .ae-stage { width: min(100% - 2rem, 92rem); }
+      .hero, .grid-2, .grid-3, .grid-4, .phase { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<div class="ae-screen plan-wide">
+  <header class="ae-bar">
+    <a class="ae-name" href="../../backlog.d/047-alert-plane-slo-burn-rate.md">BACKLOG 047 / COMPLETION</a>
+    <p class="ae-chrome">plan for the remaining alert-plane reliability slice</p>
+  </header>
+
+  <main class="ae-stage ae-stage-scroll">
+    <article class="ae-view">
+      <section class="hero" aria-label="Plan contract">
+        <div>
+          <p class="ae-chrome">P0 ALERTABILITY TRUST</p>
+          <h1 class="ae-strong">Future check-ins cannot hide overdue monitor alerts, and alert-plane impairment has a production-image proof.</h1>
+          <p class="ae-lede">Complete the rest of #047 without widening the product surface prematurely. First add an explicit future timestamp skew policy at the monitor check-in boundary, then wire a production-image induced impairment rehearsal, then add only the minimal SLO and burn-rate surfaces needed by agents.</p>
+        </div>
+        <aside class="ae-panel">
+          <h2 class="ae-h">CHOSEN DESIGN</h2>
+          <p>Reject monitor check-ins whose <code>observed_at</code> is more than five minutes ahead of receipt time. Do not clamp silently.</p>
+          <p>Keep deadline math in <code>canary-workers::health</code>; keep RFC 9457 HTTP shape in <code>ingest_routes</code>; keep SQLite as a commit ledger, not a policy engine.</p>
+          <div class="rule"></div>
+          <h2 class="ae-h">QUALITY SYSTEM</h2>
+          <p>Risk tier: substantive. Proof requires focused Rust tests, route-level Problem Details tests, production-image rehearsal, live doctor readback, and a fresh artifact-only critic.</p>
+          <p class="ae-dim">Plan status: added before the remaining 047 edits; preserve the earlier first-slice plan as historical evidence.</p>
+        </aside>
+      </section>
+
+      <section class="grid-4" aria-label="Executive contract" style="margin-top: 2em">
+        <article class="cell">
+          <h2 class="ae-h">STANDARDS</h2>
+          <p>Canonical Rust layer, deterministic Problem Details, no hidden write pools, no readiness semantic drift, no LLM path.</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">ACCEPTANCE</h2>
+          <p>Future check-ins beyond skew fail and do not write; induced impairment fails doctor or witness while <code>/readyz</code> stays route-ready.</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">VERIFY</h2>
+          <p>Focused tests first, <code>./bin/validate --fast</code> per milestone, <code>./bin/validate --strict</code> before PR, then CI, deploy, and live proof after squash merge.</p>
+        </article>
+        <article class="cell wash">
+          <h2 class="ae-h">STOP IF</h2>
+          <p>A step needs new auth scopes, persistent SLO schema ambiguity, altered <code>/readyz</code> semantics, or an unprovable production rehearsal.</p>
+        </article>
+      </section>
+
+      <section class="grid-3" aria-label="Current state" style="margin-top: 1px">
+        <article class="cell">
+          <h2 class="ae-h">CURRENT STATE</h2>
+          <p>PR #167 exposed <code>alert_plane</code> in doctor and witness. Remaining #047 work still allows far-future <code>observed_at</code> values to push monitor deadlines forward.</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">CHANGE SHAPE</h2>
+          <p>Small pure policy in worker planning, route error mapping, OpenAPI guidance, and regression tests. Later milestones add Dagger rehearsal and SLO/burn-rate read models.</p>
+        </article>
+        <article class="cell wash">
+          <h2 class="ae-h">PROOF SURFACE</h2>
+          <p>Planner test proves deadline policy. Route test proves RFC 9457 body and no write. Dagger rehearsal proves production image catches alert-plane impairment.</p>
+        </article>
+      </section>
+
+      <section class="grid-2" aria-label="Scope and anchors" style="margin-top: 2em">
+        <article class="cell">
+          <h2 class="ae-h">SCOPE</h2>
+          <p><strong>Goal:</strong> make agent-facing alertability claims resistant to stale or future-dated monitor data.</p>
+          <p><strong>Non-goals:</strong> dashboard work, distributed tracing, per-customer SLO custom policy, responder mutation, and changing deploy readiness.</p>
+          <p><strong>Policy:</strong> accept clock skew up to five minutes; reject anything beyond it with structured validation.</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">REPO ANCHORS</h2>
+          <p><a href="../../crates/canary-workers/src/health.rs">crates/canary-workers/src/health.rs</a> - monitor deadline and skew planning.</p>
+          <p><a href="../../crates/canary-server/src/ingest_routes.rs">crates/canary-server/src/ingest_routes.rs</a> - HTTP boundary and Problem Details mapping.</p>
+          <p><a href="../../crates/canary-server/src/lib.rs">crates/canary-server/src/lib.rs</a> - route regression tests.</p>
+          <p><a href="../../dagger/src/index.ts">dagger/src/index.ts</a> - strict and production-image rehearsals.</p>
+          <p><a href="../../priv/openapi/openapi.json">priv/openapi/openapi.json</a> - agent-facing contract.</p>
+        </article>
+      </section>
+
+      <section class="ae-panel" aria-label="Execution plan" style="margin-top: 2em">
+        <h2 class="ae-h">EXECUTION PLAN</h2>
+        <div class="phase">
+          <strong class="ae-accent">1 skew</strong>
+          <p>Add failing planner and route tests for far-future <code>observed_at</code>. Implement the five-minute policy and RFC 9457 mapping.</p>
+          <p class="ae-dim">Evidence: focused <code>canary-workers</code> and <code>canary-server</code> tests fail red, then pass green.</p>
+        </div>
+        <div class="phase">
+          <strong class="ae-accent">2 rehearse</strong>
+          <p>Wire a production-image induced impairment command into strict or a dedicated ops lane without weakening existing gates.</p>
+          <p class="ae-dim">Evidence: production image remains route-ready while doctor or witness returns impaired.</p>
+        </div>
+        <div class="phase">
+          <strong class="ae-accent">3 SLO</strong>
+          <p>Add coarse service SLO configuration and deterministic windowed SLI read models only after the impairment oracle is real.</p>
+          <p class="ae-dim">Evidence: report, CLI, and API fixtures expose service windows and budget state.</p>
+        </div>
+        <div class="phase">
+          <strong class="ae-accent">4 land</strong>
+          <p>Run fast and strict gates, live doctor, fresh-context review, thermo maintainability pass, PR, CI, deploy, live proof, then squash merge to <code>master</code>.</p>
+          <p class="ae-dim">Evidence: PR receipt plus ledger entry with merge commit and post-merge checks.</p>
+        </div>
+      </section>
+
+      <section class="grid-2" aria-label="Alternatives and risks" style="margin-top: 2em">
+        <article class="cell">
+          <h2 class="ae-h">ALTERNATIVES</h2>
+          <div class="table-wrap">
+            <table class="ae-table">
+              <thead><tr><th>option</th><th>why</th><th>verdict</th></tr></thead>
+              <tbody>
+                <tr><td class="ae-item">Reject future timestamps beyond five minutes</td><td>Auditable, simple, trust-boundary explicit.</td><td>choose</td></tr>
+                <tr><td class="ae-item">Clamp to receipt time</td><td>Keeps writes flowing.</td><td>reject: hides caller clock bugs and rewrites event time.</td></tr>
+                <tr><td class="ae-item">Store-level rejection</td><td>Hard backstop.</td><td>defer: policy belongs before commit planning and needs HTTP context.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+        <article class="cell wash">
+          <h2 class="ae-h">REVIEW FOCUS</h2>
+          <p>Can a future check-in still defer overdue alerts? Does the error response stay RFC 9457 and agent-readable? Did the production-image rehearsal actually exercise the changed alert-plane path? Did any new SLO surface add shallow abstractions before the proof loop exists?</p>
+        </article>
+      </section>
+    </article>
+  </main>
+
+  <footer class="ae-bar">
+    <p class="ae-foot">Canary #047 completion. Each backlog item lands through its own squash-merged PR before the next item starts.</p>
+  </footer>
+</div>
+</body>
+</html>

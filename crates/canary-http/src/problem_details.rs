@@ -161,6 +161,20 @@ pub fn invalid_observed_at_problem() -> ProblemDetails {
     )
 }
 
+/// Build the future observed-at validation problem.
+pub fn future_observed_at_problem() -> ProblemDetails {
+    ProblemDetails::new(
+        422,
+        ProblemCode::ValidationError,
+        "observed_at is too far in the future.",
+        None,
+    )
+    .with_extra(
+        "errors",
+        json!({"observed_at": ["must not be more than 5 minutes in the future"]}),
+    )
+}
+
 /// Build a generic 404 problem.
 pub fn not_found_problem(detail: impl Into<String>) -> ProblemDetails {
     ProblemDetails::new(404, ProblemCode::NotFound, detail, None)
