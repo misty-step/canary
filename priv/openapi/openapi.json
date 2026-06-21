@@ -5038,6 +5038,173 @@
           }
         }
       },
+      "ServiceSliSummary": {
+        "type": "object",
+        "description": "Per-service whole-window SLI summary returned in report.service_sli. This section is scoped by auth, window, and any API-key service binding; it is not advanced by report.cursor.",
+        "additionalProperties": false,
+        "required": [
+          "service",
+          "window",
+          "targets",
+          "monitors",
+          "errors",
+          "incidents"
+        ],
+        "properties": {
+          "service": {
+            "type": "string",
+            "description": "Service name used to join target, monitor, error, and incident signals."
+          },
+          "window": {
+            "type": "string",
+            "description": "Query window used for windowed counts and ratios.",
+            "enum": [
+              "1h",
+              "6h",
+              "24h",
+              "7d",
+              "30d"
+            ]
+          },
+          "targets": {
+            "$ref": "#/components/schemas/TargetSliSummary"
+          },
+          "monitors": {
+            "$ref": "#/components/schemas/MonitorSliSummary"
+          },
+          "errors": {
+            "$ref": "#/components/schemas/ErrorSliSummary"
+          },
+          "incidents": {
+            "$ref": "#/components/schemas/IncidentSliSummary"
+          }
+        }
+      },
+      "TargetSliSummary": {
+        "type": "object",
+        "description": "HTTP target SLI aggregate for one service in the selected report window.",
+        "additionalProperties": false,
+        "required": [
+          "configured",
+          "checks",
+          "successful_checks",
+          "failed_checks",
+          "availability_ratio",
+          "latency_ms_average"
+        ],
+        "properties": {
+          "configured": {
+            "type": "integer",
+            "description": "Configured HTTP target count for this service."
+          },
+          "checks": {
+            "type": "integer",
+            "description": "Target checks observed inside the selected window."
+          },
+          "successful_checks": {
+            "type": "integer",
+            "description": "Target checks whose persisted result is success."
+          },
+          "failed_checks": {
+            "type": "integer",
+            "description": "Target checks whose persisted result is not success."
+          },
+          "availability_ratio": {
+            "description": "successful_checks divided by checks; null when checks is zero.",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "latency_ms_average": {
+            "description": "Average target-check latency in milliseconds; null when no windowed check reported latency.",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        }
+      },
+      "MonitorSliSummary": {
+        "type": "object",
+        "description": "Non-HTTP monitor SLI aggregate for one service in the selected report window.",
+        "additionalProperties": false,
+        "required": [
+          "configured",
+          "check_ins",
+          "healthy_check_ins",
+          "failed_check_ins",
+          "availability_ratio"
+        ],
+        "properties": {
+          "configured": {
+            "type": "integer",
+            "description": "Configured monitor count for this service."
+          },
+          "check_ins": {
+            "type": "integer",
+            "description": "Monitor check-ins observed inside the selected window."
+          },
+          "healthy_check_ins": {
+            "type": "integer",
+            "description": "Check-ins that map to an up health state: alive, ok, or in_progress."
+          },
+          "failed_check_ins": {
+            "type": "integer",
+            "description": "Check-ins whose status is error."
+          },
+          "availability_ratio": {
+            "description": "healthy_check_ins divided by check_ins; null when check_ins is zero.",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        }
+      },
+      "ErrorSliSummary": {
+        "type": "object",
+        "description": "Error ingest aggregate for one service in the selected report window.",
+        "additionalProperties": false,
+        "required": [
+          "total",
+          "groups"
+        ],
+        "properties": {
+          "total": {
+            "type": "integer",
+            "description": "Error rows observed inside the selected window."
+          },
+          "groups": {
+            "type": "integer",
+            "description": "Distinct error groups observed inside the selected window."
+          }
+        }
+      },
+      "IncidentSliSummary": {
+        "type": "object",
+        "description": "Incident pressure aggregate for one service.",
+        "additionalProperties": false,
+        "required": [
+          "opened",
+          "resolved",
+          "active"
+        ],
+        "properties": {
+          "opened": {
+            "type": "integer",
+            "description": "Incidents opened inside the selected window."
+          },
+          "resolved": {
+            "description": "Incidents resolved inside the selected window.",
+            "type": "integer"
+          },
+          "active": {
+            "type": "integer",
+            "description": "Current unresolved incidents for this service, regardless of when they opened."
+          }
+        }
+      },
       "ReportResponse": {
         "type": "object",
         "additionalProperties": false,
@@ -5046,6 +5213,7 @@
           "summary",
           "targets",
           "monitors",
+          "service_sli",
           "error_groups",
           "incidents",
           "recent_transitions",
@@ -5077,6 +5245,13 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/HealthMonitor"
+            }
+          },
+          "service_sli": {
+            "type": "array",
+            "description": "Compact per-service whole-window SLI summaries. This section is auth/window/service scoped and is not paginated by report.cursor.",
+            "items": {
+              "$ref": "#/components/schemas/ServiceSliSummary"
             }
           },
           "error_groups": {

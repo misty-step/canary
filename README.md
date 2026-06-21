@@ -252,7 +252,10 @@ curl "https://canary-obs.fly.dev/api/v1/report?window=1h" \
 ```
 
 Response combines the current health view, active error groups, recent transitions,
-and correlated incidents in one bounded payload:
+windowed service SLIs, and correlated incidents in one current-state payload.
+Targets, monitors, and error groups are cursor-paginated; `service_sli` is a
+compact per-service whole-window summary scoped by auth, window, and any API-key
+service binding, and is not advanced by `report.cursor`:
 
 ```json
 {
@@ -260,6 +263,36 @@ and correlated incidents in one bounded payload:
   "summary": "3 health surfaces monitored. 1 degraded (volume). 14 errors across 1 service in the last hour.",
   "targets": [...],
   "monitors": [...],
+  "service_sli": [
+    {
+      "service": "volume",
+      "window": "1h",
+      "targets": {
+        "configured": 2,
+        "checks": 120,
+        "successful_checks": 118,
+        "failed_checks": 2,
+        "availability_ratio": 0.9833333333333333,
+        "latency_ms_average": 84.5
+      },
+      "monitors": {
+        "configured": 1,
+        "check_ins": 12,
+        "healthy_check_ins": 11,
+        "failed_check_ins": 1,
+        "availability_ratio": 0.9166666666666666
+      },
+      "errors": {
+        "total": 14,
+        "groups": 3
+      },
+      "incidents": {
+        "opened": 1,
+        "resolved": 0,
+        "active": 1
+      }
+    }
+  ],
   "error_groups": [...],
   "incidents": [
     {

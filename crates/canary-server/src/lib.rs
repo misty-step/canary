@@ -208,6 +208,7 @@ mod tests {
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::process;
+    use std::str::FromStr;
     use std::sync::{
         Arc, Mutex, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -222,7 +223,7 @@ mod tests {
         },
     };
     use canary_core::{
-        ids::{ErrorId, EventId},
+        ids::{ErrorId, EventId, IncidentId},
         ingest::classification::{Category, Classification, Component, Persistence},
     };
     use canary_http::{
@@ -235,10 +236,10 @@ mod tests {
     use canary_ingest::{IngestConfig, IngestEffect};
     use canary_store::{
         API_KEY_PREFIX_LEN, AnnotationInsert, ApiKeyInsert, ErrorIngest, ErrorIngestIds,
-        ErrorIngestPayload, MonitorInsert, Store, TargetCheckObservation, TargetInsert,
-        TargetProbeCommit, WebhookDeliveryInsert, WebhookDeliveryJobCompletion,
-        WebhookDeliveryJobInsert, WebhookDeliveryJobState, WebhookDeliveryStatus,
-        WebhookSubscriptionInsert,
+        ErrorIngestPayload, MonitorCheckInCommit, MonitorCheckInObservation, MonitorInsert, Store,
+        TargetCheckObservation, TargetInsert, TargetProbeCommit, WebhookDeliveryInsert,
+        WebhookDeliveryJobCompletion, WebhookDeliveryJobInsert, WebhookDeliveryJobState,
+        WebhookDeliveryStatus, WebhookSubscriptionInsert,
     };
     use canary_workers::{
         retention::RetentionPolicy,
@@ -6425,6 +6426,12 @@ mod tests {
             bootstrap_report["error_groups"][0]["group_hash"],
             "group-bootstrap-scope"
         );
+        assert_eq!(
+            bootstrap_report["service_sli"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(bootstrap_report["service_sli"][0]["service"], "shared-api");
+        assert_eq!(bootstrap_report["service_sli"][0]["errors"]["total"], 1);
         assert_eq!(bootstrap_report["search_results"], json!([]));
 
         let other_report = router
@@ -6438,6 +6445,12 @@ mod tests {
             other_report["error_groups"][0]["group_hash"],
             "group-other-scope"
         );
+        assert_eq!(
+            other_report["service_sli"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(other_report["service_sli"][0]["service"], "shared-api");
+        assert_eq!(other_report["service_sli"][0]["errors"]["total"], 1);
         assert_eq!(other_report["search_results"][0]["id"], other_error_id);
 
         Ok(())
@@ -6493,6 +6506,129 @@ mod tests {
         assert_eq!(body["error_groups"][0]["service"], "linejam");
         assert_eq!(body["search_results"].as_array().map(Vec::len), Some(1));
         assert_eq!(body["search_results"][0]["service"], "linejam");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn report_includes_windowed_service_sli_and_applies_service_binding()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let read_key = "sk_live_report_sli_api_secret";
+        let now = server_time::current_rfc3339();
+        {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            seed_read_api_key_for_service(&mut store, "KEY-report-sli-api", read_key, "api")?;
+            seed_target(&mut store, "api")?;
+            seed_target(&mut store, "worker")?;
+            seed_monitor(&mut store, "api")?;
+            seed_monitor(&mut store, "worker")?;
+            for (service, result, check_succeeded) in
+                [("api", "success", true), ("worker", "error", false)]
+            {
+                store.commit_target_probe(TargetProbeCommit {
+                    target_id: format!("TGT-{service}"),
+                    state: if check_succeeded { "up" } else { "down" }.to_owned(),
+                    consecutive_failures: if check_succeeded { 0 } else { 1 },
+                    consecutive_successes: if check_succeeded { 1 } else { 0 },
+                    check_succeeded,
+                    check: TargetCheckObservation {
+                        status_code: if check_succeeded {
+                            Some(200)
+                        } else {
+                            Some(500)
+                        },
+                        latency_ms: Some(42),
+                        result: result.to_owned(),
+                        tls_expires_at: None,
+                        error_detail: None,
+                        region: None,
+                    },
+                    now: now.clone(),
+                    transition: None,
+                })?;
+            }
+            for (service, status) in [("api", "alive"), ("worker", "error")] {
+                store.commit_monitor_check_in(MonitorCheckInCommit {
+                    monitor_id: format!("MON-{service}"),
+                    state: if status == "error" { "down" } else { "up" }.to_owned(),
+                    last_check_in_at: Some(now.clone()),
+                    last_check_in_status: Some(status.to_owned()),
+                    deadline_at: Some(now.clone()),
+                    check_in: MonitorCheckInObservation {
+                        id: format!("CHK-{service}-sli"),
+                        external_id: None,
+                        status: status.to_owned(),
+                        observed_at: now.clone(),
+                        ttl_ms: None,
+                        summary: None,
+                        context: None,
+                    },
+                    now: now.clone(),
+                    transition: None,
+                })?;
+            }
+            let mut api_error = owned_error_ingest(
+                canary_store::BOOTSTRAP_TENANT_ID,
+                canary_store::BOOTSTRAP_PROJECT_ID,
+                "ERR-sliapi000001",
+                "EVT-sliapi000001",
+                "group-report-sli-api",
+                "api",
+                "api timeout",
+            )?;
+            api_error.payload.created_at = now.clone();
+            store.commit_error_ingest(api_error)?;
+            let mut worker_error = owned_error_ingest(
+                canary_store::BOOTSTRAP_TENANT_ID,
+                canary_store::BOOTSTRAP_PROJECT_ID,
+                "ERR-sliworker001",
+                "EVT-sliworker001",
+                "group-report-sli-worker",
+                "worker",
+                "worker timeout",
+            )?;
+            worker_error.payload.created_at = now.clone();
+            store.commit_error_ingest(worker_error)?;
+            store.correlate_incident(IncidentCorrelation {
+                tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
+                project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
+                signal_type: "error_group".to_owned(),
+                signal_ref: "group-report-sli-api".to_owned(),
+                service: "api".to_owned(),
+                incident_id: IncidentId::from_str("INC-sliapi000001")?,
+                event_id: EventId::from_str("EVT-sliinc000001")?,
+                now: now.clone(),
+            })?;
+        }
+        let router = ingest_router(state);
+
+        let report = router
+            .clone()
+            .oneshot(read_request(READ_KEY, "/api/v1/report?window=1h")?)
+            .await?;
+        let report = json_body(report).await?;
+        let service_sli = report["service_sli"]
+            .as_array()
+            .ok_or("report should include service_sli")?;
+        assert_eq!(service_sli.len(), 2);
+        let api = service_sli
+            .iter()
+            .find(|summary| summary["service"] == "api")
+            .ok_or("missing api SLI")?;
+        assert_eq!(api["window"], "1h");
+        assert_eq!(api["targets"]["checks"], 1);
+        assert_eq!(api["targets"]["availability_ratio"], 1.0);
+        assert_eq!(api["monitors"]["healthy_check_ins"], 1);
+        assert_eq!(api["errors"]["total"], 1);
+        assert_eq!(api["incidents"]["active"], 1);
+
+        let bound = router
+            .oneshot(read_request(read_key, "/api/v1/report?window=1h")?)
+            .await?;
+        let bound = json_body(bound).await?;
+        assert_eq!(bound["service_sli"].as_array().map(Vec::len), Some(1));
+        assert_eq!(bound["service_sli"][0]["service"], "api");
 
         Ok(())
     }
