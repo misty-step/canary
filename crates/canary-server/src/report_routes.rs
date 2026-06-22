@@ -248,6 +248,13 @@ fn service_sli_response(summary: &ServiceSliSummary) -> Value {
     json!({
         "service": summary.service,
         "window": summary.window,
+        "slo": {
+            "class": summary.slo.class,
+            "source": summary.slo.source,
+            "availability_target": summary.slo.availability_target,
+            "latency_ms_average_target": summary.slo.latency_ms_average_target,
+            "error_budget_events_per_hour": summary.slo.error_budget_events_per_hour,
+        },
         "targets": {
             "configured": summary.targets.configured,
             "checks": summary.targets.checks,

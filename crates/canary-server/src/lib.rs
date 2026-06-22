@@ -6617,6 +6617,11 @@ mod tests {
             .find(|summary| summary["service"] == "api")
             .ok_or("missing api SLI")?;
         assert_eq!(api["window"], "1h");
+        assert_eq!(api["slo"]["class"], "standard");
+        assert_eq!(api["slo"]["source"], "default_health_surface");
+        assert_eq!(api["slo"]["availability_target"], 0.995);
+        assert_eq!(api["slo"]["latency_ms_average_target"], 1_000);
+        assert_eq!(api["slo"]["error_budget_events_per_hour"], 5);
         assert_eq!(api["targets"]["checks"], 1);
         assert_eq!(api["targets"]["availability_ratio"], 1.0);
         assert_eq!(api["monitors"]["healthy_check_ins"], 1);

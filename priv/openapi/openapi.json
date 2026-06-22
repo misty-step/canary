@@ -5045,6 +5045,7 @@
         "required": [
           "service",
           "window",
+          "slo",
           "targets",
           "monitors",
           "errors",
@@ -5066,6 +5067,9 @@
               "30d"
             ]
           },
+          "slo": {
+            "$ref": "#/components/schemas/ServiceSloObjective"
+          },
           "targets": {
             "$ref": "#/components/schemas/TargetSliSummary"
           },
@@ -5077,6 +5081,48 @@
           },
           "incidents": {
             "$ref": "#/components/schemas/IncidentSliSummary"
+          }
+        }
+      },
+      "ServiceSloObjective": {
+        "type": "object",
+        "description": "Deterministic default SLO objective metadata for a service. This is class configuration only; budget burn and alert severity are computed by later read models.",
+        "additionalProperties": false,
+        "required": [
+          "class",
+          "source",
+          "availability_target",
+          "latency_ms_average_target",
+          "error_budget_events_per_hour"
+        ],
+        "properties": {
+          "class": {
+            "type": "string",
+            "description": "Default SLO class assigned by Canary.",
+            "enum": [
+              "standard",
+              "best_effort"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "description": "Reason Canary assigned the default class.",
+            "enum": [
+              "default_health_surface",
+              "default_signal_only"
+            ]
+          },
+          "availability_target": {
+            "type": "number",
+            "description": "Default availability target as a ratio from 0.0 to 1.0."
+          },
+          "latency_ms_average_target": {
+            "type": "integer",
+            "description": "Default average latency target in milliseconds."
+          },
+          "error_budget_events_per_hour": {
+            "type": "integer",
+            "description": "Default allowed error events per hour before budget burn calculations consider the service over budget."
           }
         }
       },

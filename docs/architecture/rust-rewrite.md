@@ -611,9 +611,12 @@ the Rust server accepts production traffic:
     active window-wide error groups, recent target/monitor transitions,
     windowed service SLI aggregates for targets, monitors, errors, and
     incidents, and FTS error search with the same quoted-query and BM25
-    weighting as Phoenix. Service SLI rows are a compact whole-window
-    per-service snapshot scoped by auth/window/service binding; report cursors
-    advance repeated detail sections, not this summary section.
+    weighting as Phoenix. Service SLI rows include deterministic default SLO
+    class metadata (`standard` for services with a configured health surface,
+    `best_effort` for signal-only services) but not budget burn or alert
+    severity yet. They are a compact whole-window per-service snapshot scoped
+    by auth/window/service binding; report cursors advance repeated detail
+    sections, not this summary section.
     The server owns read-scope auth, query-shape validation, positive-integer
     limit parsing, CSV content negotiation, section pagination, RFC 9457
     projection for invalid window/limit/cursor/query inputs, and the final

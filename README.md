@@ -267,6 +267,13 @@ service binding, and is not advanced by `report.cursor`:
     {
       "service": "volume",
       "window": "1h",
+      "slo": {
+        "class": "standard",
+        "source": "default_health_surface",
+        "availability_target": 0.995,
+        "latency_ms_average_target": 1000,
+        "error_budget_events_per_hour": 5
+      },
       "targets": {
         "configured": 2,
         "checks": 120,

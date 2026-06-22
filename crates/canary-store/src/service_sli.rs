@@ -1,12 +1,15 @@
 //! Windowed service SLI read models.
 //!
 //! These projections derive service health from persisted observations only.
-//! They do not own SLO objectives, budgets, alert routing, or health-state
-//! transitions.
+//! They attach deterministic default SLO class metadata, but do not own budget
+//! burn, alert routing, or health-state transitions.
 
 use std::collections::BTreeMap;
 
-use canary_core::query::QueryWindow;
+use canary_core::{
+    query::QueryWindow,
+    slo::{ServiceSloObjective, default_service_slo},
+};
 use rusqlite::{Connection, params_from_iter};
 use time::OffsetDateTime;
 
@@ -19,6 +22,8 @@ pub struct ServiceSliSummary {
     pub service: String,
     /// Query window used to calculate the windowed fields.
     pub window: String,
+    /// Default SLO class and objective metadata for this service.
+    pub slo: ServiceSloObjective,
     /// HTTP-target availability and latency signals.
     pub targets: TargetSliSummary,
     /// Non-HTTP monitor availability signals.
@@ -126,6 +131,7 @@ fn service_sli_at_scoped(
     add_monitor_check_in_sli(connection, &cutoff, owner, window, &mut summaries)?;
     add_error_sli(connection, &cutoff, owner, window, &mut summaries)?;
     add_incident_sli(connection, &cutoff, owner, window, &mut summaries)?;
+    apply_default_slo(&mut summaries);
 
     Ok(summaries.into_values().collect())
 }
@@ -140,11 +146,19 @@ fn service_sli_entry<'a>(
         .or_insert_with(|| ServiceSliSummary {
             service: service.to_owned(),
             window: window.as_str().to_owned(),
+            slo: default_service_slo(false),
             targets: TargetSliSummary::default(),
             monitors: MonitorSliSummary::default(),
             errors: ErrorSliSummary::default(),
             incidents: IncidentSliSummary::default(),
         })
+}
+
+fn apply_default_slo(summaries: &mut BTreeMap<String, ServiceSliSummary>) {
+    for summary in summaries.values_mut() {
+        let has_health_surface = summary.targets.configured > 0 || summary.monitors.configured > 0;
+        summary.slo = default_service_slo(has_health_surface);
+    }
 }
 
 fn add_target_sli(
@@ -517,6 +531,12 @@ mod tests {
                 "api",
                 "2026-05-28T14:00:00Z",
             ),
+            (
+                "ERR-slibatch001",
+                "group-sli-batch-a",
+                "batch-worker",
+                "2026-05-28T20:52:30Z",
+            ),
         ] {
             store.connection.execute(
                 "INSERT INTO errors (
@@ -558,12 +578,17 @@ mod tests {
 
         let summaries = store.service_sli_at("6h", now)?;
 
-        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries.len(), 3);
         let api = summaries
             .iter()
             .find(|summary| summary.service == "api")
             .ok_or("missing api SLI")?;
         assert_eq!(api.window, "6h");
+        assert_eq!(api.slo.class, "standard");
+        assert_eq!(api.slo.source, "default_health_surface");
+        assert_ratio(Some(api.slo.availability_target), 0.995);
+        assert_eq!(api.slo.latency_ms_average_target, 1_000);
+        assert_eq!(api.slo.error_budget_events_per_hour, 5);
         assert_eq!(api.targets.configured, 1);
         assert_eq!(api.targets.checks, 3);
         assert_eq!(api.targets.successful_checks, 2);
@@ -592,6 +617,18 @@ mod tests {
         assert_ratio(worker.monitors.availability_ratio, 1.0);
         assert_eq!(worker.errors.total, 0);
         assert_eq!(worker.incidents.active, 0);
+        let batch = summaries
+            .iter()
+            .find(|summary| summary.service == "batch-worker")
+            .ok_or("missing batch-worker SLI")?;
+        assert_eq!(batch.slo.class, "best_effort");
+        assert_eq!(batch.slo.source, "default_signal_only");
+        assert_ratio(Some(batch.slo.availability_target), 0.99);
+        assert_eq!(batch.slo.latency_ms_average_target, 2_500);
+        assert_eq!(batch.slo.error_budget_events_per_hour, 20);
+        assert_eq!(batch.errors.total, 1);
+        assert_eq!(batch.targets.configured, 0);
+        assert_eq!(batch.monitors.configured, 0);
         assert!(matches!(
             store.service_sli_at("99h", now),
             Err(QueryError::InvalidWindow)
