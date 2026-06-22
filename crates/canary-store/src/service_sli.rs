@@ -644,10 +644,7 @@ mod tests {
     }
 
     fn assert_ratio(actual: Option<f64>, expected: f64) {
-        let actual = actual.expect("ratio should be present");
-        assert!(
-            (actual - expected).abs() < f64::EPSILON,
-            "expected ratio {expected}, got {actual}"
-        );
+        let within_epsilon = actual.is_some_and(|actual| (actual - expected).abs() < f64::EPSILON);
+        assert!(within_epsilon, "expected ratio {expected}, got {actual:?}");
     }
 }

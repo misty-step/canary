@@ -630,12 +630,13 @@ mod tests {
         let mut input = check_in(MonitorCheckInStatus::Alive);
         input.observed_at = "2026-05-28T20:05:01Z".to_owned();
 
-        let error = plan_monitor_check_in(
+        let Err(error) = plan_monitor_check_in(
             monitor(HealthState::Unknown, MonitorMode::Ttl),
             input,
             context()?,
-        )
-        .expect_err("future observed_at beyond skew should be rejected");
+        ) else {
+            return Err("future observed_at beyond skew should be rejected".into());
+        };
 
         assert_eq!(
             error.to_string(),
