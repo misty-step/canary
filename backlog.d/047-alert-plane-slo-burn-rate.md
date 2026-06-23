@@ -69,6 +69,17 @@ future check-in timestamp skew policy, production-image induced impairment
 gate wiring beyond the shell fixture, SLO configuration, and burn-rate
 summaries.
 
+2026-06-23 slice: children 2–5 have shipped on branch
+`deliver/047-alert-plane-reliability`. Future check-in timestamp skew
+(`a5bb058`), production-image induced impairment rehearsal (`063dece`),
+windowed service SLI read models (`51751e1`), and deterministic default SLO
+classes (`6bde51d`) are committed. A stray `expect_used`/`expect_err` clippy
+debt the unpushed branch had accumulated in tests was also cleared (`5458e51`),
+so `cargo clippy --workspace --all-targets -- -D warnings` is clean under the
+repo-pinned 1.94 toolchain. Remaining scope: child #6 only — multi-window
+burn-rate summaries across report/CLI/MCP and page-vs-ticket notification
+severity routing.
+
 ## Children
 1. Define alert-plane health separately from route readiness.
 2. Add check-in timestamp skew policy and tests.
