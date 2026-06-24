@@ -23,6 +23,7 @@ mod rate_limits;
 mod retention;
 mod schema;
 mod seeds;
+mod service_sli;
 mod telemetry;
 mod webhook_deliveries;
 
@@ -66,6 +67,7 @@ pub use retention::{
     RetentionPrune, RetentionPruneBatch, RetentionPruneBatchReport, RetentionPruneReport,
     RetentionPruneTable,
 };
+pub use service_sli::ServiceSliSummary;
 pub use telemetry::{TelemetryEventError, TelemetryEventInsert, TelemetryEventResult};
 pub use webhook_deliveries::{
     WebhookDeliveryInsert, WebhookDeliveryListOptions, WebhookDeliveryPageError,
@@ -661,6 +663,25 @@ impl Store {
         project_id: &str,
     ) -> QueryResult<Vec<ErrorSummaryItem>> {
         query::error_summary_scoped(&self.connection, window, tenant_id, project_id)
+    }
+
+    /// Query windowed service SLI aggregates for one tenant/project.
+    pub fn service_sli_scoped(
+        &self,
+        window: &str,
+        tenant_id: &str,
+        project_id: &str,
+    ) -> QueryResult<Vec<ServiceSliSummary>> {
+        service_sli::service_sli_scoped(&self.connection, window, tenant_id, project_id)
+    }
+
+    /// Query windowed service SLI aggregates at a deterministic evaluation time.
+    pub fn service_sli_at(
+        &self,
+        window: &str,
+        now: time::OffsetDateTime,
+    ) -> QueryResult<Vec<ServiceSliSummary>> {
+        service_sli::service_sli_at(&self.connection, window, now)
     }
 
     /// Query active error groups for the unified report.

@@ -36,6 +36,7 @@ FUNCTION_POLICIES = {
     "typescriptQuality": "without_git",
     "rustQuality": "without_git",
     "productionImageSmoke": "without_git",
+    "productionImageAlertPlaneRehearsal": "without_git",
     "rustAdvisories": "without_git",
     "secrets": "with_git",
     "secretsHistory": "with_git",

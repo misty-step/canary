@@ -17,8 +17,8 @@ use canary_http::problem_details::{
     invalid_string_param_problem, invalid_window_problem,
 };
 use canary_store::{
-    IncidentListOptions, QueryError, RecentTransition, SearchResult, TimelineQueryError,
-    TimelineQueryOptions,
+    IncidentListOptions, QueryError, RecentTransition, SearchResult, ServiceSliSummary,
+    TimelineQueryError, TimelineQueryOptions,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -82,6 +82,11 @@ pub(crate) async fn report(
             Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
             Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
         };
+    let mut service_sli = match store.service_sli_scoped(window, &key.tenant_id, &key.project_id) {
+        Ok(service_sli) => service_sli,
+        Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
+        Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
+    };
     let mut error_groups =
         match store.report_error_groups_scoped(window, &key.tenant_id, &key.project_id) {
             Ok(groups) => groups,
@@ -135,6 +140,7 @@ pub(crate) async fn report(
         targets.retain(|target| target.service == bound_service);
         monitors.retain(|monitor| monitor.service == bound_service);
         error_summary.retain(|summary| summary.service == bound_service);
+        service_sli.retain(|summary| summary.service == bound_service);
         error_groups.retain(|group| group.service == bound_service);
         incidents.retain(|incident| incident.service == bound_service);
         transitions.retain(|transition| transition.service == bound_service);
@@ -154,6 +160,8 @@ pub(crate) async fn report(
         Some(limit.unwrap_or(25)),
         cursor.error_groups_offset,
     );
+    // service_sli is a compact per-service snapshot; report cursors advance
+    // only repeated detail sections.
     let next_cursor = ReportCursor {
         targets_offset: next_targets_offset,
         monitor_offset: next_monitor_offset,
@@ -167,6 +175,7 @@ pub(crate) async fn report(
         "summary": summary,
         "targets": targets.iter().map(health_target_response).collect::<Vec<_>>(),
         "monitors": monitors.iter().map(health_monitor_response).collect::<Vec<_>>(),
+        "service_sli": service_sli.iter().map(service_sli_response).collect::<Vec<_>>(),
         "error_groups": error_groups.iter().map(error_group_response).collect::<Vec<_>>(),
         "incidents": incidents,
         "recent_transitions": transitions.iter().map(recent_transition_response).collect::<Vec<_>>(),
@@ -232,6 +241,44 @@ fn search_result_response(result: &SearchResult) -> Value {
         "group_hash": result.group_hash,
         "created_at": result.created_at,
         "score": result.score,
+    })
+}
+
+fn service_sli_response(summary: &ServiceSliSummary) -> Value {
+    json!({
+        "service": summary.service,
+        "window": summary.window,
+        "slo": {
+            "class": summary.slo.class,
+            "source": summary.slo.source,
+            "availability_target": summary.slo.availability_target,
+            "latency_ms_average_target": summary.slo.latency_ms_average_target,
+            "error_budget_events_per_hour": summary.slo.error_budget_events_per_hour,
+        },
+        "targets": {
+            "configured": summary.targets.configured,
+            "checks": summary.targets.checks,
+            "successful_checks": summary.targets.successful_checks,
+            "failed_checks": summary.targets.failed_checks,
+            "availability_ratio": summary.targets.availability_ratio,
+            "latency_ms_average": summary.targets.latency_ms_average,
+        },
+        "monitors": {
+            "configured": summary.monitors.configured,
+            "check_ins": summary.monitors.check_ins,
+            "healthy_check_ins": summary.monitors.healthy_check_ins,
+            "failed_check_ins": summary.monitors.failed_check_ins,
+            "availability_ratio": summary.monitors.availability_ratio,
+        },
+        "errors": {
+            "total": summary.errors.total,
+            "groups": summary.errors.groups,
+        },
+        "incidents": {
+            "opened": summary.incidents.opened,
+            "resolved": summary.incidents.resolved,
+            "active": summary.incidents.active,
+        },
     })
 }
 

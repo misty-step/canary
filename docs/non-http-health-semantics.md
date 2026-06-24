@@ -109,6 +109,11 @@ Supported statuses:
 `check_in_id` is optional but recommended when a client wants Canary to match a
 specific `in_progress` signal with a later `ok` or `error`.
 
+`observed_at` is optional and should be the runtime's actual observation time.
+Canary rejects values more than five minutes in the future relative to receipt
+time so a bad agent or host clock cannot push the monitor's overdue deadline
+far enough forward to hide a missed heartbeat.
+
 ### Monitor Modes
 
 Use one API with two server-side monitor modes:

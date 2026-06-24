@@ -131,6 +131,81 @@ Result:
 }
 ```
 
+## Production-Image Rehearsal
+
+Command:
+
+```bash
+PATH="/tmp/canary-dagger-0.20.5.OgaFYN:$PATH" ./bin/dagger call production-image-alert-plane-rehearsal
+```
+
+Red result before the Dagger entrypoint existed:
+
+```text
+unknown command "production-image-alert-plane-rehearsal" for "dagger call"
+```
+
+Green result after wiring the rehearsal:
+
+```json
+{
+  "route_ready": "ready",
+  "alert_plane": {
+    "available": true,
+    "impaired_workers": 1,
+    "reasons": ["monitor_overdue pressured"],
+    "status": "impaired",
+    "worker_count": 5,
+    "workers": [
+      {
+        "name": "monitor_overdue",
+        "state": "started",
+        "health": "pressured",
+        "due_count": 1,
+        "oldest_due_age_ms": 620818,
+        "reason": "monitor_overdue pressured"
+      }
+    ]
+  },
+  "verdict": "degraded"
+}
+```
+
+The same Dagger run also executed `bin/canary-witness` against the production
+image service. The witness exited nonzero and recorded:
+
+```json
+{
+  "status": "degraded",
+  "alert_plane": {
+    "status": "impaired",
+    "reasons": ["monitor_overdue pressured"]
+  },
+  "check_in": {
+    "skipped": true,
+    "error": "self signals were not healthy"
+  }
+}
+```
+
+The rehearsal uses the disposable production-image smoke database. It creates a
+unique TTL monitor through the admin API, writes one backdated check-in through
+the ingest API, waits for the real `monitor_overdue` worker to observe the
+overdue deadline, then requires both doctor and witness to degrade while
+`/readyz` remains route-ready.
+
+Integrated production-image smoke:
+
+```bash
+PATH="/tmp/canary-dagger-0.20.5.OgaFYN:$PATH" ./bin/dagger call production-image-smoke
+```
+
+Result: passed. The integrated smoke ran the existing SDK write/readback,
+write-path rehearsal, doctor/MCP smoke, and the new production-image
+alert-plane rehearsal. The final rehearsal summary reported
+`route_ready: "ready"`, `alert_plane.status: "impaired"`,
+`monitor_overdue.health: "pressured"`, and witness `status: "degraded"`.
+
 ## Validation
 
 Focused commands:
@@ -140,13 +215,14 @@ cargo fmt --all --check
 git diff --check
 cargo test -p canary-cli --locked
 bash -n bin/canary-witness && bash test/bin/canary_witness_test.sh
+env PATH="/tmp/canary-dagger-0.20.5.OgaFYN:$PATH" ./bin/dagger call production-image-alert-plane-rehearsal
 env PATH="/tmp/canary-dagger-0.20.5.OgaFYN:$PATH" bash ./bin/validate --fast
 ```
 
 Result: all passed. The fast gate includes the Debian `jq` 1.6 witness lane,
 which caught and verified the portable alert-plane JSON expression.
 
-Strict gate:
+Earlier first-slice strict gate:
 
 ```bash
 env PATH="/tmp/canary-dagger-0.20.5.OgaFYN:$PATH" bash ./bin/validate --strict
@@ -162,8 +238,12 @@ The final strict run used the repo-pinned Dagger `v0.20.5` binary after removing
 a stale `v0.21.6` engine that had blocked the earlier default `dagger check`
 wrapper.
 
+The full branch strict gate still runs before the #047 PR and squash merge. The
+current production-image rehearsal is already wired into `productionImageSmoke`,
+which strict reaches through `deterministic`.
+
 ## Remaining #047 Scope
 
 This does not implement SLO configuration, multi-window burn-rate summaries, or
-the monitor future-timestamp skew policy. Those remain children of #047 after
-the alert-plane impairment oracle.
+the report/CLI/MCP burn-rate surfaces. Those remain children of #047 after the
+alert-plane impairment oracle and timestamp skew policy.

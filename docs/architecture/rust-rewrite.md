@@ -608,8 +608,15 @@ the Rust server accepts production traffic:
     offset cursor: base64url JSON carrying independent target, monitor, and
     error-group offsets where `null` means that section is exhausted. The store
     owns the report read models that were missing from earlier slices:
-    active window-wide error groups, recent target/monitor transitions, and
-    FTS error search with the same quoted-query and BM25 weighting as Phoenix.
+    active window-wide error groups, recent target/monitor transitions,
+    windowed service SLI aggregates for targets, monitors, errors, and
+    incidents, and FTS error search with the same quoted-query and BM25
+    weighting as Phoenix. Service SLI rows include deterministic default SLO
+    class metadata (`standard` for services with a configured health surface,
+    `best_effort` for signal-only services) but not budget burn or alert
+    severity yet. They are a compact whole-window per-service snapshot scoped
+    by auth/window/service binding; report cursors advance repeated detail
+    sections, not this summary section.
     The server owns read-scope auth, query-shape validation, positive-integer
     limit parsing, CSV content negotiation, section pagination, RFC 9457
     projection for invalid window/limit/cursor/query inputs, and the final
@@ -893,8 +900,9 @@ the Rust server accepts production traffic:
     owns `GET /api/v1/report`, including read-scope enforcement, `q` array
     rejection, default `1h` window, invalid-window mapping, report limit/cursor
     validation, store fan-in, independent target/monitor/error-group
-    pagination, report body assembly, optional search results, CSV content
-    negotiation, and CSV row shaping. `ingest_router` still owns the route
+    pagination, whole-window service SLI inclusion, report body assembly,
+    optional search results, CSV content negotiation, and CSV row shaping.
+    `ingest_router` still owns the route
     string. Cursor encoding remains in `canary-core`, Problem Details factories
     remain in `canary-http`, report read models remain in `canary-store`, and
     canonical health projections remain in `health_routes` so report does not

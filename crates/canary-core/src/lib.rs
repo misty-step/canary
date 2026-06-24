@@ -10,4 +10,5 @@ pub mod ingest;
 pub mod metrics;
 pub mod query;
 pub mod secrets;
+pub mod slo;
 pub mod webhook_events;

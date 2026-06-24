@@ -426,6 +426,103 @@ jq -e '
 `
   }
 
+  private alertPlaneImpairmentRehearsalScript(): string {
+    return `
+prefix="dagger-alert-plane-$(date -u +%Y%m%d%H%M%S)-$$"
+monitor="canary-alert-plane-$prefix"
+observed_at="$(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
+
+monitor_payload="$(
+  jq -cn \
+    --arg name "$monitor" \
+    '{
+      name: $name,
+      service: "canary",
+      mode: "ttl",
+      expected_every_ms: 1000,
+      grace_ms: 0
+    }'
+)"
+curl --fail --silent --show-error \
+  -X POST "$CANARY_ENDPOINT/api/v1/monitors" \
+  -H "Authorization: Bearer $CANARY_API_KEY" \
+  -H "Content-Type: application/json" \
+  --data "$monitor_payload" >/tmp/canary-alert-plane-monitor.json
+
+check_in_payload="$(
+  jq -cn \
+    --arg monitor "$monitor" \
+    --arg observed_at "$observed_at" \
+    '{
+      monitor: $monitor,
+      status: "alive",
+      observed_at: $observed_at,
+      ttl_ms: 1000,
+      summary: "Dagger production-image alert-plane impairment rehearsal"
+    }'
+)"
+curl --fail --silent --show-error \
+  -X POST "$CANARY_ENDPOINT/api/v1/check-ins" \
+  -H "Authorization: Bearer $CANARY_API_KEY" \
+  -H "Content-Type: application/json" \
+  --data "$check_in_payload" >/tmp/canary-alert-plane-check-in.json
+
+for attempt in $(seq 1 30); do
+  bin/canary doctor --json >/tmp/canary-alert-plane-doctor.json
+  if jq -e '
+    .response.reachability.readyz.ok == true
+    and .response.reachability.readyz.http_status == 200
+    and .response.reachability.readyz.response.status == "ready"
+    and .response.worker_readiness.status == "ready"
+    and .response.worker_readiness.pressured_workers >= 1
+    and .response.alert_plane.status == "impaired"
+    and (.response.alert_plane.reasons | index("monitor_overdue pressured") != null)
+    and any(.response.alert_plane.workers[]?;
+      .name == "monitor_overdue"
+      and .health == "pressured"
+      and ((.oldest_due_age_ms // 0) > 120000))
+    and any(.response.verdict.blocking_signals[]?;
+      startswith("alert-plane impaired:"))
+  ' /tmp/canary-alert-plane-doctor.json >/dev/null; then
+    set +e
+    bin/canary-witness \
+      --endpoint "$CANARY_ENDPOINT" \
+      --read-api-key "$CANARY_API_KEY" \
+      --ingest-api-key "$CANARY_API_KEY" \
+      --receipt /tmp/canary-alert-plane-witness.json \
+      --require-check-in \
+      --json >/tmp/canary-alert-plane-witness.out
+    witness_status=$?
+    set -e
+    test "$witness_status" != "0"
+    jq -e '
+      .status == "degraded"
+      and .alert_plane.status == "impaired"
+      and (.alert_plane.reasons | index("monitor_overdue pressured") != null)
+      and .check_in.skipped == true
+    ' /tmp/canary-alert-plane-witness.json >/dev/null
+    jq '{
+      route_ready: .response.reachability.readyz.response.status,
+      alert_plane: .response.alert_plane,
+      verdict: .response.verdict.overall
+    }' /tmp/canary-alert-plane-doctor.json
+    jq '{
+      status: .status,
+      alert_plane: .alert_plane,
+      check_in: .check_in
+    }' /tmp/canary-alert-plane-witness.json
+    exit 0
+  fi
+  sleep 1
+done
+
+cat /tmp/canary-alert-plane-doctor.json 2>/dev/null || true
+cat /tmp/canary-alert-plane-witness.out 2>/dev/null || true
+curl --silent --show-error "$CANARY_ENDPOINT/readyz" || true
+exit 1
+`
+  }
+
   private async productionImageNodeSmokeContainer(
     source: Directory,
     service: Service,
@@ -466,11 +563,27 @@ jq -e '
       .withExec(["bash", "-ceu", this.doctorAndMcpSmokeScript()])
   }
 
+  private async productionImageAlertPlaneRehearsalContainer(
+    source: Directory,
+    service: Service,
+    adminKey: Secret,
+  ): Promise<Container> {
+    return (await rustContainer(source))
+      .withExec(["apt-get", "update", "-q"])
+      .withExec(["apt-get", "install", "-yq", "--no-install-recommends", "curl", "jq"])
+      .withServiceBinding("canary", service)
+      .withSecretVariable("CANARY_API_KEY", adminKey)
+      .withEnvVariable("CANARY_ENDPOINT", "http://canary:4000")
+      .withExec(["bash", "-ceu", this.readinessProbeScript()])
+      .withExec(["bash", "-ceu", this.alertPlaneImpairmentRehearsalScript()])
+  }
+
   private async productionImageIntegration(source: Directory): Promise<void> {
     const { service, adminKey } = await this.productionImageService(source)
 
     await (await this.productionImageNodeSmokeContainer(source, service, adminKey)).sync()
     await (await this.productionImageDoctorSmokeContainer(source, service, adminKey)).sync()
+    await (await this.productionImageAlertPlaneRehearsalContainer(source, service, adminKey)).sync()
   }
 
   @func()
@@ -704,6 +817,29 @@ jq -e '
     source?: Directory,
   ): Promise<void> {
     await this.productionImageIntegration(source!)
+  }
+
+  @func()
+  async productionImageAlertPlaneRehearsal(
+    @argument({
+      defaultPath: "/",
+      ignore: [
+        ".git",
+        "_build",
+        "deps",
+        "cover",
+        "clients/typescript/node_modules",
+        "clients/typescript/dist",
+        "clients/typescript/coverage",
+        "dagger/node_modules",
+        "target",
+      ],
+    })
+    source?: Directory,
+  ): Promise<void> {
+    const { service, adminKey } = await this.productionImageService(source!)
+
+    await (await this.productionImageAlertPlaneRehearsalContainer(source!, service, adminKey)).sync()
   }
 
   @func()
