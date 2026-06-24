@@ -5242,8 +5242,8 @@
             "description": "Incidents opened inside the selected window."
           },
           "resolved": {
-            "description": "Incidents resolved inside the selected window.",
-            "type": "integer"
+            "type": "integer",
+            "description": "Incidents resolved inside the selected window."
           },
           "active": {
             "type": "integer",
