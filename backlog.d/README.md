@@ -48,6 +48,11 @@
 | 048 | Responder rich-context safety gate | P0 | pending | XL |
 | 049 | Integration evidence and capture gaps | P1 | pending | XL |
 | 050 | Cold-agent readiness proof | P1 | pending | M |
+| 051 | TypeScript SDK npm publish | P1 | pending | S |
+| 052 | Runnable MCP server | P1 | pending | M |
+| 053 | Human alert delivery (decision) | P2 | pending | M |
+| 054 | Serving model: self-hosted, managed-later, not multi-tenant SaaS | P2 | pending | S |
+| 055 | Refresh PRINCIPLES.md examples to Rust+SQLite (post-cutover) | P3 | pending | S |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
 
