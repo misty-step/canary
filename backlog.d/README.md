@@ -53,6 +53,7 @@
 | 053 | Human alert delivery (decision) | P2 | pending | M |
 | 054 | Serving model: self-hosted, managed-later, not multi-tenant SaaS | P2 | pending | S |
 | 055 | Refresh PRINCIPLES.md examples to Rust+SQLite (post-cutover) | P3 | pending | S |
+| 056 | Lower /api/v1/report store-lock contention + dedup SLI owner-scope | P2 | pending | M |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
 
