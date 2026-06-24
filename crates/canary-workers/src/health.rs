@@ -411,13 +411,18 @@ fn parse_observed_at(value: &str) -> Result<OffsetDateTime, HealthPlanError> {
         .map_err(|_| HealthPlanError::InvalidObservedAt(value.to_owned()))
 }
 
+/// Reject a check-in whose `observed_at` is implausibly far in the future
+/// relative to server receipt time, so a forged future timestamp cannot defer
+/// an overdue alert beyond the allowed skew.
+///
+/// `receipt_time` is `ObservationContext::now` (server-generated RFC 3339). An
+/// unparseable receipt clock fails closed: the check-in is rejected rather than
+/// silently skipping the skew guard.
 fn reject_observed_at_after_receipt(
     observed_at: OffsetDateTime,
     receipt_time: &str,
 ) -> Result<(), HealthPlanError> {
-    let Some(receipt_time) = parse_monitor_timestamp("now", receipt_time) else {
-        return Ok(());
-    };
+    let receipt_time = parse_observed_at(receipt_time)?;
     if observed_at - receipt_time > Duration::seconds(MAX_MONITOR_OBSERVED_AT_FUTURE_SKEW_SECONDS) {
         return Err(HealthPlanError::ObservedAtTooFarInFuture);
     }
@@ -660,6 +665,64 @@ mod tests {
         assert_eq!(
             plan.commit.deadline_at.as_deref(),
             Some("2026-05-28T20:07:05Z")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn future_check_in_cannot_defer_an_overdue_alert() -> Result<(), Box<dyn Error>> {
+        // A monitor already past its deadline is overdue at `now`.
+        let overdue = overdue_monitor(HealthState::Up, Some("2026-05-28T19:59:59Z"), None);
+        assert!(
+            plan_monitor_overdue(overdue.clone(), context()?)?.is_some(),
+            "monitor past its deadline must be overdue at now"
+        );
+
+        // A forged check-in an hour in the future would push the deadline far
+        // ahead if honored; it must be rejected, not allowed to defer the alert.
+        let mut forged = check_in(MonitorCheckInStatus::Alive);
+        forged.observed_at = "2026-05-28T21:00:00Z".to_owned();
+        let Err(error) = plan_monitor_check_in(
+            monitor(HealthState::Up, MonitorMode::Ttl),
+            forged,
+            context()?,
+        ) else {
+            return Err("future check-in must be rejected, not deferred".into());
+        };
+        assert_eq!(
+            error.to_string(),
+            "monitor observed_at cannot be more than 300 seconds after receipt time"
+        );
+
+        // The rejected check-in cannot move the deadline, so the alert fires.
+        assert!(
+            plan_monitor_overdue(overdue, context()?)?.is_some(),
+            "a rejected future check-in must not defer the overdue alert"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn monitor_check_in_rejects_unparseable_receipt_clock() -> Result<(), Box<dyn Error>> {
+        // The future-skew guard depends on a valid server receipt clock; an
+        // unparseable `now` must fail closed (reject), never silently skip the
+        // guard and accept a forgeable future observed_at.
+        let mut broken = context()?;
+        broken.now = "not-a-timestamp".to_owned();
+
+        let mut input = check_in(MonitorCheckInStatus::Alive);
+        input.observed_at = "2026-05-28T20:05:00Z".to_owned();
+
+        let rejected = plan_monitor_check_in(
+            monitor(HealthState::Unknown, MonitorMode::Ttl),
+            input,
+            broken,
+        );
+        assert!(
+            rejected.is_err(),
+            "an unparseable receipt clock must reject the check-in, not skip the skew guard"
         );
 
         Ok(())

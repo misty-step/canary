@@ -86,13 +86,6 @@ pub struct IncidentSliSummary {
     pub active: u64,
 }
 
-pub(crate) fn service_sli(
-    connection: &Connection,
-    window: &str,
-) -> QueryResult<Vec<ServiceSliSummary>> {
-    service_sli_at(connection, window, OffsetDateTime::now_utc())
-}
-
 pub(crate) fn service_sli_scoped(
     connection: &Connection,
     window: &str,

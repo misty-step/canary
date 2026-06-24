@@ -665,11 +665,6 @@ impl Store {
         query::error_summary_scoped(&self.connection, window, tenant_id, project_id)
     }
 
-    /// Query windowed service SLI aggregates.
-    pub fn service_sli(&self, window: &str) -> QueryResult<Vec<ServiceSliSummary>> {
-        service_sli::service_sli(&self.connection, window)
-    }
-
     /// Query windowed service SLI aggregates for one tenant/project.
     pub fn service_sli_scoped(
         &self,
