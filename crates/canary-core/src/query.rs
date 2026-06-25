@@ -95,17 +95,20 @@ impl QueryWindow {
         }
     }
 
-    /// Return the RFC3339 cutoff string for this window at `now`.
-    pub fn cutoff_at(self, now: OffsetDateTime) -> String {
-        let seconds = match self {
+    /// Return the window length in seconds.
+    pub const fn duration_seconds(self) -> i64 {
+        match self {
             Self::OneHour => 3_600,
             Self::SixHours => 21_600,
             Self::TwentyFourHours => 86_400,
             Self::SevenDays => 604_800,
             Self::ThirtyDays => 2_592_000,
-        };
+        }
+    }
 
-        (now - Duration::seconds(seconds))
+    /// Return the RFC3339 cutoff string for this window at `now`.
+    pub fn cutoff_at(self, now: OffsetDateTime) -> String {
+        (now - Duration::seconds(self.duration_seconds()))
             .format(&Rfc3339)
             .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
     }

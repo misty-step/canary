@@ -6627,6 +6627,12 @@ mod tests {
         assert_eq!(api["monitors"]["healthy_check_ins"], 1);
         assert_eq!(api["errors"]["total"], 1);
         assert_eq!(api["incidents"]["active"], 1);
+        // One sample per window is below the trajectory sample floor, so the
+        // availability delta is nulled while the exact error-count delta stands.
+        assert_eq!(api["trajectory"]["status"], "insufficient_samples");
+        assert!(api["trajectory"]["targets"]["availability_delta"].is_null());
+        assert_eq!(api["trajectory"]["errors"]["total_delta"], 1);
+        assert_eq!(api["trajectory"]["errors"]["prior_total"], 0);
 
         let bound = router
             .oneshot(read_request(read_key, "/api/v1/report?window=1h")?)

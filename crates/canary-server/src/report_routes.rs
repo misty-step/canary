@@ -18,7 +18,7 @@ use canary_http::problem_details::{
 };
 use canary_store::{
     IncidentListOptions, QueryError, RecentTransition, SearchResult, ServiceSliSummary,
-    TimelineQueryError, TimelineQueryOptions,
+    ServiceSliTrajectory, TimelineQueryError, TimelineQueryOptions,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -278,6 +278,26 @@ fn service_sli_response(summary: &ServiceSliSummary) -> Value {
             "opened": summary.incidents.opened,
             "resolved": summary.incidents.resolved,
             "active": summary.incidents.active,
+        },
+        "trajectory": summary.trajectory.as_ref().map(trajectory_response),
+    })
+}
+
+fn trajectory_response(trajectory: &ServiceSliTrajectory) -> Value {
+    json!({
+        "status": trajectory.status.as_str(),
+        "sample_basis": trajectory.sample_basis,
+        "targets": {
+            "availability_delta": trajectory.targets_availability_delta,
+            "prior_availability_ratio": trajectory.prior_targets_availability_ratio,
+        },
+        "monitors": {
+            "availability_delta": trajectory.monitors_availability_delta,
+            "prior_availability_ratio": trajectory.prior_monitors_availability_ratio,
+        },
+        "errors": {
+            "total_delta": trajectory.error_total_delta,
+            "prior_total": trajectory.prior_error_total,
         },
     })
 }

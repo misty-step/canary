@@ -5,6 +5,43 @@
   "monitors": [],
   "incidents": [{"id": "INC-1", "service": "chrondle"}],
   "error_groups": [{"group_hash": "abc", "service": "chrondle", "count": 7}],
+  "service_sli": [
+    {
+      "service": "chrondle",
+      "window": "24h",
+      "slo": {
+        "class": "standard",
+        "source": "default_health_surface",
+        "availability_target": 0.995,
+        "latency_ms_average_target": 1000,
+        "error_budget_events_per_hour": 5
+      },
+      "targets": {
+        "configured": 1,
+        "checks": 120,
+        "successful_checks": 114,
+        "failed_checks": 6,
+        "availability_ratio": 0.95,
+        "latency_ms_average": 80.0
+      },
+      "monitors": {
+        "configured": 0,
+        "check_ins": 0,
+        "healthy_check_ins": 0,
+        "failed_check_ins": 0,
+        "availability_ratio": null
+      },
+      "errors": {"total": 7, "groups": 1},
+      "incidents": {"opened": 1, "resolved": 0, "active": 1},
+      "trajectory": {
+        "status": "ok",
+        "sample_basis": 120,
+        "targets": {"availability_delta": -0.04, "prior_availability_ratio": 0.99},
+        "monitors": {"availability_delta": null, "prior_availability_ratio": null},
+        "errors": {"total_delta": 3, "prior_total": 4}
+      }
+    }
+  ],
   "recent_transitions": [],
   "cursor": null,
   "truncated": false

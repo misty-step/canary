@@ -17,6 +17,11 @@ fn parses_report_fixture() -> Result<(), Box<dyn std::error::Error>> {
     let lines = summarize_report(&value);
     assert!(lines.iter().any(|line| line == "targets: 1"));
     assert!(lines.iter().any(|line| line == "error_groups: 1"));
+    // The SLI block is surfaced (no longer dropped), with the prior-window trajectory.
+    assert!(lines.iter().any(|line| line
+        == "service chrondle: slo=standard availability(targets)=0.950 availability(monitors)=n/a errors=7"));
+    assert!(lines.iter().any(|line| line
+        == "service chrondle trajectory: status=ok availability_delta(targets)=-0.040 availability_delta(monitors)=n/a errors_delta=+3"));
     Ok(())
 }
 
