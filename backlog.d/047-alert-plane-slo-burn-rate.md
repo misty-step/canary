@@ -16,7 +16,7 @@ Priority: P0 · Status: in_progress · Estimate: XL
 - P0: sustained worker pressure, stale due work, circuit-open suppression, and webhook fanout failure produce stable impairment reasons.
 - P0: monitor check-ins cannot use a future `observed_at` timestamp to defer overdue alerts beyond an explicit skew policy.
 - P0: the first implementation slice includes an induced impairment fixture before SLO or burn-rate math.
-- P1: expose coarse service SLO classes and multi-window burn-rate summaries after the impairment contract is proven.
+- P1: expose coarse service SLO classes (shipped) and a low-cardinality SLI **trajectory** signal (delta vs the prior equal-length window) on the report and CLI. Do **not** compute a server-side MWMBR burn-rate ratio against an absolute budget, and do **not** emit a page/ticket severity verdict — see the 2026-06-25 reshape note.
 - Non-goals: replacing `/readyz`, broad distributed tracing, or adding a human dashboard.
 
 ## Technical Design
@@ -42,7 +42,8 @@ impairment driver that can be run in strict or as a dedicated ops gate.
 ## Oracle
 - [ ] Given webhook delivery, monitor overdue, target probe, retention, or TLS workers report sustained pressure, circuit-open suppression, stale due work, or fanout failures, when the external witness runs, then it fails or degrades with an alert-plane impairment reason even if `/readyz` is route-ready.
 - [ ] Given a monitor check-in contains a future `observed_at` beyond an allowed skew, then Canary rejects or clamps it with RFC 9457 Problem Details and a regression test proves future check-ins cannot defer overdue alerts.
-- [ ] Given configured per-service SLO objectives, when `/metrics`, `/api/v1/report`, or `bin/canary services --json` is queried, then Canary exposes windowed availability/error/latency SLIs, budget remaining, burn rate, and recommended alert severity.
+- [ ] Given a service with checks/check-ins/errors over a window, when `/api/v1/report?window=W` and `bin/canary summary --json` are queried, then each service SLI carries the windowed availability/latency/error/incident facts **plus** a `trajectory` block holding the signed delta vs the prior equal-length window, with sub-floor windows marked `insufficient_samples` (null delta) so a single failed probe cannot fake a swing.
+- [ ] Given the change, when the surfaces are inspected, then **no** server-computed severity verdict and **no** `page`/`ticket` field is emitted on report, CLI, webhook payload, or manifest, and webhook fanout stays severity-agnostic (negative oracle); the regenerated `priv/mcp/canary-cli-tools.json` matches the generator (parity test green) and the runnable MCP server stays deferred to ticket 052.
 - [ ] Given an induced rehearsal creates alert-plane impairment, then a live or production-image rehearsal proves the witness and doctor catch it before declaring Canary healthy.
 
 ## Verification System
@@ -80,10 +81,42 @@ repo-pinned 1.94 toolchain. Remaining scope: child #6 only — multi-window
 burn-rate summaries across report/CLI/MCP and page-vs-ticket notification
 severity routing.
 
+2026-06-25 reshape (child #6 only — research + 6-model council vs VISION.md):
+the original "burn-rate summaries + page/ticket severity routing" framing was
+challenged and narrowed. Research confirmed Google's multi-window/multi-burn-rate
+(MWMBR) table assumes high-volume request streams (N≈10^6/h); Canary's data is
+low-volume probe/check-in cadence (N≈60-120/h/target), exactly the case the SRE
+Workbook warns flaps under literal 5m/14.4x paging. A council of six decorrelated
+model families (Moonshot/DeepSeek/Qwen/GLM/MiniMax/xAI) independently rejected a
+server-computed page/ticket severity verdict as human on-call vocabulary that
+violates Canary's own tenets ("write back evidence, not commands"; "no LLM on the
+request path"; "bound the first answer"). That converges with the global
+model-native doctrine (do not over-structure interfaces an LLM consumes).
+Reshaped scope:
+- Expose the windowed SLIs (already serialized on `/api/v1/report`) on the CLI,
+  which currently drops the `service_sli` block.
+- Add a deterministic, low-N-safe **trajectory** signal per SLI window: the
+  signed delta vs the prior equal-length window (e.g. this 1h vs the previous
+  1h), with a minimum-sample floor that nulls sub-floor windows as
+  `insufficient_samples`. A delta is a fact (evidence); a burn-rate-vs-budget
+  ratio is policy the responder should own.
+- Keep the two budget notions **separate raw signals** (availability ratio
+  trajectory + raw error-count trajectory). Do not synthesize a single
+  burn-rate number; drop the `error_budget_events_per_hour` "budget burn"
+  framing (events/hour is too jumpy at this cadence; it conflates the probe and
+  error-ingest data streams).
+- Defer the runnable MCP server to ticket 052; regenerate the manifest snapshot
+  so the generated/checked-in parity test stays green and reflects the new CLI
+  fields.
+- No new query windows (no 5m/30m/3d); no severity verdict; no notification
+  routing; webhook fanout stays severity-agnostic.
+Full context packet + alternatives + verification:
+`docs/architecture/canary-047-child6-sli-trajectory-shape-2026-06-25.html`.
+
 ## Children
 1. Define alert-plane health separately from route readiness.
 2. Add check-in timestamp skew policy and tests.
 3. Add an induced impairment rehearsal to strict or a dedicated ops gate.
 4. Add windowed SLI read models for targets, monitors, errors, and incidents.
 5. Add service SLO configuration with default classes.
-6. Add burn-rate summaries to report/CLI/MCP and route notification severity to page vs ticket semantics.
+6. Surface windowed SLIs + SLO targets + a low-N-safe **trajectory delta** (vs the prior equal-length window) on report/CLI; regenerate the MCP manifest snapshot. **No** server-computed burn-rate ratio, **no** page/ticket severity verdict (reshaped 2026-06-25 — see Notes).

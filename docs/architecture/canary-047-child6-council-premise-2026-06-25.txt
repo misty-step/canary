@@ -1,0 +1,118 @@
+# Design question: the final slice of an alert-reliability feature in "Canary"
+
+You are advising on a contested design decision. Deliberate from your assigned
+perspective. Be specific and decisive. Surface the non-obvious move. State
+clearly where you DISAGREE with the likely consensus (spelled out at the end).
+Keep it under ~600 words. End with a one-line recommendation per fork.
+
+## What Canary is (the product, condensed from its VISION.md)
+
+Canary is "the agent command center for production health": a small, SELF-HOSTED
+service (one Rust binary, one SQLite DB) that records errors, probes uptime,
+watches check-ins, correlates incidents, and gives AUTONOMOUS AGENTS (not humans
+at dashboards) the bounded context to respond. Load-bearing tenets:
+
+- Agent-first: API, CLI, SDK, and MCP-shaped tools ARE the product. A browser
+  dashboard is explicitly NOT the product. Humans use the same surfaces agents do.
+- "Timeline before notification": a webhook is only a WAKE-UP HINT; durable
+  timeline replay is the correctness path.
+- "Write back evidence, not commands": Canary records what happened; DOWNSTREAM
+  responders decide how to mutate repos/tickets/infra.
+- "No LLM on the request path": summaries are deterministic and auditable.
+- "Small beats complete": prefer a deep, simple module with a stable contract
+  over broad surface area. Complexity must earn its way in.
+- Explicit non-goals / ceded territory: NOT a general APM/metrics/tracing
+  platform (that's Datadog/Prometheus/Grafana); NOT an incident-command suite or
+  on-call/escalation engine (that's PagerDuty/incident.io); NOT a repo-mutation
+  or autonomous-fix engine. MCP/CLI/SDK/HTTP must stay aligned to ONE semantic
+  contract, never become parallel APIs.
+- North-star question an agent should ask once and act on: "What is unhealthy,
+  who is already working it, what context matters, and what is the next safe
+  action?"
+
+## What already exists (children 1-5 of this feature shipped to main)
+
+- An "alert-plane health" verdict SEPARATE from HTTP route readiness (/readyz):
+  the doctor/witness fail when workers are pressured/circuit-open/stale even if
+  /readyz is route-ready.
+- Check-in timestamp skew policy (future-dated check-ins can't defer overdue alerts).
+- An induced-impairment rehearsal gate.
+- WINDOWED SLI READ MODELS: one window per call, from a CLOSED set {1h, 6h, 24h,
+  7d, 30d}. Per service they compute: HTTP-target availability ratio + average
+  latency; non-HTTP monitor check-in availability ratio; error counts; incident
+  counts (opened/resolved/active).
+- DEFAULT SLO CLASSES (no per-service config table yet): two hardcoded classes.
+  "standard" = availability_target 0.995, latency 1000ms, error_budget 5
+  events/hour. "best_effort" = 0.99, 2500ms, 20 events/hour.
+
+What does NOT exist yet (all confirmed by reading the code):
+- NO burn-rate math anywhere. NO budget-remaining computation.
+- NO notification severity routing: webhook fanout is severity-AGNOSTIC. (There
+  IS an incident-severity field, "high"/"medium", derived from recent signal
+  COUNTS — a separate concept from budget burn.)
+- NO running MCP server (it's a separate, not-yet-started ticket); only a STATIC
+  CLI tool manifest (a JSON descriptor file).
+- The CLI `services` command queries a status endpoint; the `summary` command
+  queries the report endpoint but DROPS the SLI block. The report HTTP endpoint
+  already serializes the windowed SLIs.
+
+## The remaining scope (the slice being designed)
+
+Verbatim: "Add burn-rate summaries to report/CLI/MCP and route notification
+severity to page vs ticket semantics."
+
+## Relevant external research (the mature methodology)
+
+Google SRE Workbook's multi-window, multi-burn-rate (MWMBR) alerting is the
+canonical shape: an alert fires only when BOTH a long window and a short window
+exceed a burn-rate threshold (long window = "is it real", short window = "is it
+still happening / fast reset"). Recommended Table 5-8:
+  - PAGE:   long 1h / short 5m,  burn rate 14.4  (consumes 2% of monthly budget)
+  - PAGE:   long 6h / short 30m, burn rate 6     (5%)
+  - TICKET: long 3d / short 6h,  burn rate 1     (10%)
+Burn rate = observed_error_rate / error_budget_ratio. (budget length / burn rate
+= time-to-exhaustion.) In SRE terms PAGE = wake someone NOW; TICKET = file for
+later, no page.
+
+CRITICAL CAVEAT the Workbook itself raises: on LOW-TRAFFIC services a single
+failed request produces a huge error rate (e.g. 1 fail in 10 req = 1000x burn) →
+false page. Canary's data is exactly this shape: low-volume probe/check-in
+cadence, not high-traffic request streams. A self-hosted Canary might watch a
+handful of targets probed every 30-60s (~60-120 samples/hour/target); a 5-minute
+window would hold ~5-10 samples = noise.
+
+## The forks you are asked to deliberate (do NOT just rubber-stamp)
+
+FORK 1 — Severity. How far does "route notification severity to page vs ticket"
+go? Candidate paths: (a) Canary COMPUTES a recommended severity and EXPOSES it on
+report/CLI and stamps it into the webhook payload — responders route; (b) Canary
+ROUTES webhook DELIVERY internally by severity (severity-tagged channels /
+subscriptions / filtering in the delivery worker); (c) REUSE the existing
+incident-severity ladder instead of inventing a parallel field; (d) something
+else. Deeper question: is "page vs ticket" (human on-call vocabulary) even the
+right framing for an AGENT consumer, or should it be expressed differently?
+
+FORK 2 — Burn-rate windows. (a) ADAPT to the existing {1h,6h,24h,30d} windows
+plus a minimum-sample floor (the Workbook's own low-traffic mitigation); (b) ADD
+5m/30m/3d windows to faithfully implement Google's table; (c) single-window +
+floor; (d) something else. Note Canary's data shape above.
+
+FORK 3 — Budget reconciliation. Canary carries TWO budget notions: an
+availability_target RATIO and an error_budget_events_per_hour RATE. How should
+"burn rate" be defined — primarily off the availability ratio? Define both burn
+signals? Unify them? This is genuinely unresolved.
+
+FORK 4 — MCP. (a) Defer the MCP server to its own ticket, just update the static
+manifest descriptor now; (b) build a minimal MCP read surface now; (c) drop MCP
+from this slice. Note the "one semantic contract" tenet.
+
+## The likely consensus you should pressure-test
+
+The lead's current lean is: 1(a) classify-and-expose, 2(a) adapt-windows-plus-
+floor, 4(a) defer-MCP — i.e. "stay small, classify don't route, adapt don't copy,
+align don't build." This is defensible but may be too timid or may miss a better
+framing. Attack it where your perspective sees a flaw. In particular: is
+computing a single deterministic "burn rate" / "severity" number even the right
+primitive for an agent-first product whose whole thesis is handing agents bounded
+CONTEXT and letting them decide the next action? Or is it exactly right? Make a
+real argument, not an average.
