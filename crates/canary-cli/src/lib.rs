@@ -380,14 +380,63 @@ pub fn json_envelope(command: &str, endpoint: &str, response: Value) -> Value {
 
 /// Summarize a report response.
 pub fn summarize_report(value: &Value) -> Vec<String> {
-    vec![
+    let mut lines = vec![
         format!("summary: {}", string_field(value, "summary")),
         format!("status: {}", string_field(value, "status")),
         format!("targets: {}", array_len(value, "targets")),
         format!("monitors: {}", array_len(value, "monitors")),
         format!("incidents: {}", array_len(value, "incidents")),
         format!("error_groups: {}", array_len(value, "error_groups")),
-    ]
+    ];
+    if let Some(slis) = value.get("service_sli").and_then(Value::as_array) {
+        for sli in slis {
+            lines.extend(service_sli_lines(sli));
+        }
+    }
+    lines
+}
+
+/// Render one service SLI summary plus its prior-window trajectory.
+fn service_sli_lines(sli: &Value) -> Vec<String> {
+    let service = string_field(sli, "service");
+    let class = sli
+        .get("slo")
+        .map_or_else(|| "unknown".to_owned(), |slo| string_field(slo, "class"));
+    let mut lines = vec![format!(
+        "service {service}: slo={class} availability(targets)={} availability(monitors)={} errors={}",
+        ratio_text(sli.pointer("/targets/availability_ratio")),
+        ratio_text(sli.pointer("/monitors/availability_ratio")),
+        sli.pointer("/errors/total")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+    )];
+    if let Some(trajectory) = sli.get("trajectory").filter(|value| !value.is_null()) {
+        lines.push(format!(
+            "service {service} trajectory: status={} availability_delta(targets)={} availability_delta(monitors)={} errors_delta={}",
+            string_field(trajectory, "status"),
+            signed_ratio_text(trajectory.pointer("/targets/availability_delta")),
+            signed_ratio_text(trajectory.pointer("/monitors/availability_delta")),
+            trajectory
+                .pointer("/errors/total_delta")
+                .and_then(Value::as_i64)
+                .map_or_else(|| "n/a".to_owned(), |delta| format!("{delta:+}")),
+        ));
+    }
+    lines
+}
+
+/// Format an availability ratio to three decimals, or `n/a` when null/absent.
+fn ratio_text(value: Option<&Value>) -> String {
+    value
+        .and_then(Value::as_f64)
+        .map_or_else(|| "n/a".to_owned(), |ratio| format!("{ratio:.3}"))
+}
+
+/// Format a signed ratio delta to three decimals, or `n/a` when null/absent.
+fn signed_ratio_text(value: Option<&Value>) -> String {
+    value
+        .and_then(Value::as_f64)
+        .map_or_else(|| "n/a".to_owned(), |delta| format!("{delta:+.3}"))
 }
 
 /// Summarize a status response as services.
@@ -4071,7 +4120,7 @@ pub fn tool_manifest() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "canary_summary",
-            description: "Inspect global Canary status for a query window.",
+            description: "Inspect global Canary status for a query window, including per-service SLIs, SLO targets, and prior-window trajectory deltas.",
             input_schema: json!({"type":"object","properties":{"window":{"type":"string","enum":["1h","6h","24h","7d","30d"]}}}),
         },
         ToolSpec {

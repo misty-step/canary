@@ -32,6 +32,74 @@ pub struct ServiceSliSummary {
     pub errors: ErrorSliSummary,
     /// Incident pressure signals.
     pub incidents: IncidentSliSummary,
+    /// Direction of travel vs the prior equal-length window, when computed.
+    ///
+    /// `None` on read models that do not compute trajectory (e.g. the
+    /// `service_sli_at` test helper); `Some` on the report path.
+    pub trajectory: Option<ServiceSliTrajectory>,
+}
+
+/// Minimum check / check-in count, in both the current and prior window, before
+/// an availability delta is trusted. Below this floor a single failed probe
+/// would dominate the ratio, so the delta is nulled and the trajectory is
+/// marked `InsufficientSamples`.
+///
+/// This is a deliberately coarse, fixed first-pass floor. A cadence-aware floor
+/// (scaled to each target's probe interval) is a tracked follow-up on ticket
+/// 047, not part of this slice.
+pub const MIN_TRAJECTORY_SAMPLES: u64 = 20;
+
+/// Whether a service's availability trajectory is backed by enough samples to
+/// trust.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrajectoryStatus {
+    /// At least one availability delta cleared the sample floor, or the service
+    /// has no health surface to distrust (error-only services).
+    Ok,
+    /// The service has a configured health surface but every availability
+    /// window was below `MIN_TRAJECTORY_SAMPLES`, so availability deltas are
+    /// null.
+    InsufficientSamples,
+}
+
+impl TrajectoryStatus {
+    /// Wire value for this status.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::InsufficientSamples => "insufficient_samples",
+        }
+    }
+}
+
+/// Signed change in a service's SLIs vs the immediately preceding equal-length
+/// window (this window minus the prior window).
+///
+/// A delta is evidence — a fact about two adjacent windows — never a burn-rate
+/// budget claim or an urgency verdict. Consumers decide what is urgent.
+/// Availability deltas are nulled below the sample floor (see
+/// [`MIN_TRAJECTORY_SAMPLES`]); the error-count delta is always exact.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ServiceSliTrajectory {
+    /// HTTP-target availability ratio change (current − prior). `None` when
+    /// either window is below the sample floor or has no target checks.
+    pub targets_availability_delta: Option<f64>,
+    /// Prior-window HTTP-target availability ratio, when computable.
+    pub prior_targets_availability_ratio: Option<f64>,
+    /// Non-HTTP monitor availability ratio change (current − prior). `None`
+    /// when either window is below the sample floor or has no check-ins.
+    pub monitors_availability_delta: Option<f64>,
+    /// Prior-window monitor availability ratio, when computable.
+    pub prior_monitors_availability_ratio: Option<f64>,
+    /// Error-row count change vs the prior window (signed; current − prior).
+    pub error_total_delta: i64,
+    /// Prior-window error-row count.
+    pub prior_error_total: u64,
+    /// Smallest current/prior count backing a computed availability delta; 0
+    /// when no availability delta cleared the floor.
+    pub sample_basis: u64,
+    /// Whether the availability deltas are trustworthy.
+    pub status: TrajectoryStatus,
 }
 
 /// HTTP-target SLI aggregate for one service.
@@ -92,7 +160,7 @@ pub(crate) fn service_sli_scoped(
     tenant_id: &str,
     project_id: &str,
 ) -> QueryResult<Vec<ServiceSliSummary>> {
-    service_sli_at_scoped(
+    service_sli_with_trajectory_at_scoped(
         connection,
         window,
         OffsetDateTime::now_utc(),
@@ -106,6 +174,136 @@ pub(crate) fn service_sli_at(
     now: OffsetDateTime,
 ) -> QueryResult<Vec<ServiceSliSummary>> {
     service_sli_at_scoped(connection, window, now, None)
+}
+
+pub(crate) fn service_sli_with_trajectory_at(
+    connection: &Connection,
+    window: &str,
+    now: OffsetDateTime,
+) -> QueryResult<Vec<ServiceSliSummary>> {
+    service_sli_with_trajectory_at_scoped(connection, window, now, None)
+}
+
+/// Compute current-window SLIs and attach a trajectory delta vs the prior
+/// equal-length window.
+///
+/// The base read model filters `>= cutoff` with no upper bound, so we derive
+/// the prior window `[now-2d, now-d)` by subtracting current-window additive
+/// counts from a double-width window `[now-2d, ∞)`. Because the current window
+/// is a subset of the double-width window, the subtraction is exactly the prior
+/// window and cancels any future-dated rows the skew policy permits.
+fn service_sli_with_trajectory_at_scoped(
+    connection: &Connection,
+    window: &str,
+    now: OffsetDateTime,
+    owner: Option<(&str, &str)>,
+) -> QueryResult<Vec<ServiceSliSummary>> {
+    let parsed = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
+    let mut current = service_sli_at_scoped(connection, window, now, owner)?;
+
+    let prior_anchor = now - time::Duration::seconds(parsed.duration_seconds());
+    let double_width = service_sli_at_scoped(connection, window, prior_anchor, owner)?;
+    let double_by_service: BTreeMap<&str, &ServiceSliSummary> = double_width
+        .iter()
+        .map(|summary| (summary.service.as_str(), summary))
+        .collect();
+
+    for summary in &mut current {
+        let wide = double_by_service.get(summary.service.as_str()).copied();
+        summary.trajectory = Some(build_trajectory(summary, wide));
+    }
+
+    Ok(current)
+}
+
+/// Build a [`ServiceSliTrajectory`] from a current-window summary and the
+/// matching double-width (`[now-2d, ∞)`) summary. Prior-window counts are
+/// `double_width − current`.
+///
+/// INVARIANT: only ADDITIVE, cutoff-bounded fields may be subtracted this way —
+/// target/monitor check counts and `errors.total`. Do NOT extend this to
+/// non-additive aggregates: `errors.groups` is `COUNT(DISTINCT ...)`,
+/// `latency_ms_average` is an `AVG`, and `incidents.active` is a point-in-time
+/// gauge whose query has an unbounded `OR state != 'resolved'` branch. For any
+/// of those, `double_width − current` is silently wrong.
+fn build_trajectory(
+    current: &ServiceSliSummary,
+    double_width: Option<&ServiceSliSummary>,
+) -> ServiceSliTrajectory {
+    let (targets_availability_delta, prior_targets_availability_ratio, targets_basis) =
+        availability_delta(
+            current.targets.successful_checks,
+            current.targets.checks,
+            double_width.map_or(0, |wide| wide.targets.successful_checks),
+            double_width.map_or(0, |wide| wide.targets.checks),
+        );
+    let (monitors_availability_delta, prior_monitors_availability_ratio, monitors_basis) =
+        availability_delta(
+            current.monitors.healthy_check_ins,
+            current.monitors.check_ins,
+            double_width.map_or(0, |wide| wide.monitors.healthy_check_ins),
+            double_width.map_or(0, |wide| wide.monitors.check_ins),
+        );
+
+    let prior_error_total = double_width
+        .map_or(0, |wide| wide.errors.total)
+        .saturating_sub(current.errors.total);
+    let error_total_delta = current.errors.total as i64 - prior_error_total as i64;
+
+    let sample_basis = [targets_basis, monitors_basis]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(0);
+
+    let has_health_surface = current.targets.configured > 0 || current.monitors.configured > 0;
+    let any_availability =
+        targets_availability_delta.is_some() || monitors_availability_delta.is_some();
+    let status = if has_health_surface && !any_availability {
+        TrajectoryStatus::InsufficientSamples
+    } else {
+        TrajectoryStatus::Ok
+    };
+
+    ServiceSliTrajectory {
+        targets_availability_delta,
+        prior_targets_availability_ratio,
+        monitors_availability_delta,
+        prior_monitors_availability_ratio,
+        error_total_delta,
+        prior_error_total,
+        sample_basis,
+        status,
+    }
+}
+
+/// Compute the availability delta for one signal: `(delta, prior_ratio,
+/// sample_basis)`. Returns `(None, None, None)` when either window is below the
+/// sample floor (prior counts are `double_width − current`).
+fn availability_delta(
+    current_successful: u64,
+    current_total: u64,
+    double_successful: u64,
+    double_total: u64,
+) -> (Option<f64>, Option<f64>, Option<u64>) {
+    let prior_total = double_total.saturating_sub(current_total);
+    let prior_successful = double_successful.saturating_sub(current_successful);
+
+    if current_total < MIN_TRAJECTORY_SAMPLES || prior_total < MIN_TRAJECTORY_SAMPLES {
+        return (None, None, None);
+    }
+
+    match (
+        ratio(current_successful, current_total),
+        ratio(prior_successful, prior_total),
+    ) {
+        (Some(current_ratio), Some(prior_ratio)) => (
+            Some(current_ratio - prior_ratio),
+            Some(prior_ratio),
+            Some(current_total.min(prior_total)),
+        ),
+        _ => (None, None, None),
+    }
 }
 
 fn service_sli_at_scoped(
@@ -144,6 +342,7 @@ fn service_sli_entry<'a>(
             monitors: MonitorSliSummary::default(),
             errors: ErrorSliSummary::default(),
             incidents: IncidentSliSummary::default(),
+            trajectory: None,
         })
 }
 
@@ -627,6 +826,149 @@ mod tests {
             Err(QueryError::InvalidWindow)
         ));
 
+        Ok(())
+    }
+
+    fn insert_traj_target(store: &mut Store, id: &str, service: &str) -> crate::Result<()> {
+        store.insert_target(TargetInsert {
+            id: id.to_owned(),
+            url: format!("https://{service}.example.test/health"),
+            name: service.to_owned(),
+            service: service.to_owned(),
+            method: "GET".to_owned(),
+            headers: None,
+            interval_ms: 60_000,
+            timeout_ms: 10_000,
+            expected_status: "200".to_owned(),
+            body_contains: None,
+            degraded_after: 2,
+            down_after: 3,
+            up_after: 1,
+            active: true,
+            created_at: "2026-05-28T18:00:00Z".to_owned(),
+        })
+    }
+
+    fn insert_check(
+        store: &Store,
+        target_id: &str,
+        checked_at: &str,
+        result: &str,
+    ) -> crate::Result<()> {
+        store.connection.execute(
+            "INSERT INTO target_checks (target_id, checked_at, status_code, latency_ms, result)
+             VALUES (?1, ?2, 200, 50, ?3)",
+            params![target_id, checked_at, result],
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn service_sli_trajectory_reports_availability_and_error_deltas()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        insert_traj_target(&mut store, "TGT-traj", "traj")?;
+
+        // Current window [20:00, 21:00): 30 checks, 27 success -> 0.9 availability.
+        for minute in 0..30 {
+            let result = if minute < 27 { "success" } else { "error" };
+            insert_check(
+                &store,
+                "TGT-traj",
+                &format!("2026-05-28T20:{minute:02}:00Z"),
+                result,
+            )?;
+        }
+        // Prior window [19:00, 20:00): 25 checks, all success -> 1.0 availability.
+        for minute in 0..25 {
+            insert_check(
+                &store,
+                "TGT-traj",
+                &format!("2026-05-28T19:{minute:02}:00Z"),
+                "success",
+            )?;
+        }
+        // Errors: 5 in the current window, 2 in the prior window.
+        for (idx, created_at) in [
+            "2026-05-28T20:05:00Z",
+            "2026-05-28T20:10:00Z",
+            "2026-05-28T20:15:00Z",
+            "2026-05-28T20:20:00Z",
+            "2026-05-28T20:25:00Z",
+            "2026-05-28T19:05:00Z",
+            "2026-05-28T19:10:00Z",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            store.connection.execute(
+                "INSERT INTO errors (id, service, error_class, message, group_hash, created_at)
+                 VALUES (?1, 'traj', 'RuntimeError', 'boom', ?2, ?3)",
+                params![
+                    format!("ERR-traj{idx:08}"),
+                    format!("group-traj-{idx}"),
+                    created_at
+                ],
+            )?;
+        }
+
+        let now = OffsetDateTime::parse("2026-05-28T21:00:00Z", &Rfc3339)?;
+        let summaries = store.service_sli_with_trajectory_at("1h", now)?;
+        let traj = summaries
+            .iter()
+            .find(|summary| summary.service == "traj")
+            .and_then(|summary| summary.trajectory)
+            .ok_or("missing traj trajectory")?;
+
+        assert_eq!(traj.status, TrajectoryStatus::Ok);
+        assert_ratio(traj.prior_targets_availability_ratio, 1.0);
+        let delta = traj
+            .targets_availability_delta
+            .ok_or("missing availability delta")?;
+        assert!(
+            (delta - (-0.1)).abs() < 1e-9,
+            "expected -0.1 delta, got {delta}"
+        );
+        assert_eq!(traj.prior_error_total, 2);
+        assert_eq!(traj.error_total_delta, 3);
+        assert_eq!(traj.sample_basis, 25);
+        Ok(())
+    }
+
+    #[test]
+    fn service_sli_trajectory_marks_insufficient_samples_below_floor()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        insert_traj_target(&mut store, "TGT-thin", "thin")?;
+
+        // Ten checks per window, below MIN_TRAJECTORY_SAMPLES (20).
+        for minute in 0..10 {
+            insert_check(
+                &store,
+                "TGT-thin",
+                &format!("2026-05-28T20:{minute:02}:00Z"),
+                "success",
+            )?;
+            insert_check(
+                &store,
+                "TGT-thin",
+                &format!("2026-05-28T19:{minute:02}:00Z"),
+                "success",
+            )?;
+        }
+
+        let now = OffsetDateTime::parse("2026-05-28T21:00:00Z", &Rfc3339)?;
+        let summaries = store.service_sli_with_trajectory_at("1h", now)?;
+        let traj = summaries
+            .iter()
+            .find(|summary| summary.service == "thin")
+            .and_then(|summary| summary.trajectory)
+            .ok_or("missing thin trajectory")?;
+
+        assert_eq!(traj.status, TrajectoryStatus::InsufficientSamples);
+        assert!(traj.targets_availability_delta.is_none());
+        assert!(traj.prior_targets_availability_ratio.is_none());
+        assert_eq!(traj.sample_basis, 0);
         Ok(())
     }
 

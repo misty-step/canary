@@ -67,7 +67,9 @@ pub use retention::{
     RetentionPrune, RetentionPruneBatch, RetentionPruneBatchReport, RetentionPruneReport,
     RetentionPruneTable,
 };
-pub use service_sli::ServiceSliSummary;
+pub use service_sli::{
+    MIN_TRAJECTORY_SAMPLES, ServiceSliSummary, ServiceSliTrajectory, TrajectoryStatus,
+};
 pub use telemetry::{TelemetryEventError, TelemetryEventInsert, TelemetryEventResult};
 pub use webhook_deliveries::{
     WebhookDeliveryInsert, WebhookDeliveryListOptions, WebhookDeliveryPageError,
@@ -682,6 +684,16 @@ impl Store {
         now: time::OffsetDateTime,
     ) -> QueryResult<Vec<ServiceSliSummary>> {
         service_sli::service_sli_at(&self.connection, window, now)
+    }
+
+    /// Query windowed service SLI aggregates with prior-window trajectory at a
+    /// deterministic evaluation time.
+    pub fn service_sli_with_trajectory_at(
+        &self,
+        window: &str,
+        now: time::OffsetDateTime,
+    ) -> QueryResult<Vec<ServiceSliSummary>> {
+        service_sli::service_sli_with_trajectory_at(&self.connection, window, now)
     }
 
     /// Query active error groups for the unified report.

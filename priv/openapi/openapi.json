@@ -5049,7 +5049,8 @@
           "targets",
           "monitors",
           "errors",
-          "incidents"
+          "incidents",
+          "trajectory"
         ],
         "properties": {
           "service": {
@@ -5081,6 +5082,112 @@
           },
           "incidents": {
             "$ref": "#/components/schemas/IncidentSliSummary"
+          },
+          "trajectory": {
+            "description": "Direction of travel vs the prior equal-length window. Null only on read models that do not compute trajectory.",
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ServiceSliTrajectory"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ServiceSliTrajectory": {
+        "type": "object",
+        "description": "Signed change in a service's SLIs vs the immediately preceding equal-length window (current minus prior). A delta is evidence about two adjacent windows, not a burn-rate budget claim or an urgency verdict. Availability deltas are null below the sample floor so a single failed probe cannot fake a swing; the error-count delta is always exact.",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "sample_basis",
+          "targets",
+          "monitors",
+          "errors"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Whether the availability deltas are backed by enough samples to trust.",
+            "enum": [
+              "ok",
+              "insufficient_samples"
+            ]
+          },
+          "sample_basis": {
+            "type": "integer",
+            "description": "Smallest current/prior count backing a computed availability delta; 0 when no availability delta cleared the floor."
+          },
+          "targets": {
+            "type": "object",
+            "description": "HTTP-target availability trajectory.",
+            "additionalProperties": false,
+            "required": [
+              "availability_delta",
+              "prior_availability_ratio"
+            ],
+            "properties": {
+              "availability_delta": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "Target availability ratio change (current minus prior); null below the sample floor or with no target checks."
+              },
+              "prior_availability_ratio": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "Prior-window target availability ratio, when computable."
+              }
+            }
+          },
+          "monitors": {
+            "type": "object",
+            "description": "Non-HTTP monitor availability trajectory.",
+            "additionalProperties": false,
+            "required": [
+              "availability_delta",
+              "prior_availability_ratio"
+            ],
+            "properties": {
+              "availability_delta": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "Monitor availability ratio change (current minus prior); null below the sample floor or with no check-ins."
+              },
+              "prior_availability_ratio": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "Prior-window monitor availability ratio, when computable."
+              }
+            }
+          },
+          "errors": {
+            "type": "object",
+            "description": "Error-count trajectory.",
+            "additionalProperties": false,
+            "required": [
+              "total_delta",
+              "prior_total"
+            ],
+            "properties": {
+              "total_delta": {
+                "type": "integer",
+                "description": "Error-row count change vs the prior window (signed; current minus prior)."
+              },
+              "prior_total": {
+                "type": "integer",
+                "description": "Prior-window error-row count."
+              }
+            }
           }
         }
       },
