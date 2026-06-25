@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en" data-ae-mode="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Context Packet — 047 child #6: SLI trajectory, not a burn-rate pager</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@100..900&amp;family=Geist+Mono:wght@100..900&amp;display=swap">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/misty-step/aesthetic@v2.5.1/aesthetic.css">
+  <style>
+    :root { --ae-accent: #2643d0; --ae-accent-dark: #8c9eff; }
+    .plan-wide .ae-bar, .plan-wide .ae-stage { width: min(92rem, 100% - 4rem); }
+    .hero { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(25em, 0.72fr); gap: 3em; align-items: end; }
+    .kicker { display: block; margin-bottom: 0.8em; }
+    .rule { border-top: 1px solid var(--ae-line); margin: 1.5em 0; }
+    .grid-2, .grid-3, .grid-4, .grid-5 { display: grid; gap: 1px; background: var(--ae-line); }
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+    .cell { min-width: 0; background: var(--ae-surface); padding: 1.2em 1.35em; }
+    .wash { background: var(--ae-wash); }
+    .phase { display: grid; grid-template-columns: 8em minmax(0, 1fr) minmax(15em, 0.68fr); gap: 1.3em; border-top: 1px solid var(--ae-line); padding-top: 1em; margin-top: 1em; }
+    .phase:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+    .table-wrap { overflow-x: auto; }
+    .status { display: inline-flex; gap: 0.45em; align-items: baseline; }
+    .status svg { transform: translateY(0.15em); }
+    .review-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 2em; }
+    code, pre { font-family: "Geist Mono", monospace; }
+    pre.snippet { background: var(--ae-wash); padding: 1em 1.2em; overflow-x: auto; font-size: 0.82em; line-height: 1.5; border-left: 2px solid var(--ae-accent); }
+    @media (max-width: 980px) {
+      .plan-wide .ae-bar, .plan-wide .ae-stage { width: min(100% - 2rem, 92rem); }
+      .hero, .grid-2, .grid-3, .grid-5, .phase, .review-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<svg aria-hidden="true" style="display: none" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></symbol>
+</svg>
+
+<div class="ae-screen plan-wide">
+  <header class="ae-bar">
+    <a class="ae-name" href="#">CONTEXT PACKET / EXECUTOR HANDOFF</a>
+    <p class="ae-chrome">backlog 047 · child #6 (final slice) · reshaped 2026-06-25</p>
+  </header>
+
+  <main class="ae-stage ae-stage-scroll">
+    <article class="ae-view">
+
+      <!-- ============ HERO = WORK CONTRACT ============ -->
+      <section class="hero" aria-label="Plan contract">
+        <div>
+          <p class="ae-chrome kicker">BACKLOG 047 · CHILD #6 · ALERT-PLANE SLI TRAJECTORY</p>
+          <h1 class="ae-strong">An agent reading one bounded report can see whether each service's availability and error trajectory is worsening — without Canary pre-deciding urgency.</h1>
+          <p class="ae-lede">Children 1–5 shipped the alert-plane verdict, check-in skew policy, induced-impairment rehearsal, windowed SLI read models, and default SLO classes. This final slice makes those SLIs <em>visible and directional</em>: surface the already-computed windowed SLIs + SLO targets on the CLI (which silently drops them today), and add a deterministic, low-N-safe <strong>trajectory delta</strong> — this window vs the prior equal-length window. It deliberately does <strong>not</strong> build a burn-rate-vs-budget ratio or a page/ticket severity verdict: that math assumes high-traffic request streams Canary does not have, and that verdict is policy the responder owns.</p>
+        </div>
+        <aside class="ae-panel">
+          <h2 class="ae-h">CHOSEN DESIGN</h2>
+          <p><span class="status"><svg class="ae-icon ae-ok"><use href="#i-check"></use></svg> Windowed SLIs + SLO targets + signed trajectory delta on <code>/api/v1/report</code> &amp; CLI. Two budget signals kept separate (availability ratio, raw error count). Regenerate the MCP manifest snapshot; defer the runnable server to 052.</span></p>
+          <div class="rule"></div>
+          <h2 class="ae-h">QUALITY SYSTEM</h2>
+          <p><strong>Standard:</strong> a delta is <em>evidence</em> (a fact about two windows); never a budget promise or an urgency policy. Sub-floor windows say <code>insufficient_samples</code>, never a fake swing.</p>
+          <p><strong>Proof:</strong> focused Rust tests (store/server/CLI/manifest-parity) + production-image report readback + a negative grep oracle that no severity field leaked + one fresh cross-family contract critic.</p>
+          <div class="rule"></div>
+          <p class="ae-dim">Premise source: <code>sha256:87886d45ad720106f4d0b275d7e618d45e4ced0130fa48ba38fe88b0cdf5af22 docs/architecture/canary-047-child6-council-premise-2026-06-25.txt</code> (research + 6-model council vs VISION.md).</p>
+          <p class="ae-dim">Plan status: authored as HTML and opened for hierarchy review before execution.</p>
+        </aside>
+      </section>
+
+      <!-- ============ EXECUTIVE GRID = FIRST-VIEWPORT CONTRACT ============ -->
+      <section class="grid-5" aria-label="Executive contract" style="margin-top: 2em">
+        <article class="cell">
+          <h2 class="ae-h">STANDARDS</h2>
+          <p>Smallest durable surface (Principle 8). Deterministic, no LLM on the request path. The new field reads as a fact, not a budget/SLA claim. One semantic contract across report/CLI/manifest.</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">ACCEPTANCE</h2>
+          <p>Report &amp; <code>canary summary --json</code> carry per-service SLIs, SLO targets, and a <code>trajectory</code> block (signed delta vs prior equal-length window; sub-floor → <code>insufficient_samples</code>). No <code>page</code>/<code>ticket</code>/<code>recommended_severity</code> anywhere.</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">VERIFY</h2>
+          <p><code>cargo test</code> across store/server/CLI + manifest parity; negative grep oracle; production-image report readback through the dogfood/witness loop.</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">COMMUNICATE</h2>
+          <p>State the trajectory field shape before edits. Report the serializer + CLI diff, the readback JSON, the negative-oracle result, and the cross-family critic verdict at closeout.</p>
+        </article>
+        <article class="cell wash">
+          <h2 class="ae-h">STOP IF</h2>
+          <p>The prior-window comparison tempts a new sub-hour window; a consumer actually needs a server urgency verdict (re-open with operator); manifest parity can't go green without standing up a server.</p>
+        </article>
+      </section>
+
+      <section class="grid-3" aria-label="Current change proof" style="margin-top: 1px">
+        <article class="cell">
+          <h2 class="ae-h">CURRENT STATE</h2>
+          <p><code>/api/v1/report</code> already serializes <code>service_sli</code> (<a href="#">report_routes.rs:85,247</a>). The CLI <code>summarize_report</code> <strong>drops</strong> it (<a href="#">canary-cli/src/lib.rs:382</a>). The SLI read model computes one window per call from a closed set <code>{1h,6h,24h,7d,30d}</code> (<a href="#">service_sli.rs</a>, <a href="#">query.rs:60</a>) with availability ratio + latency, check-in availability, error/incident counts. SLO classes are two hardcoded defaults (<a href="#">slo.rs</a>). No burn rate, no budget-remaining, no severity routing exist. The MCP manifest is generated over the CLI (<a href="#">priv/mcp/canary-cli-tools.json</a>); no server (ticket 052).</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">CHANGE SHAPE</h2>
+          <p><strong>Add</strong> a <code>Trajectory</code> to <code>ServiceSliSummary</code> computed by re-running the existing read model at <code>now − window_duration</code> (the prior equal-length window) and differencing; a <code>MIN_TRAJECTORY_SAMPLES</code> floor nulls thin windows. <strong>Extend</strong> the report serializer and CLI renderer to surface SLIs+SLO+trajectory. <strong>Regenerate</strong> the manifest snapshot. <strong>Leave alone:</strong> windows, webhook delivery, incident severity, SLO config.</p>
+        </article>
+        <article class="cell wash">
+          <h2 class="ae-h">PROOF SURFACE</h2>
+          <p><code>cargo test -p canary-store service_sli</code> (current vs prior with injected <code>now</code>) · <code>-p canary-server report</code> · <code>-p canary-cli summarize_report</code> · manifest parity test · <code>grep -rE '"(page|ticket)"|recommended_severity|burn_rate' crates/</code> returns no new product field · production-image <code>GET /api/v1/report?window=1h</code> readback on a real dogfood service showing a populated/`insufficient_samples` trajectory.</p>
+        </article>
+      </section>
+
+      <!-- ============ SCOPE + ANCHORS ============ -->
+      <section class="grid-2" aria-label="Scope and anchors" style="margin-top: 2em">
+        <article class="cell">
+          <h2 class="ae-h">SCOPE</h2>
+          <p><strong>Goal:</strong> let an agent judge "is this service getting worse?" from one bounded read, without the substrate deciding how urgent that is.</p>
+          <p><strong>Non-goals:</strong> MWMBR burn-rate ratio against an absolute budget; any <code>page</code>/<code>ticket</code>/<code>recommended_severity</code> field; webhook payload severity or delivery routing (stays severity-agnostic); new query windows (5m/30m/3d); a per-service SLO config table; a runnable MCP server (ticket 052); Prometheus burn-rate gauges on <code>/metrics</code>.</p>
+          <p><strong>Invariants:</strong> RFC 9457 problem details on invalid window; deterministic summaries, no LLM on request path; single SQLite writer — the prior-window lookup is a bounded extra <em>read</em>, never a second writer or a long-held lock; one semantic contract across report/CLI/manifest (enforced by the parity test).</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">REPO ANCHORS</h2>
+          <p><a href="#">crates/canary-store/src/service_sli.rs</a> — read model; <code>service_sli_at(now)</code> already takes an injectable clock — reuse it for the prior window. Trajectory + floor live here.</p>
+          <p><a href="#">crates/canary-core/src/query.rs:60</a> — <code>QueryWindow</code> closed set + <code>cutoff_at</code>; derive the prior-window duration here, do <strong>not</strong> extend the enum.</p>
+          <p><a href="#">crates/canary-core/src/slo.rs</a> — SLO classes; the sample-floor const fits alongside.</p>
+          <p><a href="#">crates/canary-server/src/report_routes.rs:247</a> — <code>service_sli_response</code>; add the <code>trajectory</code> object.</p>
+          <p><a href="#">crates/canary-cli/src/lib.rs:382</a> — <code>summarize_report</code> drops <code>service_sli</code>; render SLIs + trajectory. Exemplar render style: <code>summarize_query</code> (lib.rs:405).</p>
+          <p><a href="#">priv/mcp/canary-cli-tools.json</a> — generated snapshot + parity test (the "contract test" already largely exists here).</p>
+        </article>
+      </section>
+
+      <!-- ============ DESIGN DETAIL ============ -->
+      <section class="ae-panel" aria-label="Design detail" style="margin-top: 2em">
+        <h2 class="ae-h">DESIGN — the trajectory primitive</h2>
+        <p>Compute the current window summary as today, then compute the immediately-preceding equal-length window by re-running the read model at <code>now − duration(window)</code>. Difference the two. Keep the two failure modes as <em>separate</em> raw signals — do not synthesize one number. Illustrative shape (the builder owns exact field names/types):</p>
+        <pre class="snippet">trajectory: {
+  availability_delta: Option&lt;f64&gt;,     // signed; current_ratio − prior_ratio (negative = worse)
+  prior_availability_ratio: Option&lt;f64&gt;,
+  error_total_delta: Option&lt;i64&gt;,       // signed; current_total − prior_total
+  prior_error_total: u64,
+  sample_basis: u64,                    // min(current, prior) checks/check-ins backing the delta
+  status: "ok" | "insufficient_samples" // sub-floor → deltas null, no fake swing
+}</pre>
+        <p><strong>Why a delta, not a burn rate:</strong> a burn-rate-vs-budget ratio is policy ("budget consumed too fast" against an absolute the substrate doesn't own) and, on N≈60–120 samples/hour, a single failed probe produces a huge ratio (the SRE Workbook's own low-traffic caveat). A signed delta vs the prior equal-length window survives low N, stays a fact, and is exactly the "is it worsening?" input an agent needs to decide its own next action. <strong>Why drop the events/hour budget:</strong> <code>error_budget_events_per_hour</code> conflates the probe stream with the error-ingest stream and is too jumpy at this cadence — surface the raw error-count delta instead and let the SLO target travel as context.</p>
+      </section>
+
+      <!-- ============ EXECUTION PLAN ============ -->
+      <section class="ae-panel" aria-label="Execution plan" style="margin-top: 2em">
+        <h2 class="ae-h">EXECUTION PLAN</h2>
+        <div class="phase">
+          <strong class="ae-accent">1 frame</strong>
+          <p>Re-read the anchors live. Confirm <code>service_sli_at</code> accepts an injectable <code>now</code> and that the report already carries <code>service_sli</code>. Lock the trajectory field shape + the floor constant value (start conservative).</p>
+          <p class="ae-dim">Evidence: files read; this packet opened; floor value recorded with rationale.</p>
+        </div>
+        <div class="phase">
+          <strong class="ae-accent">2 build (TDD)</strong>
+          <p>Red→green in the store: trajectory current-vs-prior with injected <code>now</code>; boundary test at the sample floor (one below = <code>insufficient_samples</code>, one above = real delta). Then the serializer, then the CLI renderer (stop dropping the block). Regenerate the manifest; keep parity green.</p>
+          <p class="ae-dim">Evidence: failing-then-passing tests per layer; serializer + CLI diff; regenerated manifest diff.</p>
+        </div>
+        <div class="phase">
+          <strong class="ae-accent">3 review</strong>
+          <p>Fresh-context, artifact-only critic on a different model family: API-contract stability of the new field, low-N correctness of the delta/floor, and confirmation that no severity/policy leaked. Run the negative grep oracle.</p>
+          <p class="ae-dim">Evidence: critic receipt with blockers resolved or waived; negative-oracle output.</p>
+        </div>
+        <div class="phase">
+          <strong class="ae-accent">4 close</strong>
+          <p>Run the repo gate; production-image report readback on a real dogfood service; flip child #6 / ticket 047 to done; resolve visible files; report residual risk (floor tuning).</p>
+          <p class="ae-dim">Evidence: gate output, readback JSON, final <code>git status</code>, remote-sync result.</p>
+        </div>
+      </section>
+
+      <!-- ============ ALTERNATIVES + RISKS ============ -->
+      <section class="grid-2" aria-label="Alternatives and risks" style="margin-top: 2em">
+        <article class="cell">
+          <h2 class="ae-h">ALTERNATIVE DESIGNS</h2>
+          <div class="table-wrap">
+            <table class="ae-table">
+              <thead><tr><th>option</th><th>why it helps</th><th>tradeoff</th><th>verdict</th></tr></thead>
+              <tbody>
+                <tr><td class="ae-item">SLIs + trajectory delta</td><td>Low-N-safe, deterministic, keeps the bounded "is it worsening" first answer.</td><td>One extra read per window; floor needs tuning.</td><td><strong>choose</strong></td></tr>
+                <tr><td class="ae-item">Faithful MWMBR burn rate + page/ticket (original wording)</td><td>Matches the canonical SRE table.</td><td>Assumes N≈10⁶/h; flaps on probe data; severity is responder policy; breaks model-native + vision tenets.</td><td>reject</td></tr>
+                <tr><td class="ae-item">Expose raw SLIs only, compute nothing (DeepSeek)</td><td>Smallest possible; agent computes everything.</td><td>Drops Canary's "bound the first answer" value; every agent re-derives trajectory.</td><td>partial — fold in, add the delta</td></tr>
+                <tr><td class="ae-item">Structured interrupt-vs-batch hint (Moonshot)</td><td>Agent-native urgency vocabulary, no routing.</td><td>Still a server-side urgency verdict; no consumer needs it yet.</td><td>defer</td></tr>
+                <tr><td class="ae-item">Reuse incident-severity ladder (MiniMax)</td><td>No new field; one contract.</td><td>Count-derived incident severity is a different concept; conflation muddies the contract.</td><td>reject for this purpose</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+        <article class="cell wash">
+          <h2 class="ae-h">RISKS</h2>
+          <div class="table-wrap">
+            <table class="ae-table">
+              <thead><tr><th>risk</th><th>mitigation</th><th>owner</th></tr></thead>
+              <tbody>
+                <tr><td>Prior-window query doubles SLI read cost under the store lock.</td><td>Reuse existing SQL; it's a bounded read like the others the report already runs; measure, and compute prior lazily if heavy.</td><td>agent</td></tr>
+                <tr><td>Sample floor mis-tuned → flapping (too low) or always-null (too high).</td><td>Named const + boundary test; start conservative; cadence-aware floor is an explicit follow-up, not this slice.</td><td>agent</td></tr>
+                <tr><td>Trajectory read as a budget/SLA promise.</td><td>Field naming as a raw delta; packet + ticket say "fact, not budget"; negative oracle keeps severity out.</td><td>agent / operator</td></tr>
+                <tr><td>Scope creep into severity routing or the MCP server.</td><td>Explicit non-goals + STOP IF; defer to tickets 052/053.</td><td>operator</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <!-- ============ VERIFICATION SYSTEM ============ -->
+      <section class="ae-panel" aria-label="Verification system" style="margin-top: 2em">
+        <h2 class="ae-h">VERIFICATION SYSTEM</h2>
+        <div class="grid-2" style="margin-top: 1em">
+          <article class="cell">
+            <p><strong>Claim:</strong> an agent sees worsening availability/error trajectory from one bounded report; the substrate emits no urgency policy.</p>
+            <p><strong>Falsifier:</strong> a service whose 1h availability is far below its prior 1h but the report shows no delta; or a sub-floor window emitting a non-null delta that flaps; or any <code>page</code>/<code>ticket</code>/<code>recommended_severity</code> field on a surface.</p>
+            <p><strong>Driver:</strong> focused Rust tests (store current-vs-prior with injected clock; serializer; CLI render; manifest parity) + production-image report readback.</p>
+          </article>
+          <article class="cell wash">
+            <p><strong>Grader:</strong> report &amp; CLI JSON envelopes contain <code>trajectory</code> with correct sign and <code>insufficient_samples</code> at the floor; <code>grep</code> proves no new severity field beyond the pre-existing incident severity.</p>
+            <p><strong>Evidence packet:</strong> readback JSON + test output linked from the implementation PR.</p>
+            <p><strong>Cadence:</strong> unit/parity tests every gate; production-image readback before merge and after any floor change.</p>
+            <p><strong>Gaps/waiver:</strong> cadence-aware (per-target probe-rate) floor deferred; fixed floor accepted for this slice.</p>
+          </article>
+        </div>
+      </section>
+
+      <!-- ============ REVIEW TOPOLOGY ============ -->
+      <section class="ae-panel" aria-label="Review topology" style="margin-top: 2em">
+        <h2 class="ae-h">REVIEW TOPOLOGY</h2>
+        <div class="table-wrap">
+          <table class="ae-table">
+            <thead><tr><th>selected tier</th><th>why this tier fits</th><th>critic lenses</th><th>waiver / escalation</th></tr></thead>
+            <tbody>
+              <tr><td class="ae-item">Standard (additive read surface)</td><td>Reversible, observable via tests + readback, but it adds a public API/CLI field → contract stability matters.</td><td>API-contract stability of <code>trajectory</code>; low-N correctness of delta + floor; no severity/policy leak; store-lock read cost.</td><td>Drop to light only if the field ships behind an existing unstable surface; escalate to operator if a consumer needs an urgency verdict.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p><strong>Ignore:</strong> field-name bikeshedding beyond "reads as a fact, not a budget"; the exact floor integer (test the boundary, not the value).</p>
+      </section>
+
+      <section class="review-grid" aria-label="Review and communication" style="margin-top: 2em">
+        <article class="ae-plate">
+          <p class="ae-plate-cap">REVIEW — useful attacks</p>
+          <p><span class="status"><svg class="ae-icon ae-warn"><use href="#i-alert"></use></svg> Hidden context.</span> Does the prior-window math handle a service that didn't exist in the prior window (prior = null, not delta = 0)?</p>
+          <p><span class="status"><svg class="ae-icon ae-warn"><use href="#i-alert"></use></svg> Weak oracle.</span> Is the floor boundary actually tested both sides, or just asserted?</p>
+          <p><span class="status"><svg class="ae-icon ae-warn"><use href="#i-alert"></use></svg> Scope creep.</span> Did "surface SLIs on CLI" quietly pull <code>services</code> off <code>/status</code> onto <code>/report</code>? Keep that out unless the oracle needs it.</p>
+        </article>
+        <article class="ae-plate">
+          <p class="ae-plate-cap">COMMUNICATION — agent cadence</p>
+          <p>Before edits: confirm the trajectory field shape + floor value with the operator.</p>
+          <p>During edits: report the read-model + serializer + CLI diff and one readback sample, not every test run.</p>
+          <p>Before closeout: report gate, readback JSON, negative-oracle result, cross-family critic verdict, residual risk, final tree state.</p>
+        </article>
+      </section>
+
+      <section style="margin-top: 2em" class="ae-dim">
+        <p>Sources: ticket <code>backlog.d/047-alert-plane-slo-burn-rate.md</code> · premise/research+council <code>docs/architecture/canary-047-child6-council-premise-2026-06-25.txt</code> · Google SRE Workbook "Alerting on SLOs" Table 5-8 (page 1h/5m·14.4, page 6h/30m·6, ticket 3d/6h·1) + low-traffic caveat · VISION.md tenets (timeline before notification; write back evidence not commands; bound the first answer; small beats complete; ceded territory: PagerDuty=on-call, Datadog=high-cardinality SLO).</p>
+      </section>
+
+    </article>
+  </main>
+
+  <footer class="ae-bar">
+    <p class="ae-foot">Context packet for <code>/deliver 047</code> (child #6). Authored as HTML per the plan-in-HTML doctrine; open before execution.</p>
+  </footer>
+</div>
+</body>
+</html>
