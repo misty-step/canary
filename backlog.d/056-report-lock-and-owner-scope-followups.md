@@ -43,5 +43,5 @@ security-sensitive path and should not be lost to a closed PR.
       pass; add one if a shared helper is introduced.
 
 ## Relationship to existing backlog
-Follow-up to #047 (alert-plane reliability; children 1–5 shipped, child #6
-burn-rate still open). Pure store-layer refactor + perf; no API/contract change.
+Follow-up to shipped #047 (alert-plane reliability and SLI trajectory). Pure
+store-layer refactor + perf; no API/contract change.

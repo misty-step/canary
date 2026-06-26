@@ -6,7 +6,12 @@ Priority: P1 · Status: pending · Estimate: M
 Let an agent connect to Canary over MCP (not just shell out to the CLI or hit the HTTP read API), exposing the read + remediation-claims surface as MCP tools — so agent operators get first-class "what's erroring / claim this incident" access from their own MCP client.
 
 ## Why now
-Habitat-dogfooding surfaced this. `canary mcp-manifest` emits a 15-tool manifest (`priv/mcp/canary-cli-tools.json`), but there is **no running MCP server** — agents currently shell out to the CLI or call the HTTP read API. For an agent-operated consumer (Habitat is run by the Olympus/Argus/Vulcan agents), MCP is the native control surface, and "is prod ok?" should be one tool call away.
+Habitat-dogfooding surfaced this. `canary mcp-manifest` emits a generated tool
+manifest, but there is **no running MCP server** — agents currently shell out to
+the CLI or call the HTTP read API. For an agent-operated consumer (Habitat is
+run by the Olympus/Argus/Vulcan agents), MCP is the native control surface, and
+"is prod ok?" should be one tool call away. Static manifest drift is tracked
+separately in #057.
 
 ## Oracle
 - [ ] An installable MCP server wraps the CLI manifest; an MCP client lists the tools and invokes one read-only/no-op tool end to end.

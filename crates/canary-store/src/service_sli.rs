@@ -45,8 +45,7 @@ pub struct ServiceSliSummary {
 /// marked `InsufficientSamples`.
 ///
 /// This is a deliberately coarse, fixed first-pass floor. A cadence-aware floor
-/// (scaled to each target's probe interval) is a tracked follow-up on ticket
-/// 047, not part of this slice.
+/// (scaled to each target's probe interval) is tracked by backlog ticket 058.
 pub const MIN_TRAJECTORY_SAMPLES: u64 = 20;
 
 /// Whether a service's availability trajectory is backed by enough samples to
