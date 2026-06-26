@@ -1,6 +1,6 @@
 # Canary Backlog
 
-`backlog.d/` is the source of truth for active backlog work as of 2026-06-11.
+`backlog.d/` is the source of truth for active backlog work as of 2026-06-26.
 
 ## Priority Order
 
@@ -44,7 +44,7 @@
 | 044 | Telemetry and analytics signal model | P1 | done | XL |
 | 045 | Self-watch operator verdict | P0 | done | L |
 | 046 | Dogfood value receipts | P0 | done | L |
-| 047 | Alert-plane reliability and SLO burn-rate | P0 | ready | XL |
+| 047 | Alert-plane reliability and SLI trajectory | P0 | done | XL |
 | 048 | Responder rich-context safety gate | P0 | pending | XL |
 | 049 | Integration evidence and capture gaps | P1 | pending | XL |
 | 050 | Cold-agent readiness proof | P1 | pending | M |
@@ -54,6 +54,8 @@
 | 054 | Serving model: self-hosted, managed-later, not multi-tenant SaaS | P2 | pending | S |
 | 055 | Refresh PRINCIPLES.md examples to Rust+SQLite (post-cutover) | P3 | pending | S |
 | 056 | Lower /api/v1/report store-lock contention + dedup SLI owner-scope | P2 | pending | M |
+| 057 | Static MCP manifest parity | P1 | ready | S |
+| 058 | Cadence-aware SLI trajectory sample floor | P2 | pending | M |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
 
@@ -91,16 +93,19 @@
 043 (agentic remediation claim protocol) — shipped; typed claims now add deterministic ownership/claim state for downstream triage agents
 045 (self-watch operator verdict) — makes Canary's own watchman state one actionable agent-readable verdict, including witness, worker pressure, incidents, dogfood gaps, and next operator action
 046 (dogfood value receipts) — turns coverage into per-service value proof: current signal, owner/claim, action, outcome, stale evidence, and verification receipt
-047 (alert-plane reliability/SLO burn-rate) — separates route readiness from alerting ability, adds check-in skew safety, and introduces SLO/error-budget feedback after an induced impairment rehearsal proves the alert-plane verdict
+047 (alert-plane reliability/SLI trajectory) — shipped; separates route readiness from alerting ability, adds check-in skew safety, proves induced impairment rehearsal, and exposes windowed SLI + prior-window trajectory evidence without burn-rate severity routing
 048 (responder rich-context safety gate) — narrows responder authority, enforces minimized/audited rich context, defines safe browser/public-ingest authority, and aligns HTTP/CLI/MCP responder privileges before arbitrary-user auto-triage
 049 (integration evidence/capture gaps) — closes residual post-040 overclaiming gaps: synthetic service-specific readback, service-specific webhooks, stale-evidence failure, safe browser capture after 048, platform env parity, integrate apply, and MCP wrapper
 050 (cold-agent readiness proof) — codifies a one-entrypoint proof that a cold agent can inspect Canary, discover MCP/CLI surfaces, run fast validation, and leave a redacted readiness receipt
+057 (static MCP manifest parity) — makes the checked-in MCP manifest match `bin/canary mcp-manifest` or removes the stale parallel snapshot before agents rely on it
+058 (cadence-aware SLI trajectory floor) — follows shipped 047 by replacing the fixed sample floor with cadence-aware sufficiency for low-frequency but complete target/monitor windows
 
 022 (contract hygiene) ──── ships independently; restores summary invariant + supervision-tree collapse
 023 (incident detail API) ──→ Canary-side substrate for the Bitterblossom responder workload (and thus 010 ramp pattern)
 024 (signal-agnostic annotations) ──→ blocked on 023; completes the Ramp-loop writable-metadata primitive
-046 ──→ 047 ──→ 048 ──→ Bitterblossom 055 ──→ 049 ──→ 010
-047 + 049 ──→ 050 (readiness proof consumes the real alert and MCP/integration surfaces)
+046 ──→ 047 (shipped) ──→ 048 ──→ Bitterblossom 055 ──→ 049 ──→ 010
+049 + 052 + 057 ──→ 050 (readiness proof consumes the integration and MCP surfaces; 047 alert-plane surface is already real)
+058 follows 047 as quality tuning; it does not block 048/049/050 unless trajectory sufficiency becomes a readiness proof requirement
 ```
 
 ## Execution Lanes
@@ -112,33 +117,34 @@
 **Lane 4 (hardening):** 008, 014, 016, 017, 018, 019 (independent, small, can ship anytime) · **034 (worker lifecycle readiness oracle)** hardens the Rust background-worker proof surface
 **Lane 5 (dogfood coverage):** 020 (Adminifi HTTP surface verification) · **033 (deployed service registry lifecycle)** shipped the managed registry substrate · **035 (deployed app Canary coverage)** makes every active owned deployment covered or explicitly blocked · **036 (agent-native inspection surface)** gives agents the operating view · **037 (watch the watchmen)** proves Canary externally · **038 (one-command integration agent)** removes setup friction
 **Lane 6 (arbitrary-app productization):** 039 (external-user security/privacy foundation) → 041 (live integration verification harness) + 042 (runtime pressure/freshness ops) → 040 (universal integration/enrollment engine) → 043 (agentic remediation claim protocol) + 044 (telemetry/analytics signal model) → **048 (responder rich-context safety gate)** → Bitterblossom **055 (canary/incident responder template)** → **049 (integration evidence/capture gaps)** → 010 (Ramp pattern)
-**Lane 7 (product feedback loop):** 045 (self-watch operator verdict) shipped → 046 (dogfood value receipts) shipped → **047 (alert-plane reliability/SLO burn-rate)** — turns Canary dogfooding from coverage checks into value, alertability, and operator-action proof
-**Lane 8 (cold-agent readiness):** 050 — after the alert-plane and integration/MCP surfaces harden, package the cold-agent verification path into one discoverable proof and receipt
+**Lane 7 (product feedback loop):** 045 (self-watch operator verdict) shipped → 046 (dogfood value receipts) shipped → 047 (alert-plane reliability/SLI trajectory) shipped — Canary dogfooding now has value, alertability, and operator-action proof; 056/058 are quality followups
+**Lane 8 (cold-agent readiness):** 057 + 052 + 049 → 050 — after stale MCP manifest parity, the runnable MCP surface, and integration proof harden, package the cold-agent verification path into one discoverable proof and receipt
 
-### Active order (2026-06-17)
+### Active order (2026-06-26)
 
-045 shipped in PR #163 (commit b0c43b5). 046 shipped the per-service dogfood
-value receipt loop. `bin/canary dogfood value --service <name> --json` now
-answers what Canary proves for one service, and `doctor --json` includes
-aggregate dogfood value counts. 047 is still the best next pickup, but the
-first slice is now the induced alert-plane impairment proof: make doctor and
-the external witness degrade on alertability failure before implementing
-broader SLO/error-budget math.
+045, 046, and 047 are shipped and archived. 047 landed in slices across PR
+#167, PR #168, PR #171, and PR #172: alert-plane health is distinct from route
+readiness, future check-ins cannot defer overdue alerts beyond the skew policy,
+strict includes an induced impairment rehearsal, windowed service SLI/default
+SLO data is exposed, and report/CLI/OpenAPI now carry a prior-window
+`trajectory` block without server-computed burn-rate severity or page/ticket
+routing.
 
-048 stays pending until the self-watch/value/SLO loops settle, because
-arbitrary-user rich-context responders need those contracts to avoid
-over-authorizing. 048 now also owns the public-ingest or relay boundary for
-browser capture and the HTTP/CLI/MCP authority parity that arbitrary responders
-need. After 048, the cross-repo pickup is Bitterblossom
+048 is now the next product pickup because arbitrary-user rich-context
+responders need the safety contract before browser capture, integration apply,
+or downstream responder templates widen authority. 048 owns public-ingest or
+relay browser boundaries and HTTP/CLI/MCP authority parity. After 048, the
+cross-repo pickup is Bitterblossom
 `/Users/phaedrus/Development/bitterblossom/backlog.d/055-workload-template-portfolio.md`
 child 2, the canary/incident responder template. 049 follows that responder
 template and closes residual integration evidence gaps without redoing shipped
-040 enrollment work. 050 should not preempt 047/048/049; it packages the
-agent-facing verification proof once the surfaces it proves are real. 020 stays
-blocked on Adminifi URLs. 010 stays blocked on that downstream Bitterblossom
-responder workload, but the Lane 7 alertability proof, responder-safety
-foundation, and cold-agent proof now precede any claim that Canary is ready for
-arbitrary external users.
+040 enrollment work. 057 is a small ready hygiene pickup before MCP/cold-agent
+work: the checked-in MCP snapshot currently has 13 tools while the generator
+emits 23. 058 is a quality followup for the fixed #047 trajectory sample floor.
+050 should not preempt 048/049/052/057; it packages the agent-facing
+verification proof once the surfaces it proves are real. 020 stays blocked on
+Adminifi URLs. 010 stays blocked on the downstream Bitterblossom responder
+workload.
 
 022 + 023 landed on 2026-04-21. 024 landed on 2026-04-22. 026 landed on
 2026-04-23 — Ramp
@@ -287,6 +293,11 @@ Bitterblossom workload. 020 stays blocked on Adminifi URLs.
   048 into the arbitrary-responder safety gate including public-ingest/relay
   and authority parity, keep 049 pending behind 048 while hardening its
   anti-overclaim receipt oracle, and add 050 for a cold-agent readiness proof.
+- 2026-06-26: Archived 047 after PR #172 shipped the final trajectory slice.
+  Filed #057 for static MCP manifest parity after observing the checked-in
+  snapshot had 13 tools while `bin/canary mcp-manifest` emitted 23, and filed
+  #058 for cadence-aware SLI trajectory sample floors. 048 is the next product
+  pickup; do not reopen 047 for these followups.
 
 ## Status
 
