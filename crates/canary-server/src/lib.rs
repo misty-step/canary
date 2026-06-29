@@ -1162,13 +1162,16 @@ mod tests {
     #[tokio::test]
     async fn canary_server_boot_wires_retention_prune_worker() -> Result<(), Box<dyn Error>> {
         let path = temp_db_path("retention-prune");
+        let now = server_time::current_utc();
+        let old_created_at = server_time::format_rfc3339(now - time::Duration::days(31));
+        let recent_created_at = server_time::format_rfc3339(now - time::Duration::days(1));
         {
             let mut store = Store::open(&path)?;
             store.migrate()?;
             for index in 0..1005 {
-                store.commit_error_ingest(test_error_ingest(index, "2026-04-01T00:00:00Z"))?;
+                store.commit_error_ingest(test_error_ingest(index, &old_created_at))?;
             }
-            store.commit_error_ingest(test_error_ingest(2000, "2026-05-28T00:00:00Z"))?;
+            store.commit_error_ingest(test_error_ingest(2000, &recent_created_at))?;
         }
 
         let config = ServerConfig {
@@ -9343,7 +9346,7 @@ mod tests {
                     persistence: Persistence::Persistent,
                     component: Component::Runtime,
                 },
-                created_at: "2026-05-28T20:00:00Z".to_owned(),
+                created_at: server_time::current_rfc3339(),
             },
         })
     }

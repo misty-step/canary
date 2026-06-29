@@ -431,13 +431,15 @@ mod tests {
     fn lifecycle_records_tls_expiring_event_and_enqueues_webhook() -> Result<(), Box<dyn Error>> {
         let mut store = Store::open_in_memory()?;
         store.migrate()?;
-        seed_tls_target(&mut store, "2026-06-05T00:00:00Z")?;
+        let now = current_utc();
+        let now_string = format_rfc3339(now);
+        let tls_expires_at = format_rfc3339(now + time::Duration::days(7));
+        seed_tls_target(&mut store, &tls_expires_at)?;
         let store = Arc::new(Mutex::new(store));
         let sink = Arc::new(RecordingSink::default());
         let lifecycle = TlsExpiryScanLifecycle::new(store.clone(), sink.clone());
-        let now = OffsetDateTime::parse("2026-05-29T00:00:00Z", &Rfc3339)?;
 
-        let report = lifecycle.run_due(now, "2026-05-29T00:00:00Z".to_owned())?;
+        let report = lifecycle.run_due(now, now_string)?;
 
         assert_eq!(
             report,
@@ -460,7 +462,7 @@ mod tests {
         assert_eq!(event.event, "health_check.tls_expiring");
         assert_eq!(event.severity.as_deref(), Some("warning"));
         assert_eq!(event.summary, "api: TLS expires in 7 day(s)");
-        assert_eq!(event.payload["tls_expires_at"], "2026-06-05T00:00:00Z");
+        assert_eq!(event.payload["tls_expires_at"], tls_expires_at);
         assert_eq!(event.payload["days_until_expiry"], 7);
         assert_eq!(
             event.payload["target"]["url"],
@@ -473,12 +475,14 @@ mod tests {
     fn lifecycle_keeps_recorded_event_when_webhook_enqueue_fails() -> Result<(), Box<dyn Error>> {
         let mut store = Store::open_in_memory()?;
         store.migrate()?;
-        seed_tls_target(&mut store, "2026-06-05T00:00:00Z")?;
+        let now = current_utc();
+        let now_string = format_rfc3339(now);
+        let tls_expires_at = format_rfc3339(now + time::Duration::days(7));
+        seed_tls_target(&mut store, &tls_expires_at)?;
         let store = Arc::new(Mutex::new(store));
         let lifecycle = TlsExpiryScanLifecycle::new(store.clone(), Arc::new(FailingSink));
-        let now = OffsetDateTime::parse("2026-05-29T00:00:00Z", &Rfc3339)?;
 
-        let report = lifecycle.run_due(now, "2026-05-29T00:00:00Z".to_owned())?;
+        let report = lifecycle.run_due(now, now_string)?;
 
         assert_eq!(report.recorded, 1);
         assert_eq!(report.event_fanout_failed, 1);
