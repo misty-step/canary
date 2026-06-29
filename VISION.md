@@ -1,6 +1,8 @@
 # Canary Vision
 
-Canary is the agent command center for production health.
+Canary is the agent-first command center for production health: a small,
+self-hosted union of error logging, uptime checks, operational events, and
+incident coordination that fleets of agents can read from and write back to.
 
 It is a small, self-hosted service that records errors, probes uptime, watches
 check-ins, correlates incidents, keeps a durable timeline, and gives agents the
@@ -12,7 +14,9 @@ Production health tooling was built around humans staring at dashboards:
 Sentry for application errors, UptimeRobot for uptime, PagerDuty or incident.io
 for response, Datadog or Grafana for broad telemetry, and ad hoc glue between
 them. That stack works for human teams with time to click, filter, and infer.
-It is a poor default for autonomous agents.
+It is a poor default for autonomous agents, and an even worse default for fleets
+of agents that need to divide incident triage without losing the story of what
+happened.
 
 Agents need a different surface:
 
@@ -40,6 +44,9 @@ The next reliability loop is agent-operated:
 5. The agent fixes, files, escalates, or deliberately dismisses outside Canary.
 6. The agent writes back annotations, claim transitions, links, and evidence.
 7. Another agent can replay the same timeline and see what happened.
+8. The incident history remains useful after the urgency is gone: what signal
+   fired, which agents responded, what they learned, what changed, and what
+   still needs human attention.
 
 Canary wins when that loop is boring, deterministic, and hard to misuse.
 
@@ -52,6 +59,11 @@ operator scripts. Complexity has to earn its way in.
 **Agent-first observability.** API, CLI, SDK, and MCP-shaped tools are the
 product surfaces. Humans use the same surfaces agents use. A browser dashboard
 is not the product.
+
+**A trigger surface for responder agents.** Canary should make it obvious how
+an error, uptime failure, missed check-in, or operational event wakes one or more
+triage agents while preserving enough context for them to avoid duplicate,
+contradictory, or amnesiac work.
 
 **An event and incident ledger.** The timeline is the durable source of truth.
 Webhooks wake agents up; timeline replay tells them what is true.

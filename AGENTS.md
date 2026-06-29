@@ -1,6 +1,6 @@
 # Canary — Agent Router
 
-Self-hosted observability substrate for AI agents (not humans). Rust + SQLite + Litestream → Fly Tigris. Fly app **`canary-obs`**. v1: single region, single org, one Docker image, one SQLite file. Read this before acting; read `CLAUDE.md` for load-bearing footguns.
+Self-hosted observability substrate for AI agents (not humans). Rust + SQLite + Litestream → Fly Tigris. Fly app **`canary-obs`**. v1: single region, single org, one Docker image, one SQLite file. Read `VISION.md` for the product north star before changing product scope, responder boundaries, or agent-facing surfaces; read `CLAUDE.md` for load-bearing footguns.
 
 ## Stack & boundaries
 
