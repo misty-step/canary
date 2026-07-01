@@ -4,7 +4,12 @@
 //! that compatibility at the process edge and returns a typed runtime config so
 //! the server boot path does not parse environment variables itself.
 
-use std::{collections::BTreeMap, fmt, net::SocketAddr, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    net::{Ipv6Addr, SocketAddr},
+    path::PathBuf,
+};
 
 use canary_workers::retention::RetentionPolicy;
 
@@ -72,7 +77,7 @@ impl ServerProcessConfig {
 
         Ok(Self {
             server,
-            listen_addr: SocketAddr::from(([0, 0, 0, 0], port)),
+            listen_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)),
         })
     }
 }
@@ -160,7 +165,10 @@ mod tests {
             config.server.database_path,
             PathBuf::from("/data/canary.db")
         );
-        assert_eq!(config.listen_addr, SocketAddr::from(([0, 0, 0, 0], 4000)));
+        assert_eq!(
+            config.listen_addr,
+            SocketAddr::from((Ipv6Addr::UNSPECIFIED, 4000))
+        );
         assert_eq!(config.server.retention_policy, RetentionPolicy::default());
         assert!(!config.server.target_probe_options.allow_private_targets);
         assert!(config.server.disclose_bootstrap_key);
@@ -179,7 +187,10 @@ mod tests {
         ])?;
 
         assert_eq!(config.server.database_path, PathBuf::from("/tmp/canary.db"));
-        assert_eq!(config.listen_addr, SocketAddr::from(([0, 0, 0, 0], 8080)));
+        assert_eq!(
+            config.listen_addr,
+            SocketAddr::from((Ipv6Addr::UNSPECIFIED, 8080))
+        );
         assert_eq!(
             config.server.retention_policy,
             RetentionPolicy {
