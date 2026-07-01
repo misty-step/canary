@@ -186,7 +186,7 @@ entrypoint. See [docs/ci-control-plane.md](docs/ci-control-plane.md).
 Canary's MCP surface is the CLI contract served over stdio:
 
 ```bash
-CANARY_ENDPOINT=https://canary-obs.fly.dev \
+CANARY_ENDPOINT="https://<your-fly-app>.fly.dev" \
 CANARY_READ_API_KEY=... \
 bin/canary mcp-server
 ```
@@ -204,6 +204,12 @@ The machine-readable contract lives at `GET /api/v1/openapi.json`. That
 endpoint, `/healthz`, and `/readyz` are public. The contract embeds the
 canonical agent replay guide in `info.x-agent-guide`.
 
+Set the instance endpoint before running API examples:
+
+```bash
+export CANARY_ENDPOINT="https://<your-fly-app>.fly.dev"
+```
+
 All other endpoints require a scoped API key:
 
 - `ingest-only` for `POST /api/v1/errors` and `POST /api/v1/check-ins`
@@ -215,7 +221,7 @@ Manual rotation steps live in [docs/api-key-rotation.md](docs/api-key-rotation.m
 ### Error Ingestion
 
 ```bash
-curl -X POST https://canary-obs.fly.dev/api/v1/errors \
+curl -X POST $CANARY_ENDPOINT/api/v1/errors \
   -H "Authorization: Bearer $CANARY_INGEST_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -237,18 +243,18 @@ Response: `201 Created`
 
 ```bash
 # Recent errors for a service
-curl "https://canary-obs.fly.dev/api/v1/query?service=cadence&window=1h" \
+curl "$CANARY_ENDPOINT/api/v1/query?service=cadence&window=1h" \
   -H "Authorization: Bearer $CANARY_READ_KEY"
 
 # Error detail
-curl "https://canary-obs.fly.dev/api/v1/errors/ERR-a1b2c3" \
+curl "$CANARY_ENDPOINT/api/v1/errors/ERR-a1b2c3" \
   -H "Authorization: Bearer $CANARY_READ_KEY"
 ```
 
 ### Health Status
 
 ```bash
-curl "https://canary-obs.fly.dev/api/v1/health-status" \
+curl "$CANARY_ENDPOINT/api/v1/health-status" \
   -H "Authorization: Bearer $CANARY_READ_KEY"
 ```
 
@@ -264,7 +270,7 @@ Response includes natural-language summary:
 ### Unified Report
 
 ```bash
-curl "https://canary-obs.fly.dev/api/v1/report?window=1h" \
+curl "$CANARY_ENDPOINT/api/v1/report?window=1h" \
   -H "Authorization: Bearer $CANARY_READ_KEY"
 ```
 
@@ -334,7 +340,7 @@ service binding, and is not advanced by `report.cursor`:
 ### Timeline
 
 ```bash
-curl "https://canary-obs.fly.dev/api/v1/timeline?service=volume&window=24h&limit=50" \
+curl "$CANARY_ENDPOINT/api/v1/timeline?service=volume&window=24h&limit=50" \
   -H "Authorization: Bearer $CANARY_READ_KEY"
 ```
 
@@ -344,7 +350,7 @@ timeline queries and outbound webhook deliveries.
 Optional free-text error search stays on the same endpoint:
 
 ```bash
-curl "https://canary-obs.fly.dev/api/v1/report?window=1h&q=timeout" \
+curl "$CANARY_ENDPOINT/api/v1/report?window=1h&q=timeout" \
   -H "Authorization: Bearer $CANARY_READ_KEY"
 ```
 
@@ -377,7 +383,7 @@ health target, generates a fresh ingest key, and returns exact copy/paste
 snippets for reporting errors and verifying the service in Canary.
 
 ```bash
-curl -X POST https://canary-obs.fly.dev/api/v1/service-onboarding \
+curl -X POST $CANARY_ENDPOINT/api/v1/service-onboarding \
   -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{"service": "my-api", "url": "https://my-api.fly.dev/health", "environment": "production"}'
@@ -406,7 +412,7 @@ check-in monitors managed separately from URL-backed targets.
 
 ```bash
 # Create a schedule-based monitor
-curl -X POST https://canary-obs.fly.dev/api/v1/monitors \
+curl -X POST $CANARY_ENDPOINT/api/v1/monitors \
   -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -418,7 +424,7 @@ curl -X POST https://canary-obs.fly.dev/api/v1/monitors \
   }'
 
 # Report a healthy check-in
-curl -X POST https://canary-obs.fly.dev/api/v1/check-ins \
+curl -X POST $CANARY_ENDPOINT/api/v1/check-ins \
   -H "Authorization: Bearer $CANARY_INGEST_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -437,13 +443,13 @@ Crash or exception telemetry still belongs on `POST /api/v1/errors`.
 
 ```bash
 # Add target
-curl -X POST https://canary-obs.fly.dev/api/v1/targets \
+curl -X POST $CANARY_ENDPOINT/api/v1/targets \
   -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{"name": "my-api", "service": "my-api", "url": "https://my-api.fly.dev/health", "interval_ms": 60000}'
 
 # List / pause / resume / delete
-curl https://canary-obs.fly.dev/api/v1/targets -H "Authorization: Bearer $CANARY_ADMIN_KEY"
+curl $CANARY_ENDPOINT/api/v1/targets -H "Authorization: Bearer $CANARY_ADMIN_KEY"
 curl -X POST .../targets/:id/pause
 curl -X POST .../targets/:id/resume
 curl -X DELETE .../targets/:id
@@ -453,8 +459,8 @@ curl -X DELETE .../targets/:id
 
 ```bash
 # List / create / delete monitors
-curl https://canary-obs.fly.dev/api/v1/monitors -H "Authorization: Bearer $CANARY_ADMIN_KEY"
-curl -X POST https://canary-obs.fly.dev/api/v1/monitors \
+curl $CANARY_ENDPOINT/api/v1/monitors -H "Authorization: Bearer $CANARY_ADMIN_KEY"
+curl -X POST $CANARY_ENDPOINT/api/v1/monitors \
   -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{"name": "desktop-active-timer", "mode": "ttl", "expected_every_ms": 60000, "grace_ms": 15000}'
@@ -464,19 +470,19 @@ curl -X DELETE .../monitors/:id
 ### Webhook Management
 
 ```bash
-curl -X POST https://canary-obs.fly.dev/api/v1/webhooks \
+curl -X POST $CANARY_ENDPOINT/api/v1/webhooks \
   -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{"url": "https://example.com/hook", "events": ["health_check.down", "error.new_class"]}'
 
-curl "https://canary-obs.fly.dev/api/v1/webhook-deliveries?webhook_id=WHK-abc123&limit=20" \
+curl "$CANARY_ENDPOINT/api/v1/webhook-deliveries?webhook_id=WHK-abc123&limit=20" \
   -H "Authorization: Bearer $CANARY_READ_KEY"
 ```
 
 ### API Key Management
 
 ```bash
-curl -X POST https://canary-obs.fly.dev/api/v1/keys \
+curl -X POST $CANARY_ENDPOINT/api/v1/keys \
   -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{"name": "cadence-prod", "scope": "read-only"}'
@@ -515,11 +521,28 @@ All webhooks are HMAC-SHA256 signed. Secret returned on subscription creation.
 
 ## Deployment
 
-Deployed to Fly.io with SQLite persistence and a Fly Tigris-backed Litestream
-restore path.
+Deploy to Fly.io with SQLite persistence and a Fly Tigris-backed Litestream
+restore path. A full cold-operator runbook lives in
+[docs/self-host-fly.md](docs/self-host-fly.md).
 
 ```bash
-flyctl deploy --app canary-obs
+export CANARY_FLY_APP="<your-fly-app>"
+export CANARY_ENDPOINT="https://${CANARY_FLY_APP}.fly.dev"
+flyctl deploy --app "$CANARY_FLY_APP" --remote-only
+```
+
+On first boot, capture the one-time bootstrap admin key from Fly logs:
+
+```bash
+flyctl logs --app "$CANARY_FLY_APP" --no-tail | rg 'Bootstrap API key:'
+```
+
+If the first boot log was missed, mint a replacement admin key without data
+loss:
+
+```bash
+flyctl ssh console --app "$CANARY_FLY_APP" \
+  -C '/app/bin/canary-server mint-key --scope admin --name operator-recovery'
 ```
 
 DR verification and restore procedures live in [docs/backup-restore-dr.md](docs/backup-restore-dr.md).
@@ -527,7 +550,7 @@ Use `bin/dr-status` for a read-only Litestream preflight and
 `bin/dr-restore-check` for a non-destructive restore drill against the running
 Fly app.
 On a fresh Fly app, enable the same path with
-`flyctl storage create --app canary-obs --name canary-obs-backups --yes`, then
+`flyctl storage create --app "$CANARY_FLY_APP" --name "$CANARY_FLY_APP-backups" --yes`, then
 re-run the two verification commands. See the DR runbook for the latest live
 verification status.
 

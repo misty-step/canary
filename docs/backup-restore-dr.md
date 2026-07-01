@@ -1,9 +1,16 @@
 # Backup, Restore, and DR
 
-This runbook covers Litestream backup verification and manual recovery for the
-Fly app `canary-obs`.
+This runbook covers Litestream backup verification and manual recovery for a
+Fly-hosted Canary app.
 
-## Current State
+Set the target instance before running commands:
+
+```bash
+export CANARY_FLY_APP="<your-fly-app>"
+export CANARY_ENDPOINT="https://${CANARY_FLY_APP}.fly.dev"
+```
+
+## Historical Production Evidence
 
 Initial live inspection on `2026-04-16` found that `canary-obs` was not
 actively backing up:
@@ -26,14 +33,17 @@ recovery work.
 
 The shell tests in this repo verify wrapper command composition and
 restore-on-missing-DB behavior. They do not replace a live Fly/Litestream
-verification run against `canary-obs`.
+verification run against the operator's own app.
 
 ## Enable Fly Tigris Backups
 
-Provision a Fly-managed Tigris bucket for `canary-obs`:
+Provision a Fly-managed Tigris bucket for the app:
 
 ```bash
-flyctl storage create --app canary-obs --name canary-obs-backups --yes
+flyctl storage create \
+  --app "$CANARY_FLY_APP" \
+  --name "${CANARY_FLY_APP}-backups" \
+  --yes
 ```
 
 `flyctl storage create` provisions the bucket and stages or deploys the app
@@ -45,14 +55,14 @@ backup contract stays Fly-specific and small.
 Confirm the secrets are present:
 
 ```bash
-flyctl secrets list --app canary-obs
+flyctl secrets list --app "$CANARY_FLY_APP"
 ```
 
 If Fly reports them as `Staged`, deploy the current release with the new
 secrets without rebuilding:
 
 ```bash
-flyctl secrets deploy --app canary-obs
+flyctl secrets deploy --app "$CANARY_FLY_APP"
 ```
 
 `bin/dr-status` is still the authoritative verification step because it checks
@@ -63,7 +73,7 @@ the running container's effective Litestream configuration.
 Check Litestream replication status on the running machine:
 
 ```bash
-bin/dr-status
+bin/dr-status --app "$CANARY_FLY_APP"
 ```
 
 The wrapper owns the exact `flyctl ssh console` contract through
@@ -92,7 +102,7 @@ Restore the Tigris replica to a temporary file on the running machine without
 touching the live database:
 
 ```bash
-bin/dr-restore-check
+bin/dr-restore-check --app "$CANARY_FLY_APP"
 ```
 
 The wrapper builds the remote restore command through
@@ -123,7 +133,7 @@ Use this only after `bin/dr-status` and `bin/dr-restore-check` succeed.
 ```bash
 set -euo pipefail
 
-MACHINE_JSON=$(flyctl machines list --app canary-obs --json | jq -ce 'map(select(.config.env.FLY_PROCESS_GROUP == "app")) | .[0]')
+MACHINE_JSON=$(flyctl machines list --app "$CANARY_FLY_APP" --json | jq -ce 'map(select(.config.env.FLY_PROCESS_GROUP == "app")) | .[0]')
 MACHINE_ID=$(printf '%s' "$MACHINE_JSON" | jq -er '.id')
 VOLUME_ID=$(printf '%s' "$MACHINE_JSON" | jq -er '.config.mounts[0].volume')
 IMAGE=$(printf '%s' "$MACHINE_JSON" | jq -er '.config.image')
@@ -132,32 +142,32 @@ MAINT_NAME="cdrm_$(date +%s | tail -c 7)"
 
 printf 'Recovering Fly machine: %s (volume %s)\n' "$MACHINE_ID" "$VOLUME_ID"
 
-flyctl machines stop "$MACHINE_ID" --app canary-obs
+flyctl machines stop "$MACHINE_ID" --app "$CANARY_FLY_APP"
 
-flyctl machine run --app canary-obs --region "$REGION" --detach \
+flyctl machine run --app "$CANARY_FLY_APP" --region "$REGION" --detach \
   --skip-dns-registration --restart no --name "$MAINT_NAME" \
   --entrypoint sleep --volume "$VOLUME_ID":/data "$IMAGE" infinity
 
 MAINT_ID=
 for _ in $(seq 1 30); do
-  MAINT_ID=$(flyctl machines list --app canary-obs --json | jq -er --arg name "$MAINT_NAME" '.[] | select(.name == $name) | .id' 2>/dev/null || true)
+  MAINT_ID=$(flyctl machines list --app "$CANARY_FLY_APP" --json | jq -er --arg name "$MAINT_NAME" '.[] | select(.name == $name) | .id' 2>/dev/null || true)
   [ -n "$MAINT_ID" ] && break
   sleep 2
 done
 test -n "$MAINT_ID"
 
 cleanup_maint() {
-  flyctl machine destroy "$MAINT_ID" --app canary-obs --force
+  flyctl machine destroy "$MAINT_ID" --app "$CANARY_FLY_APP" --force
 }
 trap cleanup_maint EXIT
 
-flyctl machine wait "$MAINT_ID" --app canary-obs --state started
-flyctl machine exec "$MAINT_ID" "sh -eu -c 'rm -f /data/canary.db /data/canary.db-wal /data/canary.db-shm && for path in /data/canary.db /data/canary.db-wal /data/canary.db-shm; do [ ! -e \"$path\" ] || { echo \"$path still present\" >&2; exit 1; }; done'" --app canary-obs
+flyctl machine wait "$MAINT_ID" --app "$CANARY_FLY_APP" --state started
+flyctl machine exec "$MAINT_ID" "sh -eu -c 'rm -f /data/canary.db /data/canary.db-wal /data/canary.db-shm && for path in /data/canary.db /data/canary.db-wal /data/canary.db-shm; do [ ! -e \"$path\" ] || { echo \"$path still present\" >&2; exit 1; }; done'" --app "$CANARY_FLY_APP"
 
-flyctl machine destroy "$MAINT_ID" --app canary-obs --force
+flyctl machine destroy "$MAINT_ID" --app "$CANARY_FLY_APP" --force
 trap - EXIT
 
-flyctl machines start "$MACHINE_ID" --app canary-obs
+flyctl machines start "$MACHINE_ID" --app "$CANARY_FLY_APP"
 ```
 
 Why the stop/maintenance/start sequence exists:
@@ -177,25 +187,25 @@ disposable forked volume using the same image and `flyctl machine run` /
 Re-run the backup checks after the machine comes back:
 
 ```bash
-bin/dr-status
-bin/dr-restore-check
+bin/dr-status --app "$CANARY_FLY_APP"
+bin/dr-restore-check --app "$CANARY_FLY_APP"
 ```
 
 Check recent logs for the restore message:
 
 ```bash
-flyctl logs --app canary-obs --no-tail | rg "Restoring database from Litestream"
+flyctl logs --app "$CANARY_FLY_APP" --no-tail | rg "Restoring database from Litestream"
 ```
 
 Treat this as a failed recovery and stop immediately if it appears:
 
 ```bash
-flyctl logs --app canary-obs --no-tail | rg "did not materialize /data/canary.db"
+flyctl logs --app "$CANARY_FLY_APP" --no-tail | rg "did not materialize /data/canary.db"
 ```
 
 Then verify the service itself:
 
 ```bash
-curl -fsS https://canary-obs.fly.dev/healthz
-curl -fsS https://canary-obs.fly.dev/readyz
+curl -fsS "$CANARY_ENDPOINT/healthz"
+curl -fsS "$CANARY_ENDPOINT/readyz"
 ```

@@ -12,13 +12,14 @@ concurrency:
 
 jobs:
   core:
-    if: github.event.workflow_run.conclusion == 'success'
+    if: github.event.workflow_run.conclusion == 'success' && (github.repository == 'misty-step/canary' || vars.CANARY_FLY_APP != '')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1
-      - run: flyctl deploy --remote-only
+      - run: flyctl deploy --app "$FLY_APP" --remote-only
         env:
+          FLY_APP: ${{ vars.CANARY_FLY_APP || 'canary-obs' }}
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
