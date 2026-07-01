@@ -2,7 +2,10 @@
 
 Canary is the agent-first command center for production health: a small,
 self-hosted union of error logging, uptime checks, operational events, and
-incident coordination that fleets of agents can read from and write back to.
+incident coordination that fleets of agents can read from and write back to. In
+the Factory composition, Canary is the monitoring half: the ledger that tells
+orchestrators what is unhealthy, who already claimed it, and what evidence came
+back.
 
 It is a small, self-hosted service that records errors, probes uptime, watches
 check-ins, correlates incidents, keeps a durable timeline, and gives agents the
@@ -26,6 +29,8 @@ Agents need a different surface:
 - scoped write-back for evidence, decisions, and ownership
 - deterministic summaries that fit in transcripts and context windows
 - setup and verification loops that prove a deployed app is actually covered
+- a cold-operator path that lets a new team run its own instance without
+  inheriting another operator's app name, dogfood registry, or secrets
 
 The missing product is not another dashboard. It is a coordination substrate
 for agents watching production.
@@ -49,6 +54,9 @@ The next reliability loop is agent-operated:
    still needs human attention.
 
 Canary wins when that loop is boring, deterministic, and hard to misuse.
+It also wins only if the instance is boring to own: a fresh operator should be
+able to deploy, recover the first admin key, add a service, and prove readback
+from public docs and repo-local commands.
 
 ## What Canary Is
 
@@ -56,9 +64,18 @@ Canary wins when that loop is boring, deterministic, and hard to misuse.
 image, one SQLite database, one deployment target, and a small set of explicit
 operator scripts. Complexity has to earn its way in.
 
+**A cold-self-hostable product.** The product must not require the Misty Step
+`canary-obs` instance, Phaedrus dogfood data, personal paths, or private
+operating lore. Instance configuration belongs outside product code.
+
 **Agent-first observability.** API, CLI, SDK, and MCP-shaped tools are the
 product surfaces. Humans use the same surfaces agents use. A browser dashboard
 is not the product.
+
+**One semantic contract across surfaces.** HTTP, CLI, MCP, and SDK adapters
+must expose the same loop and authority model. If an agent can read, claim, or
+annotate through one surface, the other agent-facing surfaces should not force
+raw route trivia or broader keys.
 
 **A trigger surface for responder agents.** Canary should make it obvious how
 an error, uptime failure, missed check-in, or operational event wakes one or more
@@ -145,8 +162,14 @@ contract includes:
 - dogfood registry, audit, self-watch, and value receipt loops
 
 The remaining gap is not raw capability. The gap is trust and usefulness:
-alert reliability, stale evidence cleanup, responder safety, fewer
-overclaimed integrations, and a cleaner agent handoff from signal to action.
+alert reliability, cold-operator deployability, instance/product separation,
+stale evidence cleanup, responder safety, fewer overclaimed integrations, and a
+cleaner agent handoff from signal to action.
+
+The uncomfortable current truth is that Canary's live Misty Step instance is
+more mature than its stranger-owned deploy path. The next product bar is a
+clean instance run by another operator, with bootstrap-key recovery, Fly
+deployment, backup setup, and first service onboarding documented and proven.
 
 ## Product Principles
 
@@ -172,6 +195,9 @@ overclaimed integrations, and a cleaner agent handoff from signal to action.
 
 The near-term product direction is not "add every observability feature." It is:
 
+- make a cold operator able to deploy and own their own instance
+- plumb the Factory fleet into Canary with fresh service-specific readback
+- close the read -> claim -> annotate -> release loop through CLI and MCP
 - make alert-plane reliability and SLO/error-budget feedback trustworthy
 - make responder context safe enough for arbitrary-agent consumers
 - remove stale dogfood evidence and overclaiming in integration receipts

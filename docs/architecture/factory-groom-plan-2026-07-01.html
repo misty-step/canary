@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canary Factory Groom Plan 2026-07-01</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #1b1c1f;
+      --muted: #61646b;
+      --line: #d9dce2;
+      --wash: #f6f7f9;
+      --paper: #ffffff;
+      --accent: #1d5f7a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--wash);
+      line-height: 1.45;
+    }
+    main {
+      width: min(1120px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 32px 0 56px;
+    }
+    header {
+      display: grid;
+      grid-template-columns: minmax(0, 1.3fr) minmax(280px, 0.7fr);
+      gap: 24px;
+      align-items: end;
+      padding: 28px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(32px, 5vw, 58px);
+      line-height: 0.98;
+      letter-spacing: 0;
+    }
+    h2 {
+      margin: 0 0 10px;
+      font-size: 13px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+    p { margin: 0 0 10px; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+      background: #eef1f4;
+      padding: 0.1em 0.28em;
+    }
+    .lede {
+      margin-top: 18px;
+      max-width: 760px;
+      font-size: 18px;
+      color: var(--muted);
+    }
+    .panel,
+    .cell {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      padding: 18px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1px;
+      margin-top: 20px;
+    }
+    .grid .cell {
+      border-width: 1px;
+      min-height: 160px;
+    }
+    .phases {
+      margin-top: 20px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+    }
+    .phase {
+      display: grid;
+      grid-template-columns: 160px minmax(0, 1fr) minmax(240px, 0.55fr);
+      gap: 18px;
+      padding: 18px;
+      border-top: 1px solid var(--line);
+    }
+    .phase:first-child { border-top: 0; }
+    .tag {
+      color: var(--accent);
+      font-weight: 700;
+    }
+    .muted { color: var(--muted); }
+    ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+    li { margin: 6px 0; }
+    @media (max-width: 860px) {
+      header,
+      .grid,
+      .phase {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <section>
+      <h2>Canary Factory Lane</h2>
+      <h1>Groom backlog, sync the north star, then ship the cold-operator path.</h1>
+      <p class="lede">Phase 1 records the 2026-07-01 factory decisions in Canary's durable backlog and VISION, with MIT ownership corrected for Misty Step LLC. Phase 2 starts the top epic immediately: make a fresh operator deploy their own Canary instance without tribal knowledge or Phaedrus instance data.</p>
+    </section>
+    <aside class="panel">
+      <h2>Proof Contract</h2>
+      <p><strong>Gate:</strong> <code>./bin/validate</code></p>
+      <p><strong>PR:</strong> <code>groom(2026-07-01): backlog + vision + license</code></p>
+      <p><strong>Merge:</strong> squash after CI and local gate are green.</p>
+      <p class="muted">Top Phase 2 item comes from <code>~/.factory-lanes/groom/_decisions.md</code>: cold-operator deploy path.</p>
+    </aside>
+  </header>
+
+  <section class="grid" aria-label="Execution contract">
+    <article class="cell">
+      <h2>Standards</h2>
+      <p>House backlog format: numbered files, Goal + Oracle, epics with Children. Keep existing tickets visible; consolidation is documented, not silent.</p>
+    </article>
+    <article class="cell">
+      <h2>Acceptance</h2>
+      <p>New epics encode cold deploy, fleet plumb-in, agent loop writeback, triage hardening, release/upgrade, runtime hardening, and consolidation. VISION names the composition role and self-host bar.</p>
+    </article>
+    <article class="cell">
+      <h2>Stop Conditions</h2>
+      <p>Stop if live repo contradicts the groom evidence, if the gate fails from unrelated baseline breakage, or if another agent has conflicting edits in the same files.</p>
+    </article>
+  </section>
+
+  <section class="grid" aria-label="Quality system">
+    <article class="cell">
+      <h2>Proof Methods</h2>
+      <ul>
+        <li>Local file verification against factory brief, decisions, and groom report.</li>
+        <li>Repo gate: <code>./bin/validate</code>.</li>
+        <li>GitHub PR checks before merge.</li>
+      </ul>
+    </article>
+    <article class="cell">
+      <h2>Critic Focus</h2>
+      <p>The failure to catch is backlog slop: invented priorities, weakened Canary invariants, or a VISION that suggests model calls or repo mutation belongs in Canary.</p>
+    </article>
+    <article class="cell">
+      <h2>Residual Risk</h2>
+      <p>Phase 1 is governance/docs. It does not yet prove a stranger can deploy. Phase 2 must turn the first epic into executable docs, config, and smoke proof.</p>
+    </article>
+  </section>
+
+  <section class="phases" aria-label="Plan">
+    <div class="phase">
+      <strong class="tag">1. Frame</strong>
+      <p>Read factory doctrine, operator decisions, Canary groom report, VISION, backlog, AGENTS, CLAUDE, and live repo state.</p>
+      <p class="muted">Evidence: exact files read in terminal transcript.</p>
+    </div>
+    <div class="phase">
+      <strong class="tag">2. Phase 1 Build</strong>
+      <p>Add ordered epics, update backlog README active order, revise VISION for composition and cold self-host truth, correct LICENSE owner.</p>
+      <p class="muted">Evidence: focused docs diff and local gate.</p>
+    </div>
+    <div class="phase">
+      <strong class="tag">3. Land</strong>
+      <p>Create the requested branch and PR title, run <code>./bin/validate</code>, push, watch checks, merge when green.</p>
+      <p class="muted">Evidence: PR URL, gate command, final branch sync.</p>
+    </div>
+    <div class="phase">
+      <strong class="tag">4. Phase 2</strong>
+      <p>Start the cold-operator deploy path in a new focused branch. First deliverable should make bootstrap key recovery and Fly instance setup executable from public docs.</p>
+      <p class="muted">Evidence: focused PR with docs/config/test or smoke proof.</p>
+    </div>
+  </section>
+</main>
+</body>
+</html>
