@@ -1,0 +1,14 @@
+product:
+  name: Canary
+  description: Self-hosted production-health ledger and responder surface for agent-operated reliability.
+audience: developer
+voice: Operational, concrete, and specific to agent-facing reliability behavior.
+changelog:
+  source: auto
+release:
+  profile: synthesis-only
+model:
+  policy: balanced
+budget:
+  max_input_tokens: 12000
+  max_output_tokens: 1200
