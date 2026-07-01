@@ -37,6 +37,13 @@ reuses the existing integration engine and the future evidence hardening in
 `049`; it should not turn Canary into a repo mutation engine. Downstream app
 patches happen in those repos or through external agents.
 
+## Progress
+- 2026-07-01: Bastion lane verified `canary-obs.internal` resolution and route
+  path from the fleet, but connections to `canary-obs.internal:4000` were
+  refused because the production server was not listening on the Fly 6PN-facing
+  address family. Added a server bind fix to listen on `[::]:PORT`; deployment
+  proof must include a curl from outside the Fly machine.
+
 ## Children
 1. Define the active Factory app inventory and coverage statuses.
 2. Publish a 15-minute integration recipe that works through API, CLI, MCP, or
