@@ -1,6 +1,6 @@
 # Regenerate and gate the static MCP manifest snapshot
 
-Priority: P1 · Status: ready · Estimate: S
+Priority: P1 · Status: done · Estimate: S
 
 ## Goal
 Make the checked-in `priv/mcp/canary-cli-tools.json` snapshot either match
@@ -21,13 +21,13 @@ is agent-facing enough to become misleading, especially before #052 ships a
 runnable MCP server.
 
 ## Oracle
-- [ ] Given `bin/canary mcp-manifest` runs in a clean checkout, then the
+- [x] Given `bin/canary mcp-manifest` runs in a clean checkout, then the
       checked-in `priv/mcp/canary-cli-tools.json` is byte-for-byte equivalent
       after stable JSON formatting, or the file is removed and all references
       point to the generator.
-- [ ] Given `canary-cli::tool_manifest()` changes, then the canonical gate fails
+- [x] Given `canary-cli::tool_manifest()` changes, then the canonical gate fails
       if a retained static snapshot was not regenerated.
-- [ ] Given docs or backlog tickets mention MCP tool counts, then they do not
+- [x] Given docs or backlog tickets mention MCP tool counts, then they do not
       hardcode stale counts; they either derive from the generator or describe
       the contract without a count.
 
@@ -42,6 +42,16 @@ runnable MCP server.
 - Cadence: every repo gate when the snapshot is retained.
 
 ## Relationship to existing backlog
-Follow-up to #047 child #6 and prerequisite hygiene for #050/#052. This does
-not ship the runnable MCP server; #052 still owns server installation and one
-client invocation.
+Follow-up to #047 child #6 and prerequisite hygiene for #050/#052. This shipped
+with #052 so the static manifest parity gate and runnable MCP server landed as
+one agent-facing surface.
+
+## Completion
+
+Shipped 2026-07-01 with #052. The checked-in snapshot was regenerated from
+`bin/canary mcp-manifest`, and
+`checked_in_mcp_manifest_matches_generated_manifest` now fails if
+`tool_manifest()` changes without a snapshot update.
+
+Proof: `cargo test -p canary-cli --test fixtures checked_in_mcp_manifest_matches_generated_manifest --locked`
+failed before regeneration and passed after regeneration.

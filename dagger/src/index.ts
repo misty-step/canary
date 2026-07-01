@@ -423,6 +423,19 @@ jq -e '
   and (.tools | length) >= 4
   and all(.tools[]; (.name | type == "string") and (.description | type == "string") and .input_schema.type == "object" and (.input_schema.properties | type == "object"))
 ' /tmp/canary-mcp-manifest.json
+
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"dagger-smoke","version":"0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  | bin/canary mcp-server >/tmp/canary-mcp-server.jsonl
+jq -s -e '
+  length == 2
+  and .[0].result.protocolVersion == "2025-11-25"
+  and .[0].result.capabilities.tools.listChanged == false
+  and (.[1].result.tools | type == "array")
+  and any(.[1].result.tools[]; .name == "canary_summary" and .inputSchema.type == "object")
+' /tmp/canary-mcp-server.jsonl
 `
   }
 

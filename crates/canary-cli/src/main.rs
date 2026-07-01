@@ -1,19 +1,26 @@
 //! Command-line entrypoint for agent-native Canary inspection.
 
-use std::{env, path::PathBuf, process::ExitCode};
+use std::{
+    env,
+    io::{self, BufRead, Write},
+    path::PathBuf,
+    process::ExitCode,
+};
 
 use canary_cli::{
-    ApiClient, CliError, Config, IntegrationEnrollRequest, IntegrationInput, RenderMode, Result,
-    Window, doctor_report, dogfood_strict_failure_count, dogfood_value_report, encode,
-    find_repo_root, integration_discover, integration_enroll, integration_patch, integration_plan,
-    integration_status, json_envelope, print_json, print_lines, resolve_endpoint_without_config,
-    run_dogfood_inventory, summarize_claims, summarize_doctor, summarize_dogfood,
-    summarize_dogfood_value, summarize_event, summarize_incidents, summarize_integration,
-    summarize_monitors, summarize_query, summarize_report, summarize_services, summarize_targets,
-    summarize_timeline, tool_manifest,
+    ApiClient, CliError, Config, IntegrationEnrollRequest, IntegrationInput, McpToolContext,
+    RenderMode, Result, Window, doctor_report, dogfood_strict_failure_count, dogfood_value_report,
+    encode, find_repo_root, integration_discover, integration_enroll, integration_patch,
+    integration_plan, integration_status, json_envelope, mcp_tool_manifest, print_json,
+    print_lines, resolve_endpoint_without_config, run_dogfood_inventory, summarize_claims,
+    summarize_doctor, summarize_dogfood, summarize_dogfood_value, summarize_event,
+    summarize_incidents, summarize_integration, summarize_monitors, summarize_query,
+    summarize_report, summarize_services, summarize_targets, summarize_timeline, tool_manifest,
 };
 use clap::{Args, Parser, Subcommand};
-use serde_json::json;
+use serde_json::{Value, json};
+
+const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 
 #[derive(Debug, Parser)]
 #[command(name = "canary")]
@@ -59,6 +66,8 @@ enum Commands {
     Doctor,
     /// Emit the CLI-backed MCP tool manifest.
     McpManifest,
+    /// Run the CLI-backed MCP stdio server.
+    McpServer,
 }
 
 #[derive(Debug, Args)]
@@ -352,6 +361,7 @@ fn run() -> Result<()> {
             "schema_version": 1,
             "tools": tool_manifest()
         })),
+        Commands::McpServer => run_mcp_server(endpoint, api_key, config),
         command => run_http_command(command, endpoint, api_key, config, mode),
     }
 }
@@ -563,10 +573,159 @@ fn run_http_command(
                 summarize_doctor,
             )
         }
-        Commands::Dogfood(_) | Commands::Integrate(_) | Commands::McpManifest => {
+        Commands::Dogfood(_)
+        | Commands::Integrate(_)
+        | Commands::McpManifest
+        | Commands::McpServer => {
             unreachable!("handled before HTTP setup")
         }
     }
+}
+
+fn run_mcp_server(
+    endpoint: Option<String>,
+    api_key: Option<String>,
+    config_path: Option<PathBuf>,
+) -> Result<()> {
+    let cwd = env::current_dir().map_err(|source| CliError::Io {
+        path: PathBuf::from("."),
+        source,
+    })?;
+    let repo_root = find_repo_root(&cwd).unwrap_or(cwd);
+    let context = McpToolContext::new(endpoint, api_key, config_path, repo_root);
+    let stdin = io::stdin();
+    let mut stdout = io::stdout().lock();
+
+    for line in stdin.lock().lines() {
+        let line = line.map_err(|source| CliError::Io {
+            path: PathBuf::from("<stdin>"),
+            source,
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let response = match serde_json::from_str::<Value>(&line) {
+            Ok(message) => handle_mcp_message(&context, &message),
+            Err(error) => Some(jsonrpc_error(Value::Null, -32700, &error.to_string())),
+        };
+        if let Some(response) = response {
+            writeln!(stdout, "{response}").map_err(|source| CliError::Io {
+                path: PathBuf::from("<stdout>"),
+                source,
+            })?;
+            stdout.flush().map_err(|source| CliError::Io {
+                path: PathBuf::from("<stdout>"),
+                source,
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_mcp_message(context: &McpToolContext, message: &Value) -> Option<Value> {
+    let method = message.get("method").and_then(Value::as_str).unwrap_or("");
+    let id = message.get("id").cloned()?;
+
+    match method {
+        "initialize" => Some(jsonrpc_result(
+            id,
+            json!({
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {
+                    "tools": {
+                        "listChanged": false
+                    }
+                },
+                "serverInfo": {
+                    "name": "canary",
+                    "title": "Canary",
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "instructions": "Use Canary tools for agent-first production health inspection and remediation claims. Webhooks are wake-up hints; timeline/report replay is the correctness path."
+            }),
+        )),
+        "ping" => Some(jsonrpc_result(id, json!({}))),
+        "tools/list" => Some(jsonrpc_result(
+            id,
+            json!({
+                "tools": mcp_tool_manifest()
+            }),
+        )),
+        "tools/call" => Some(handle_mcp_tool_call(context, id, message)),
+        _ => Some(jsonrpc_error(
+            id,
+            -32601,
+            &format!("method not found: {method}"),
+        )),
+    }
+}
+
+fn handle_mcp_tool_call(context: &McpToolContext, id: Value, message: &Value) -> Value {
+    let Some(params) = message.get("params").and_then(Value::as_object) else {
+        return jsonrpc_error(id, -32602, "tools/call params must be an object");
+    };
+    let Some(name) = params.get("name").and_then(Value::as_str) else {
+        return jsonrpc_error(id, -32602, "tools/call params.name must be a string");
+    };
+    let empty_arguments = json!({});
+    let arguments = params.get("arguments").unwrap_or(&empty_arguments);
+
+    let result = match context.invoke(name, arguments) {
+        Ok(value) => mcp_tool_result(value),
+        Err(error) => mcp_tool_error(error.to_string()),
+    };
+    jsonrpc_result(id, result)
+}
+
+fn mcp_tool_result(value: Value) -> Value {
+    json!({
+        "content": [{
+            "type": "text",
+            "text": value_to_pretty_text(&value)
+        }],
+        "structuredContent": value
+    })
+}
+
+fn mcp_tool_error(message: String) -> Value {
+    let structured_content = json!({
+        "schema_version": 1,
+        "error": {
+            "message": message.clone()
+        }
+    });
+    json!({
+        "content": [{
+            "type": "text",
+            "text": message
+        }],
+        "structuredContent": structured_content,
+        "isError": true
+    })
+}
+
+fn value_to_pretty_text(value: &Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn jsonrpc_result(id: Value, result: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result
+    })
+}
+
+fn jsonrpc_error(id: Value, code: i64, message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": code,
+            "message": message
+        }
+    })
 }
 
 fn run_events_command(args: EventsArgs, client: &ApiClient, mode: RenderMode) -> Result<()> {

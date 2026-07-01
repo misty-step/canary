@@ -181,6 +181,23 @@ plus the candidate snapshot separately, and executes `dagger call strict
 definition outside the candidate diff while preserving the same strict Dagger
 entrypoint. See [docs/ci-control-plane.md](docs/ci-control-plane.md).
 
+### Agent MCP Server
+
+Canary's MCP surface is the CLI contract served over stdio:
+
+```bash
+CANARY_ENDPOINT=https://canary-obs.fly.dev \
+CANARY_READ_API_KEY=... \
+bin/canary mcp-server
+```
+
+MCP clients can list and call the same generated tools exposed by
+`bin/canary mcp-manifest`: summary, services, errors, incidents, timeline,
+targets, monitors, doctor, dogfood, event capture, remediation claims, and
+integration helpers. The server returns MCP `inputSchema` fields at the wire
+boundary while the checked CLI manifest remains gated in
+`priv/mcp/canary-cli-tools.json`.
+
 ## API
 
 The machine-readable contract lives at `GET /api/v1/openapi.json`. That

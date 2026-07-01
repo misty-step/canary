@@ -110,7 +110,9 @@ knowing internal table names, raw route trivia, or chat-only instructions.
 - `POST /api/v1/annotations`: evidence and decisions after work.
 - `bin/canary integrate status/plan/patch/enroll`: setup loop for deployed
   services.
-- `bin/canary mcp-manifest`: machine-readable tool contract for MCP wrappers.
+- `bin/canary mcp-manifest`: machine-readable CLI tool contract snapshot.
+- `bin/canary mcp-server`: stdio MCP server over the generated CLI tool
+  contract.
 
 ## Value To Consuming Applications
 

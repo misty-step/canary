@@ -334,3 +334,16 @@ fn mcp_manifest_exposes_operator_drilldowns() {
         assert!(names.contains(name), "missing {name}");
     }
 }
+
+#[test]
+fn checked_in_mcp_manifest_matches_generated_manifest() -> Result<(), Box<dyn std::error::Error>> {
+    let checked_in: Value =
+        serde_json::from_str(include_str!("../../../priv/mcp/canary-cli-tools.json"))?;
+    let generated = json!({
+        "schema_version": 1,
+        "tools": tool_manifest()
+    });
+
+    assert_eq!(checked_in, generated);
+    Ok(())
+}

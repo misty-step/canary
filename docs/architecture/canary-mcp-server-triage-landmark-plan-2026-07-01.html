@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canary 052 Plan</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f7f4ec;
+      --ink: #191714;
+      --muted: #625d53;
+      --panel: #fffaf0;
+      --line: #ded4c2;
+      --accent: #255c75;
+      --warn: #9b4d2c;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #121418;
+        --ink: #ece5d7;
+        --muted: #aaa295;
+        --panel: #1b1f26;
+        --line: #303742;
+        --accent: #76b7d1;
+        --warn: #e08a65;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main {
+      width: min(76rem, calc(100% - 2rem));
+      margin: 0 auto;
+      padding: 2rem 0 4rem;
+    }
+    h1, h2, h3 { line-height: 1.15; margin: 0; }
+    h1 { font-size: clamp(2rem, 5vw, 4rem); letter-spacing: 0; }
+    h2 { font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+    h3 { font-size: 1rem; margin-top: 1rem; }
+    p { margin: 0.55rem 0 0; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
+    .hero {
+      min-height: 52vh;
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(22rem, 0.8fr);
+      gap: 2rem;
+      align-items: end;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 2rem;
+    }
+    .lede { color: var(--muted); font-size: 1.12rem; max-width: 58rem; }
+    .panel, .cell {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      padding: 1rem;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1px;
+      background: var(--line);
+      border: 1px solid var(--line);
+      margin-top: 1.5rem;
+    }
+    .grid .cell { border: 0; }
+    .two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .warn { color: var(--warn); font-weight: 650; }
+    ul { margin: 0.5rem 0 0; padding-left: 1.1rem; }
+    li { margin: 0.35rem 0; }
+    @media (max-width: 860px) {
+      .hero, .grid, .two { grid-template-columns: 1fr; }
+      .hero { min-height: auto; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <div>
+      <h2>Backlog 052 + 057 / Factory Canary Lane</h2>
+      <h1>Ship a real Canary MCP server without creating a second semantic API.</h1>
+      <p class="lede">
+        Canary already owns the agent contract in the Rust CLI: <code>tool_manifest()</code>,
+        JSON envelopes, scoped HTTP operations, and deterministic summaries. The chosen
+        design is a stdio MCP adapter inside <code>canary</code> that translates the generated
+        CLI manifest into MCP <code>tools/list</code> shape and dispatches <code>tools/call</code>
+        through the same CLI-backed functions.
+      </p>
+    </div>
+    <aside class="panel">
+      <h2>Quality System</h2>
+      <p><strong>Outcome:</strong> an MCP client can initialize, list Canary tools, and call a read-only tool.</p>
+      <p><strong>Standards:</strong> one generated tool source, no LLM on request path, no new responder authority, no stale manifest.</p>
+      <p><strong>Proof:</strong> MCP JSON-RPC smoke, manifest parity test, focused Rust tests, repo gate.</p>
+      <p><strong>Critic:</strong> fresh diff-only review focused on protocol drift, auth leakage, and shallow adapters.</p>
+      <p><strong>Stop:</strong> halt if the wrapper needs a parallel tool registry or claims responder safety beyond current scopes.</p>
+    </aside>
+  </section>
+
+  <section class="grid">
+    <article class="cell">
+      <h2>Current State</h2>
+      <p><code>bin/canary mcp-manifest</code> emits a CLI-backed manifest, but the checked-in snapshot is stale and no MCP server runs.</p>
+    </article>
+    <article class="cell">
+      <h2>Change Shape</h2>
+      <p>Add <code>canary mcp-server</code>, a smokeable stdio JSON-RPC server, generated <code>tools/list</code>, dispatch for existing manifest tools, docs, and snapshot parity.</p>
+    </article>
+    <article class="cell">
+      <h2>Out Of Scope</h2>
+      <p>No new responder-write scope, no browser capture authority, no autonomous repo mutation, no separate MCP-only business logic.</p>
+    </article>
+  </section>
+
+  <section class="grid two">
+    <article class="cell">
+      <h2>Verification System</h2>
+      <ul>
+        <li><strong>Claim:</strong> Canary exposes a runnable MCP surface over the CLI contract.</li>
+        <li><strong>Falsifier:</strong> <code>tools/list</code> differs from the generated manifest or <code>tools/call</code> cannot invoke a read-only command.</li>
+        <li><strong>Driver:</strong> feed initialize, initialized, <code>tools/list</code>, and <code>tools/call</code> JSON-RPC lines into <code>canary mcp-server</code>.</li>
+        <li><strong>Grader:</strong> MCP result has <code>inputSchema</code>, text content, structured content, and no secret leakage.</li>
+        <li><strong>Evidence:</strong> checked test fixture and command transcript in closeout.</li>
+      </ul>
+    </article>
+    <article class="cell">
+      <h2>Landmark Integration</h2>
+      <p>Add a release workflow that waits for Canary CI success on <code>master</code>, checks out full history, and runs <code>misty-step/landmark@v1</code> with <code>GH_RELEASE_TOKEN</code>, optional <code>OPENROUTER_API_KEY</code>, Node 24, and synthesis enabled but non-blocking.</p>
+    </article>
+  </section>
+
+  <section class="grid two">
+    <article class="cell">
+      <h2>Bitterblossom Trigger Contract</h2>
+      <p>Document the event path: signed Canary webhook is wake-up only; responder verifies signature and delivery id, queries Canary for timeline/report/context, creates a remediation claim, acts outside Canary, then writes annotations and claim evidence back.</p>
+    </article>
+    <article class="cell">
+      <h2>Risk Focus</h2>
+      <p class="warn">MCP is allowed to be an adapter, not an excuse to widen authority.</p>
+      <p>Tool errors should be MCP tool results with <code>isError</code>; protocol errors should stay JSON-RPC errors. Secret-bearing config values must never appear in responses or docs.</p>
+    </article>
+  </section>
+</main>
+</body>
+</html>
