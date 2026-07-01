@@ -49,6 +49,7 @@ bin/canary integrate patch /path/to/app --service app --json
 bin/canary integrate enroll --service app --url https://app.example.com/api/health --project-root /path/to/app --json
 bin/canary doctor --json
 bin/canary mcp-manifest
+bin/canary mcp-server
 ```
 
 Every command supports `--json`. JSON output is wrapped in a stable envelope:
@@ -237,13 +238,44 @@ secret-manager handoff.
 
 ## MCP Shape
 
-`bin/canary mcp-manifest` emits the generated tool manifest. MCP tools should shell
-out to the CLI and reuse the same JSON schemas rather than reimplementing route
-semantics.
+`bin/canary mcp-server` runs the generated CLI tool surface as a stdio MCP
+server. MCP clients should configure the command with the same environment as
+the CLI:
+
+```json
+{
+  "command": "/path/to/canary",
+  "args": ["mcp-server"],
+  "env": {
+    "CANARY_ENDPOINT": "https://canary-obs.fly.dev",
+    "CANARY_READ_API_KEY": "redacted"
+  }
+}
+```
+
+The server supports the MCP lifecycle and tool methods an agent needs for
+Canary inspection:
+
+- `initialize`
+- `notifications/initialized`
+- `ping`
+- `tools/list`
+- `tools/call`
+
+`tools/list` is translated from the same generated CLI manifest but uses the
+MCP wire field `inputSchema`. Tool call results return a text content block and
+the CLI JSON envelope as `structuredContent`. Runtime failures, such as missing
+credentials or a Canary HTTP error, are returned as MCP tool results with
+`isError: true` so agents can self-correct without confusing tool failures with
+protocol failures.
+
+`bin/canary mcp-manifest` still emits the checked CLI manifest snapshot shape
+with `input_schema`. The checked-in snapshot at `priv/mcp/canary-cli-tools.json`
+is gated against `tool_manifest()` so it cannot drift from the runtime list.
 
 The manifest covers the drill-down surfaces an agent needs after
 `canary_doctor`: summary, services, errors, incidents, timeline, targets,
 monitors, dogfood audit, dogfood value receipts, witness, DR status, event
 capture, remediation claims, and integration discovery/status/plan/patch/enroll.
-If a future MCP server does not implement a tool directly, it must preserve the
-manifest replacement command so agents can shell out to the CLI.
+The MCP server implements those tools directly through the CLI-backed adapter;
+it does not define separate route semantics.

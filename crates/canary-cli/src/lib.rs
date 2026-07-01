@@ -4115,6 +4115,492 @@ pub struct ToolSpec {
     pub input_schema: Value,
 }
 
+/// Tool metadata in MCP `tools/list` wire shape.
+#[derive(Debug, Serialize)]
+pub struct McpToolSpec {
+    /// Tool name.
+    pub name: &'static str,
+    /// Tool description.
+    pub description: &'static str,
+    /// JSON schema for arguments.
+    #[serde(rename = "inputSchema")]
+    pub input_schema: Value,
+}
+
+/// Return the CLI-backed tool manifest in MCP wire shape.
+pub fn mcp_tool_manifest() -> Vec<McpToolSpec> {
+    tool_manifest()
+        .into_iter()
+        .map(|tool| McpToolSpec {
+            name: tool.name,
+            description: tool.description,
+            input_schema: tool.input_schema,
+        })
+        .collect()
+}
+
+/// Context used to invoke CLI-backed MCP tools.
+#[derive(Debug, Clone)]
+pub struct McpToolContext {
+    endpoint: Option<String>,
+    api_key: Option<String>,
+    config_path: Option<PathBuf>,
+    repo_root: PathBuf,
+}
+
+impl McpToolContext {
+    /// Create a reusable MCP tool invocation context.
+    pub fn new(
+        endpoint: Option<String>,
+        api_key: Option<String>,
+        config_path: Option<PathBuf>,
+        repo_root: PathBuf,
+    ) -> Self {
+        Self {
+            endpoint,
+            api_key,
+            config_path,
+            repo_root,
+        }
+    }
+
+    /// Invoke one CLI-backed tool and return the standard JSON command envelope.
+    pub fn invoke(&self, name: &str, arguments: &Value) -> Result<Value> {
+        let arguments = arguments
+            .as_object()
+            .ok_or_else(|| CliError::Message("tool arguments must be a JSON object".to_owned()))?;
+
+        match name {
+            "canary_summary" => {
+                let client = self.read_client()?;
+                let window = window_argument(arguments, "window", "24h")?;
+                let response =
+                    client.get_auth_json(&format!("/api/v1/report?window={}", window.as_str()))?;
+                Ok(json_envelope("canary_summary", client.endpoint(), response))
+            }
+            "canary_errors" => {
+                let client = self.read_client()?;
+                let service = required_string(arguments, "service")?;
+                let window = window_argument(arguments, "window", "24h")?;
+                let response = client.get_auth_json(&format!(
+                    "/api/v1/query?service={}&window={}",
+                    encode(&service),
+                    window.as_str()
+                ))?;
+                Ok(json_envelope("canary_errors", client.endpoint(), response))
+            }
+            "canary_services" => {
+                let client = self.read_client()?;
+                let window = window_argument(arguments, "window", "24h")?;
+                let mut response =
+                    client.get_auth_json(&format!("/api/v1/status?window={}", window.as_str()))?;
+                if let Some(state) = optional_string(arguments, "state")?
+                    && let Some(object) = response.as_object_mut()
+                {
+                    object.insert("state_filter".to_owned(), json!(state));
+                }
+                Ok(json_envelope(
+                    "canary_services",
+                    client.endpoint(),
+                    response,
+                ))
+            }
+            "canary_incidents" => {
+                let client = self.read_client()?;
+                let response = client.get_auth_json("/api/v1/incidents")?;
+                Ok(json_envelope(
+                    "canary_incidents",
+                    client.endpoint(),
+                    response,
+                ))
+            }
+            "canary_timeline" => {
+                let client = self.read_client()?;
+                let window = window_argument(arguments, "window", "24h")?;
+                let limit = optional_u16(arguments, "limit")?.unwrap_or(20);
+                let mut path = format!("/api/v1/timeline?window={}&limit={limit}", window.as_str());
+                if let Some(service) = optional_string(arguments, "service")? {
+                    path.push_str("&service=");
+                    path.push_str(&encode(&service));
+                }
+                let response = client.get_auth_json(&path)?;
+                Ok(json_envelope(
+                    "canary_timeline",
+                    client.endpoint(),
+                    response,
+                ))
+            }
+            "canary_targets" => {
+                let client = self.read_client()?;
+                let response = client.get_auth_json("/api/v1/targets")?;
+                Ok(json_envelope("canary_targets", client.endpoint(), response))
+            }
+            "canary_monitors" => {
+                let client = self.read_client()?;
+                let response = client.get_auth_json("/api/v1/monitors")?;
+                Ok(json_envelope(
+                    "canary_monitors",
+                    client.endpoint(),
+                    response,
+                ))
+            }
+            "canary_doctor" => {
+                let client = self.read_client()?;
+                let response = doctor_report(&client, &self.repo_root);
+                Ok(json_envelope("canary_doctor", client.endpoint(), response))
+            }
+            "canary_witness" => {
+                let client = self.read_client()?;
+                let doctor = doctor_report(&client, &self.repo_root);
+                let response = json!({
+                    "schema_version": 1,
+                    "witness": doctor.get("witness").cloned().unwrap_or(Value::Null),
+                    "receipt_run_references": doctor
+                        .pointer("/verdict/receipt_run_references")
+                        .cloned()
+                        .unwrap_or(Value::Null)
+                });
+                Ok(json_envelope("canary_witness", client.endpoint(), response))
+            }
+            "canary_dr_status" => {
+                let client = self.read_client()?;
+                let doctor = doctor_report(&client, &self.repo_root);
+                let response = json!({
+                    "schema_version": 1,
+                    "dr": doctor.get("dr").cloned().unwrap_or(Value::Null)
+                });
+                Ok(json_envelope(
+                    "canary_dr_status",
+                    client.endpoint(),
+                    response,
+                ))
+            }
+            "canary_dogfood_audit" => {
+                let strict = optional_bool(arguments, "strict")?.unwrap_or(false);
+                let response = run_dogfood_inventory(&self.repo_root, strict)?;
+                let strict_failures = dogfood_strict_failure_count(&response);
+                if strict && strict_failures > 0 {
+                    return Err(CliError::Message(format!(
+                        "dogfood strict failures: {strict_failures}"
+                    )));
+                }
+                Ok(json_envelope(
+                    "canary_dogfood_audit",
+                    &self.local_endpoint(),
+                    response,
+                ))
+            }
+            "canary_dogfood_value" => {
+                let client = self.read_client()?;
+                let service = required_string(arguments, "service")?;
+                let window = window_argument(arguments, "window", "24h")?;
+                let response = dogfood_value_report(&client, &self.repo_root, &service, window)?;
+                Ok(json_envelope(
+                    "canary_dogfood_value",
+                    client.endpoint(),
+                    response,
+                ))
+            }
+            "canary_event_capture" => {
+                let client = self.ingest_client()?;
+                let response = client.post_auth_json(
+                    "/api/v1/events",
+                    &json!({
+                        "service": required_string(arguments, "service")?,
+                        "name": required_string(arguments, "name")?,
+                        "summary": required_string(arguments, "summary")?,
+                        "severity": optional_string(arguments, "severity")?.unwrap_or_else(|| "info".to_owned()),
+                        "attributes": optional_object(arguments, "attributes")?.unwrap_or_default(),
+                        "retention_class": optional_string(arguments, "retention_class")?.unwrap_or_else(|| "standard".to_owned()),
+                        "privacy_policy": optional_string(arguments, "privacy_policy")?.unwrap_or_else(|| "redacted".to_owned()),
+                        "sampling_policy": optional_string(arguments, "sampling_policy")?.unwrap_or_else(|| "unsampled".to_owned()),
+                    }),
+                )?;
+                Ok(json_envelope(
+                    "canary_event_capture",
+                    client.endpoint(),
+                    response,
+                ))
+            }
+            "canary_claims_list" => {
+                let client = self.read_client()?;
+                let mut path = format!(
+                    "/api/v1/claims?subject_type={}&subject_id={}",
+                    encode(&required_string(arguments, "subject_type")?),
+                    encode(&required_string(arguments, "subject_id")?)
+                );
+                if let Some(limit) = optional_u16(arguments, "limit")? {
+                    path.push_str(&format!("&limit={limit}"));
+                }
+                if let Some(cursor) = optional_string(arguments, "cursor")? {
+                    path.push_str("&cursor=");
+                    path.push_str(&encode(&cursor));
+                }
+                let response = client.get_auth_json(&path)?;
+                Ok(json_envelope(
+                    "canary_claims_list",
+                    client.endpoint(),
+                    response,
+                ))
+            }
+            "canary_claim_get" => {
+                let client = self.read_client()?;
+                let claim_id = required_string(arguments, "claim_id")?;
+                let response =
+                    client.get_auth_json(&format!("/api/v1/claims/{}", encode(&claim_id)))?;
+                Ok(json_envelope(
+                    "canary_claim_get",
+                    client.endpoint(),
+                    response,
+                ))
+            }
+            "canary_claim_create" => {
+                let client = self.read_client()?;
+                let response = client.post_auth_json(
+                    "/api/v1/claims",
+                    &json!({
+                        "subject_type": required_string(arguments, "subject_type")?,
+                        "subject_id": required_string(arguments, "subject_id")?,
+                        "owner": required_string(arguments, "owner")?,
+                        "purpose": required_string(arguments, "purpose")?,
+                        "idempotency_key": required_string(arguments, "idempotency_key")?,
+                        "ttl_ms": required_i64(arguments, "ttl_ms")?,
+                        "evidence_links": optional_string_array(arguments, "evidence_links")?.unwrap_or_default(),
+                    }),
+                )?;
+                Ok(json_envelope(
+                    "canary_claim_create",
+                    client.endpoint(),
+                    response,
+                ))
+            }
+            "canary_claim_transition" => {
+                let client = self.read_client()?;
+                let claim_id = required_string(arguments, "claim_id")?;
+                let response = client.post_auth_json(
+                    &format!("/api/v1/claims/{}/transition", encode(&claim_id)),
+                    &json!({
+                        "owner": required_string(arguments, "owner")?,
+                        "state": required_string(arguments, "state")?,
+                        "evidence_links": optional_string_array(arguments, "evidence_links")?.unwrap_or_default(),
+                    }),
+                )?;
+                Ok(json_envelope(
+                    "canary_claim_transition",
+                    client.endpoint(),
+                    response,
+                ))
+            }
+            "canary_claim_release" => {
+                let client = self.read_client()?;
+                let claim_id = required_string(arguments, "claim_id")?;
+                let response = client.post_auth_json(
+                    &format!("/api/v1/claims/{}/release", encode(&claim_id)),
+                    &json!({"owner": required_string(arguments, "owner")?}),
+                )?;
+                Ok(json_envelope(
+                    "canary_claim_release",
+                    client.endpoint(),
+                    response,
+                ))
+            }
+            "canary_integrate_discover" => {
+                let endpoint = self.local_endpoint();
+                let input = integration_input_from_tool(arguments, endpoint.clone())?;
+                let response = integration_discover(&input)?;
+                Ok(json_envelope(
+                    "canary_integrate_discover",
+                    &endpoint,
+                    response,
+                ))
+            }
+            "canary_integrate_status" => {
+                let client = self.read_client()?;
+                let input = integration_input_from_tool(arguments, client.endpoint().to_owned())?;
+                let response = integration_status(&client, &input, &self.repo_root)?;
+                Ok(json_envelope(
+                    "canary_integrate_status",
+                    client.endpoint(),
+                    response,
+                ))
+            }
+            "canary_integrate_plan" => {
+                let endpoint = self.local_endpoint();
+                let input = integration_input_from_tool(arguments, endpoint.clone())?;
+                let response = integration_plan(&input)?;
+                Ok(json_envelope("canary_integrate_plan", &endpoint, response))
+            }
+            "canary_integrate_patch" => {
+                let endpoint = self.local_endpoint();
+                let input = integration_input_from_tool(arguments, endpoint.clone())?;
+                let response = integration_patch(&input)?;
+                Ok(json_envelope("canary_integrate_patch", &endpoint, response))
+            }
+            "canary_integrate_enroll" => {
+                let client = self.read_client()?;
+                let request = IntegrationEnrollRequest {
+                    service: required_string(arguments, "service")?,
+                    url: required_string(arguments, "url")?,
+                    environment: optional_string(arguments, "environment")?
+                        .unwrap_or_else(|| "production".to_owned()),
+                    interval_ms: optional_i64(arguments, "interval_ms")?,
+                    redact: !optional_bool(arguments, "show_secret")?.unwrap_or(false),
+                    receipt_root: optional_string(arguments, "project_root")?.map(PathBuf::from),
+                };
+                let response = integration_enroll(&client, &request)?;
+                Ok(json_envelope(
+                    "canary_integrate_enroll",
+                    client.endpoint(),
+                    response,
+                ))
+            }
+            _ => Err(CliError::Message(format!(
+                "unknown Canary MCP tool: {name}"
+            ))),
+        }
+    }
+
+    fn read_client(&self) -> Result<ApiClient> {
+        ApiClient::new(Config::resolve(
+            self.endpoint.clone(),
+            self.api_key.clone(),
+            self.config_path.clone(),
+        )?)
+    }
+
+    fn ingest_client(&self) -> Result<ApiClient> {
+        ApiClient::new(Config::resolve_for_ingest(
+            self.endpoint.clone(),
+            self.api_key.clone(),
+            self.config_path.clone(),
+        )?)
+    }
+
+    fn local_endpoint(&self) -> String {
+        resolve_endpoint_without_config(self.endpoint.as_deref())
+    }
+}
+
+fn integration_input_from_tool(
+    arguments: &serde_json::Map<String, Value>,
+    endpoint: String,
+) -> Result<IntegrationInput> {
+    Ok(IntegrationInput {
+        target: PathBuf::from(required_string(arguments, "path_or_project")?),
+        service: optional_string(arguments, "service")?,
+        production_url: optional_string(arguments, "production_url")?,
+        platform_project: optional_string(arguments, "platform_project")?,
+        endpoint,
+    })
+}
+
+fn window_argument(
+    arguments: &serde_json::Map<String, Value>,
+    key: &str,
+    default: &str,
+) -> Result<Window> {
+    let value = optional_string(arguments, key)?.unwrap_or_else(|| default.to_owned());
+    Window::parse(&value)
+}
+
+fn required_string(arguments: &serde_json::Map<String, Value>, key: &str) -> Result<String> {
+    optional_string(arguments, key)?
+        .ok_or_else(|| CliError::Message(format!("missing required tool argument: {key}")))
+}
+
+fn optional_string(
+    arguments: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<String>> {
+    match arguments.get(key) {
+        Some(Value::String(value)) => Ok(Some(value.to_owned())),
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err(CliError::Message(format!(
+            "tool argument `{key}` must be a string"
+        ))),
+    }
+}
+
+fn required_i64(arguments: &serde_json::Map<String, Value>, key: &str) -> Result<i64> {
+    optional_i64(arguments, key)?
+        .ok_or_else(|| CliError::Message(format!("missing required tool argument: {key}")))
+}
+
+fn optional_i64(arguments: &serde_json::Map<String, Value>, key: &str) -> Result<Option<i64>> {
+    match arguments.get(key) {
+        Some(Value::Number(value)) => value.as_i64().map(Some).ok_or_else(|| {
+            CliError::Message(format!("tool argument `{key}` must be a signed integer"))
+        }),
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err(CliError::Message(format!(
+            "tool argument `{key}` must be an integer"
+        ))),
+    }
+}
+
+fn optional_u16(arguments: &serde_json::Map<String, Value>, key: &str) -> Result<Option<u16>> {
+    match arguments.get(key) {
+        Some(Value::Number(value)) => {
+            let Some(value) = value.as_u64() else {
+                return Err(CliError::Message(format!(
+                    "tool argument `{key}` must be a positive integer"
+                )));
+            };
+            u16::try_from(value)
+                .map(Some)
+                .map_err(|_| CliError::Message(format!("tool argument `{key}` must fit in u16")))
+        }
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err(CliError::Message(format!(
+            "tool argument `{key}` must be an integer"
+        ))),
+    }
+}
+
+fn optional_bool(arguments: &serde_json::Map<String, Value>, key: &str) -> Result<Option<bool>> {
+    match arguments.get(key) {
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err(CliError::Message(format!(
+            "tool argument `{key}` must be a boolean"
+        ))),
+    }
+}
+
+fn optional_object(
+    arguments: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<serde_json::Map<String, Value>>> {
+    match arguments.get(key) {
+        Some(Value::Object(value)) => Ok(Some(value.clone())),
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err(CliError::Message(format!(
+            "tool argument `{key}` must be an object"
+        ))),
+    }
+}
+
+fn optional_string_array(
+    arguments: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<Vec<String>>> {
+    match arguments.get(key) {
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+                    CliError::Message(format!("tool argument `{key}` must be an array of strings"))
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(Some),
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Err(CliError::Message(format!(
+            "tool argument `{key}` must be an array"
+        ))),
+    }
+}
+
 /// Return the CLI-backed tool manifest.
 pub fn tool_manifest() -> Vec<ToolSpec> {
     vec![

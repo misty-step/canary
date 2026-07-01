@@ -2,7 +2,7 @@
   "schema_version": 1,
   "tools": [
     {
-      "description": "Inspect global Canary status for a query window.",
+      "description": "Inspect global Canary status for a query window, including per-service SLIs, SLO targets, and prior-window trajectory deltas.",
       "input_schema": {
         "properties": {
           "window": {
@@ -46,12 +46,203 @@
       "name": "canary_errors"
     },
     {
+      "description": "List target and monitor service states from `bin/canary services`.",
+      "input_schema": {
+        "properties": {
+          "state": {
+            "enum": [
+              "up",
+              "degraded",
+              "down",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "window": {
+            "enum": [
+              "1h",
+              "6h",
+              "24h",
+              "7d",
+              "30d"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "canary_services"
+    },
+    {
+      "description": "Inspect active incidents from `bin/canary incidents`; use this after doctor reports an open Canary incident.",
+      "input_schema": {
+        "properties": {
+          "open": {
+            "default": true,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "canary_incidents"
+    },
+    {
+      "description": "Inspect timeline events globally or for one service.",
+      "input_schema": {
+        "properties": {
+          "limit": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "service": {
+            "type": "string"
+          },
+          "window": {
+            "enum": [
+              "1h",
+              "6h",
+              "24h",
+              "7d",
+              "30d"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "canary_timeline"
+    },
+    {
+      "description": "List configured HTTP uptime targets.",
+      "input_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "canary_targets"
+    },
+    {
+      "description": "List configured non-HTTP monitors and check-in watchers.",
+      "input_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "canary_monitors"
+    },
+    {
       "description": "Run the agent-oriented Canary doctor check.",
       "input_schema": {
         "properties": {},
         "type": "object"
       },
       "name": "canary_doctor"
+    },
+    {
+      "description": "Inspect the external `canary-watchman` state and GitHub Actions receipt refs; replacement command: `bin/canary doctor --json | jq '.response.witness,.response.verdict.receipt_run_references'`.",
+      "input_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "canary_witness"
+    },
+    {
+      "description": "Inspect DR/Litestream evidence surfaced by doctor; replacement command: `bin/canary doctor --json | jq '.response.dr'`.",
+      "input_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "canary_dr_status"
+    },
+    {
+      "description": "Run deployed-service dogfood coverage audit; strict mode exits nonzero after printing JSON gaps.",
+      "input_schema": {
+        "properties": {
+          "strict": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "canary_dogfood_audit"
+    },
+    {
+      "description": "Build one per-service dogfood value receipt from coverage, health, errors, incidents, claims, annotations, telemetry, and verification evidence.",
+      "input_schema": {
+        "properties": {
+          "service": {
+            "type": "string"
+          },
+          "window": {
+            "enum": [
+              "1h",
+              "6h",
+              "24h",
+              "7d",
+              "30d"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "service"
+        ],
+        "type": "object"
+      },
+      "name": "canary_dogfood_value"
+    },
+    {
+      "description": "Capture one bounded analytics event as a telemetry.event timeline row.",
+      "input_schema": {
+        "properties": {
+          "attributes": {
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          },
+          "privacy_policy": {
+            "enum": [
+              "redacted",
+              "public",
+              "sensitive"
+            ],
+            "type": "string"
+          },
+          "retention_class": {
+            "enum": [
+              "ephemeral",
+              "standard",
+              "audit"
+            ],
+            "type": "string"
+          },
+          "sampling_policy": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "info",
+              "warning",
+              "error"
+            ],
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "service",
+          "name",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "name": "canary_event_capture"
     },
     {
       "description": "List remediation claims for one Canary subject.",
