@@ -56,6 +56,7 @@
 | 056 | Lower /api/v1/report store-lock contention + dedup SLI owner-scope | P2 | pending | M |
 | 057 | Static MCP manifest parity | P1 | done | S |
 | 058 | Cadence-aware SLI trajectory sample floor | P2 | pending | M |
+| 059 | Bump anyhow after RUSTSEC-2026-0190 | P2 | pending | S |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
 
@@ -107,6 +108,7 @@
 046 ──→ 047 (shipped) ──→ 048 ──→ Bitterblossom 055 ──→ 049 ──→ 010
 049 + shipped 052/057 ──→ 050 (readiness proof consumes the integration and MCP surfaces; 047 alert-plane surface is already real)
 058 follows 047 as quality tuning; it does not block 048/049/050 unless trajectory sufficiency becomes a readiness proof requirement
+059 tracks the allowed `RUSTSEC-2026-0190` advisory for `anyhow`; keep it as a curated dependency bump, not mixed into feature work
 ```
 
 ## Execution Lanes
