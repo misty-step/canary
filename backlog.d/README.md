@@ -2,10 +2,35 @@
 
 `backlog.d/` is the source of truth for active backlog work as of 2026-06-26.
 
+## Factory Groom 2026-07-01
+
+The Factory operator decisions reprioritize Canary around composition
+readiness: first make a cold operator able to deploy a clean instance, then
+wire the Factory fleet into Canary, then close the agent writeback and triage
+loops. The new epics below are consolidation umbrellas; existing tickets stay
+visible until a focused PR archives them with evidence.
+
+| # | Epic | Priority | Relationship |
+|---|------|----------|--------------|
+| 060 | Cold-operator deploy path | P0 | Top pickup. Folds in self-host docs, app-name dehardcoding, bootstrap-key docs, and dogfood instance split. |
+| 061 | Fleet plumb-in | P0 | Composition monitoring half: every Factory app reports health/errors/uptime with fresh readback. |
+| 062 | Agent loop write surface | P0 | Adds CLI/MCP annotation writeback and scoped responder-key loop; adopts 048. |
+| 063 | Triage contract hardening | P1 | Durable cooldown, dispatch budget caps, claim-gated delivery, and drills. |
+| 064 | Trustworthy release/upgrade | P1 | Absorbs 051; fixes release truth, npm/Docker claims, and upgrade docs. |
+| 065 | Runtime hardening | P1 | Absorbs 056/058/059 plus bcrypt-outside-mutex, tracing, and backup posture. |
+| 066 | Consolidation and archaeology deletion | P2 | Deletes parity archaeology, duplicated worker lifecycle, stale roots, and shallow seams. |
+
 ## Priority Order
 
 | # | Item | Priority | Status | Estimate |
 |---|------|----------|--------|----------|
+| 060 | Cold-operator deploy path | P0 | pending | XL |
+| 061 | Fleet plumb-in | P0 | pending | L |
+| 062 | Agent loop write surface | P0 | pending | XL |
+| 063 | Triage contract hardening | P1 | pending | XL |
+| 064 | Trustworthy release/upgrade | P1 | pending | L |
+| 065 | Runtime hardening | P1 | pending | L |
+| 066 | Consolidation and archaeology deletion | P2 | pending | XL |
 | 001 | Annotations API | high | done | M |
 | 002 | Timeline agent polling | high | done | S |
 | 003 | Triage diagnostic webhooks non-fatal | high | done | S |
@@ -123,7 +148,32 @@
 **Lane 7 (product feedback loop):** 045 (self-watch operator verdict) shipped → 046 (dogfood value receipts) shipped → 047 (alert-plane reliability/SLI trajectory) shipped — Canary dogfooding now has value, alertability, and operator-action proof; 056/058 are quality followups
 **Lane 8 (cold-agent readiness):** shipped 057 + shipped 052 + 049 → 050 — after integration proof hardens, package the cold-agent verification path into one discoverable proof and receipt
 
-### Active order (2026-06-26)
+### Active order (2026-07-01)
+
+060 is now the next product pickup because the Factory decision overlay makes
+cold-operator deployability the blocking gap for Canary's standalone value and
+for Adminifi/R90 adoption. It should produce executable docs/config/smoke
+evidence before fleet-wide integration work.
+
+061 follows once a clean instance path exists: the Factory composition needs
+every app to report health/errors/uptime to the Misty Step instance through a
+15-minute integration path and service-specific readback receipts.
+
+062 is the next agent-loop pickup after the deploy/composition basics. It
+adopts 048's scoped responder safety gate and adds the missing CLI/MCP
+annotation writeback so agents can complete read -> claim -> annotate -> release
+without raw route trivia or admin keys.
+
+063 hardens the triage wake-up contract once real responders are close:
+cooldown must be durable, dispatch spend must be capped, and claim-gated
+delivery must prevent duplicate responder storms.
+
+064 and 065 are parallel P1 hardening tracks: release/upgrade truth and runtime
+reliability. 064 owns 051's npm 404 or claim removal; 065 owns 056/058/059 plus
+bcrypt-outside-mutex and tracing. 066 is the later deletion pass; do not mix it
+with the product-critical epics.
+
+### Prior active order (2026-06-26)
 
 045, 046, and 047 are shipped and archived. 047 landed in slices across PR
 #167, PR #168, PR #171, and PR #172: alert-plane health is distinct from route
