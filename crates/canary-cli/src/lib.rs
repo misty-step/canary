@@ -3488,11 +3488,23 @@ fn run_dr_status(repo_root: &Path) -> Value {
             "reason": "bin/dr-status not found"
         });
     }
+    let Some(app) = env::var("CANARY_FLY_APP")
+        .ok()
+        .or_else(|| env::var("FLY_APP").ok())
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return json!({
+            "ok": false,
+            "reason": "CANARY_FLY_APP/FLY_APP not configured",
+            "command": "NO_COLOR=1 bin/dr-status --app <fly-app>"
+        });
+    };
+    let command_display = format!("NO_COLOR=1 bin/dr-status --app {app}");
     match Command::new(&program)
         .current_dir(repo_root)
         .env("NO_COLOR", "1")
         .arg("--app")
-        .arg("canary-obs")
+        .arg(&app)
         .output()
     {
         Ok(output) => json!({
@@ -3501,14 +3513,14 @@ fn run_dr_status(repo_root: &Path) -> Value {
                 .status
                 .code()
                 .map_or_else(|| "signal".to_owned(), |code| code.to_string()),
-            "command": "NO_COLOR=1 bin/dr-status --app canary-obs",
+            "command": command_display,
             "stdout": redact_text(&String::from_utf8_lossy(&output.stdout)),
             "stderr": redact_text(&String::from_utf8_lossy(&output.stderr))
         }),
         Err(error) => json!({
             "ok": false,
             "reason": error.to_string(),
-            "command": "NO_COLOR=1 bin/dr-status --app canary-obs"
+            "command": command_display
         }),
     }
 }

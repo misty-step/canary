@@ -396,13 +396,24 @@ echo "Test 3: missing curl fails clearly"
 NO_CURL_PATH="$TMPDIR_TEST/no-curl-path"
 rm -rf "$NO_CURL_PATH"
 mkdir -p "$NO_CURL_PATH"
-OUTPUT=$(run_failure env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin PATH="$NO_CURL_PATH" "$BASH_BIN" "$SCRIPT" --json)
+OUTPUT=$(run_failure env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin PATH="$NO_CURL_PATH" "$BASH_BIN" "$SCRIPT" --app canary-test --json)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "missing curl exits non-zero"
 assert_contains "$BODY" "Missing required command: curl" "missing curl names dependency"
 
-echo "Test 4: stubbed rehearsal emits sanitized JSON receipt"
+echo "Test 4: missing Fly app fails clearly when DR status is enabled"
+setup_stubs
+OUTPUT=$(run_failure env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin "$SCRIPT" --prefix test --webhook-url https://example.com/hook --no-dr-status --json)
+STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
+assert_exit_code "$STATUS" "0" "no-dr-status allows missing app"
+OUTPUT=$(run_failure env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin "$SCRIPT" --prefix test --webhook-url https://example.com/hook --json)
+STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
+BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
+assert_exit_code "$STATUS" "1" "missing app exits non-zero"
+assert_contains "$BODY" "Missing Fly app" "missing app names configuration"
+
+echo "Test 5: stubbed rehearsal emits sanitized JSON receipt"
 setup_stubs
 OUTPUT=$(env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin EXPECT_TARGET_URL=http://127.0.0.1:4000/healthz "$SCRIPT" --prefix test --webhook-url https://example.com/hook --target-url http://127.0.0.1:4000/healthz --app canary-test --json)
 assert_jq "$OUTPUT" '.status == "ok"' "receipt status ok"
@@ -435,7 +446,7 @@ assert_file_contains "$CURL_LOG" "DELETE /api/v1/monitors/MON-test" "deletes mon
 assert_file_contains "$CURL_LOG" "DELETE /api/v1/webhooks/WHK-test" "deletes webhook"
 assert_file_contains "$CURL_LOG" "POST /api/v1/keys/KEY-test/revoke" "revokes key"
 
-echo "Test 5: non-delivered webhook rows fail and clean up"
+echo "Test 6: non-delivered webhook rows fail and clean up"
 setup_stubs
 OUTPUT=$(run_failure env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin CURL_DELIVERY_STATUS=pending "$SCRIPT" --prefix test --webhook-url https://example.com/hook --app canary-test --poll-attempts 1 --poll-sleep 0 --json)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
@@ -447,7 +458,7 @@ assert_file_contains "$CURL_LOG" "DELETE /api/v1/monitors/MON-test" "pending fai
 assert_file_contains "$CURL_LOG" "DELETE /api/v1/webhooks/WHK-test" "pending failure deletes webhook"
 assert_file_contains "$CURL_LOG" "POST /api/v1/keys/KEY-test/revoke" "pending failure revokes key"
 
-echo "Test 6: unexpected credential-bearing mutation status redacts and cleans up"
+echo "Test 7: unexpected credential-bearing mutation status redacts and cleans up"
 setup_stubs
 OUTPUT=$(run_failure env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin CURL_KEY_CREATE_STATUS=500 "$SCRIPT" --prefix test --webhook-url https://example.com/hook --app canary-test --json)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)

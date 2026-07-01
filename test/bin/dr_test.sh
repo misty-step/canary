@@ -119,64 +119,78 @@ echo "Test 1: dr-status help"
 OUTPUT=$(run_and_capture "$DR_STATUS" --help)
 assert_contains "$OUTPUT" "Usage: bin/dr-status" "shows dr-status usage"
 
-echo "Test 2: dr-status uses default app and status command"
+echo "Test 2: dr-status requires an explicit app"
+OUTPUT=$(run_failure "$DR_STATUS")
+STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
+BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
+assert_exit_code "$STATUS" "1" "status wrapper exits non-zero without app"
+assert_contains "$BODY" "Missing Fly app: pass --app or set CANARY_FLY_APP/FLY_APP" "status wrapper names app configuration"
+
+echo "Test 3: dr-status honors CANARY_FLY_APP env default"
 setup_stubs
-run_and_capture "$DR_STATUS" >/dev/null
+CANARY_FLY_APP=canary-env run_and_capture "$DR_STATUS" >/dev/null
 assert_file_matches "$FLYCTL_LOG" '^arg[0-9]+=ssh$' "invokes flyctl ssh"
-assert_file_matches "$FLYCTL_LOG" '^arg[0-9]+=canary-obs$' "uses default app"
+assert_file_matches "$FLYCTL_LOG" '^arg[0-9]+=canary-env$' "uses configured app"
 assert_file_matches "$FLYCTL_LOG" \
   "^arg[0-9]+=sh -eu -c 'litestream status -config /etc/litestream\\.yml'\$" \
   "uses remote litestream status command"
 
-echo "Test 3: dr-status honors FLY_APP env default"
+echo "Test 4: dr-status honors FLY_APP env default"
 setup_stubs
 FLY_APP=canary-env run_and_capture "$DR_STATUS" >/dev/null
 assert_file_matches "$FLYCTL_LOG" '^arg[0-9]+=canary-env$' "status wrapper uses env app default"
 
-echo "Test 4: dr-status accepts --app override"
+echo "Test 5: dr-status accepts --app override"
 setup_stubs
 run_and_capture "$DR_STATUS" --app canary-staging >/dev/null
 assert_file_matches "$FLYCTL_LOG" '^arg[0-9]+=canary-staging$' "uses overridden app"
 
-echo "Test 5: dr-status rejects unknown arguments"
+echo "Test 6: dr-status rejects unknown arguments"
 OUTPUT=$(run_failure "$DR_STATUS" --bogus)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "status wrapper exits non-zero on unknown argument"
 assert_contains "$BODY" "Usage: bin/dr-status" "status wrapper prints usage on unknown argument"
 
-echo "Test 6: dr-status rejects --app without a value"
+echo "Test 7: dr-status rejects --app without a value"
 OUTPUT=$(run_failure "$DR_STATUS" --app)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "status wrapper exits non-zero on missing app value"
 assert_contains "$BODY" "Usage: bin/dr-status" "status wrapper prints usage on missing app value"
 
-echo "Test 7: dr-status fails cleanly when flyctl is unavailable"
-OUTPUT=$(PATH="$MISSING_FLYCTL_PATH" run_failure "$BASH_BIN" "$DR_STATUS")
+echo "Test 8: dr-status fails cleanly when flyctl is unavailable"
+OUTPUT=$(PATH="$MISSING_FLYCTL_PATH" run_failure "$BASH_BIN" "$DR_STATUS" --app canary-staging)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "status wrapper exits non-zero when flyctl is missing"
 assert_contains "$BODY" "Missing required command: flyctl" "status wrapper names the missing dependency"
 
-echo "Test 8: dr-status propagates flyctl failures"
+echo "Test 9: dr-status propagates flyctl failures"
 setup_stubs
 export FLYCTL_STUB_EXIT=23
 set +e
-"$DR_STATUS" >/dev/null 2>&1
+"$DR_STATUS" --app canary-staging >/dev/null 2>&1
 STATUS=$?
 set -e
 unset FLYCTL_STUB_EXIT
 assert_equals "$STATUS" "23" "propagates flyctl exit status"
 
-echo "Test 9: dr-restore-check help"
+echo "Test 10: dr-restore-check help"
 OUTPUT=$(run_and_capture "$DR_RESTORE_CHECK" --help)
 assert_contains "$OUTPUT" "Usage: bin/dr-restore-check" "shows dr-restore-check usage"
 
-echo "Test 10: dr-restore-check uses default app and db path"
+echo "Test 11: dr-restore-check requires an explicit app"
+OUTPUT=$(run_failure "$DR_RESTORE_CHECK")
+STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
+BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
+assert_exit_code "$STATUS" "1" "restore check exits non-zero without app"
+assert_contains "$BODY" "Missing Fly app: pass --app or set CANARY_FLY_APP/FLY_APP" "restore check names app configuration"
+
+echo "Test 12: dr-restore-check uses configured app and db path"
 setup_stubs
-run_and_capture "$DR_RESTORE_CHECK" >/dev/null
-assert_file_matches "$FLYCTL_LOG" '^arg[0-9]+=canary-obs$' "restore check uses default app"
+CANARY_FLY_APP=canary-env run_and_capture "$DR_RESTORE_CHECK" >/dev/null
+assert_file_matches "$FLYCTL_LOG" '^arg[0-9]+=canary-env$' "restore check uses configured app"
 assert_file_contains "$FLYCTL_LOG" "restore_path=\$(mktemp /tmp/canary-restore.XXXXXX);" \
   "restore check creates a temporary restore path"
 assert_file_contains "$FLYCTL_LOG" \
@@ -189,13 +203,13 @@ assert_file_matches "$FLYCTL_LOG" \
   "^arg[0-9]+=.* sh /data/canary\\.db\$" \
   "restore check targets the default database path"
 
-echo "Test 11: dr-restore-check uses the remote DB default even when local CANARY_DB_PATH is set"
+echo "Test 13: dr-restore-check uses the remote DB default even when local CANARY_DB_PATH is set"
 setup_stubs
 FLY_APP=canary-env CANARY_DB_PATH=/data/env.db run_and_capture "$DR_RESTORE_CHECK" >/dev/null
 assert_file_matches "$FLYCTL_LOG" '^arg[0-9]+=canary-env$' "restore check uses env app default"
 assert_file_matches "$FLYCTL_LOG" "^arg[0-9]+=.* sh /data/canary\\.db\$" "restore check ignores local db env default"
 
-echo "Test 12: dr-restore-check accepts overrides"
+echo "Test 14: dr-restore-check accepts overrides"
 setup_stubs
 run_and_capture "$DR_RESTORE_CHECK" --app canary-staging --db-path /data/restore.db >/dev/null
 assert_file_matches "$FLYCTL_LOG" '^arg[0-9]+=canary-staging$' "restore check uses overridden app"
@@ -203,53 +217,53 @@ assert_file_matches "$FLYCTL_LOG" \
   "^arg[0-9]+=.* sh /data/restore\\.db\$" \
   "restore check uses overridden db path"
 
-echo "Test 13: dr-restore-check rejects unknown arguments"
+echo "Test 15: dr-restore-check rejects unknown arguments"
 OUTPUT=$(run_failure "$DR_RESTORE_CHECK" --bogus)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "restore check exits non-zero on unknown argument"
 assert_contains "$BODY" "Usage: bin/dr-restore-check" "restore check prints usage on unknown argument"
 
-echo "Test 14: dr-restore-check safely quotes apostrophes in db paths"
+echo "Test 16: dr-restore-check safely quotes apostrophes in db paths"
 setup_stubs
-run_and_capture "$DR_RESTORE_CHECK" --db-path "/data/o'brien.db" >/dev/null
+run_and_capture "$DR_RESTORE_CHECK" --app canary-staging --db-path "/data/o'brien.db" >/dev/null
 assert_file_matches "$FLYCTL_LOG" \
   "^arg[0-9]+=.* sh /data/o\\\\'brien\\.db\$" \
   "restore check shell-quotes db paths"
 
-echo "Test 15: dr-restore-check safely quotes spaces in db paths"
+echo "Test 17: dr-restore-check safely quotes spaces in db paths"
 setup_stubs
-run_and_capture "$DR_RESTORE_CHECK" --db-path "/data/restore copy.db" >/dev/null
+run_and_capture "$DR_RESTORE_CHECK" --app canary-staging --db-path "/data/restore copy.db" >/dev/null
 assert_file_matches "$FLYCTL_LOG" \
   '^arg[0-9]+=.* sh /data/restore\\ copy\.db$' \
   "restore check shell-quotes paths with spaces"
 
-echo "Test 16: dr-restore-check rejects --db-path without a value"
+echo "Test 18: dr-restore-check rejects --db-path without a value"
 OUTPUT=$(run_failure "$DR_RESTORE_CHECK" --db-path)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "restore check exits non-zero on missing db path"
 assert_contains "$BODY" "Usage: bin/dr-restore-check" "restore check prints usage on missing db path"
 
-echo "Test 17: dr-restore-check rejects --app without a value"
+echo "Test 19: dr-restore-check rejects --app without a value"
 OUTPUT=$(run_failure "$DR_RESTORE_CHECK" --app)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "restore check exits non-zero on missing app value"
 assert_contains "$BODY" "Usage: bin/dr-restore-check" "restore check prints usage on missing app value"
 
-echo "Test 18: dr-restore-check fails cleanly when flyctl is unavailable"
-OUTPUT=$(PATH="$MISSING_FLYCTL_PATH" run_failure "$BASH_BIN" "$DR_RESTORE_CHECK")
+echo "Test 20: dr-restore-check fails cleanly when flyctl is unavailable"
+OUTPUT=$(PATH="$MISSING_FLYCTL_PATH" run_failure "$BASH_BIN" "$DR_RESTORE_CHECK" --app canary-staging)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "restore check exits non-zero when flyctl is missing"
 assert_contains "$BODY" "Missing required command: flyctl" "restore check names the missing dependency"
 
-echo "Test 19: dr-restore-check propagates flyctl failures"
+echo "Test 21: dr-restore-check propagates flyctl failures"
 setup_stubs
 export FLYCTL_STUB_EXIT=29
 set +e
-"$DR_RESTORE_CHECK" >/dev/null 2>&1
+"$DR_RESTORE_CHECK" --app canary-staging >/dev/null 2>&1
 STATUS=$?
 set -e
 unset FLYCTL_STUB_EXIT
