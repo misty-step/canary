@@ -1,3 +1,10 @@
+## [1.0.1](https://github.com/misty-step/canary/compare/v1.0.0...v1.0.1) (2026-07-01)
+
+
+### Bug Fixes
+
+* **server:** bind production listener to IPv6 ([#179](https://github.com/misty-step/canary/issues/179)) ([d894ab5](https://github.com/misty-step/canary/commit/d894ab54257c080658e6c7694cebfb26df540390))
+
 # 1.0.0 (2026-07-01)
 
 
