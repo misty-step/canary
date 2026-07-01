@@ -11,14 +11,19 @@ Manual rotation is the supported path for now.
 ## Prerequisites
 
 - An existing `admin` key with permission to create and revoke keys
+- `CANARY_ENDPOINT` set to the operator's Canary instance, for example
+  `https://<your-fly-app>.fly.dev`
 - A confirmed inventory of the services or operators using the key you want to rotate
+
+If the original bootstrap admin key was missed, recover a replacement with the
+no-data-loss path in [docs/self-host-fly.md](self-host-fly.md#deploy-and-capture-the-first-admin-key).
 
 ## Rotate An Ingest Key
 
 1. Create a replacement key with the same scope:
 
 ```bash
-curl -X POST https://canary-obs.fly.dev/api/v1/keys \
+curl -X POST $CANARY_ENDPOINT/api/v1/keys \
   -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{"name": "billing-api-ingest-2026-04", "scope": "ingest-only"}'
@@ -29,7 +34,7 @@ curl -X POST https://canary-obs.fly.dev/api/v1/keys \
 4. Revoke the old key after the new key is live everywhere:
 
 ```bash
-curl -X POST https://canary-obs.fly.dev/api/v1/keys/KEY-old/revoke \
+curl -X POST $CANARY_ENDPOINT/api/v1/keys/KEY-old/revoke \
   -H "Authorization: Bearer $CANARY_ADMIN_KEY"
 ```
 
@@ -38,7 +43,7 @@ curl -X POST https://canary-obs.fly.dev/api/v1/keys/KEY-old/revoke \
 1. Create the replacement with the same scope:
 
 ```bash
-curl -X POST https://canary-obs.fly.dev/api/v1/keys \
+curl -X POST $CANARY_ENDPOINT/api/v1/keys \
   -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{"name": "ops-read-2026-04", "scope": "read-only"}'

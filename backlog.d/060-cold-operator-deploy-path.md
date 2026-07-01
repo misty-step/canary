@@ -51,6 +51,14 @@ only when the Adminifi/R90 deployment proof supersedes it with concrete
 evidence. Historical `canary-obs` evidence files can remain historical; product
 defaults and current docs should not require that instance.
 
+## Progress
+- 2026-07-01: Added the first cold-operator docs/script slice: public Fly
+  self-host guide, README bootstrap-key recovery path, fork-safe deploy and
+  witness workflow guards, and explicit endpoint/app requirements for witness,
+  DR, and write-path rehearsal scripts. The epic remains open; Rust CLI
+  compiled defaults, `fly.toml`, dogfood instance data, and clean-room
+  deployment evidence still need follow-up.
+
 ## Children
 1. Document first-key and lost-key recovery in README and key-rotation docs.
 2. Add a fresh Fly deploy guide covering app creation, volume, Tigris, secrets,

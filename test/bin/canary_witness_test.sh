@@ -178,6 +178,16 @@ assert_json_equals() {
   fi
 }
 
+assert_stderr_contains() {
+  local expected="$1" message="$2"
+  if grep -qF -- "$expected" "$TMPDIR_TEST/canary-witness-test.err"; then
+    record_pass "$message"
+  else
+    record_fail "$message"
+    cat "$TMPDIR_TEST/canary-witness-test.err" >&2 || true
+  fi
+}
+
 run_success() {
   local message="$1"
   shift
@@ -204,6 +214,19 @@ run_failure() {
 }
 
 setup_fake_curl
+
+run_failure "missing endpoint exits nonzero" \
+  env \
+    -u CANARY_ENDPOINT \
+    -u CANARY_WITNESS_ENDPOINT \
+    STUB_SCENARIO=healthy \
+    "${WITNESS[@]}" \
+    --read-api-key read-key \
+    --receipt "$TMPDIR_TEST/missing-endpoint.json" \
+    --json
+assert_stderr_contains \
+  "canary-witness: missing endpoint: pass --endpoint or set CANARY_WITNESS_ENDPOINT/CANARY_ENDPOINT" \
+  "missing endpoint names configuration"
 
 receipt="$TMPDIR_TEST/healthy.json"
 run_success "healthy witness exits zero" \

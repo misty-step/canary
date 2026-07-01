@@ -10,7 +10,8 @@ inventory command; it does not create a second semantic API.
 
 The CLI reads:
 
-- `CANARY_ENDPOINT`, defaulting to `https://canary-obs.fly.dev`
+- `CANARY_ENDPOINT` for the target Canary instance. Self-hosted operators
+  should set this explicitly and should not rely on compiled legacy defaults.
 - `CANARY_ADMIN_API_KEY`, `CANARY_ADMIN_KEY`, `CANARY_READ_API_KEY`,
   `CANARY_READ_KEY`, or `CANARY_API_KEY`
 - `CANARY_CONFIG`, or `~/.config/canary/config.json`
@@ -19,7 +20,7 @@ Config JSON:
 
 ```json
 {
-  "endpoint": "https://canary-obs.fly.dev",
+  "endpoint": "https://<your-fly-app>.fly.dev",
   "admin_api_key": "sk_live_...",
   "read_api_key": "sk_live_..."
 }
@@ -58,7 +59,7 @@ Every command supports `--json`. JSON output is wrapped in a stable envelope:
 {
   "schema_version": 1,
   "command": "summary",
-  "endpoint": "https://canary-obs.fly.dev",
+  "endpoint": "$CANARY_ENDPOINT",
   "response": {}
 }
 ```
@@ -166,7 +167,7 @@ dr: litestream ok, restore_receipt_missing: no architecture DR receipt found, fa
 ```
 
 The `dr` line is data, not a request-path dependency. It runs the operator
-`bin/dr-status --app canary-obs` check when available and points to the latest
+`bin/dr-status --app "$CANARY_FLY_APP"` check when available and points to the latest
 checked-in restore-specific receipt when one exists. Production startup can be
 made fail-closed on backup configuration with `CANARY_REQUIRE_LITESTREAM=1`.
 
@@ -247,7 +248,7 @@ the CLI:
   "command": "/path/to/canary",
   "args": ["mcp-server"],
   "env": {
-    "CANARY_ENDPOINT": "https://canary-obs.fly.dev",
+    "CANARY_ENDPOINT": "https://<your-fly-app>.fly.dev",
     "CANARY_READ_API_KEY": "redacted"
   }
 }

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEFAULT_ENDPOINT="https://canary-obs.fly.dev"
-ENDPOINT="${CANARY_WITNESS_ENDPOINT:-${CANARY_ENDPOINT:-$DEFAULT_ENDPOINT}}"
+ENDPOINT="${CANARY_WITNESS_ENDPOINT:-${CANARY_ENDPOINT:-}}"
 READ_API_KEY="${CANARY_WITNESS_READ_KEY:-${CANARY_READ_API_KEY:-${CANARY_READ_KEY:-${CANARY_API_KEY:-}}}}"
 INGEST_API_KEY="${CANARY_WITNESS_INGEST_KEY:-${CANARY_INGEST_API_KEY:-${CANARY_API_KEY:-}}}"
 MONITOR="${CANARY_WITNESS_MONITOR:-canary-watchman}"
@@ -118,6 +117,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 validate_positive_millis "ttl-ms" "$CHECK_IN_TTL_MS"
+if [[ -z "$ENDPOINT" ]]; then
+  printf 'canary-witness: missing endpoint: pass --endpoint or set CANARY_WITNESS_ENDPOINT/CANARY_ENDPOINT\n' >&2
+  exit 2
+fi
 require_command jq
 require_command "$CURL_BIN"
 

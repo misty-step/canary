@@ -3,7 +3,7 @@
 Canary monitors itself from two directions:
 
 - Inside Canary, the `canary-self` HTTP target checks
-  `https://canary-obs.fly.dev/healthz`.
+  `$CANARY_ENDPOINT/healthz`.
 - Outside Canary, the scheduled GitHub Actions witness asks to run every five
   minutes and preserves a JSON receipt as a workflow artifact. GitHub cron is
   best-effort, so the production workflow sends a two-hour `ttl_ms` check-in
@@ -59,6 +59,11 @@ Required repository secrets:
 - `CANARY_WITNESS_INGEST_KEY`: ingest-scoped or admin-scoped key for the
   `canary-watchman` check-in.
 
+Forks can leave the witness workflow unconfigured. Upstream Misty Step runs the
+workflow against its production instance by default; forks run it only after
+setting the `CANARY_WITNESS_ENDPOINT` repository variable. See
+[`docs/self-host-fly.md`](self-host-fly.md#configure-fork-workflows).
+
 Production monitor configuration:
 
 ```bash
@@ -102,6 +107,6 @@ false` before the alert plane is healthy. A pressured worker is still
 route-ready evidence; it is not healthy alert-plane evidence.
 
 `doctor` also prints a `dr:` line. That line reflects the operator
-`bin/dr-status --app canary-obs` Litestream check when available and points to
+`bin/dr-status --app "$CANARY_FLY_APP"` Litestream check when available and points to
 the latest checked-in restore-specific receipt when one exists; otherwise it
 reports `restore_receipt_missing` and the fallback runbook path.

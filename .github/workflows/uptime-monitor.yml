@@ -11,12 +11,14 @@ concurrency:
 
 jobs:
   witness:
+    if: github.repository == 'misty-step/canary' || vars.CANARY_WITNESS_ENDPOINT != ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
       issues: write
     env:
-      CANARY_WITNESS_ENDPOINT: https://canary-obs.fly.dev
+      CANARY_WITNESS_ENDPOINT: ${{ vars.CANARY_WITNESS_ENDPOINT || 'https://canary-obs.fly.dev' }}
+      CANARY_FLY_APP: ${{ vars.CANARY_FLY_APP || 'canary-obs' }}
       CANARY_WITNESS_MONITOR: canary-watchman
       CANARY_WITNESS_TTL_MS: "7200000"
       CANARY_WITNESS_READ_KEY: ${{ secrets.CANARY_WITNESS_READ_KEY }}
@@ -125,8 +127,8 @@ jobs:
           ### Runbook
 
           1. Check the uploaded \`canary-witness-receipt.json\` artifact.
-          2. Check Fly.io machine status: \`flyctl status --app canary-obs\`
-          3. Check logs: \`flyctl logs --app canary-obs\`
+          2. Check Fly.io machine status: \`flyctl status --app $CANARY_FLY_APP\`
+          3. Check logs: \`flyctl logs --app $CANARY_FLY_APP\`
           4. Check recent self-errors: \`bin/canary errors canary --window 1h\`
           5. If DB corruption is suspected, see \`docs/backup-restore-dr.md\`.
 

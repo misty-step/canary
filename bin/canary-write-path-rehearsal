@@ -7,7 +7,7 @@ ENDPOINT="${CANARY_ENDPOINT:-}"
 API_KEY="${CANARY_API_KEY:-}"
 WEBHOOK_URL="${CANARY_REHEARSAL_WEBHOOK_URL:-https://httpbingo.org/status/204}"
 TARGET_URL="${CANARY_REHEARSAL_TARGET_URL:-}"
-APP="${FLY_APP:-canary-obs}"
+APP="${CANARY_FLY_APP:-${FLY_APP:-}}"
 PREFIX=""
 JSON_OUTPUT=0
 RUN_DR_STATUS=1
@@ -626,6 +626,9 @@ require_command date
 
 [[ -n "$ENDPOINT" ]] || fail "Missing Canary endpoint. Set CANARY_ENDPOINT or pass --endpoint."
 [[ -n "$API_KEY" ]] || fail "Missing Canary API key. Set CANARY_API_KEY or pass --api-key."
+if ((RUN_DR_STATUS == 1)) && [[ -z "$APP" ]]; then
+  fail "Missing Fly app. Set CANARY_FLY_APP/FLY_APP, pass --app, or pass --no-dr-status."
+fi
 [[ "$POLL_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || fail "--poll-attempts must be a positive integer."
 [[ "$POLL_SLEEP" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail "--poll-sleep must be a non-negative number."
 

@@ -1,7 +1,18 @@
 #!/usr/bin/env bash
 
 dr_default_app() {
-  printf '%s\n' "${FLY_APP:-canary-obs}"
+  printf '%s\n' "${CANARY_FLY_APP:-${FLY_APP:-}}"
+}
+
+dr_require_app() {
+  local app="$1"
+
+  if [ -z "$app" ]; then
+    printf 'Missing Fly app: pass --app or set CANARY_FLY_APP/FLY_APP\n' >&2
+    exit 1
+  fi
+
+  printf '%s\n' "$app"
 }
 
 dr_default_db_path() {

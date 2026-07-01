@@ -47,6 +47,7 @@ while (($#)); do
   esac
 done
 
+APP="$(dr_require_app "$APP")"
 dr_require_command flyctl
 
 dr_fly_ssh "$APP" "$(dr_restore_remote_command "$DB_PATH")"
