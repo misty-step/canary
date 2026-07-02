@@ -106,10 +106,35 @@ ingest, query, webhook or monitor state, and a receipt.
 - Not a dashboard. Agents are the UI; operators inspect the same API and CLI.
 - Not a semantic workflow engine hidden behind provider-specific agents.
 - Not multi-tenant SaaS by default. External-user productization must be
-  explicit, scoped, and security-reviewed.
+  explicit, scoped, and security-reviewed (see Serving Model below).
 
 Canary may expose MCP tools, SDKs, and CLIs, but those are adapters over the
 same contract. They must not become parallel semantic APIs.
+
+## Serving Model
+
+Canary's serving model is intentional, not incidental:
+
+1. **Self-hosted single-tenant binary is the product** — and the competitive
+   wedge. One Docker image, one SQLite file, one process, one operator. The
+   architecture (SQLite single-writer on one machine) already commits to this;
+   the doc says so plainly.
+
+2. **Optional managed hosting is a possible later offering** — running the
+   *same* single-tenant binary, one isolated instance per customer (the
+   Plausible / PostHog open-core model). This is a convenience/revenue path,
+   not a re-architecture: no clustered store, no tenant isolation inside the
+   binary. Do not build it now; do not foreclose it. Principle #9 ("design for
+   migration, don't build for it") keeps the door open without paying for it.
+
+3. **Multi-tenant SaaS is out by default.** A clustered store plus tenant
+   isolation would forfeit the single-binary elegance and put Canary on the
+   incumbents' turf (see Competitive Position). Revisiting this is a deliberate,
+   security-reviewed decision gated by the external-user security/privacy
+   foundation — not an organic drift.
+
+A new reader should be able to answer "self-hosted, managed-later, or SaaS?"
+from this section alone, without reading `fly.toml` or the code.
 
 ## Competitive Position
 
