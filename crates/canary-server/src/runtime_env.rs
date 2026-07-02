@@ -1,6 +1,6 @@
 //! Process environment adapter for the Rust Canary server.
 //!
-//! Phoenix still defines the production environment names. This module keeps
+//! The production environment names are. This module keeps
 //! that compatibility at the process edge and returns a typed runtime config so
 //! the server boot path does not parse environment variables itself.
 
@@ -158,7 +158,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn process_config_uses_phoenix_compatible_defaults() -> Result<(), RuntimeEnvError> {
+    fn process_config_uses_compatible_defaults() -> Result<(), RuntimeEnvError> {
         let config = ServerProcessConfig::from_env(Vec::<(String, String)>::new())?;
 
         assert_eq!(

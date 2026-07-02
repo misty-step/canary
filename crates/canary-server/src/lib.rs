@@ -2774,8 +2774,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn monitor_check_in_accepts_ingest_scope_and_returns_phoenix_body()
-    -> Result<(), Box<dyn Error>> {
+    async fn monitor_check_in_accepts_ingest_scope_and_returns_body() -> Result<(), Box<dyn Error>>
+    {
         let state = test_ingest_state_with_monitor("desktop-active-timer")?;
         let response = ingest_router(state)
             .oneshot(check_in_request(
@@ -4136,7 +4136,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_monitor_mutations_follow_phoenix_contract() -> Result<(), Box<dyn Error>> {
+    async fn admin_monitor_mutations_follow_contract() -> Result<(), Box<dyn Error>> {
         let router = ingest_router(test_ingest_state()?);
 
         let create_response = router
@@ -4343,7 +4343,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_webhook_mutations_follow_phoenix_contract() -> Result<(), Box<dyn Error>> {
+    async fn admin_webhook_mutations_follow_contract() -> Result<(), Box<dyn Error>> {
         let router = ingest_router(
             test_ingest_state()?.with_webhook_transport(Arc::new(RecordingTransport::status(204))),
         );
@@ -4680,7 +4680,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_api_key_mutations_follow_phoenix_contract() -> Result<(), Box<dyn Error>> {
+    async fn admin_api_key_mutations_follow_contract() -> Result<(), Box<dyn Error>> {
         let router = ingest_router(test_ingest_state()?);
 
         let create_response = router
@@ -7001,7 +7001,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn target_checks_keeps_phoenix_error_and_empty_missing_target_behavior()
+    async fn target_checks_keeps_error_and_empty_missing_target_behavior()
     -> Result<(), Box<dyn Error>> {
         let missing = ingest_router(test_ingest_state()?)
             .oneshot(read_request(
@@ -7628,8 +7628,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_annotation_routes_and_errors_follow_phoenix_contract()
-    -> Result<(), Box<dyn Error>> {
+    async fn legacy_annotation_routes_and_errors_follow_contract() -> Result<(), Box<dyn Error>> {
         let state = test_ingest_state()?;
         let router = ingest_router(state.clone());
         let created_error = router
@@ -8388,8 +8387,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ingest_and_query_routes_enforce_phoenix_rate_limit_buckets()
-    -> Result<(), Box<dyn Error>> {
+    async fn ingest_and_query_routes_enforce_rate_limit_buckets() -> Result<(), Box<dyn Error>> {
         let state = test_ingest_state()?;
         {
             let mut limiter = state
