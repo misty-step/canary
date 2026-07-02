@@ -1,3 +1,10 @@
+# [1.5.0](https://github.com/misty-step/canary/compare/v1.4.2...v1.5.0) (2026-07-02)
+
+
+### Features
+
+* **071:** record durable read-audit events for responder context fetches ([#206](https://github.com/misty-step/canary/issues/206)) ([3b411bb](https://github.com/misty-step/canary/commit/3b411bb654e4619e7f3cd6e28317e9ce6a838648)), closes [#048](https://github.com/misty-step/canary/issues/048) [#048](https://github.com/misty-step/canary/issues/048) [#071](https://github.com/misty-step/canary/issues/071)
+
 ## [1.4.2](https://github.com/misty-step/canary/compare/v1.4.1...v1.4.2) (2026-07-02)
 
 
