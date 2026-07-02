@@ -30,6 +30,37 @@ cargo run -p canary-server
 No Docker is required for local development outside the Dagger gate. The repo
 includes the Rust service workspace and the TypeScript SDK package.
 
+### First run: capturing the bootstrap API key
+
+On first boot, Canary seeds a one-time bootstrap admin key and prints it to
+**stderr**. Capture it immediately — it is not shown again:
+
+```bash
+cargo run -p canary-server 2>&1 | grep "Bootstrap API key:"
+```
+
+Store the key as an environment variable for API calls:
+
+```bash
+export CANARY_ADMIN_KEY="sk_live_..."
+```
+
+All authenticated endpoints require a scoped API key. The bootstrap key has
+`admin` scope. Create scoped keys for services and operators:
+
+```bash
+curl -fsS -X POST http://localhost:4000/api/v1/keys \
+  -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "my-app-ingest", "scope": "ingest-only"}'
+```
+
+See [`docs/api-key-rotation.md`](docs/api-key-rotation.md) for the full scope
+matrix and rotation procedure.
+
+For Fly deployment (including key recovery if the first boot log was missed),
+see [`docs/self-host-fly.md`](docs/self-host-fly.md).
+
 Canary has no human dashboard by design — agents are the UI. Operators who
 need to look at current state use the query API directly (`GET
 /api/v1/status`, `GET /api/v1/report`, `GET /api/v1/query`, `GET
