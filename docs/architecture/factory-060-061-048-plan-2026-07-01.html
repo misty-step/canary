@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en" data-ae-mode="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canary Factory Plan 060/061/048</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@100..900&amp;family=Geist+Mono:wght@100..900&amp;display=swap">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/misty-step/aesthetic@v2.5.1/aesthetic.css">
+  <style>
+    .wrap .ae-bar,
+    .wrap .ae-stage { width: min(92rem, 100% - 4rem); }
+    .hero { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(22rem, .75fr); gap: 2rem; align-items: end; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--ae-line); margin-top: 1px; }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .cell { background: var(--ae-surface); padding: 1rem 1.1rem; min-width: 0; }
+    .wash { background: var(--ae-wash); }
+    .phase { display: grid; grid-template-columns: 8rem minmax(0, 1fr) minmax(15rem, .7fr); gap: 1rem; border-top: 1px solid var(--ae-line); padding-top: 1rem; margin-top: 1rem; }
+    .phase:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
+    @media (max-width: 900px) {
+      .wrap .ae-bar, .wrap .ae-stage { width: min(100% - 2rem, 92rem); }
+      .hero, .grid, .grid.three, .phase { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="ae-screen wrap">
+    <header class="ae-bar">
+      <a class="ae-name" href="../../backlog.d/_done/060-cold-operator-deploy-path.md">CANARY FACTORY</a>
+      <p class="ae-chrome">060 first, then 061, then annotation/write-key hardening</p>
+    </header>
+    <main class="ae-stage ae-stage-scroll">
+      <section class="hero">
+        <div>
+          <p class="ae-chrome">WORK CONTRACT / 2026-07-01</p>
+          <h1 class="ae-strong">Make Canary self-hostable by a cold operator, then enroll the Factory fleet, then harden responder write-back.</h1>
+          <p class="ae-lede">The first slice finishes epic 060: no product path should require the Misty Step instance, checked-in Phaedrus service data, or hidden bootstrap-key recovery. Each later slice must ship with live proof: a real clean-room deploy rehearsal, live Factory app telemetry, or an annotation/responder-key exercise.</p>
+        </div>
+        <aside class="ae-panel">
+          <h2 class="ae-h">CHOSEN DESIGN</h2>
+          <p>Slice by operator-visible contracts: docs and config first, then live receipt, then fleet enrollment, then responder write paths.</p>
+          <h2 class="ae-h">QUALITY SYSTEM</h2>
+          <p>Standards: self-host defaults, no secret leakage, repo-owned gate vocabulary, additive fleet coordination, service-bound authority for writes.</p>
+          <p>Proof: live oracle plus `./bin/validate`, hosted CI, and artifact-only critic for substantive diffs.</p>
+          <p class="ae-dim">Stop if an external app must be mutated without a resident lane or if a secret value would need to be printed.</p>
+        </aside>
+      </section>
+
+      <section class="grid" aria-label="Quality system">
+        <article class="cell">
+          <h2 class="ae-h">060 ACCEPTANCE</h2>
+          <p>A fresh operator can create a Fly app, capture or recover the first admin key, run smoke/DR/write-path proof, and use instance-local dogfood config.</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">061 ACCEPTANCE</h2>
+          <p>Bastion, powder, and the Bitterblossom plane report live health/error/uptime into the Misty Step hub through the documented 15-minute path.</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">048 ACCEPTANCE</h2>
+          <p>Agents can write annotations through CLI/MCP using scoped responder keys without needing admin authority or cross-service access.</p>
+        </article>
+        <article class="cell wash">
+          <h2 class="ae-h">VERIFY</h2>
+          <p>Focused tests, `./bin/validate`, hosted Dagger, live Canary query/readback, Fly logs, and checked-in receipts under `docs/architecture/`.</p>
+        </article>
+      </section>
+
+      <section class="grid three" aria-label="Current state">
+        <article class="cell">
+          <h2 class="ae-h">CURRENT STATE</h2>
+          <p>060 has a first docs/script slice. Gaps remain in `fly.toml`, README bootstrap recovery, tracked dogfood instance data, and clean-room evidence.</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">BOUNDARIES</h2>
+          <p>Canary owns observability, queries, webhooks, and annotation write contracts. External app mutations happen in their repos or with resident lanes.</p>
+        </article>
+        <article class="cell wash">
+          <h2 class="ae-h">RISKS</h2>
+          <p>Accidental deploy to Misty Step, stale dogfood registry pretending to be product data, and wide responder keys that can mutate unrelated services.</p>
+        </article>
+      </section>
+
+      <section class="ae-panel" style="margin-top: 2rem">
+        <h2 class="ae-h">EXECUTION PLAN</h2>
+        <div class="phase">
+          <strong class="ae-accent">060</strong>
+          <p>Finish the cold-operator path: make Fly app identity a placeholder, move owned-service registry to sample/instance-local config, document first-key and recovery paths in README, and add a clean-room rehearsal receipt.</p>
+          <p class="ae-dim">Proof: grep for current defaults, script tests, local dry-run receipt, `./bin/validate`, PR, hosted CI.</p>
+        </div>
+        <div class="phase">
+          <strong class="ae-accent">061</strong>
+          <p>Publish the 15-minute integration recipe and enroll the next two Factory apps additively: powder and the Bitterblossom plane, preserving bastion-router evidence.</p>
+          <p class="ae-dim">Proof: live targets/monitors/check-ins or receipts visible through Canary query/status and dogfood/integration status.</p>
+        </div>
+        <div class="phase">
+          <strong class="ae-accent">048</strong>
+          <p>Add annotation write support to CLI/MCP and scoped responder keys. Verify least privilege and readback through the public operator surfaces.</p>
+          <p class="ae-dim">Proof: failing-then-passing auth tests, CLI/MCP invocation, live annotation readback, hosted gate.</p>
+        </div>
+        <div class="phase">
+          <strong class="ae-accent">close</strong>
+          <p>Each slice lands as a PR with provenance, green gate, live receipt, clean worktree, and explicit residual risks before moving to the next slice.</p>
+          <p class="ae-dim">The main checkout has separate pre-existing incident-contract edits; this work uses isolated clean worktrees until those are resolved.</p>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
-MANIFEST="$ROOT/priv/dogfood/owned_services.json"
+MANIFEST="${CANARY_DOGFOOD_MANIFEST:-$ROOT/.canary/dogfood/owned_services.json}"
 WINDOW="24h"
 NOW=""
 MAX_EVIDENCE_AGE_HOURS=168
@@ -17,9 +17,10 @@ Usage: bin/dogfood-audit [--endpoint <url>] [--api-key <key>] [--window <window>
 
 Audit Canary's deployed-service dogfood registry against a live Canary instance.
 
-By default the command reads `CANARY_ENDPOINT` and `CANARY_API_KEY` from the
-environment, validates `priv/dogfood/owned_services.json`, compares active
-HTTP services against live Canary targets, and prints:
+By default the command reads `CANARY_ENDPOINT`, `CANARY_API_KEY`, and the
+instance-local registry at `.canary/dogfood/owned_services.json`. Set
+`CANARY_DOGFOOD_MANIFEST` or pass `--manifest` to use another registry. The
+command compares active HTTP services against live Canary targets and prints:
 
 - Canary's current summary for the requested window
 - every active service with target presence, URL match, health state, and errors

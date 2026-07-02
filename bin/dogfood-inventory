@@ -2,15 +2,15 @@
 set -euo pipefail
 
 ROOT="$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)"
-MANIFEST="$ROOT/priv/dogfood/owned_services.json"
-DEFAULT_REQUESTED="canary-self,vanity,chrondle,linejam,misty-step,trump-goggles-splash,timeismoney-splash,sploot"
+MANIFEST="${CANARY_DOGFOOD_MANIFEST:-$ROOT/.canary/dogfood/owned_services.json}"
+DEFAULT_REQUESTED=""
 REQUESTED="$DEFAULT_REQUESTED"
 WINDOW="24h"
 NOW=""
 MAX_EVIDENCE_AGE_HOURS=168
 STRICT=false
 JSON_ONLY=false
-VERCEL_SCOPES=("misty-step" "adminifi-growth")
+VERCEL_SCOPES=()
 VERCEL_PROJECT_FILES=()
 LOCAL_ROOTS=()
 FLY_APPS_FILE=""
@@ -21,16 +21,27 @@ Usage: bin/dogfood-inventory [--manifest <path>] [--vercel-scope <scope>] [--ver
 
 Inventory owned deployments and classify Canary dogfood coverage.
 
-By default this command reads Vercel projects for scopes `misty-step` and
-`adminifi-growth`, Fly apps, local `.vercel/project.json` links under the repo
-parent, and `priv/dogfood/owned_services.json`. Fixture flags replace live CLI
-calls for deterministic tests.
+By default this command reads the instance-local registry at
+`.canary/dogfood/owned_services.json`, Fly apps, and local
+`.vercel/project.json` links under the repo parent. Pass `--vercel-scope` for
+each Vercel team to inspect. Set `CANARY_DOGFOOD_MANIFEST` or pass `--manifest`
+to use another registry. Fixture flags replace live CLI calls for deterministic
+tests.
 EOF
 }
 
 die() {
   printf 'dogfood-inventory: %s\n' "$*" >&2
   exit 2
+}
+
+add_vercel_scope() {
+  local scope="$1" existing
+  [[ -n "$scope" ]] || return 0
+  for existing in "${VERCEL_SCOPES[@]}"; do
+    [[ "$existing" == "$scope" ]] && return 0
+  done
+  VERCEL_SCOPES+=("$scope")
 }
 
 while [[ $# -gt 0 ]]; do
@@ -42,12 +53,15 @@ while [[ $# -gt 0 ]]; do
       ;;
     --vercel-scope)
       [[ $# -ge 2 ]] || die "--vercel-scope requires a scope"
-      VERCEL_SCOPES+=("$2")
+      add_vercel_scope "$2"
       shift 2
       ;;
     --vercel-projects)
       [[ $# -ge 2 ]] || die "--vercel-projects requires scope=path"
+      [[ "$2" == *=* ]] || die "--vercel-projects requires scope=path"
+      [[ -n "${2%%=*}" && -n "${2#*=}" ]] || die "--vercel-projects requires scope=path"
       VERCEL_PROJECT_FILES+=("$2")
+      add_vercel_scope "${2%%=*}"
       shift 2
       ;;
     --fly-apps)
@@ -442,7 +456,7 @@ jq -s \
           coverage: "partial",
           last_checked_at: null,
           failure_mode: "Deployment is live but missing from the Canary dogfood registry.",
-          next_action: "Classify this deployment in priv/dogfood/owned_services.json or ignore it with evidence.",
+          next_action: "Classify this deployment in .canary/dogfood/owned_services.json or ignore it with evidence.",
           deployment_seen: true,
           local_link_seen: false,
           reasons: ["unregistered_deployment"]
@@ -467,7 +481,7 @@ jq -s \
           coverage: "partial",
           last_checked_at: null,
           failure_mode: "Local Vercel project link is missing from the Canary dogfood registry.",
-          next_action: "Classify this local deployment link in priv/dogfood/owned_services.json or remove stale metadata.",
+          next_action: "Classify this local deployment link in .canary/dogfood/owned_services.json or remove stale metadata.",
           deployment_seen: false,
           local_link_seen: true,
           reasons: ["unregistered_local_link"]
@@ -490,7 +504,7 @@ jq -s \
           coverage: (if receipt_covers($receipt) then "partial" else "blocked" end),
           last_checked_at: $receipt.last_verified_at,
           failure_mode: "Integration receipt exists but the service is missing from the Canary dogfood registry.",
-          next_action: "Classify this receipt-backed integration in priv/dogfood/owned_services.json.",
+          next_action: "Classify this receipt-backed integration in .canary/dogfood/owned_services.json.",
           evidence_source: "integration_receipt",
           evidence_stale: stale_receipt($receipt),
           evidence_age_hours: evidence_age_hours($receipt; null),

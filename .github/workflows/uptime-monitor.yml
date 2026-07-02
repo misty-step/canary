@@ -11,14 +11,14 @@ concurrency:
 
 jobs:
   witness:
-    if: github.repository == 'misty-step/canary' || vars.CANARY_WITNESS_ENDPOINT != ''
+    if: vars.CANARY_WITNESS_ENDPOINT != ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
       issues: write
     env:
-      CANARY_WITNESS_ENDPOINT: ${{ vars.CANARY_WITNESS_ENDPOINT || 'https://canary-obs.fly.dev' }}
-      CANARY_FLY_APP: ${{ vars.CANARY_FLY_APP || 'canary-obs' }}
+      CANARY_WITNESS_ENDPOINT: ${{ vars.CANARY_WITNESS_ENDPOINT }}
+      CANARY_FLY_APP: ${{ vars.CANARY_FLY_APP }}
       CANARY_WITNESS_MONITOR: canary-watchman
       CANARY_WITNESS_TTL_MS: "7200000"
       CANARY_WITNESS_READ_KEY: ${{ secrets.CANARY_WITNESS_READ_KEY }}

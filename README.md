@@ -399,9 +399,12 @@ The response includes:
 ### Owned Service Dogfooding
 
 Use [docs/networked-service-dogfooding.md](docs/networked-service-dogfooding.md)
-and `bin/dogfood-audit --strict` to verify the checked-in deployed-service
-registry against a live Canary instance. Add `--json` when an agent or CI job
-needs a machine-readable report.
+and `bin/dogfood-audit --strict` to verify an instance-local deployed-service
+registry against a live Canary instance. Initialize it from
+`priv/dogfood/owned_services.example.json` into
+`.canary/dogfood/owned_services.json` and keep production service names out of
+committed examples. Add `--json` when an agent or CI job needs a
+machine-readable report.
 
 ### Non-HTTP Runtime Health
 
@@ -528,21 +531,44 @@ restore path. A full cold-operator runbook lives in
 ```bash
 export CANARY_FLY_APP="<your-fly-app>"
 export CANARY_ENDPOINT="https://${CANARY_FLY_APP}.fly.dev"
+mkdir -p .canary/dogfood
+cp priv/dogfood/owned_services.example.json .canary/dogfood/owned_services.json
 flyctl deploy --app "$CANARY_FLY_APP" --remote-only
 ```
 
-On first boot, capture the one-time bootstrap admin key from Fly logs:
+The checked-in `fly.toml` uses a placeholder app name. Always pass
+`--app "$CANARY_FLY_APP"` so a fork or clean-room checkout cannot deploy to the
+Misty Step instance by accident.
+
+On first boot, capture the one-time bootstrap admin key from Fly logs and store
+it in the operator's secret manager:
 
 ```bash
-flyctl logs --app "$CANARY_FLY_APP" --no-tail | rg 'Bootstrap API key:'
+flyctl logs --app "$CANARY_FLY_APP" --no-tail | grep -E 'Bootstrap API key:'
 ```
 
 If the first boot log was missed, mint a replacement admin key without data
-loss:
+loss. This prints a raw admin key once:
 
 ```bash
 flyctl ssh console --app "$CANARY_FLY_APP" \
   -C '/app/bin/canary-server mint-key --scope admin --name operator-recovery'
+```
+
+After the key is stored, prove the new instance with the same smoke commands an
+agent will use later:
+
+```bash
+export CANARY_ADMIN_KEY="<stored-admin-key>"
+curl -fsS "$CANARY_ENDPOINT/healthz"
+curl -fsS "$CANARY_ENDPOINT/readyz"
+curl -fsS "$CANARY_ENDPOINT/api/v1/report?window=1h" \
+  -H "Authorization: Bearer $CANARY_ADMIN_KEY"
+bin/canary-write-path-rehearsal \
+  --endpoint "$CANARY_ENDPOINT" \
+  --api-key "$CANARY_ADMIN_KEY" \
+  --app "$CANARY_FLY_APP" \
+  --json
 ```
 
 DR verification and restore procedures live in [docs/backup-restore-dr.md](docs/backup-restore-dr.md).

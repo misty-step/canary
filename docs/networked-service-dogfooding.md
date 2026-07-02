@@ -1,10 +1,11 @@
 # Networked Service Dogfooding
 
-Canary keeps a checked-in deployed-service registry at
-[priv/dogfood/owned_services.json](../priv/dogfood/owned_services.json).
-The registry is the operator contract for which owned services Canary should
-monitor, which services are pending or blocked, and what action moves each one
-forward.
+Canary reads a deployed-service registry from instance-local operator state:
+`.canary/dogfood/owned_services.json` by default. The checked-in
+[priv/dogfood/owned_services.example.json](../priv/dogfood/owned_services.example.json)
+is only a starter shape. Copy it into `.canary/dogfood/owned_services.json`,
+replace the example services with the operator's own apps, and keep production
+service names out of committed examples.
 
 ## Audit Command
 
@@ -35,9 +36,9 @@ Run the deployed-surface inventory before changing dogfood coverage:
 bin/dogfood-inventory --strict --json
 ```
 
-The command reads the registry, Vercel projects for scopes `misty-step` and
-`adminifi-growth`, Fly apps, and local `.vercel/project.json` links under the
-workspace parent. It emits one JSON document with each surface classified as:
+The command reads the registry, any Vercel scopes passed with `--vercel-scope`,
+Fly apps, and local `.vercel/project.json` links under the workspace parent. It
+emits one JSON document with each surface classified as:
 
 - `covered`: active service has health or monitor coverage and verified ingest
 - `partial`: service is present but has pending, incomplete, or follow-on
@@ -53,11 +54,11 @@ its source. Use fixture inputs in tests or offline audits:
 
 ```bash
 bin/dogfood-inventory \
-  --manifest priv/dogfood/owned_services.json \
-  --vercel-projects misty-step=/tmp/vercel-misty-step.json \
+  --manifest .canary/dogfood/owned_services.json \
+  --vercel-projects example-team=/tmp/vercel-example-team.json \
   --fly-apps /tmp/fly-apps.json \
-  --local-root /Users/phaedrus/Development \
-  --requested canary-self,vanity,chrondle,linejam,misty-step,trump-goggles-splash,timeismoney-splash,sploot \
+  --local-root /path/to/workspace \
+  --requested canary-self,example-api \
   --strict --json
 ```
 
@@ -113,25 +114,13 @@ Each service entry has:
 live Canary target is missing, duplicated, or pointed at another URL. Other
 states stay visible in the report but do not fail strict mode.
 
-## Current Registry
+## Registry Lifecycle
 
-As of 2026-06-11, active registry services are:
+Keep the instance-local registry current whenever an owned deployment is added,
+removed, renamed, or reclassified. A service is not considered covered just
+because a deployment exists or env vars exist; it needs health/monitor
+enrollment and Canary readback evidence.
 
-| Service | Platform | Health URL | Notes |
-|---|---|---|---|
-| `canary-self` | Fly | `https://canary-obs.fly.dev/healthz` | Self HTTP liveness is enrolled; independent witness is tracked separately. |
-| `chrondle` | Vercel | `https://www.chrondle.app/api/health` | Enrolled, but the live 24h audit showed a high-volume `TypeError` group. |
-| `linejam` | Vercel | `https://www.linejam.app/api/health` | Reference integration with Vercel health and Fly responder coverage. |
-| `vulcan` | Fly | `https://adminifi-vulcan-orchestrator.fly.dev/health` | Active Adminifi orchestrator surface. |
-
-Pending or blocked services include `sploot`, `misty-step`, `vanity`,
-`trump-goggles-splash`, `timeismoney-splash`, `adminifi-web`, and
-`consumer-portal`. Follow-on services include desktop/non-HTTP or unpinned
-surfaces such as `time-tracker` and `cerberus`. Ignored services are explicitly
-out of rotation; `volume` is ignored because the product is retired and its
-public Vercel surface now returns `DEPLOYMENT_NOT_FOUND`.
-
-Keep the registry current whenever an owned deployment is added, removed,
-renamed, or reclassified. A service is not considered covered just because a
-deployment exists or env vars exist; it needs health/monitor enrollment and
-Canary readback evidence.
+Historical Misty Step dogfood evidence lives under `docs/architecture/` and
+backlog archives. Do not copy those service names into a clean-room deployment
+unless that operator owns those apps.

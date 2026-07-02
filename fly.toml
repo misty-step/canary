@@ -1,4 +1,6 @@
-app = "canary-obs"
+# Placeholder only. Operators must pass `--app "$CANARY_FLY_APP"` or set their
+# own Fly app in a local copy.
+app = "replace-me-canary"
 primary_region = "iad"
 kill_signal = "SIGTERM"
 kill_timeout = "30s"

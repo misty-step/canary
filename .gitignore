@@ -8,6 +8,10 @@
 !.env.example
 *.secret
 
+# Instance-local Canary operator state. Use priv/dogfood/*.example.json for
+# committed examples.
+/.canary/dogfood/owned_services.json
+
 # Secret material — keys, certificates, credentials. Never commit.
 *.pem
 *.key
