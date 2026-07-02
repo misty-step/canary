@@ -43,7 +43,7 @@ replay:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": "canary.incident_event.v1",
   "event": "incident.opened",
   "subject": {
     "type": "incident",

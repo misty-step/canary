@@ -3131,7 +3131,18 @@ mod tests {
         assert_eq!(event.id, "EVT-abcdefghijkl");
         let payload: Value =
             serde_json::from_str(&event.payload_json).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        assert_eq!(payload["schema_version"], "canary.incident_event.v1");
         assert_eq!(payload["event"], "incident.opened");
+        assert_eq!(payload["subject"]["type"], "incident");
+        assert_eq!(payload["subject"]["id"], "INC-123456789abc");
+        assert_eq!(payload["subject"]["service"], "cadence");
+        assert_eq!(payload["signal"]["kind"], "error_group");
+        assert_eq!(payload["signal"]["fingerprint"], "group-incident-a");
+        assert_eq!(payload["signal"]["observed_at"], "2026-05-28T20:00:05Z");
+        assert_eq!(
+            payload["replay"]["incident_url"],
+            "/api/v1/incidents/INC-123456789abc"
+        );
         assert_eq!(payload["incident"]["id"], "INC-123456789abc");
         assert_eq!(
             payload["incident"]["signals"][0]["signal_ref"],

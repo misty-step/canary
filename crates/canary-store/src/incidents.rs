@@ -19,6 +19,7 @@ use crate::Result;
 const ACTIVE_WINDOW_SECONDS: i64 = 300;
 const OPEN_STATE: &str = "investigating";
 const RESOLVED_STATE: &str = "resolved";
+const INCIDENT_EVENT_SCHEMA_VERSION: &str = "canary.incident_event.v1";
 
 /// One incident-correlation command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -509,9 +510,21 @@ fn incident_payload(
     now: &str,
 ) -> serde_json::Value {
     json!({
+        "schema_version": INCIDENT_EVENT_SCHEMA_VERSION,
         "event": event,
         "tenant_id": incident.tenant_id,
         "project_id": incident.project_id,
+        "subject": {
+            "type": "incident",
+            "id": incident.id,
+            "service": incident.service,
+        },
+        "signal": incident_signal_payload(incident, signals, now),
+        "replay": {
+            "timeline_url": format!("/api/v1/timeline?service={}&window=1h", incident.service),
+            "report_url": "/api/v1/report?window=1h",
+            "incident_url": format!("/api/v1/incidents/{}", incident.id),
+        },
         "incident": {
             "id": incident.id,
             "service": incident.service,
@@ -531,6 +544,27 @@ fn incident_payload(
         },
         "timestamp": now,
     })
+}
+
+fn incident_signal_payload(
+    incident: &IncidentRow,
+    signals: &[SignalRow],
+    now: &str,
+) -> serde_json::Value {
+    match signals.first() {
+        Some(signal) => json!({
+            "kind": signal.signal_type,
+            "fingerprint": signal.signal_ref,
+            "severity": incident.severity,
+            "observed_at": signal.attached_at,
+        }),
+        None => json!({
+            "kind": "incident",
+            "fingerprint": incident.id,
+            "severity": incident.severity,
+            "observed_at": now,
+        }),
+    }
 }
 
 fn title_for(service: &str) -> String {
