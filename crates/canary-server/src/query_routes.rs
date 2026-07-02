@@ -249,12 +249,12 @@ pub(crate) async fn show_error(
         Err(problem) => return problem_response(*problem),
     };
 
-    let store = match state.lock_store() {
+    let mut store = match state.lock_store() {
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
 
-    match store.error_detail_scoped(&id, &key.tenant_id, &key.project_id) {
+    let response = match store.error_detail_scoped(&id, &key.tenant_id, &key.project_id) {
         Ok(Some(result)) => {
             if let Some(bound_service) = key.service.as_deref()
                 && result.service != bound_service
@@ -266,7 +266,10 @@ pub(crate) async fn show_error(
         Ok(None) => problem_response(not_found_problem(format!("Error {id} not found."))),
         Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
         Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
-    }
+    };
+
+    crate::read_audit::record_read_audit(&mut store, &key, "GET /api/v1/errors/{id}");
+    response
 }
 
 pub(crate) async fn show_incident(
@@ -284,7 +287,7 @@ pub(crate) async fn show_incident(
         Err(_) => return problem_response(internal_problem()),
     };
 
-    match store.incident_detail_scoped(&id, &key.tenant_id, &key.project_id) {
+    let response = match store.incident_detail_scoped(&id, &key.tenant_id, &key.project_id) {
         Ok(Some(result)) => {
             if let Some(bound_service) = key.service.as_deref()
                 && result.incident.service != bound_service
@@ -296,5 +299,8 @@ pub(crate) async fn show_incident(
         Ok(None) => problem_response(not_found_problem(format!("Incident {id} not found."))),
         Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
         Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
-    }
+    };
+
+    crate::read_audit::record_read_audit(&mut store, &key, "GET /api/v1/incidents/{id}");
+    response
 }
