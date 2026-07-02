@@ -34,6 +34,7 @@ mod monitor_overdue;
 mod public_routes;
 mod query_routes;
 mod rate_limit;
+mod read_audit;
 mod report_routes;
 mod retention_prune;
 mod route_state;

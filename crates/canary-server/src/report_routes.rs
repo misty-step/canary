@@ -190,7 +190,7 @@ pub(crate) async fn report(
         );
     }
 
-    if accepts_csv(&headers) {
+    let result = if accepts_csv(&headers) {
         response(
             StatusCode::OK.as_u16(),
             "text/csv; charset=utf-8",
@@ -198,7 +198,10 @@ pub(crate) async fn report(
         )
     } else {
         json_status_response(StatusCode::OK.as_u16(), body)
-    }
+    };
+
+    crate::read_audit::record_read_audit(&mut store, &key, "GET /api/v1/report");
+    result
 }
 
 fn error_group_response(group: &ErrorGroupSummary) -> Value {
