@@ -20,16 +20,17 @@ Audit Canary's deployed-service dogfood registry against a live Canary instance.
 By default the command reads `CANARY_ENDPOINT`, `CANARY_API_KEY`, and the
 instance-local registry at `.canary/dogfood/owned_services.json`. Set
 `CANARY_DOGFOOD_MANIFEST` or pass `--manifest` to use another registry. The
-command compares active HTTP services against live Canary targets and prints:
+command compares active HTTP services against live Canary targets, compares
+active check-in services against live Canary monitors, and prints:
 
 - Canary's current summary for the requested window
-- every active service with target presence, URL match, health state, and errors
+- every active service with target/monitor presence, health state, and errors
 - pending, blocked, follow-on, suspended, and ignored services with next action
 - extra live targets outside the deployed-service registry
 
 `--json` emits the same audit as machine-readable JSON.
-`--strict` exits non-zero when any active service target is missing, duplicated,
-or pointed at the wrong URL.
+`--strict` exits non-zero when any active service coverage is missing,
+duplicated, stale, or pointed at the wrong URL.
 EOF
 }
 
@@ -70,12 +71,16 @@ validate_manifest() {
       (.platform | type == "string" and length > 0) and
       (has("production_url") and (.production_url == null or (.production_url | type == "string"))) and
       (has("health_url") and (.health_url == null or (.health_url | type == "string"))) and
+      (.monitor_mode == null or (.monitor_mode | IN("http", "check_in", "external", "none"))) and
       (.last_checked_at | type == "string" and length > 0) and
       (.failure_mode | type == "string" and length > 0) and
       (.owner | type == "string" and length > 0) and
       (.next_action | type == "string" and length > 0)
     ) and
-    all(.services[] | select(.state == "active"); (.health_url | type == "string" and length > 0))
+    all(.services[] | select(.state == "active");
+      ((.monitor_mode // "http") == "check_in")
+      or (.health_url | type == "string" and length > 0)
+    )
   ' "$MANIFEST" >/dev/null; then
     fail "Invalid deployed-service registry: $MANIFEST"
   fi
@@ -221,10 +226,20 @@ strict_failures=$((strict_failures + $(wc -l < "$registry_policy_failures" | tr 
 
 while IFS= read -r service_json; do
   service="$(jq -r '.service' <<<"$service_json")"
-  expected_url="$(jq -r '.health_url' <<<"$service_json")"
+  expected_url="$(jq -r '.health_url // ""' <<<"$service_json")"
+  monitor_mode="$(jq -r '.monitor_mode // (if (.health_url // "") != "" then "http" else "none" end)' <<<"$service_json")"
   encoded_service="$(urlencode "$service")"
   encoded_window="$(urlencode "$WINDOW")"
   query_json="$(api_get "/api/v1/query?service=${encoded_service}&window=${encoded_window}")"
+
+  target_required=0
+  monitor_required=0
+  if [[ -n "$expected_url" ]]; then
+    target_required=1
+  fi
+  if [[ "$monitor_mode" == "check_in" ]]; then
+    monitor_required=1
+  fi
 
   target_count="$(
     jq -r --arg service "$service" '
@@ -244,43 +259,99 @@ while IFS= read -r service_json; do
     ' <<<"$report_json"
   )"
 
+  monitor_count="$(
+    jq -r --arg service "$service" '
+      [.monitors[]? | select(.service == $service)] | length
+    ' <<<"$report_json"
+  )"
+
+  monitor_state="$(
+    jq -r --arg service "$service" '
+      [.monitors[]? | select(.service == $service) | .state][0] // "missing"
+    ' <<<"$report_json"
+  )"
+
+  monitor_name="$(
+    jq -r --arg service "$service" '
+      [.monitors[]? | select(.service == $service) | .name][0] // ""
+    ' <<<"$report_json"
+  )"
+
+  last_check_in_at="$(
+    jq -r --arg service "$service" '
+      [.monitors[]? | select(.service == $service) | .last_check_in_at][0] // ""
+    ' <<<"$report_json"
+  )"
+
   total_errors="$(jq -r '.total_errors // 0' <<<"$query_json")"
   summary="$(jq -r '.summary // ""' <<<"$query_json")"
 
-  target_state="present"
-  url_state="yes"
+  target_state="n/a"
+  url_state="n/a"
+  monitor_state_label="n/a"
 
-  if [[ "$target_count" == "0" ]]; then
-    target_state="missing"
-    url_state="n/a"
-    strict_failures=$((strict_failures + 1))
-  elif [[ "$target_count" != "1" ]]; then
-    target_state="duplicate"
-    url_state="no"
-    strict_failures=$((strict_failures + 1))
-  elif [[ "$actual_url" != "$expected_url" ]]; then
-    url_state="no"
-    strict_failures=$((strict_failures + 1))
+  if ((target_required == 1)); then
+    target_state="present"
+    url_state="yes"
+
+    if [[ "$target_count" == "0" ]]; then
+      target_state="missing"
+      url_state="n/a"
+      strict_failures=$((strict_failures + 1))
+    elif [[ "$target_count" != "1" ]]; then
+      target_state="duplicate"
+      url_state="no"
+      strict_failures=$((strict_failures + 1))
+    elif [[ "$actual_url" != "$expected_url" ]]; then
+      url_state="no"
+      strict_failures=$((strict_failures + 1))
+    elif [[ "$health_state" == "missing" ]]; then
+      target_state="unobserved"
+      strict_failures=$((strict_failures + 1))
+    fi
+  else
+    actual_url=""
+    health_state="n/a"
+  fi
+
+  if ((monitor_required == 1)); then
+    monitor_state_label="$monitor_state"
+
+    if [[ "$monitor_count" == "0" ]]; then
+      monitor_state_label="missing"
+      strict_failures=$((strict_failures + 1))
+    elif [[ -z "$last_check_in_at" ]]; then
+      monitor_state_label="unobserved"
+      strict_failures=$((strict_failures + 1))
+    fi
   fi
 
   jq -cn \
     --argjson registry "$service_json" \
+    --arg monitor_mode "$monitor_mode" \
     --arg target_state "$target_state" \
     --arg url_state "$url_state" \
     --arg actual_url "$actual_url" \
     --arg health_state "$health_state" \
+    --arg monitor_state "$monitor_state_label" \
+    --arg monitor_name "$monitor_name" \
+    --arg last_check_in_at "$last_check_in_at" \
     --argjson total_errors "$total_errors" \
     --arg summary "$summary" \
     '{
       service: $registry.service,
       state: $registry.state,
       platform: $registry.platform,
+      monitor_mode: $monitor_mode,
       production_url: $registry.production_url,
       expected_health_url: $registry.health_url,
       actual_health_url: $actual_url,
       target: $target_state,
       url: $url_state,
       health: $health_state,
+      monitor: $monitor_state,
+      monitor_name: $monitor_name,
+      last_check_in_at: $last_check_in_at,
       total_errors: $total_errors,
       summary: $summary,
       owner: $registry.owner,
@@ -324,15 +395,16 @@ else
   printf '\n'
 
   printf 'Active services\n'
-  printf '%-18s %-9s %-8s %-10s %-6s %-8s %s\n' "service" "target" "url" "health" "errors" "platform" "expected"
-  printf '%-18s %-9s %-8s %-10s %-6s %-8s %s\n' "-------" "------" "---" "------" "------" "--------" "--------"
+  printf '%-18s %-9s %-8s %-10s %-10s %-6s %-8s %s\n' "service" "target" "url" "health" "monitor" "errors" "platform" "expected"
+  printf '%-18s %-9s %-8s %-10s %-10s %-6s %-8s %s\n' "-------" "------" "---" "------" "-------" "------" "--------" "--------"
 
   while IFS= read -r result_json; do
-    printf '%-18s %-9s %-8s %-10s %-6s %-8s %s\n' \
+    printf '%-18s %-9s %-8s %-10s %-10s %-6s %-8s %s\n' \
       "$(jq -r '.service' <<<"$result_json")" \
       "$(jq -r '.target' <<<"$result_json")" \
       "$(jq -r '.url' <<<"$result_json")" \
       "$(jq -r '.health' <<<"$result_json")" \
+      "$(jq -r '.monitor' <<<"$result_json")" \
       "$(jq -r '.total_errors' <<<"$result_json")" \
       "$(jq -r '.platform' <<<"$result_json")" \
       "$(jq -r '.expected_health_url' <<<"$result_json")"
@@ -375,7 +447,7 @@ fi
 
 if ((STRICT == 1 && strict_failures > 0)); then
   if ((JSON_OUTPUT == 0)); then
-    printf '\nStrict audit failed: %s active service target issue(s).\n' "$strict_failures" >&2
+    printf '\nStrict audit failed: %s active service coverage issue(s).\n' "$strict_failures" >&2
   fi
   exit 1
 fi

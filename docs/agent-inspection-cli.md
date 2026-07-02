@@ -224,6 +224,10 @@ deliberately split into reviewable phases:
   `--project-root` is supplied. The one-time key and snippets are redacted
   unless `--show-secret` is explicitly passed for a secure handoff.
 
+Factory fleet enrollment uses the same CLI surface plus live target and
+check-in readback. The 15-minute operator recipe is
+[`docs/factory-fleet-integration.md`](factory-fleet-integration.md).
+
 Use SDK instrumentation when the application code can ship a patch: it provides
 service names, environments, scrubbed context, and typed request/browser error
 capture. Use platform-level drains only as a supplement for logs/errors the app

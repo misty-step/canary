@@ -39,6 +39,8 @@ JSON
   {"service":"alpha","url":"https://alpha.example/health","state":"up"},
   {"service":"bravo","url":"https://bravo.example/health","state":"up"},
   {"service":"canary-self","url":"https://canary.example/healthz","state":"up"}
+],"monitors":[
+  {"service":"foxtrot","name":"foxtrot-worker","state":"up","last_check_in_status":"alive","last_check_in_at":"2026-06-11T23:59:00Z"}
 ]}
 JSON
     ;;
@@ -50,6 +52,16 @@ JSON
   https://canary.example/api/v1/query?service=bravo\&window=24h)
     cat <<'JSON'
 {"service":"bravo","summary":"0 errors in bravo in the last 24h. 0 unique classes.","total_errors":0}
+JSON
+    ;;
+  https://canary.example/api/v1/query?service=foxtrot\&window=24h)
+    cat <<'JSON'
+{"service":"foxtrot","summary":"0 errors in foxtrot in the last 24h. 0 unique classes.","total_errors":0}
+JSON
+    ;;
+  https://canary.example/api/v1/query?service=golf\&window=24h)
+    cat <<'JSON'
+{"service":"golf","summary":"0 errors in golf in the last 24h. 0 unique classes.","total_errors":0}
 JSON
     ;;
   https://canary.example/api/v1/query?service=missing\&window=24h)
@@ -100,6 +112,18 @@ write_manifest() {
       "failure_mode": "No current blocker.",
       "owner": "example-org",
       "next_action": "Keep enrolled."
+    },
+    {
+      "service": "foxtrot",
+      "state": "active",
+      "platform": "fly",
+      "production_url": null,
+      "health_url": null,
+      "monitor_mode": "check_in",
+      "last_checked_at": "2026-06-11T00:00:00Z",
+      "failure_mode": "No current blocker.",
+      "owner": "example-org",
+      "next_action": "Keep check-in monitor fresh."
     },
     {
       "service": "charlie",
@@ -188,6 +212,29 @@ write_missing_manifest() {
       "failure_mode": "Fixture ignores self target.",
       "owner": "example-org",
       "next_action": "No fixture action."
+    }
+  ]
+}
+JSON
+}
+
+write_missing_monitor_manifest() {
+  local path="$1"
+  cat > "$path" <<'JSON'
+{
+  "schema_version": 1,
+  "services": [
+    {
+      "service": "golf",
+      "state": "active",
+      "platform": "fly",
+      "production_url": null,
+      "health_url": null,
+      "monitor_mode": "check_in",
+      "last_checked_at": "2026-06-11T00:00:00Z",
+      "failure_mode": "Monitor is not enrolled.",
+      "owner": "example-org",
+      "next_action": "Create the check-in monitor."
     }
   ]
 }
@@ -310,10 +357,12 @@ assert_json_equals() {
 
 MANIFEST="$TMPDIR_TEST/manifest.json"
 MISSING_MANIFEST="$TMPDIR_TEST/missing-manifest.json"
+MISSING_MONITOR_MANIFEST="$TMPDIR_TEST/missing-monitor-manifest.json"
 INVALID_MANIFEST="$TMPDIR_TEST/invalid-manifest.json"
 STALE_MANIFEST="$TMPDIR_TEST/stale-manifest.json"
 write_manifest "$MANIFEST"
 write_missing_manifest "$MISSING_MANIFEST"
+write_missing_monitor_manifest "$MISSING_MONITOR_MANIFEST"
 write_invalid_manifest "$INVALID_MANIFEST"
 write_stale_manifest "$STALE_MANIFEST"
 
@@ -338,6 +387,7 @@ assert_contains "$OUTPUT" "Canary dogfood audit (24h)" "prints report header"
 assert_contains "$OUTPUT" "Active services" "prints active section"
 assert_contains "$OUTPUT" "alpha" "includes first active service"
 assert_contains "$OUTPUT" "bravo" "includes second active service"
+assert_contains "$OUTPUT" "foxtrot" "includes active check-in service"
 assert_contains "$OUTPUT" "pending services" "prints pending section"
 assert_contains "$OUTPUT" "charlie" "includes pending service"
 assert_contains "$OUTPUT" "blocked services" "prints blocked section"
@@ -352,7 +402,8 @@ echo "Test 3: dogfood-audit emits machine-readable json"
 setup_stubbed_curl
 OUTPUT=$(CANARY_ENDPOINT=https://canary.example CANARY_API_KEY=sk_test run_and_capture "$DOGFOOD_AUDIT" --manifest "$MANIFEST" --now 2026-06-12T00:00:00Z --json)
 assert_json_equals "$OUTPUT" ".window" "24h" "json includes window"
-assert_json_equals "$OUTPUT" ".active_services | length" "2" "json includes active service results"
+assert_json_equals "$OUTPUT" ".active_services | length" "3" "json includes active service results"
+assert_json_equals "$OUTPUT" ".active_services[] | select(.service == \"foxtrot\") | .monitor" "up" "json includes check-in monitor state"
 assert_json_equals "$OUTPUT" ".registry[] | select(.service == \"delta\") | .state" "blocked" "json includes non-active registry states"
 assert_json_equals "$OUTPUT" ".extra_targets | length" "0" "json excludes ignored registry target from extras"
 
@@ -365,7 +416,16 @@ assert_exit_code "$STATUS" "1" "strict mode exits non-zero"
 assert_contains "$BODY" "Strict audit failed" "strict mode explains the failure"
 assert_contains "$BODY" "missing" "strict output names the missing service state"
 
-echo "Test 5: dogfood-audit rejects invalid registry shape"
+echo "Test 5: dogfood-audit strict mode fails when an active check-in monitor is missing"
+setup_stubbed_curl
+OUTPUT=$(CANARY_ENDPOINT=https://canary.example CANARY_API_KEY=sk_test run_failure "$DOGFOOD_AUDIT" --manifest "$MISSING_MONITOR_MANIFEST" --now 2026-06-12T00:00:00Z --strict)
+STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
+BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
+assert_exit_code "$STATUS" "1" "missing monitor exits non-zero"
+assert_contains "$BODY" "Strict audit failed" "missing monitor explains the failure"
+assert_contains "$BODY" "golf" "strict output names the missing monitor service"
+
+echo "Test 6: dogfood-audit rejects invalid registry shape"
 setup_stubbed_curl
 OUTPUT=$(CANARY_ENDPOINT=https://canary.example CANARY_API_KEY=sk_test run_failure "$DOGFOOD_AUDIT" --manifest "$INVALID_MANIFEST")
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
@@ -373,7 +433,7 @@ BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "invalid registry exits non-zero"
 assert_contains "$BODY" "Invalid deployed-service registry" "invalid registry explains the schema failure"
 
-echo "Test 6: dogfood-audit strict json reports stale evidence and singular completed-ticket next actions"
+echo "Test 7: dogfood-audit strict json reports stale evidence and singular completed-ticket next actions"
 setup_stubbed_curl
 OUTPUT=$(CANARY_ENDPOINT=https://canary.example CANARY_API_KEY=sk_test run_failure "$DOGFOOD_AUDIT" --manifest "$STALE_MANIFEST" --now 2026-06-14T00:00:00Z --max-evidence-age-hours 24 --strict --json)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
@@ -383,7 +443,7 @@ assert_json_equals "$BODY" ".registry_policy_failures | length" "2" "json includ
 assert_json_equals "$BODY" ".registry_policy_failures[0].kind" "stale_registry_evidence" "json names stale evidence failure"
 assert_json_equals "$BODY" ".registry_policy_failures[1].kind" "completed_ticket_next_action" "json names completed-ticket failure"
 
-echo "Test 7: dogfood-audit fails cleanly when curl is unavailable"
+echo "Test 8: dogfood-audit fails cleanly when curl is unavailable"
 setup_path_without_curl
 OUTPUT=$(PATH="$MISSING_CURL_PATH" CANARY_ENDPOINT=https://canary.example CANARY_API_KEY=sk_test run_failure "$BASH_BIN" "$DOGFOOD_AUDIT")
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)

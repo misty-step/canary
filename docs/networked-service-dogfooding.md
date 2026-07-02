@@ -16,11 +16,12 @@ bin/dogfood-audit --strict
 ```
 
 The command reads `CANARY_ENDPOINT` and `CANARY_API_KEY`, validates the registry
-schema, compares active HTTP services against live Canary targets, and prints:
+schema, compares active HTTP services against live Canary targets, compares
+active check-in services against live Canary monitors, and prints:
 
 - the unified Canary report summary for the requested window
-- every active service with target presence, URL match, health state, platform,
-  and current error totals
+- every active service with target presence, URL match, health state, monitor
+  state, platform, and current error totals
 - pending, blocked, follow-on, suspended, and ignored services with failure mode
   and next action
 - extra live targets outside the registry
@@ -100,8 +101,8 @@ Each service entry has:
   `service`, or `null` when there is no deployment project
 - `production_url`: public production surface when one exists
 - `repo_path`: local checkout path when known, otherwise `null`
-- `health_url`: HTTP target URL for active services, or `null` for non-HTTP or
-  not-yet-healthable services
+- `health_url`: HTTP target URL for services that expose HTTP health, or `null`
+  for monitor-only services
 - `monitor_mode`: `http`, `check_in`, `external`, or `none`
 - `ingest_status`: `verified`, `partial`, `missing`, `not_applicable`, or
   `blocked`
@@ -110,9 +111,17 @@ Each service entry has:
 - `owner`: accountable org or owner namespace
 - `next_action`: concrete next step
 
-`active` services must have a non-empty `health_url`; strict audit fails if the
-live Canary target is missing, duplicated, or pointed at another URL. Other
-states stay visible in the report but do not fail strict mode.
+`active` services must have either a non-empty `health_url` or
+`monitor_mode: "check_in"`.
+
+- `monitor_mode: "http"` with a `health_url` requires exactly one live Canary
+  target for that service, a matching URL, and target state readback in
+  `/api/v1/report`.
+- `monitor_mode: "check_in"` requires live monitor readback and a non-empty
+  `last_check_in_at`. If `health_url` is also set, strict mode verifies both
+  the HTTP target and the check-in monitor.
+
+Other states stay visible in the report but do not fail strict mode.
 
 ## Registry Lifecycle
 
