@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-/// Default hosted Canary endpoint used when no endpoint is configured.
-pub const DEFAULT_ENDPOINT: &str = "https://canary-obs.fly.dev";
+/// Example endpoint used by local-only integration planning when no endpoint is configured.
+pub const DEFAULT_ENDPOINT: &str = "https://canary.example";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const WITNESS_MONITOR_NAME: &str = "canary-watchman";
@@ -114,13 +114,11 @@ impl Config {
         mode: KeyMode,
     ) -> Result<Self> {
         let file_config = read_file_config(config_path)?;
-        let endpoint = first_non_empty([
+        let endpoint = resolve_required_endpoint(
             endpoint_flag,
             env::var("CANARY_ENDPOINT").ok(),
             file_config.endpoint,
-            Some(DEFAULT_ENDPOINT.to_owned()),
-        ])
-        .unwrap_or_else(|| DEFAULT_ENDPOINT.to_owned());
+        )?;
 
         let key_sources = match mode {
             KeyMode::Read => vec![
@@ -203,13 +201,33 @@ enum KeyMode {
 
 /// Resolve an endpoint for local-only commands without reading config files.
 pub fn resolve_endpoint_without_config(endpoint_flag: Option<&str>) -> String {
-    let endpoint = first_non_empty([
+    let endpoint = resolve_local_endpoint(
         endpoint_flag.map(ToOwned::to_owned),
         env::var("CANARY_ENDPOINT").ok(),
+    );
+    normalize_endpoint(&endpoint)
+}
+
+fn resolve_required_endpoint(
+    endpoint_flag: Option<String>,
+    env_endpoint: Option<String>,
+    file_endpoint: Option<String>,
+) -> Result<String> {
+    first_non_empty([endpoint_flag, env_endpoint, file_endpoint]).ok_or_else(|| {
+        CliError::Message(
+            "missing Canary endpoint; set --endpoint, CANARY_ENDPOINT, or config endpoint"
+                .to_owned(),
+        )
+    })
+}
+
+fn resolve_local_endpoint(endpoint_flag: Option<String>, env_endpoint: Option<String>) -> String {
+    first_non_empty([
+        endpoint_flag,
+        env_endpoint,
         Some(DEFAULT_ENDPOINT.to_owned()),
     ])
-    .unwrap_or_else(|| DEFAULT_ENDPOINT.to_owned());
-    normalize_endpoint(&endpoint)
+    .unwrap_or_else(|| DEFAULT_ENDPOINT.to_owned())
 }
 
 /// Minimal blocking API client.
@@ -5032,6 +5050,43 @@ mod tests {
     }
 
     #[test]
+    fn live_config_requires_explicit_endpoint() {
+        let result = resolve_required_endpoint(None, None, None);
+
+        assert!(result.is_err(), "endpoint should be required");
+        let message = result
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(message.contains("missing Canary endpoint"));
+    }
+
+    #[test]
+    fn live_config_normalizes_explicit_endpoint()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = temp_project("endpoint-normalization")?;
+        let config_path = root.join("config.json");
+        fs::write(&config_path, r#"{"api_key":"sk_test"}"#)?;
+
+        let config = Config::resolve(
+            Some("https://example-canary.fly.dev/".to_owned()),
+            None,
+            Some(config_path),
+        )?;
+
+        assert_eq!(config.endpoint, "https://example-canary.fly.dev");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn local_integration_endpoint_uses_neutral_example_default() {
+        let endpoint = normalize_endpoint(&resolve_local_endpoint(None, None));
+
+        assert_eq!(endpoint, "https://canary.example");
+    }
+
+    #[test]
     fn restore_receipt_discovery_requires_restore_specific_receipts()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let root = temp_project("restore-receipt")?;
@@ -5611,11 +5666,11 @@ Vercel CLI completed
             {"service": "chrondle", "state": "active"}
         ]}});
         let surfaces = json!({"ok": true, "response": {"surfaces": [
-            {"service": "misty-step", "coverage": "covered"}
+            {"service": "example-site", "coverage": "covered"}
         ]}});
 
         assert_eq!(dogfood_service_state(&registry, "chrondle"), "active");
-        assert_eq!(dogfood_service_state(&surfaces, "misty-step"), "covered");
+        assert_eq!(dogfood_service_state(&surfaces, "example-site"), "covered");
     }
 
     #[test]

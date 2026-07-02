@@ -12,7 +12,7 @@ visible until a focused PR archives them with evidence.
 
 | # | Epic | Priority | Relationship |
 |---|------|----------|--------------|
-| 060 | Cold-operator deploy path | P0 | Top pickup. Folds in self-host docs, app-name dehardcoding, bootstrap-key docs, and dogfood instance split. |
+| 060 | Cold-operator deploy path | P0 | Shipped 2026-07-01. Folded in self-host docs, app-name dehardcoding, bootstrap-key docs, dogfood instance split, and clean-room receipt. |
 | 061 | Fleet plumb-in | P0 | Composition monitoring half: every Factory app reports health/errors/uptime with fresh readback. |
 | 062 | Agent loop write surface | P0 | Adds CLI/MCP annotation writeback and scoped responder-key loop; adopts 048. |
 | 063 | Triage contract hardening | P1 | Durable cooldown, dispatch budget caps, claim-gated delivery, and drills. |
@@ -24,7 +24,6 @@ visible until a focused PR archives them with evidence.
 
 | # | Item | Priority | Status | Estimate |
 |---|------|----------|--------|----------|
-| 060 | Cold-operator deploy path | P0 | pending | XL |
 | 061 | Fleet plumb-in | P0 | pending | L |
 | 062 | Agent loop write surface | P0 | pending | XL |
 | 063 | Triage contract hardening | P1 | pending | XL |
@@ -80,6 +79,7 @@ visible until a focused PR archives them with evidence.
 | 055 | Refresh PRINCIPLES.md examples to Rust+SQLite (post-cutover) | P3 | pending | S |
 | 056 | Lower /api/v1/report store-lock contention + dedup SLI owner-scope | P2 | pending | M |
 | 057 | Static MCP manifest parity | P1 | done | S |
+| 060 | Cold-operator deploy path | P0 | done | XL |
 | 058 | Cadence-aware SLI trajectory sample floor | P2 | pending | M |
 | 059 | Bump anyhow after RUSTSEC-2026-0190 | P2 | pending | S |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
@@ -150,14 +150,13 @@ visible until a focused PR archives them with evidence.
 
 ### Active order (2026-07-01)
 
-060 is now the next product pickup because the Factory decision overlay makes
-cold-operator deployability the blocking gap for Canary's standalone value and
-for Adminifi/R90 adoption. It should produce executable docs/config/smoke
-evidence before fleet-wide integration work.
+060 shipped on 2026-07-01: the cold-operator deploy path now has explicit
+endpoint/app configuration, bootstrap-key recovery docs, instance-local dogfood
+state, and a clean-room receipt.
 
-061 follows once a clean instance path exists: the Factory composition needs
-every app to report health/errors/uptime to the Misty Step instance through a
-15-minute integration path and service-specific readback receipts.
+061 is now the next product pickup: the Factory composition needs every app to
+report health/errors/uptime to the Misty Step instance through a 15-minute
+integration path and service-specific readback receipts.
 
 062 is the next agent-loop pickup after the deploy/composition basics. It
 adopts 048's scoped responder safety gate and adds the missing CLI/MCP

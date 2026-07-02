@@ -111,6 +111,8 @@ due webhook job
 module and covers the Rust workspace, TypeScript SDK, operator scripts,
 production image smoke, secrets scanning, and advisory checks in strict mode.
 
-Deployment target is Fly app `canary-obs`. The Dockerfile builds the Rust
-`canary-server` binary and `bin/entrypoint.sh` wraps Litestream restore and
-replication before executing it.
+The upstream Misty Step production deployment uses Fly app `canary-obs`.
+Self-hosted operators must pass their own `--app "$CANARY_FLY_APP"`; the
+checked-in Fly config uses a placeholder app name. The Dockerfile builds the
+Rust `canary-server` binary and `bin/entrypoint.sh` wraps Litestream restore
+and replication before executing it.

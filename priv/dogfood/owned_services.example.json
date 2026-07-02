@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "services": [
+    {
+      "service": "canary-self",
+      "state": "active",
+      "platform": "fly",
+      "platform_project": "example-canary",
+      "production_url": "https://example-canary.fly.dev",
+      "repo_path": null,
+      "health_url": "https://example-canary.fly.dev/healthz",
+      "monitor_mode": "http",
+      "ingest_status": "verified",
+      "last_checked_at": "2026-07-01T00:00:00Z",
+      "failure_mode": "Self health target is enrolled for this Canary instance.",
+      "owner": "example-org",
+      "next_action": "Keep enrolled after each deploy and pair with an external witness monitor."
+    },
+    {
+      "service": "example-api",
+      "state": "pending",
+      "platform": "fly",
+      "platform_project": "example-api",
+      "production_url": "https://example-api.fly.dev",
+      "repo_path": null,
+      "health_url": "https://example-api.fly.dev/healthz",
+      "monitor_mode": "http",
+      "ingest_status": "partial",
+      "last_checked_at": "2026-07-01T00:00:00Z",
+      "failure_mode": "Health URL is known, but target enrollment and ingest readback have not been verified.",
+      "owner": "example-org",
+      "next_action": "Run service onboarding, store the scoped ingest key in the service, then verify query readback."
+    },
+    {
+      "service": "example-worker",
+      "state": "follow_on",
+      "platform": "worker",
+      "platform_project": null,
+      "production_url": null,
+      "repo_path": null,
+      "health_url": null,
+      "monitor_mode": "check_in",
+      "ingest_status": "missing",
+      "last_checked_at": "2026-07-01T00:00:00Z",
+      "failure_mode": "Non-HTTP runtime should report check-ins instead of exposing an HTTP target.",
+      "owner": "example-org",
+      "next_action": "Create a schedule or ttl monitor and wire check-ins from the worker runtime."
+    }
+  ]
+}

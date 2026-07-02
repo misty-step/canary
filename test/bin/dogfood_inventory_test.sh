@@ -26,22 +26,22 @@ write_manifest() {
       "ingest_status": "verified",
       "last_checked_at": "2026-06-11T00:00:00Z",
       "failure_mode": "No current blocker.",
-      "owner": "misty-step",
+      "owner": "example-org",
       "next_action": "Keep enrolled."
     },
     {
       "service": "canary-self",
       "state": "active",
       "platform": "fly",
-      "platform_project": "canary-obs",
-      "production_url": "https://canary-obs.fly.dev",
+      "platform_project": "canary-example",
+      "production_url": "https://canary.example",
       "repo_path": null,
-      "health_url": "https://canary-obs.fly.dev/healthz",
+      "health_url": "https://canary.example/healthz",
       "monitor_mode": "http",
       "ingest_status": "verified",
       "last_checked_at": "2026-06-11T00:00:00Z",
       "failure_mode": "Self target is enrolled.",
-      "owner": "misty-step",
+      "owner": "example-org",
       "next_action": "Keep enrolled."
     },
     {
@@ -56,7 +56,7 @@ write_manifest() {
       "ingest_status": "partial",
       "last_checked_at": "2026-06-11T00:00:00Z",
       "failure_mode": "Target not enrolled yet.",
-      "owner": "misty-step",
+      "owner": "example-org",
       "next_action": "Enroll the target."
     },
     {
@@ -71,7 +71,7 @@ write_manifest() {
       "ingest_status": "blocked",
       "last_checked_at": "2026-06-11T00:00:00Z",
       "failure_mode": "No health route exists.",
-      "owner": "misty-step",
+      "owner": "example-org",
       "next_action": "Add a health route."
     },
     {
@@ -86,7 +86,7 @@ write_manifest() {
       "ingest_status": "not_applicable",
       "last_checked_at": "2026-06-11T00:00:00Z",
       "failure_mode": "Retired.",
-      "owner": "misty-step",
+      "owner": "example-org",
       "next_action": "No action."
     }
   ]
@@ -110,7 +110,7 @@ write_invalid_manifest() {
       "health_url": "https://alpha.example/api/health",
       "last_checked_at": "2026-06-11T00:00:00Z",
       "failure_mode": "No current blocker.",
-      "owner": "misty-step",
+      "owner": "example-org",
       "next_action": "Keep enrolled."
     }
   ]
@@ -136,7 +136,7 @@ write_stale_manifest() {
       "ingest_status": "verified",
       "last_checked_at": "2026-06-15T00:00:00Z",
       "failure_mode": "Old evidence.",
-      "owner": "misty-step",
+      "owner": "example-org",
       "next_action": "Finish ticket 038."
     }
   ]
@@ -180,7 +180,7 @@ write_fly_apps() {
   local path="$1"
   cat >"$path" <<'JSON'
 [
-  {"Name": "canary-obs", "Organization": {"Slug": "misty-step"}, "Hostname": "canary-obs.fly.dev"}
+  {"Name": "canary-example", "Organization": {"Slug": "example-org"}, "Hostname": "canary.example"}
 ]
 JSON
 }
@@ -236,12 +236,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$scope" in
-  misty-step)
+  example-team)
     cat <<'JSON'
 {"projects":[{"name":"alpha","url":"https://alpha.example"},{"name":"bravo","url":"https://bravo.example"}]}
 JSON
     ;;
-  adminifi-growth)
+  example-admin)
     cat <<'JSON'
 {"projects":[]}
 JSON
@@ -259,7 +259,7 @@ STUB
 set -euo pipefail
 
 cat <<'JSON'
-[{"Name":"canary-obs","Organization":{"Slug":"misty-step"},"Hostname":"canary-obs.fly.dev"}]
+[{"Name":"canary-example","Organization":{"Slug":"example-org"},"Hostname":"canary.example"}]
 JSON
 STUB
   chmod +x "$bin_dir/flyctl"
@@ -346,9 +346,17 @@ echo "Test 1: dogfood-inventory help"
 OUTPUT=$(run_and_capture "$DOGFOOD_INVENTORY" --help)
 assert_contains "$OUTPUT" "Usage: bin/dogfood-inventory" "shows dogfood-inventory usage"
 assert_contains "$OUTPUT" "--vercel-projects" "documents Vercel fixtures"
+assert_contains "$OUTPUT" ".canary/dogfood/owned_services.json" "documents instance-local registry"
+
+echo "Test 1b: dogfood-inventory fails cleanly without local registry"
+OUTPUT=$(run_failure "$DOGFOOD_INVENTORY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT" --now 2026-06-12T00:00:00Z --json)
+STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
+BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
+assert_exit_code "$STATUS" "2" "missing default registry exits non-zero"
+assert_contains "$BODY" ".canary/dogfood/owned_services.json" "missing registry points to instance-local path"
 
 echo "Test 2: dogfood-inventory emits coverage json"
-OUTPUT=$(run_and_capture "$DOGFOOD_INVENTORY" --manifest "$MANIFEST" --vercel-projects "misty-step=$VERCEL_PROJECTS" --vercel-projects "adminifi-growth=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT" --requested alpha,bravo,canary-self --now 2026-06-12T00:00:00Z --json --strict)
+OUTPUT=$(run_and_capture "$DOGFOOD_INVENTORY" --manifest "$MANIFEST" --vercel-projects "example-team=$VERCEL_PROJECTS" --vercel-projects "example-admin=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT" --requested alpha,bravo,canary-self --now 2026-06-12T00:00:00Z --json --strict)
 assert_json_equals "$OUTPUT" ".summary.covered" "2" "json counts covered services"
 assert_json_equals "$OUTPUT" ".summary.partial" "1" "json counts partial services"
 assert_json_equals "$OUTPUT" ".summary.blocked" "1" "json counts blocked services"
@@ -360,7 +368,7 @@ assert_json_equals "$OUTPUT" ".surfaces[] | select(.service == \"charlie\") | .r
 assert_json_equals "$OUTPUT" ".surfaces[] | select(.service == \"charlie\") | .coverage" "blocked" "planned receipt does not create coverage"
 
 echo "Test 3: dogfood-inventory strict fails on unregistered deployment"
-OUTPUT=$(run_failure "$DOGFOOD_INVENTORY" --manifest "$MANIFEST" --vercel-projects "misty-step=$VERCEL_ROGUE" --vercel-projects "adminifi-growth=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT" --requested alpha,bravo,canary-self --now 2026-06-12T00:00:00Z --strict)
+OUTPUT=$(run_failure "$DOGFOOD_INVENTORY" --manifest "$MANIFEST" --vercel-projects "example-team=$VERCEL_ROGUE" --vercel-projects "example-admin=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT" --requested alpha,bravo,canary-self --now 2026-06-12T00:00:00Z --strict)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "strict unregistered deployment exits non-zero"
@@ -368,21 +376,21 @@ assert_contains "$BODY" "unregistered_deployment" "strict output names unregiste
 assert_contains "$BODY" "rogue" "strict output names rogue project"
 
 echo "Test 4: dogfood-inventory strict fails on missing requested service"
-OUTPUT=$(run_failure "$DOGFOOD_INVENTORY" --manifest "$MANIFEST" --vercel-projects "misty-step=$VERCEL_PROJECTS" --vercel-projects "adminifi-growth=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT" --requested alpha,missing --now 2026-06-12T00:00:00Z --strict)
+OUTPUT=$(run_failure "$DOGFOOD_INVENTORY" --manifest "$MANIFEST" --vercel-projects "example-team=$VERCEL_PROJECTS" --vercel-projects "example-admin=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT" --requested alpha,missing --now 2026-06-12T00:00:00Z --strict)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "missing requested registry entry exits non-zero"
 assert_contains "$BODY" "missing_requested_registry_entry" "strict output names missing requested service"
 
 echo "Test 5: dogfood-inventory rejects invalid registry shape"
-OUTPUT=$(run_failure "$DOGFOOD_INVENTORY" --manifest "$INVALID_MANIFEST" --vercel-projects "misty-step=$VERCEL_PROJECTS" --vercel-projects "adminifi-growth=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT")
+OUTPUT=$(run_failure "$DOGFOOD_INVENTORY" --manifest "$INVALID_MANIFEST" --vercel-projects "example-team=$VERCEL_PROJECTS" --vercel-projects "example-admin=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT")
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "2" "invalid registry exits non-zero"
 assert_contains "$BODY" "invalid dogfood registry shape" "invalid registry explains schema failure"
 
 echo "Test 6: dogfood-inventory strict fails stale evidence and singular completed-ticket next actions"
-OUTPUT=$(run_failure "$DOGFOOD_INVENTORY" --manifest "$STALE_MANIFEST" --vercel-projects "misty-step=$VERCEL_EMPTY" --vercel-projects "adminifi-growth=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT" --requested stale --now 2026-06-14T00:00:00Z --max-evidence-age-hours 24 --strict)
+OUTPUT=$(run_failure "$DOGFOOD_INVENTORY" --manifest "$STALE_MANIFEST" --vercel-projects "example-team=$VERCEL_EMPTY" --vercel-projects "example-admin=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT" --requested stale --now 2026-06-14T00:00:00Z --max-evidence-age-hours 24 --strict)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "stale registry evidence exits non-zero"
@@ -392,7 +400,7 @@ assert_contains "$BODY" "completed_ticket_next_action" "strict output names comp
 echo "Test 7: dogfood-inventory supports no-fixture collector path"
 STUB_BIN="$TMPDIR_TEST/bin"
 setup_stubbed_collectors "$STUB_BIN"
-OUTPUT=$(PATH="$STUB_BIN:$PATH" run_and_capture "$DOGFOOD_INVENTORY" --manifest "$MANIFEST" --local-root "$LOCAL_ROOT" --requested alpha,bravo,canary-self --now 2026-06-12T00:00:00Z --json --strict)
+OUTPUT=$(PATH="$STUB_BIN:$PATH" run_and_capture "$DOGFOOD_INVENTORY" --manifest "$MANIFEST" --vercel-scope example-team --vercel-scope example-admin --local-root "$LOCAL_ROOT" --requested alpha,bravo,canary-self --now 2026-06-12T00:00:00Z --json --strict)
 assert_json_equals "$OUTPUT" ".summary.strict_failures" "0" "stubbed live collectors satisfy strict mode"
 assert_json_equals "$OUTPUT" ".collector_errors | length" "0" "stubbed live collectors avoid collector errors"
 assert_json_equals "$OUTPUT" ".surfaces[] | select(.service == \"canary-self\") | .deployment_seen" "true" "stubbed Fly collector joins active self service"

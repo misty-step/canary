@@ -87,7 +87,7 @@ write_manifest() {
       "health_url": "https://alpha.example/health",
       "last_checked_at": "2026-06-11T00:00:00Z",
       "failure_mode": "No current blocker.",
-      "owner": "misty-step",
+      "owner": "example-org",
       "next_action": "Keep enrolled."
     },
     {
@@ -98,7 +98,7 @@ write_manifest() {
       "health_url": "https://bravo.example/health",
       "last_checked_at": "2026-06-11T00:00:00Z",
       "failure_mode": "No current blocker.",
-      "owner": "misty-step",
+      "owner": "example-org",
       "next_action": "Keep enrolled."
     },
     {
@@ -109,7 +109,7 @@ write_manifest() {
       "health_url": "https://charlie.example/health",
       "last_checked_at": "2026-06-11T00:00:00Z",
       "failure_mode": "Waiting on a public health surface.",
-      "owner": "misty-step",
+      "owner": "example-org",
       "next_action": "Verify the public health URL."
     },
     {
@@ -120,7 +120,7 @@ write_manifest() {
       "health_url": null,
       "last_checked_at": "2026-06-11T00:00:00Z",
       "failure_mode": "No health route exists.",
-      "owner": "misty-step",
+      "owner": "example-org",
       "next_action": "Add a health route."
     },
     {
@@ -131,7 +131,7 @@ write_manifest() {
       "health_url": null,
       "last_checked_at": "2026-06-11T00:00:00Z",
       "failure_mode": "Desktop app.",
-      "owner": "misty-step",
+      "owner": "example-org",
       "next_action": "Use monitor check-ins."
     },
     {
@@ -142,7 +142,7 @@ write_manifest() {
       "health_url": "https://canary.example/healthz",
       "last_checked_at": "2026-06-11T00:00:00Z",
       "failure_mode": "Fixture ignores self target.",
-      "owner": "misty-step",
+      "owner": "example-org",
       "next_action": "No fixture action."
     }
   ]
@@ -164,7 +164,7 @@ write_missing_manifest() {
       "health_url": "https://alpha.example/health",
       "last_checked_at": "2026-06-11T00:00:00Z",
       "failure_mode": "No current blocker.",
-      "owner": "misty-step",
+      "owner": "example-org",
       "next_action": "Keep enrolled."
     },
     {
@@ -175,7 +175,7 @@ write_missing_manifest() {
       "health_url": "https://missing.example/health",
       "last_checked_at": "2026-06-11T00:00:00Z",
       "failure_mode": "Target is not enrolled.",
-      "owner": "misty-step",
+      "owner": "example-org",
       "next_action": "Enroll the target."
     },
     {
@@ -186,7 +186,7 @@ write_missing_manifest() {
       "health_url": "https://canary.example/healthz",
       "last_checked_at": "2026-06-11T00:00:00Z",
       "failure_mode": "Fixture ignores self target.",
-      "owner": "misty-step",
+      "owner": "example-org",
       "next_action": "No fixture action."
     }
   ]
@@ -208,7 +208,7 @@ write_invalid_manifest() {
       "health_url": null,
       "last_checked_at": "2026-06-11T00:00:00Z",
       "failure_mode": "Active services require a health URL.",
-      "owner": "misty-step",
+      "owner": "example-org",
       "next_action": "Fix schema."
     }
   ]
@@ -230,7 +230,7 @@ write_stale_manifest() {
       "health_url": "https://alpha.example/health",
       "last_checked_at": "2026-06-15T00:00:00Z",
       "failure_mode": "Old evidence.",
-      "owner": "misty-step",
+      "owner": "example-org",
       "next_action": "Finish ticket 038."
     }
   ]
@@ -321,6 +321,15 @@ echo "Test 1: dogfood-audit help"
 OUTPUT=$(run_and_capture "$DOGFOOD_AUDIT" --help)
 assert_contains "$OUTPUT" "Usage: bin/dogfood-audit" "shows dogfood-audit usage"
 assert_contains "$OUTPUT" "--json" "documents json output"
+assert_contains "$OUTPUT" ".canary/dogfood/owned_services.json" "documents instance-local registry"
+
+echo "Test 1b: dogfood-audit fails cleanly without local registry"
+setup_stubbed_curl
+OUTPUT=$(CANARY_ENDPOINT=https://canary.example CANARY_API_KEY=sk_test run_failure "$DOGFOOD_AUDIT" --now 2026-06-12T00:00:00Z)
+STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
+BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
+assert_exit_code "$STATUS" "1" "missing default registry exits non-zero"
+assert_contains "$BODY" ".canary/dogfood/owned_services.json" "missing registry points to instance-local path"
 
 echo "Test 2: dogfood-audit renders registry states"
 setup_stubbed_curl

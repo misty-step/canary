@@ -2,6 +2,11 @@
 
 Date: 2026-06-11
 
+Status: historical Misty Step evidence snapshot. Current clean-room operators
+should use `docs/networked-service-dogfooding.md` and
+`priv/dogfood/owned_services.example.json`; do not treat the service names or
+Vercel scopes below as product defaults.
+
 ## Goal
 
 Every deployed owned application should be observable through Canary, and
@@ -13,7 +18,7 @@ JSON API, and eventually MCP server over the same read/admin API that agents
 use. A browser dashboard stays intentionally out of scope unless a later ticket
 finds a forcing function that the agent surface cannot satisfy.
 
-## Current Evidence
+## Historical Evidence
 
 Commands run during the design pass:
 

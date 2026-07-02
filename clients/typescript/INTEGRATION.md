@@ -31,8 +31,8 @@ npm install @canary-obs/sdk
 In `.env.local` and your deployment platform:
 ```dotenv
 CANARY_API_KEY=sk_live_...
-CANARY_ENDPOINT=https://canary-obs.fly.dev
-NEXT_PUBLIC_CANARY_ENDPOINT=https://canary-obs.fly.dev
+CANARY_ENDPOINT=https://your-canary.example
+NEXT_PUBLIC_CANARY_ENDPOINT=https://your-canary.example
 ```
 
 `CANARY_API_KEY` is for server-side ingest. Do not expose raw Canary API keys in
@@ -48,7 +48,7 @@ export { onRequestError } from "@canary-obs/sdk/nextjs";
 
 export function register() {
   initCanary({
-    endpoint: process.env.CANARY_ENDPOINT ?? "https://canary-obs.fly.dev",
+    endpoint: process.env.CANARY_ENDPOINT ?? "https://your-canary.example",
     apiKey: process.env.CANARY_API_KEY ?? "",
     service: "my-app",
     environment: process.env.NODE_ENV ?? "production",
@@ -95,7 +95,7 @@ export async function POST(request: Request) {
   const { service: _service, environment: _environment, ...event } = payload;
 
   const response = await fetch(
-    `${process.env.CANARY_ENDPOINT ?? "https://canary-obs.fly.dev"}/api/v1/errors`,
+    `${process.env.CANARY_ENDPOINT ?? "https://your-canary.example"}/api/v1/errors`,
     {
       method: "POST",
       headers: {
