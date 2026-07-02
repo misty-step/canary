@@ -304,10 +304,22 @@
   }
 
   function loadingView() {
+    const card = `
+      <div class="service-row">
+        <span class="ae-skeleton">status placeholder</span>
+        <span class="ae-skeleton">metric placeholder</span>
+      </div>
+    `;
     return `
       <section class="view">
-        <h1 class="view-title">Reading Canary</h1>
-        <p class="summary">Loading current state.</p>
+        <p class="ae-sr" role="status">Reading Canary — loading current state.</p>
+        <div class="view-head">
+          <div>
+            <h1 class="ae-skeleton view-title">Reading Canary</h1>
+            <p class="ae-skeleton summary">Loading current state, one moment.</p>
+          </div>
+        </div>
+        <div class="wall">${card}${card}${card}</div>
       </section>
     `;
   }
@@ -438,7 +450,7 @@
         <div class="detail-columns">
           <section>
             <div class="eyebrow">Timeline</div>
-            ${detail.recent_timeline_events?.length ? detail.recent_timeline_events.map(renderTimelineEvent).join("") : empty("No recent timeline events.")}
+            ${detail.recent_timeline_events?.length ? `<ol class="ae-trail">${detail.recent_timeline_events.map(renderTimelineEvent).join("")}</ol>` : empty("No recent timeline events.")}
           </section>
           <section>
             <div class="eyebrow">Probe evidence</div>
@@ -446,8 +458,7 @@
           </section>
           <section>
             <div class="eyebrow">Agent activity</div>
-            ${renderClaim(claim)}
-            ${detail.annotations?.length ? detail.annotations.map(renderActivity).join("") : empty("No writeback annotations yet.")}
+            ${claim || detail.annotations?.length ? `<ol class="ae-trail">${renderClaim(claim)}${detail.annotations?.length ? detail.annotations.map(renderActivity).join("") : ""}</ol>` : empty("No writeback annotations yet.")}
           </section>
         </div>
       </div>
@@ -456,13 +467,13 @@
 
   function renderTimelineEvent(event) {
     return `
-      <div class="timeline-row">
-        <div class="time">${escapeHtml(formatTime(event.created_at))}</div>
-        <div>
-          <div class="event-name">${escapeHtml(event.event)}</div>
-          <div class="meta">${escapeHtml(event.summary || "")}</div>
+      <li class="ae-trail-item">
+        <div class="ae-trail-head">
+          <span class="ae-trail-time">${escapeHtml(formatTime(event.created_at))}</span>
+          <span class="ae-trail-who">${escapeHtml(event.event)}</span>
         </div>
-      </div>
+        <div class="ae-trail-body">${escapeHtml(event.summary || "")}</div>
+      </li>
     `;
   }
 
@@ -491,32 +502,31 @@
     }
     const lines = [
       ["claim", claim.id],
-      ["owner", claim.owner],
       ["state", claim.state],
       ["purpose", claim.purpose],
       ["updated", formatTime(claim.updated_at)],
     ];
     return `
-      <div class="activity-row">
-        <div class="time">claim</div>
-        <div>
-          <div class="strong">${escapeHtml(claim.owner || "agent")}</div>
-          <div class="metadata">${escapeHtml(lines.map(([key, value]) => `${key}: ${value || "n/a"}`).join("\n"))}</div>
+      <li class="ae-trail-item is-active">
+        <div class="ae-trail-head">
+          <span class="ae-trail-time">claim</span>
+          <span class="ae-trail-who">${escapeHtml(claim.owner || "agent")}</span>
         </div>
-      </div>
+        <div class="ae-trail-body metadata">${escapeHtml(lines.map(([key, value]) => `${key}: ${value || "n/a"}`).join("\n"))}</div>
+      </li>
     `;
   }
 
   function renderActivity(annotation) {
     return `
-      <div class="activity-row">
-        <div class="time">${escapeHtml(formatTime(annotation.created_at))}</div>
-        <div>
-          <div class="strong">${escapeHtml(annotation.agent || "agent")}</div>
-          <div>${escapeHtml(annotation.action || "annotated")}</div>
-          ${annotation.metadata ? `<div class="metadata">${escapeHtml(JSON.stringify(annotation.metadata, null, 2))}</div>` : ""}
+      <li class="ae-trail-item">
+        <div class="ae-trail-head">
+          <span class="ae-trail-time">${escapeHtml(formatTime(annotation.created_at))}</span>
+          <span class="ae-trail-who">${escapeHtml(annotation.agent || "agent")}</span>
         </div>
-      </div>
+        <div class="ae-trail-body">${escapeHtml(annotation.action || "annotated")}</div>
+        ${annotation.metadata ? `<div class="metadata">${escapeHtml(JSON.stringify(annotation.metadata, null, 2))}</div>` : ""}
+      </li>
     `;
   }
 

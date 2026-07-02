@@ -1,4 +1,6 @@
 :root {
+  /* accent steering deferred to the Fable design-catalogue pass —
+     kit default (unchanged) until that direction lands */
   --ae-accent: #2643d0;
   --ae-accent-dark: #8c9eff;
 }
@@ -143,8 +145,7 @@ button {
 .row-label,
 .empty,
 .problem,
-.tag,
-.time {
+.tag {
   font-size: 13px;
   color: var(--ae-ink-muted);
 }
@@ -195,8 +196,6 @@ button {
 .service-row,
 .data-row,
 .incident-row,
-.activity-row,
-.timeline-row,
 .signal-row {
   border-bottom: 1px solid var(--ae-line);
   padding: var(--ae-space-3) 0;
@@ -299,38 +298,20 @@ button {
 .detail-columns > *,
 .row-grid > *,
 .service-row > *,
-.timeline-row > *,
-.signal-row > *,
-.activity-row > * {
+.signal-row > * {
   min-width: 0;
 }
 
 .strong,
-.event-name,
 .summary,
 .meta,
-.signal-row,
-.timeline-row,
-.activity-row {
+.signal-row {
   overflow-wrap: anywhere;
 }
 
-.event-name {
-  font-family: var(--ae-font-mono);
-  font-size: 13px;
-  font-weight: var(--ae-w-medium);
-}
-
-.activity-row {
-  display: grid;
-  grid-template-columns: 8rem 1fr;
-  gap: var(--ae-space-4);
-}
-
-.timeline-row {
-  display: grid;
-  grid-template-columns: 8rem 1fr;
-  gap: var(--ae-space-4);
+.ae-trail-body,
+.ae-trail-who {
+  overflow-wrap: anywhere;
 }
 
 .metadata {
@@ -417,9 +398,7 @@ button {
 
   .view-head,
   .detail-grid,
-  .row-grid,
-  .activity-row,
-  .timeline-row {
+  .row-grid {
     grid-template-columns: 1fr;
   }
 

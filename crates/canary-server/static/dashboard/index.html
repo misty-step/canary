@@ -5,8 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Canary</title>
     <link rel="icon" href="data:,">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=Geist+Mono:wght@100..900&display=swap">
     <link rel="stylesheet" href="/ui/aesthetic.css">
     <link rel="stylesheet" href="/ui/dashboard.css">
+    <script>
+      try {
+        var m = sessionStorage.getItem("canary.dashboard.mode");
+        if (m === "dark" || m === "light") {
+          document.documentElement.dataset.aeMode = m;
+        }
+      } catch (e) {}
+    </script>
     <script defer src="/ui/app.js"></script>
   </head>
   <body>
