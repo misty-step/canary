@@ -75,7 +75,7 @@ visible until a focused PR archives them with evidence.
 | 052 | Runnable MCP server | P1 | done | M |
 | 053 | Human alert delivery (decision) | P2 | pending | M |
 | 054 | Serving model: self-hosted, managed-later, not multi-tenant SaaS | P2 | pending | S |
-| 055 | Refresh PRINCIPLES.md examples to Rust+SQLite (post-cutover) | P3 | pending | S |
+| 055 | Refresh PRINCIPLES.md examples to Rust+SQLite (post-cutover) | P3 | done | S |
 | 056 | Lower /api/v1/report store-lock contention + dedup SLI owner-scope | P2 | pending | M |
 | 057 | Static MCP manifest parity | P1 | done | S |
 | 060 | Cold-operator deploy path | P0 | done | XL |
