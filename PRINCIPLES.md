@@ -38,10 +38,10 @@ Pretending these limitations don't exist is worse than documenting them. Users c
 
 Following Ousterhout's *A Philosophy of Software Design*:
 
-- `Ingest.ingest/1` — one function hides validation, grouping, persistence, webhook dispatch
-- `StateMachine.transition/4` — pure function, no side effects, table-driven tests
-- `Grouping.compute_group_hash/1` — three strategies behind one interface
-- ETS services (`RateLimiter`, `DedupCache`, `CircuitBreaker`, `Cooldown`) — GenServer lifecycle + ETS internals hidden behind `check/2`, `mark/1`, `open?/1`
+- `canary_ingest::ingest` — one function hides validation, grouping, persistence, webhook dispatch
+- `canary_core::health::state_machine::transition` — pure function, no side effects, table-driven tests
+- `canary_core::ingest::grouping` — three hash strategies (fingerprint, stack, template) behind one `Grouping` struct
+- `canary_store::Store` — the single-writer SQLite boundary hides migrations, schema validation, and all persistence behind one owned handle
 
 The interface should be simple even when the implementation is complex.
 
@@ -55,22 +55,21 @@ When the system that monitors your infrastructure is itself unpredictable, you h
 
 Every line fights for its life. The right answer is often "don't build that."
 
-- No MCP server (API + CLI + skill files are sufficient)
-- No dashboard (agents are the UI)
+- No dashboard (agents are the UI; the operator dashboard was deleted, see `docs/operator-dashboard-removal.md`)
 - No built-in integrations (webhooks are generic)
-- No multi-tenant support (internal tool)
+- No multi-tenant support (single-tenant binary is the product)
 - No log aggregation (structured errors only)
 
-Features that aren't built can't break.
+Features that aren't built can't break. The MCP stdio server and CLI JSON envelope exist because they are thin adapters over the same HTTP API — not a second product surface.
 
 ## 8. Separation of Stateful and Stateless
 
-GenServers own stateful, cadence-sensitive work (probe scheduling, consecutive failure tracking, flap detection). Oban owns stateless, retry-oriented work (webhook delivery, retention pruning, TLS scanning).
+In-process worker threads own stateful, cadence-sensitive work (target probes, monitor-overdue evaluation, retention pruning, TLS scanning) through dedicated `*Lifecycle` runtime structs in `canary-server`. Webhook delivery leases durable job rows from `canary-store` and drains them with backoff.
 
-This isn't arbitrary — it follows from the nature of the work. Probes need monotonic scheduling and in-memory counters. Webhooks need exponential backoff and persistence across restarts.
+This isn't arbitrary — it follows from the nature of the work. Probes need monotonic scheduling and in-memory counters. Webhook delivery needs persistence across restarts and at-least-once semantics with `executing`-lease recovery.
 
 ## 9. Design for Migration, Don't Build for It
 
-The data model includes `region` fields for future multi-region support. Ecto abstraction preserves the Postgres migration path. But v1 doesn't build multi-region or HA — it just doesn't block it.
+The data model is SQLite (WAL, one explicit writer, `user_version` schema stamping) — small, durable, and Litestream-replicated. The store's hand-rolled migrations are fail-closed on partial existing schemas before stamping. But v1 doesn't build clustering or HA — it just doesn't block a future move to a different store if scale ever demands it.
 
 Design decisions that keep future options open cost nothing. Building for hypothetical requirements costs everything.
