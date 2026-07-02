@@ -41,14 +41,20 @@ pub struct ServiceSliSummary {
     pub trajectory: Option<ServiceSliTrajectory>,
 }
 
-/// Minimum check / check-in count, in both the current and prior window, before
-/// an availability delta is trusted. Below this floor a single failed probe
-/// would dominate the ratio, so the delta is nulled and the trajectory is
-/// marked `InsufficientSamples`.
+/// Absolute minimum check / check-in count, in both the current and prior
+/// window, before an availability delta is trusted. Below this floor a single
+/// failed probe would dominate the ratio, so the delta is nulled and the
+/// trajectory is marked `InsufficientSamples`.
 ///
-/// This is a deliberately coarse, fixed first-pass floor. A cadence-aware floor
-/// (scaled to each target's probe interval) is tracked by backlog ticket 058.
-pub const MIN_TRAJECTORY_SAMPLES: u64 = 20;
+/// This is a deliberately low absolute floor. The cadence-aware completeness
+/// check in [`availability_delta`] handles the case where one window is
+/// genuinely thin relative to the other.
+pub const MIN_TRAJECTORY_SAMPLES: u64 = 5;
+
+/// Minimum ratio between the smaller and larger window sample counts for the
+/// trajectory to be considered complete. If one window has fewer than this
+/// fraction of the other's samples, the data is too thin to trust the delta.
+const TRAJECTORY_COMPLETENESS_RATIO: f64 = 0.5;
 
 /// Whether a service's availability trajectory is backed by enough samples to
 /// trust.
@@ -280,7 +286,8 @@ fn build_trajectory(
 
 /// Compute the availability delta for one signal: `(delta, prior_ratio,
 /// sample_basis)`. Returns `(None, None, None)` when either window is below the
-/// sample floor (prior counts are `double_width − current`).
+/// absolute sample floor or when the windows are too uneven (completeness
+/// ratio check). Prior counts are `double_width − current`.
 fn availability_delta(
     current_successful: u64,
     current_total: u64,
@@ -291,6 +298,12 @@ fn availability_delta(
     let prior_successful = double_successful.saturating_sub(current_successful);
 
     if current_total < MIN_TRAJECTORY_SAMPLES || prior_total < MIN_TRAJECTORY_SAMPLES {
+        return (None, None, None);
+    }
+
+    let larger = current_total.max(prior_total);
+    let smaller = current_total.min(prior_total);
+    if larger > 0 && (smaller as f64 / larger as f64) < TRAJECTORY_COMPLETENESS_RATIO {
         return (None, None, None);
     }
 
@@ -916,8 +929,8 @@ mod tests {
         let mut store = migrated_store()?;
         insert_traj_target(&mut store, "TGT-thin", "thin")?;
 
-        // Ten checks per window, below MIN_TRAJECTORY_SAMPLES (20).
-        for minute in 0..10 {
+        // Three checks per window, below MIN_TRAJECTORY_SAMPLES (5).
+        for minute in 0..3 {
             insert_check(
                 &store,
                 "TGT-thin",
@@ -944,6 +957,84 @@ mod tests {
         assert!(traj.targets_availability_delta.is_none());
         assert!(traj.prior_targets_availability_ratio.is_none());
         assert_eq!(traj.sample_basis, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn service_sli_trajectory_passes_low_cadence_complete_windows()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        insert_traj_target(&mut store, "TGT-slow", "slow")?;
+
+        // 5-minute cadence over 1h: 12 checks per window.
+        // Below the old fixed floor of 20, but above the new floor of 5
+        // and both windows are complete (ratio 1.0).
+        for minute in (0..60).step_by(5) {
+            insert_check(
+                &store,
+                "TGT-slow",
+                &format!("2026-05-28T20:{minute:02}:00Z"),
+                "success",
+            )?;
+            insert_check(
+                &store,
+                "TGT-slow",
+                &format!("2026-05-28T19:{minute:02}:00Z"),
+                "success",
+            )?;
+        }
+
+        let now = OffsetDateTime::parse("2026-05-28T21:00:00Z", &Rfc3339)?;
+        let summaries = store.service_sli_with_trajectory_at("1h", now)?;
+        let traj = summaries
+            .iter()
+            .find(|summary| summary.service == "slow")
+            .and_then(|summary| summary.trajectory)
+            .ok_or("missing slow trajectory")?;
+
+        assert_eq!(traj.status, TrajectoryStatus::Ok);
+        assert!(traj.targets_availability_delta.is_some());
+        assert!(traj.prior_targets_availability_ratio.is_some());
+        assert_eq!(traj.sample_basis, 12);
+        Ok(())
+    }
+
+    #[test]
+    fn service_sli_trajectory_rejects_uneven_windows()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        insert_traj_target(&mut store, "TGT-uneven", "uneven")?;
+
+        // Current window: 10 checks (complete for 6m cadence).
+        for minute in 0..10 {
+            insert_check(
+                &store,
+                "TGT-uneven",
+                &format!("2026-05-28T20:{minute:02}:00Z"),
+                "success",
+            )?;
+        }
+        // Prior window: 30 checks (complete for 2m cadence).
+        // The ratio 10/30 = 0.33 < 0.5 completeness threshold.
+        for minute in 0..30 {
+            insert_check(
+                &store,
+                "TGT-uneven",
+                &format!("2026-05-28T19:{minute:02}:00Z"),
+                "success",
+            )?;
+        }
+
+        let now = OffsetDateTime::parse("2026-05-28T21:00:00Z", &Rfc3339)?;
+        let summaries = store.service_sli_with_trajectory_at("1h", now)?;
+        let traj = summaries
+            .iter()
+            .find(|summary| summary.service == "uneven")
+            .and_then(|summary| summary.trajectory)
+            .ok_or("missing uneven trajectory")?;
+
+        assert_eq!(traj.status, TrajectoryStatus::InsufficientSamples);
+        assert!(traj.targets_availability_delta.is_none());
         Ok(())
     }
 
