@@ -1,3 +1,10 @@
+# [1.3.0](https://github.com/misty-step/canary/compare/v1.2.0...v1.3.0) (2026-07-02)
+
+
+### Features
+
+* **fleet:** verify factory coverage readback ([#183](https://github.com/misty-step/canary/issues/183)) ([0d21d65](https://github.com/misty-step/canary/commit/0d21d657d0b7dd572850d0a421e11a62f2014734))
+
 # [1.2.0](https://github.com/misty-step/canary/compare/v1.1.0...v1.2.0) (2026-07-02)
 
 
