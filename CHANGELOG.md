@@ -1,3 +1,10 @@
+# [1.7.0](https://github.com/misty-step/canary/compare/v1.6.0...v1.7.0) (2026-07-02)
+
+
+### Features
+
+* **058:** make SLI trajectory sample floor cadence-aware ([#214](https://github.com/misty-step/canary/issues/214)) ([d235ce3](https://github.com/misty-step/canary/commit/d235ce3b8f740ea653dd74f3441cbb8c651d4e7b)), closes [#058](https://github.com/misty-step/canary/issues/058)
+
 # [1.6.0](https://github.com/misty-step/canary/compare/v1.5.0...v1.6.0) (2026-07-02)
 
 
