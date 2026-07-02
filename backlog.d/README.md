@@ -32,7 +32,7 @@ visible until a focused PR archives them with evidence.
 | 064 | Trustworthy release/upgrade | P1 | pending | L |
 | 065 | Runtime hardening | P1 | pending | L |
 | 066 | Consolidation and archaeology deletion | P2 | pending | XL |
-| 058 | Cadence-aware SLI trajectory sample floor | P2 | pending | M |
+| 058 | Cadence-aware SLI trajectory sample floor | P2 | done | M |
 | 082 | Triage GitHub issue #129 | P3 | done | S |
 | 070 | Archive shipped backlog tickets | P3 | done | S |
 | 072 | Webhook receiver conformance fixtures | P1 | done | M |
@@ -87,7 +87,7 @@ visible until a focused PR archives them with evidence.
 | 057 | Static MCP manifest parity | P1 | done | S |
 | 060 | Cold-operator deploy path | P0 | done | XL |
 | 061 | Fleet plumb-in | P0 | done | L |
-| 058 | Cadence-aware SLI trajectory sample floor | P2 | pending | M |
+| 058 | Cadence-aware SLI trajectory sample floor | P2 | done | M |
 | 059 | Bump anyhow after RUSTSEC-2026-0190 | P2 | done | S |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
