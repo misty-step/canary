@@ -580,3 +580,149 @@ fn within_active_window(timestamp: &str, now: &str) -> bool {
     };
     (now - timestamp).whole_seconds() <= ACTIVE_WINDOW_SECONDS
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn test_incident() -> IncidentRow {
+        IncidentRow {
+            id: "INC-example".to_owned(),
+            tenant_id: "".to_owned(),
+            project_id: "".to_owned(),
+            service: "canary".to_owned(),
+            state: "investigating".to_owned(),
+            severity: "warning".to_owned(),
+            title: None,
+            opened_at: "2026-07-01T00:00:00Z".to_owned(),
+            resolved_at: None,
+        }
+    }
+
+    fn test_signal() -> SignalRow {
+        SignalRow {
+            id: 1,
+            signal_type: "error_group".to_owned(),
+            signal_ref: "ERR-example".to_owned(),
+            attached_at: "2026-07-01T00:00:00Z".to_owned(),
+            resolved_at: None,
+        }
+    }
+
+    const NOW: &str = "2026-07-01T00:00:00Z";
+
+    #[test]
+    fn payload_has_expected_top_level_keys() {
+        let payload = incident_payload("incident.opened", &test_incident(), &[test_signal()], NOW);
+        let obj = match payload.as_object() {
+            Some(map) => map,
+            None => return,
+        };
+        let mut keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "event",
+                "incident",
+                "project_id",
+                "replay",
+                "schema_version",
+                "signal",
+                "subject",
+                "tenant_id",
+                "timestamp"
+            ]
+        );
+    }
+
+    #[test]
+    fn schema_version_is_stable_string() {
+        let payload = incident_payload("incident.opened", &test_incident(), &[test_signal()], NOW);
+        assert_eq!(payload["schema_version"], "canary.incident_event.v1");
+    }
+
+    #[test]
+    fn subject_shape_is_pinned() {
+        let payload = incident_payload("incident.opened", &test_incident(), &[test_signal()], NOW);
+        let subject = &payload["subject"];
+        assert_eq!(subject["type"], "incident");
+        assert_eq!(subject["id"], "INC-example");
+        assert_eq!(subject["service"], "canary");
+        assert!(
+            subject.get("environment").is_none(),
+            "subject.environment is not in the live emitter; adding it is a breaking change"
+        );
+    }
+
+    #[test]
+    fn signal_shape_with_attached_signal() {
+        let payload = incident_payload("incident.opened", &test_incident(), &[test_signal()], NOW);
+        let signal = &payload["signal"];
+        assert_eq!(signal["kind"], "error_group");
+        assert_eq!(signal["fingerprint"], "ERR-example");
+        assert_eq!(signal["severity"], "warning");
+        assert_eq!(signal["observed_at"], "2026-07-01T00:00:00Z");
+    }
+
+    #[test]
+    fn signal_shape_with_no_signals() {
+        let payload = incident_payload("incident.opened", &test_incident(), &[], NOW);
+        let signal = &payload["signal"];
+        assert_eq!(signal["kind"], "incident");
+        assert_eq!(signal["fingerprint"], "INC-example");
+        assert_eq!(signal["severity"], "warning");
+        assert_eq!(signal["observed_at"], NOW);
+    }
+
+    #[test]
+    fn replay_urls_are_pinned() {
+        let payload = incident_payload("incident.opened", &test_incident(), &[test_signal()], NOW);
+        let replay = &payload["replay"];
+        assert_eq!(
+            replay["timeline_url"],
+            "/api/v1/timeline?service=canary&window=1h"
+        );
+        assert_eq!(replay["report_url"], "/api/v1/report?window=1h");
+        assert_eq!(replay["incident_url"], "/api/v1/incidents/INC-example");
+    }
+
+    #[test]
+    fn incident_block_is_pinned() {
+        let payload = incident_payload("incident.opened", &test_incident(), &[test_signal()], NOW);
+        let incident = &payload["incident"];
+        assert_eq!(incident["id"], "INC-example");
+        assert_eq!(incident["service"], "canary");
+        assert_eq!(incident["state"], "investigating");
+        assert_eq!(incident["severity"], "warning");
+        assert_eq!(incident["title"], Value::Null);
+        assert_eq!(incident["opened_at"], "2026-07-01T00:00:00Z");
+        assert_eq!(incident["resolved_at"], Value::Null);
+
+        let signals = match incident["signals"].as_array() {
+            Some(arr) => arr,
+            None => return,
+        };
+        assert_eq!(signals.len(), 1);
+        assert_eq!(signals[0]["signal_type"], "error_group");
+        assert_eq!(signals[0]["signal_ref"], "ERR-example");
+        assert_eq!(signals[0]["attached_at"], "2026-07-01T00:00:00Z");
+        assert_eq!(signals[0]["resolved_at"], Value::Null);
+    }
+
+    #[test]
+    fn timestamp_is_pinned() {
+        let payload = incident_payload("incident.opened", &test_incident(), &[test_signal()], NOW);
+        assert_eq!(payload["timestamp"], NOW);
+    }
+
+    #[test]
+    fn mutating_schema_version_breaks_test() {
+        let payload = incident_payload("incident.opened", &test_incident(), &[test_signal()], NOW);
+        assert_ne!(
+            payload["schema_version"], "canary.incident_event.v2",
+            "schema_version bump is a breaking change requiring lockstep BB migration"
+        );
+    }
+}
