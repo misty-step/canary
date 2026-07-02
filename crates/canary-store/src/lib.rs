@@ -22,6 +22,7 @@ mod query;
 mod rate_limits;
 mod retention;
 mod schema;
+mod scope;
 mod seeds;
 mod service_sli;
 mod telemetry;
