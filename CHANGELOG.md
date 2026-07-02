@@ -1,3 +1,10 @@
+# [1.4.0](https://github.com/misty-step/canary/compare/v1.3.0...v1.4.0) (2026-07-02)
+
+
+### Features
+
+* **responder:** add scoped agent writeback ([#184](https://github.com/misty-step/canary/issues/184)) ([845f90e](https://github.com/misty-step/canary/commit/845f90e81fae63e30039b0251ac8b85aedc5d742))
+
 # [1.3.0](https://github.com/misty-step/canary/compare/v1.2.0...v1.3.0) (2026-07-02)
 
 
