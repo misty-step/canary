@@ -39,31 +39,59 @@ must query Canary before acting.
 ## Minimum Trigger Payload
 
 The webhook payload must be enough to route and replay, not enough to replace
-replay:
+replay. The shape below is the **actual live emitter output** as of
+2026-07-02, pinned by a conformance test in
+`crates/canary-store/src/incidents.rs`. A coordinated rename to a
+`subject`+`schema_version:1` form is a FUTURE migration requiring lockstep
+Bitterblossom changes (its task.toml filters on `/incident/service`).
 
 ```json
 {
   "schema_version": "canary.incident_event.v1",
   "event": "incident.opened",
+  "tenant_id": "",
+  "project_id": "",
   "subject": {
     "type": "incident",
     "id": "INC-example",
-    "service": "canary",
-    "environment": "production"
+    "service": "canary"
   },
   "signal": {
-    "kind": "error_group|target|monitor|telemetry_event",
-    "fingerprint": "sha256-or-stable-id",
-    "severity": "info|warning|error",
+    "kind": "error_group",
+    "fingerprint": "ERR-example",
+    "severity": "warning",
     "observed_at": "2026-07-01T00:00:00Z"
   },
   "replay": {
     "timeline_url": "/api/v1/timeline?service=canary&window=1h",
     "report_url": "/api/v1/report?window=1h",
     "incident_url": "/api/v1/incidents/INC-example"
-  }
+  },
+  "incident": {
+    "id": "INC-example",
+    "service": "canary",
+    "state": "investigating",
+    "severity": "warning",
+    "title": null,
+    "opened_at": "2026-07-01T00:00:00Z",
+    "resolved_at": null,
+    "signals": [
+      {
+        "signal_type": "error_group",
+        "signal_ref": "ERR-example",
+        "attached_at": "2026-07-01T00:00:00Z",
+        "resolved_at": null
+      }
+    ]
+  },
+  "timestamp": "2026-07-01T00:00:00Z"
 }
 ```
+
+Note: the `subject.environment` field referenced in earlier drafts of this
+contract is not present in the live emitter today. Bitterblossom should
+treat its absence as a report-only setup gap and query the missing value by
+subject id.
 
 If the current generic webhook payload lacks one of those fields, the
 Bitterblossom workload should treat that as a report-only setup gap and query
