@@ -43,3 +43,55 @@ pub(crate) fn window_params<'a>(
     }
     values
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owner_clause_with_owner_produces_scoped_fragment() {
+        let clause = owner_clause("error_groups", 2, Some(("tenant-a", "project-b")));
+        assert!(clause.contains("error_groups.tenant_id = ?2"));
+        assert!(clause.contains("error_groups.project_id = ?3"));
+    }
+
+    #[test]
+    fn owner_clause_without_owner_returns_empty_string() {
+        let clause = owner_clause("incidents", 1, None);
+        assert!(clause.is_empty());
+    }
+
+    #[test]
+    fn owner_clause_preserves_alias_and_first_parameter() {
+        let clause = owner_clause("g", 5, Some(("t", "p")));
+        assert!(clause.contains("g.tenant_id = ?5"));
+        assert!(clause.contains("g.project_id = ?6"));
+    }
+
+    #[test]
+    fn owner_params_with_owner_returns_both_values() {
+        let params = owner_params(Some(("tenant-a", "project-b")));
+        assert_eq!(params, vec!["tenant-a", "project-b"]);
+    }
+
+    #[test]
+    fn owner_params_without_owner_returns_empty_vec() {
+        let params = owner_params(None);
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn window_params_with_owner_returns_cutoff_tenant_project() {
+        let params = window_params("2026-07-01T00:00:00Z", Some(("tenant-a", "project-b")));
+        assert_eq!(
+            params,
+            vec!["2026-07-01T00:00:00Z", "tenant-a", "project-b"]
+        );
+    }
+
+    #[test]
+    fn window_params_without_owner_returns_cutoff_only() {
+        let params = window_params("2026-07-01T00:00:00Z", None);
+        assert_eq!(params, vec!["2026-07-01T00:00:00Z"]);
+    }
+}
