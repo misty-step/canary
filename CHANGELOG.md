@@ -1,3 +1,10 @@
+# [1.6.0](https://github.com/misty-step/canary/compare/v1.5.0...v1.6.0) (2026-07-02)
+
+
+### Features
+
+* **065:** adopt tracing for server startup and shutdown logging ([#211](https://github.com/misty-step/canary/issues/211)) ([1e1d53f](https://github.com/misty-step/canary/commit/1e1d53fb611a0e3a23673fe37e443eaf870ce05c)), closes [#065](https://github.com/misty-step/canary/issues/065)
+
 # [1.5.0](https://github.com/misty-step/canary/compare/v1.4.2...v1.5.0) (2026-07-02)
 
 
