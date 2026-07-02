@@ -22,9 +22,20 @@ targets, monitors, webhooks, query readback, and dogfood registry evidence.
 
 ## Step 1: Install
 
+The SDK is not yet published to npm (tracked in #051). Until publication,
+install from source:
+
 ```bash
-npm install @canary-obs/sdk
+# From the Canary repo, build the SDK:
+cd clients/typescript && npm install && npm run build
+
+# In your app, link it via file: (adjust the relative path):
+npm install file:../path/to/canary/clients/typescript
 ```
+
+`bin/canary integrate patch` adds `"@canary-obs/sdk": "^0.1.0"` to your
+`package.json` dependencies; replace that version specifier with the `file:`
+path above before running `npm install`, or the install will 404.
 
 ## Step 2: Add env vars
 
