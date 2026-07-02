@@ -25,6 +25,23 @@ is checking.
 | Alert plane | `/readyz` worker snapshots | Every required worker has `health: ok`, no backoff/circuit pressure, and no stale due-work pressure. A `pressured` worker can remain route-ready, but the witness reports a degraded alert plane and does not send the healthy check-in. |
 | Error readback | `GET /api/v1/query?service=canary&window=1h` | HTTP 200, service `canary`, and numeric `total_errors` |
 
+### Self-heal exception
+
+`$MONITOR`'s own check-in is the only thing that clears its overdue pressure.
+If `monitor_overdue` is impaired *solely* because `$MONITOR` itself (normally
+`canary-watchman`) is overdue — no other worker and no other monitor is
+unhealthy, confirmed via `GET /api/v1/status` — the witness sends the
+check-in anyway instead of skipping it. Without this, a single missed
+heartbeat becomes permanent: the overdue heartbeat keeps the alert plane
+impaired, and the impaired alert plane keeps blocking the only check-in that
+would resolve it (found live in production 2026-07-02, `canary-watchman`
+stuck overdue for 11+ hours because its own pressure had locked out its own
+recovery). Impairment involving any other worker or monitor still blocks the
+check-in exactly as before — this exception does not weaken the alert-plane
+bar for unrelated degradation, and does not change the reported `status`
+(it stays `degraded`, not `healthy`, until the next run confirms recovery).
+The receipt's `self_heal_check_in` field records when this fired.
+
 When all route and alert-plane signals are healthy, the witness sends an ingest check-in:
 
 ```json
