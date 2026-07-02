@@ -5565,7 +5565,7 @@ Vercel CLI completed
         let patched = integration_patch(&IntegrationInput {
             target: root.clone(),
             service: Some("vanity".to_owned()),
-            production_url: Some("https://www.phaedrus.io".to_owned()),
+            production_url: Some("https://www.example.com".to_owned()),
             platform_project: None,
             endpoint: DEFAULT_ENDPOINT.to_owned(),
         })?;
@@ -5595,7 +5595,7 @@ Vercel CLI completed
                 && change["status"] == "updated"
         }));
         assert_eq!(receipt["service"], "vanity");
-        assert_eq!(receipt["health_url"], "https://www.phaedrus.io/api/health");
+        assert_eq!(receipt["health_url"], "https://www.example.com/api/health");
         assert_eq!(receipt["verification_status"], "planned");
         assert_eq!(receipt["target_id"], Value::Null);
         assert_eq!(
@@ -5615,7 +5615,7 @@ Vercel CLI completed
                 "service": "vanity",
                 "environment": "production",
                 "canary_endpoint": DEFAULT_ENDPOINT,
-                "health_url": "https://www.phaedrus.io/api/health",
+                "health_url": "https://www.example.com/api/health",
                 "target_id": "TGT-existing",
                 "monitor_ids": ["MON-existing"],
                 "webhook_ids": ["WHK-existing"],
@@ -5629,7 +5629,7 @@ Vercel CLI completed
         integration_patch(&IntegrationInput {
             target: root.clone(),
             service: Some("vanity".to_owned()),
-            production_url: Some("https://www.phaedrus.io".to_owned()),
+            production_url: Some("https://www.example.com".to_owned()),
             platform_project: None,
             endpoint: DEFAULT_ENDPOINT.to_owned(),
         })?;
