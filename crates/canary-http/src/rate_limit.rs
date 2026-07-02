@@ -1,25 +1,21 @@
 //! HTTP rate-limit contracts.
 //!
-//! Phoenix keeps counters in ETS and the router decides which requests are
-//! limited. This module keeps the public policy and 429 problem shape in one
-//! place so the Axum runtime only has to maintain in-memory buckets.
+//! The Axum runtime maintains in-memory fixed-window buckets. This module
+//! keeps the public policy and 429 problem shape in one place.
 
 use serde_json::json;
 
 use crate::problem_details::{ProblemCode, ProblemDetails};
 
-/// Rate-limit buckets used by the Phoenix router and auth plug.
+/// Rate-limit buckets enforced by the router and auth pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RateLimitKind {
     /// Error and monitor check-in ingest routes.
     Ingest,
-    /// Read/query routes plus admin routes in Phoenix's query pipeline.
+    /// Read/query routes plus admin routes in the query pipeline.
     Query,
     /// Invalid-key attempts grouped by client identity.
     AuthFail,
-    /// Phoenix-defined burst bucket. Reserved for parity with the existing
-    /// limiter even though no current router path selects it.
-    Burst,
 }
 
 /// Fixed-window policy for one rate-limit bucket.
@@ -32,7 +28,7 @@ pub struct RateLimitPolicy {
 }
 
 impl RateLimitKind {
-    /// Return the Phoenix-compatible limit and window for this bucket.
+    /// Return the limit and window for this bucket.
     pub const fn policy(self) -> RateLimitPolicy {
         match self {
             Self::Ingest => RateLimitPolicy {
@@ -47,15 +43,11 @@ impl RateLimitKind {
                 limit: 10,
                 window_ms: 60_000,
             },
-            Self::Burst => RateLimitPolicy {
-                limit: 200,
-                window_ms: 10_000,
-            },
         }
     }
 }
 
-/// Build the Phoenix-compatible 429 body for an exhausted bucket.
+/// Build the 429 body for an exhausted bucket.
 pub fn rate_limited_problem(retry_after_seconds: u64) -> ProblemDetails {
     ProblemDetails::new(
         429,
@@ -73,7 +65,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn policies_match_phoenix_rate_limiter_constants() {
+    fn policies_match_rate_limiter_constants() {
         assert_eq!(
             RateLimitKind::Ingest.policy(),
             RateLimitPolicy {
@@ -95,17 +87,10 @@ mod tests {
                 window_ms: 60_000
             }
         );
-        assert_eq!(
-            RateLimitKind::Burst.policy(),
-            RateLimitPolicy {
-                limit: 200,
-                window_ms: 10_000
-            }
-        );
     }
 
     #[test]
-    fn rate_limited_problem_matches_phoenix_wire_shape() {
+    fn rate_limited_problem_matches_wire_shape() {
         let encoded = to_value(rate_limited_problem(42)).unwrap_or(Value::Null);
 
         assert_eq!(encoded["type"], "https://canary.dev/problems/rate-limited");

@@ -310,6 +310,5 @@ fn rate_limit_kind_name(kind: RateLimitKind) -> &'static str {
         RateLimitKind::Ingest => "ingest",
         RateLimitKind::Query => "query",
         RateLimitKind::AuthFail => "auth_fail",
-        RateLimitKind::Burst => "burst",
     }
 }
