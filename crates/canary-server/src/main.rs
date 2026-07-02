@@ -15,7 +15,7 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Box<dyn Error>> {
-    // Operator subcommand: `canary-server mint-key [--scope S] [--name N]`.
+    // Operator subcommand: `canary-server mint-key [--scope S] [--name N] [--service SERVICE]`.
     // Recovery path for issuing a scoped API key directly against the SQLite
     // store when the one-time bootstrap key has been lost. Defaults to admin.
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -36,6 +36,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
 fn run_mint_key(args: &[String]) -> Result<(), Box<dyn Error>> {
     let mut scope = "admin".to_owned();
     let mut name = "operator-minted".to_owned();
+    let mut service: Option<String> = None;
     let mut iter = args.iter();
     while let Some(flag) = iter.next() {
         match flag.as_str() {
@@ -45,6 +46,9 @@ fn run_mint_key(args: &[String]) -> Result<(), Box<dyn Error>> {
             "--name" => {
                 name = iter.next().ok_or("--name requires a value")?.clone();
             }
+            "--service" => {
+                service = Some(iter.next().ok_or("--service requires a value")?.clone());
+            }
             other => return Err(format!("unknown mint-key argument: {other}").into()),
         }
     }
@@ -53,7 +57,7 @@ fn run_mint_key(args: &[String]) -> Result<(), Box<dyn Error>> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_DB_PATH));
 
-    let raw_key = keygen::mint_key(&db_path, &scope, &name)?;
+    let raw_key = keygen::mint_key(&db_path, &scope, &name, service.as_deref())?;
     // The raw key prints to stdout; everything else goes to stderr so the key
     // can be captured cleanly (e.g. `... mint-key | tail -1`).
     eprintln!(

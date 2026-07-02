@@ -24,12 +24,11 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::{
-    IngestState,
+    IngestState, enforce_service_authority,
     http_contract::{check_content_length, json_status_response, problem_response},
-    require_query_limited_admin_scope, require_read_scope, require_scope,
+    require_read_scope, require_responder_write_scope,
     server_time::current_rfc3339,
 };
-use canary_http::auth::Permission;
 
 #[derive(Deserialize)]
 pub(crate) struct AnnotationPageParams {
@@ -154,7 +153,7 @@ pub(crate) async fn create_annotation(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
-    let authority = match require_scope(&state, &headers, Permission::Admin) {
+    let authority = match require_responder_write_scope(&state, &headers) {
         Ok(authority) => authority,
         Err(problem) => return problem_response(*problem),
     };
@@ -220,7 +219,7 @@ fn create_annotation_for_subject(
     subject_id: String,
     not_found_detail: &'static str,
 ) -> Response<Body> {
-    let authority = match require_query_limited_admin_scope(&state, &headers) {
+    let authority = match require_responder_write_scope(&state, &headers) {
         Ok(authority) => authority,
         Err(problem) => return problem_response(*problem),
     };
@@ -250,8 +249,8 @@ fn create_annotation_request(
     request: AnnotationCreate,
     not_found_detail: &'static str,
 ) -> Response<Body> {
-    let tenant_id = authority.tenant_id;
-    let project_id = authority.project_id;
+    let tenant_id = authority.tenant_id.clone();
+    let project_id = authority.project_id.clone();
     let (annotation, service) = {
         let mut store = match state.lock_store() {
             Ok(store) => store,
@@ -275,6 +274,16 @@ fn create_annotation_request(
             }
             Err(AnnotationError::Sqlite(_)) => return problem_response(internal_problem()),
         };
+        if let Some(service) = service.as_deref()
+            && let Err(problem) = enforce_service_authority(&authority, service)
+        {
+            return problem_response(*problem);
+        }
+        if service.is_none()
+            && let Some(bound_service) = authority.service.as_deref()
+        {
+            return problem_response(crate::service_authority_problem(bound_service, "*"));
+        }
         let annotation = match store.create_annotation(AnnotationInsert {
             id: canary_core::ids::AnnotationId::generate().into_string(),
             tenant_id: tenant_id.clone(),

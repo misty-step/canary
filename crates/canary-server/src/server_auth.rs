@@ -50,6 +50,20 @@ pub(crate) fn require_query_limited_admin_scope(
     Ok(key)
 }
 
+pub(crate) fn require_responder_write_scope(
+    state: &IngestState,
+    headers: &HeaderMap,
+) -> Result<VerifiedApiKey, Box<ProblemDetails>> {
+    let key = require_scope(state, headers, Permission::ResponderWrite)?;
+    if ApiKeyScope::parse(&key.scope) == Some(ApiKeyScope::ResponderWrite)
+        && key.service.as_deref().is_none()
+    {
+        return Err(Box::new(responder_service_binding_problem()));
+    }
+    enforce_rate_limit(state, RateLimitKind::Query, &key.id)?;
+    Ok(key)
+}
+
 pub(crate) fn require_scope(
     state: &IngestState,
     headers: &HeaderMap,
@@ -129,6 +143,17 @@ pub(crate) fn service_authority_problem(
     )
     .with_extra("bound_service", json!(bound_service))
     .with_extra("requested_service", json!(requested_service))
+}
+
+pub(crate) fn responder_service_binding_problem() -> ProblemDetails {
+    ProblemDetails::new(
+        StatusCode::FORBIDDEN.as_u16(),
+        ProblemCode::InsufficientScope,
+        "API key scope `responder-write` must be bound to one service.",
+        None,
+    )
+    .with_extra("scope", json!("responder-write"))
+    .with_extra("required_service_binding", json!(true))
 }
 
 fn reject_limited_unknown_prefix(

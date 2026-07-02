@@ -12,10 +12,11 @@ use canary_cli::{
     RenderMode, Result, Window, doctor_report, dogfood_strict_failure_count, dogfood_value_report,
     encode, find_repo_root, integration_discover, integration_enroll, integration_patch,
     integration_plan, integration_status, json_envelope, mcp_tool_manifest, print_json,
-    print_lines, resolve_endpoint_without_config, run_dogfood_inventory, summarize_claims,
-    summarize_doctor, summarize_dogfood, summarize_dogfood_value, summarize_event,
-    summarize_incidents, summarize_integration, summarize_monitors, summarize_query,
-    summarize_report, summarize_services, summarize_targets, summarize_timeline, tool_manifest,
+    print_lines, resolve_endpoint_without_config, run_dogfood_inventory, summarize_annotations,
+    summarize_claims, summarize_doctor, summarize_dogfood, summarize_dogfood_value,
+    summarize_event, summarize_incidents, summarize_integration, summarize_monitors,
+    summarize_query, summarize_report, summarize_services, summarize_targets, summarize_timeline,
+    tool_manifest,
 };
 use clap::{Args, Parser, Subcommand};
 use serde_json::{Value, json};
@@ -60,6 +61,8 @@ enum Commands {
     Events(EventsArgs),
     /// Coordinate agentic remediation claims.
     Claims(ClaimsArgs),
+    /// Read or write coordination annotations.
+    Annotations(AnnotationsArgs),
     /// Discover, plan, patch, and enroll application integrations.
     Integrate(IntegrateArgs),
     /// Run an agent-oriented health and coverage diagnostic.
@@ -238,6 +241,46 @@ struct ClaimReleaseArgs {
     claim_id: String,
     #[arg(long)]
     owner: String,
+}
+
+#[derive(Debug, Args)]
+struct AnnotationsArgs {
+    #[command(subcommand)]
+    command: AnnotationsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum AnnotationsCommand {
+    /// List annotations for one subject.
+    List(AnnotationSubjectArgs),
+    /// Create an annotation for one subject.
+    Create(AnnotationCreateArgs),
+}
+
+#[derive(Debug, Args)]
+struct AnnotationSubjectArgs {
+    #[arg(long)]
+    subject_type: String,
+    #[arg(long)]
+    subject_id: String,
+    #[arg(long)]
+    limit: Option<u16>,
+    #[arg(long)]
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct AnnotationCreateArgs {
+    #[arg(long)]
+    subject_type: String,
+    #[arg(long)]
+    subject_id: String,
+    #[arg(long)]
+    agent: String,
+    #[arg(long)]
+    action: String,
+    #[arg(long = "metadata")]
+    metadata: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -468,116 +511,125 @@ fn run_http_command(
     config_path: Option<PathBuf>,
     mode: RenderMode,
 ) -> Result<()> {
-    let config = match &command {
-        Commands::Events(_) => Config::resolve_for_ingest(endpoint, api_key, config_path)?,
-        _ => Config::resolve(endpoint, api_key, config_path)?,
-    };
-    let client = ApiClient::new(config)?;
-
     match command {
-        Commands::Summary(args) => {
-            let window = Window::parse(&args.window)?;
-            let path = format!("/api/v1/report?window={}", window.as_str());
-            let response = client.get_auth_json(&path)?;
-            render(
-                "summary",
-                client.endpoint(),
-                response,
-                mode,
-                summarize_report,
-            )
+        Commands::Claims(args) => run_claims_command(args, endpoint, api_key, config_path, mode),
+        Commands::Annotations(args) => {
+            run_annotations_command(args, endpoint, api_key, config_path, mode)
         }
-        Commands::Services(args) => {
-            let window = Window::parse(&args.window)?;
-            let path = format!("/api/v1/status?window={}", window.as_str());
-            let response = client.get_auth_json(&path)?;
-            let state = args.state;
-            render_with_lines("services", client.endpoint(), response, mode, |value| {
-                summarize_services(value, state.as_deref())
-            })
-        }
-        Commands::Errors(args) => {
-            let window = Window::parse(&args.window)?;
-            let path = format!(
-                "/api/v1/query?service={}&window={}",
-                encode(&args.service),
-                window.as_str()
-            );
-            let response = client.get_auth_json(&path)?;
-            render("errors", client.endpoint(), response, mode, summarize_query)
-        }
-        Commands::Incidents(_args) => {
-            let response = client.get_auth_json("/api/v1/incidents")?;
-            render(
-                "incidents",
-                client.endpoint(),
-                response,
-                mode,
-                summarize_incidents,
-            )
-        }
-        Commands::Timeline(args) => {
-            let window = Window::parse(&args.window)?;
-            let mut path = format!(
-                "/api/v1/timeline?window={}&limit={}",
-                window.as_str(),
-                args.limit
-            );
-            if let Some(service) = args.service {
-                path.push_str("&service=");
-                path.push_str(&encode(&service));
+        command => {
+            let config = match &command {
+                Commands::Events(_) => Config::resolve_for_ingest(endpoint, api_key, config_path)?,
+                _ => Config::resolve(endpoint, api_key, config_path)?,
+            };
+            let client = ApiClient::new(config)?;
+
+            match command {
+                Commands::Summary(args) => {
+                    let window = Window::parse(&args.window)?;
+                    let path = format!("/api/v1/report?window={}", window.as_str());
+                    let response = client.get_auth_json(&path)?;
+                    render(
+                        "summary",
+                        client.endpoint(),
+                        response,
+                        mode,
+                        summarize_report,
+                    )
+                }
+                Commands::Services(args) => {
+                    let window = Window::parse(&args.window)?;
+                    let path = format!("/api/v1/status?window={}", window.as_str());
+                    let response = client.get_auth_json(&path)?;
+                    let state = args.state;
+                    render_with_lines("services", client.endpoint(), response, mode, |value| {
+                        summarize_services(value, state.as_deref())
+                    })
+                }
+                Commands::Errors(args) => {
+                    let window = Window::parse(&args.window)?;
+                    let path = format!(
+                        "/api/v1/query?service={}&window={}",
+                        encode(&args.service),
+                        window.as_str()
+                    );
+                    let response = client.get_auth_json(&path)?;
+                    render("errors", client.endpoint(), response, mode, summarize_query)
+                }
+                Commands::Incidents(_args) => {
+                    let response = client.get_auth_json("/api/v1/incidents")?;
+                    render(
+                        "incidents",
+                        client.endpoint(),
+                        response,
+                        mode,
+                        summarize_incidents,
+                    )
+                }
+                Commands::Timeline(args) => {
+                    let window = Window::parse(&args.window)?;
+                    let mut path = format!(
+                        "/api/v1/timeline?window={}&limit={}",
+                        window.as_str(),
+                        args.limit
+                    );
+                    if let Some(service) = args.service {
+                        path.push_str("&service=");
+                        path.push_str(&encode(&service));
+                    }
+                    let response = client.get_auth_json(&path)?;
+                    render(
+                        "timeline",
+                        client.endpoint(),
+                        response,
+                        mode,
+                        summarize_timeline,
+                    )
+                }
+                Commands::Targets => {
+                    let response = client.get_auth_json("/api/v1/targets")?;
+                    render(
+                        "targets",
+                        client.endpoint(),
+                        response,
+                        mode,
+                        summarize_targets,
+                    )
+                }
+                Commands::Monitors => {
+                    let response = client.get_auth_json("/api/v1/monitors")?;
+                    render(
+                        "monitors",
+                        client.endpoint(),
+                        response,
+                        mode,
+                        summarize_monitors,
+                    )
+                }
+                Commands::Events(args) => run_events_command(args, &client, mode),
+                Commands::Doctor => {
+                    let cwd = env::current_dir().map_err(|source| CliError::Io {
+                        path: PathBuf::from("."),
+                        source,
+                    })?;
+                    let repo_root = find_repo_root(&cwd)?;
+                    let response = doctor_report(&client, &repo_root);
+                    render(
+                        "doctor",
+                        client.endpoint(),
+                        response,
+                        mode,
+                        summarize_doctor,
+                    )
+                }
+                Commands::Dogfood(_)
+                | Commands::Integrate(_)
+                | Commands::McpManifest
+                | Commands::McpServer
+                | Commands::Claims(_)
+                | Commands::Annotations(_) => {
+                    unreachable!("handled before HTTP setup")
+                }
             }
-            let response = client.get_auth_json(&path)?;
-            render(
-                "timeline",
-                client.endpoint(),
-                response,
-                mode,
-                summarize_timeline,
-            )
-        }
-        Commands::Targets => {
-            let response = client.get_auth_json("/api/v1/targets")?;
-            render(
-                "targets",
-                client.endpoint(),
-                response,
-                mode,
-                summarize_targets,
-            )
-        }
-        Commands::Monitors => {
-            let response = client.get_auth_json("/api/v1/monitors")?;
-            render(
-                "monitors",
-                client.endpoint(),
-                response,
-                mode,
-                summarize_monitors,
-            )
-        }
-        Commands::Events(args) => run_events_command(args, &client, mode),
-        Commands::Claims(args) => run_claims_command(args, &client, mode),
-        Commands::Doctor => {
-            let cwd = env::current_dir().map_err(|source| CliError::Io {
-                path: PathBuf::from("."),
-                source,
-            })?;
-            let repo_root = find_repo_root(&cwd)?;
-            let response = doctor_report(&client, &repo_root);
-            render(
-                "doctor",
-                client.endpoint(),
-                response,
-                mode,
-                summarize_doctor,
-            )
-        }
-        Commands::Dogfood(_)
-        | Commands::Integrate(_)
-        | Commands::McpManifest
-        | Commands::McpServer => {
-            unreachable!("handled before HTTP setup")
         }
     }
 }
@@ -642,7 +694,7 @@ fn handle_mcp_message(context: &McpToolContext, message: &Value) -> Option<Value
                     "title": "Canary",
                     "version": env!("CARGO_PKG_VERSION")
                 },
-                "instructions": "Use Canary tools for agent-first production health inspection and remediation claims. Webhooks are wake-up hints; timeline/report replay is the correctness path."
+                "instructions": "Use Canary tools for agent-first production health inspection, remediation claims, and annotation writeback. Webhooks are wake-up hints; timeline/report replay is the correctness path."
             }),
         )),
         "ping" => Some(jsonrpc_result(id, json!({}))),
@@ -773,9 +825,16 @@ fn parse_attributes(attributes: &[String]) -> Result<serde_json::Map<String, ser
     Ok(object)
 }
 
-fn run_claims_command(args: ClaimsArgs, client: &ApiClient, mode: RenderMode) -> Result<()> {
+fn run_claims_command(
+    args: ClaimsArgs,
+    endpoint: Option<String>,
+    api_key: Option<String>,
+    config_path: Option<PathBuf>,
+    mode: RenderMode,
+) -> Result<()> {
     match args.command {
         ClaimsCommand::List(args) => {
+            let client = ApiClient::new(Config::resolve(endpoint, api_key, config_path)?)?;
             let mut path = format!(
                 "/api/v1/claims?subject_type={}&subject_id={}",
                 encode(&args.subject_type),
@@ -797,6 +856,11 @@ fn run_claims_command(args: ClaimsArgs, client: &ApiClient, mode: RenderMode) ->
             )
         }
         ClaimsCommand::Claim(args) => {
+            let client = ApiClient::new(Config::resolve_for_responder_write(
+                endpoint,
+                api_key,
+                config_path,
+            )?)?;
             let response = client.post_auth_json(
                 "/api/v1/claims",
                 &json!({
@@ -818,6 +882,7 @@ fn run_claims_command(args: ClaimsArgs, client: &ApiClient, mode: RenderMode) ->
             )
         }
         ClaimsCommand::Get(args) => {
+            let client = ApiClient::new(Config::resolve(endpoint, api_key, config_path)?)?;
             let response =
                 client.get_auth_json(&format!("/api/v1/claims/{}", encode(&args.claim_id)))?;
             render(
@@ -829,6 +894,11 @@ fn run_claims_command(args: ClaimsArgs, client: &ApiClient, mode: RenderMode) ->
             )
         }
         ClaimsCommand::Transition(args) => {
+            let client = ApiClient::new(Config::resolve_for_responder_write(
+                endpoint,
+                api_key,
+                config_path,
+            )?)?;
             let response = client.post_auth_json(
                 &format!("/api/v1/claims/{}/transition", encode(&args.claim_id)),
                 &json!({
@@ -846,6 +916,11 @@ fn run_claims_command(args: ClaimsArgs, client: &ApiClient, mode: RenderMode) ->
             )
         }
         ClaimsCommand::Release(args) => {
+            let client = ApiClient::new(Config::resolve_for_responder_write(
+                endpoint,
+                api_key,
+                config_path,
+            )?)?;
             let response = client.post_auth_json(
                 &format!("/api/v1/claims/{}/release", encode(&args.claim_id)),
                 &json!({
@@ -858,6 +933,65 @@ fn run_claims_command(args: ClaimsArgs, client: &ApiClient, mode: RenderMode) ->
                 response,
                 mode,
                 summarize_claims,
+            )
+        }
+    }
+}
+
+fn run_annotations_command(
+    args: AnnotationsArgs,
+    endpoint: Option<String>,
+    api_key: Option<String>,
+    config_path: Option<PathBuf>,
+    mode: RenderMode,
+) -> Result<()> {
+    match args.command {
+        AnnotationsCommand::List(args) => {
+            let client = ApiClient::new(Config::resolve(endpoint, api_key, config_path)?)?;
+            let mut path = format!(
+                "/api/v1/annotations?subject_type={}&subject_id={}",
+                encode(&args.subject_type),
+                encode(&args.subject_id)
+            );
+            if let Some(limit) = args.limit {
+                path.push_str(&format!("&limit={limit}"));
+            }
+            if let Some(cursor) = args.cursor {
+                path.push_str("&cursor=");
+                path.push_str(&encode(&cursor));
+            }
+            let response = client.get_auth_json(&path)?;
+            render(
+                "annotations list",
+                client.endpoint(),
+                response,
+                mode,
+                summarize_annotations,
+            )
+        }
+        AnnotationsCommand::Create(args) => {
+            let client = ApiClient::new(Config::resolve_for_responder_write(
+                endpoint,
+                api_key,
+                config_path,
+            )?)?;
+            let metadata = parse_attributes(&args.metadata)?;
+            let response = client.post_auth_json(
+                "/api/v1/annotations",
+                &json!({
+                    "subject_type": args.subject_type,
+                    "subject_id": args.subject_id,
+                    "agent": args.agent,
+                    "action": args.action,
+                    "metadata": metadata,
+                }),
+            )?;
+            render(
+                "annotations create",
+                client.endpoint(),
+                response,
+                mode,
+                summarize_annotations,
             )
         }
     }

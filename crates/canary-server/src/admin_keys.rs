@@ -211,8 +211,10 @@ fn parse_api_key_create(attrs: Map<String, Value>) -> Result<ApiKeyCreate, Box<P
             "admin".to_owned()
         }
     };
-    if !matches!(scope.as_str(), "admin" | "ingest-only" | "read-only")
-        && !matches!(attrs.get("scope"), Some(value) if !value.is_string())
+    if !matches!(
+        scope.as_str(),
+        "admin" | "ingest-only" | "read-only" | "responder-write"
+    ) && !matches!(attrs.get("scope"), Some(value) if !value.is_string())
     {
         errors.insert("scope".to_owned(), vec!["is invalid".to_owned()]);
     }
@@ -232,6 +234,12 @@ fn parse_api_key_create(attrs: Map<String, Value>) -> Result<ApiKeyCreate, Box<P
         errors.insert(
             "service".to_owned(),
             vec!["cannot be set on admin keys".to_owned()],
+        );
+    }
+    if service.is_none() && scope == "responder-write" {
+        errors.insert(
+            "service".to_owned(),
+            vec!["is required for responder-write keys".to_owned()],
         );
     }
 

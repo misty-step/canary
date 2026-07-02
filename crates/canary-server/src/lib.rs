@@ -97,7 +97,7 @@ pub use runtime_env::{RuntimeEnvError, ServerProcessConfig};
 pub(crate) use server_auth::{UNKNOWN_AUTH_FAIL_IDENTITY, auth_fail_identity};
 pub(crate) use server_auth::{
     enforce_service_authority, require_ingest_scope, require_query_limited_admin_scope,
-    require_read_scope, require_scope, service_authority_problem,
+    require_read_scope, require_responder_write_scope, require_scope, service_authority_problem,
 };
 use service_onboarding_routes::create_service_onboarding;
 pub use target_probes::{
@@ -291,13 +291,16 @@ mod tests {
     const WRONG_INGEST_PREFIX_KEY: &str = "sk_live_ingest_wrong";
     const READ_KEY: &str = "sk_live_read_secret";
     const OTHER_READ_KEY: &str = "sk_live_other_read_secret";
+    const RESPONDER_KEY: &str = "sk_live_responder_secret";
     const REVOKED_KEY: &str = "sk_live_revoked_secret";
     static ADMIN_ACCEPTED_KEYS: &[&str] = &[ADMIN_KEY];
     static INGEST_ACCEPTED_KEYS: &[&str] = &[ADMIN_KEY, INGEST_KEY];
-    static READ_ACCEPTED_KEYS: &[&str] = &[ADMIN_KEY, READ_KEY];
-    static ADMIN_REJECTED_KEYS: &[&str] = &[INGEST_KEY, READ_KEY];
-    static INGEST_REJECTED_KEYS: &[&str] = &[READ_KEY];
+    static READ_ACCEPTED_KEYS: &[&str] = &[ADMIN_KEY, READ_KEY, RESPONDER_KEY];
+    static RESPONDER_WRITE_ACCEPTED_KEYS: &[&str] = &[ADMIN_KEY, RESPONDER_KEY];
+    static ADMIN_REJECTED_KEYS: &[&str] = &[INGEST_KEY, READ_KEY, RESPONDER_KEY];
+    static INGEST_REJECTED_KEYS: &[&str] = &[READ_KEY, RESPONDER_KEY];
     static READ_REJECTED_KEYS: &[&str] = &[INGEST_KEY];
+    static RESPONDER_WRITE_REJECTED_KEYS: &[&str] = &[INGEST_KEY, READ_KEY];
     const TEST_BCRYPT_COST: u32 = 4;
     static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -378,7 +381,7 @@ mod tests {
             "POST",
             "/api/v1/incidents/{incident_id}/annotations",
             "/api/v1/incidents/INC-route/annotations",
-            "admin",
+            "responder-write",
         ),
         auth_route(
             "GET",
@@ -390,7 +393,7 @@ mod tests {
             "POST",
             "/api/v1/groups/{group_hash}/annotations",
             "/api/v1/groups/group-route/annotations",
-            "admin",
+            "responder-write",
         ),
         auth_route(
             "GET",
@@ -402,10 +405,15 @@ mod tests {
             "POST",
             "/api/v1/annotations",
             "/api/v1/annotations",
-            "admin",
+            "responder-write",
         ),
         auth_route("GET", "/api/v1/claims", "/api/v1/claims", "read-only"),
-        auth_route("POST", "/api/v1/claims", "/api/v1/claims", "admin"),
+        auth_route(
+            "POST",
+            "/api/v1/claims",
+            "/api/v1/claims",
+            "responder-write",
+        ),
         auth_route(
             "GET",
             "/api/v1/claims/{id}",
@@ -416,13 +424,13 @@ mod tests {
             "POST",
             "/api/v1/claims/{id}/transition",
             "/api/v1/claims/CLM-route/transition",
-            "admin",
+            "responder-write",
         ),
         auth_route(
             "POST",
             "/api/v1/claims/{id}/release",
             "/api/v1/claims/CLM-route/release",
-            "admin",
+            "responder-write",
         ),
         auth_route(
             "GET",
@@ -505,6 +513,7 @@ mod tests {
             "admin" => Ok(ADMIN_ACCEPTED_KEYS),
             "ingest-only" => Ok(INGEST_ACCEPTED_KEYS),
             "read-only" => Ok(READ_ACCEPTED_KEYS),
+            "responder-write" => Ok(RESPONDER_WRITE_ACCEPTED_KEYS),
             scope => Err(format!("unknown scope in route spec: {scope}").into()),
         }
     }
@@ -516,6 +525,7 @@ mod tests {
             "admin" => Ok(ADMIN_REJECTED_KEYS),
             "ingest-only" => Ok(INGEST_REJECTED_KEYS),
             "read-only" => Ok(READ_REJECTED_KEYS),
+            "responder-write" => Ok(RESPONDER_WRITE_REJECTED_KEYS),
             scope => Err(format!("unknown scope in route spec: {scope}").into()),
         }
     }
@@ -4833,6 +4843,35 @@ mod tests {
         assert_eq!(default_key["name"], "unnamed");
         assert_eq!(default_key["scope"], "admin");
 
+        let responder_response = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/keys",
+                ADMIN_KEY,
+                r#"{"name":"bb-responder","scope":"responder-write","service":"bitterblossom"}"#,
+            )?)
+            .await?;
+        assert_eq!(responder_response.status(), StatusCode::CREATED);
+        let responder_key = json_body(responder_response).await?;
+        assert_eq!(responder_key["scope"], "responder-write");
+        assert_eq!(responder_key["service"], "bitterblossom");
+
+        let unbound_responder = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/keys",
+                ADMIN_KEY,
+                r#"{"name":"bad-responder","scope":"responder-write"}"#,
+            )?)
+            .await?;
+        assert_eq!(unbound_responder.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            json_body(unbound_responder).await?["errors"]["service"],
+            json!(["is required for responder-write keys"])
+        );
+
         let forbidden_response = router
             .clone()
             .oneshot(json_request(
@@ -5357,7 +5396,7 @@ mod tests {
                 StatusCode::FORBIDDEN,
                 "insufficient_scope",
                 "detail",
-                "API key scope `ingest-only` cannot access this read endpoint. Use an `admin` or `read-only` key.",
+                "API key scope `ingest-only` cannot access this read endpoint. Use an `admin` or `read-only` or `responder-write` key.",
             ),
             (
                 read_request(READ_KEY, "/api/v1/timeline?window=99h")?,
@@ -5581,7 +5620,7 @@ mod tests {
                 StatusCode::FORBIDDEN,
                 "insufficient_scope",
                 "detail",
-                "API key scope `ingest-only` cannot access this read endpoint. Use an `admin` or `read-only` key.",
+                "API key scope `ingest-only` cannot access this read endpoint. Use an `admin` or `read-only` or `responder-write` key.",
             ),
             (
                 read_request(READ_KEY, "/api/v1/webhook-deliveries?limit=0")?,
@@ -5784,7 +5823,7 @@ mod tests {
         assert_eq!(forbidden_body["code"], "insufficient_scope");
         assert_eq!(
             forbidden_body["detail"],
-            "API key scope `ingest-only` cannot access this read endpoint. Use an `admin` or `read-only` key."
+            "API key scope `ingest-only` cannot access this read endpoint. Use an `admin` or `read-only` or `responder-write` key."
         );
 
         Ok(())
@@ -6175,7 +6214,7 @@ mod tests {
             assert_eq!(body["code"], "insufficient_scope", "{path}");
             assert_eq!(
                 body["detail"],
-                "API key scope `ingest-only` cannot access this read endpoint. Use an `admin` or `read-only` key.",
+                "API key scope `ingest-only` cannot access this read endpoint. Use an `admin` or `read-only` or `responder-write` key.",
                 "{path}"
             );
         }
@@ -6997,7 +7036,7 @@ mod tests {
                 read_request(INGEST_KEY, "/api/v1/targets/TGT-any/checks")?,
                 StatusCode::FORBIDDEN,
                 "insufficient_scope",
-                "API key scope `ingest-only` cannot access this read endpoint. Use an `admin` or `read-only` key.",
+                "API key scope `ingest-only` cannot access this read endpoint. Use an `admin` or `read-only` or `responder-write` key.",
             ),
         ];
 
@@ -7378,6 +7417,121 @@ mod tests {
                 ]
             );
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn responder_write_key_claims_and_annotates_only_bound_service()
+    -> Result<(), Box<dyn Error>> {
+        const API_RESPONDER_KEY: &str = "sk_live_claims_api_responder_secret";
+        const WEB_RESPONDER_KEY: &str = "sk_live_claims_web_responder_secret";
+        let state = test_ingest_state()?;
+        {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            seed_responder_api_key_for_service(
+                &mut store,
+                "KEY-api-responder",
+                API_RESPONDER_KEY,
+                "api",
+            )?;
+            seed_responder_api_key_for_service(
+                &mut store,
+                "KEY-web-responder",
+                WEB_RESPONDER_KEY,
+                "web",
+            )?;
+            seed_target(&mut store, "api")?;
+            seed_target(&mut store, "web")?;
+        }
+        let router = ingest_router(state);
+
+        let created = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/claims",
+                API_RESPONDER_KEY,
+                r#"{"subject_type":"target","subject_id":"TGT-api","owner":"codex","purpose":"responder loop","ttl_ms":900000,"idempotency_key":"api-run"}"#,
+            )?)
+            .await?;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created_body = json_body(created).await?;
+        assert_eq!(created_body["service"], "api");
+        let claim_id = created_body["id"]
+            .as_str()
+            .ok_or("missing claim id")?
+            .to_owned();
+
+        let visible = router
+            .clone()
+            .oneshot(read_request(
+                API_RESPONDER_KEY,
+                &format!("/api/v1/claims/{claim_id}"),
+            )?)
+            .await?;
+        assert_eq!(visible.status(), StatusCode::OK);
+
+        let hidden = router
+            .clone()
+            .oneshot(read_request(
+                WEB_RESPONDER_KEY,
+                &format!("/api/v1/claims/{claim_id}"),
+            )?)
+            .await?;
+        assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+
+        let cross_claim = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/claims",
+                API_RESPONDER_KEY,
+                r#"{"subject_type":"target","subject_id":"TGT-web","owner":"codex","purpose":"wrong service","ttl_ms":900000,"idempotency_key":"web-run"}"#,
+            )?)
+            .await?;
+        assert_eq!(cross_claim.status(), StatusCode::NOT_FOUND);
+
+        let transitioned = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/claims/{claim_id}/transition"),
+                API_RESPONDER_KEY,
+                r#"{"owner":"codex","state":"verified","evidence_links":["https://example.com/proof"]}"#,
+            )?)
+            .await?;
+        assert_eq!(transitioned.status(), StatusCode::OK);
+        assert_eq!(json_body(transitioned).await?["state"], "verified");
+
+        let annotation = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/annotations",
+                API_RESPONDER_KEY,
+                r#"{"subject_type":"target","subject_id":"TGT-api","agent":"codex","action":"fix-verified","metadata":{"claim_id":"CLM-test"}}"#,
+            )?)
+            .await?;
+        assert_eq!(annotation.status(), StatusCode::CREATED);
+        let annotation_body = json_body(annotation).await?;
+        assert_eq!(annotation_body["subject_id"], "TGT-api");
+        assert_eq!(annotation_body["action"], "fix-verified");
+
+        let cross_annotation = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/annotations",
+                API_RESPONDER_KEY,
+                r#"{"subject_type":"target","subject_id":"TGT-web","agent":"codex","action":"fix-verified"}"#,
+            )?)
+            .await?;
+        assert_eq!(cross_annotation.status(), StatusCode::FORBIDDEN);
+        let cross_body = json_body(cross_annotation).await?;
+        assert_eq!(cross_body["code"], "insufficient_scope");
+        assert_eq!(cross_body["bound_service"], "api");
+        assert_eq!(cross_body["requested_service"], "web");
 
         Ok(())
     }
@@ -8964,6 +9118,7 @@ mod tests {
         seed_api_key(&mut store, "KEY-admin", ADMIN_KEY, "admin", None)?;
         seed_api_key(&mut store, "KEY-ingest", INGEST_KEY, "ingest-only", None)?;
         seed_api_key(&mut store, "KEY-read", READ_KEY, "read-only", None)?;
+        seed_responder_api_key_for_service(&mut store, "KEY-responder", RESPONDER_KEY, "test-svc")?;
         seed_api_key(
             &mut store,
             "KEY-revoked",
@@ -9159,6 +9314,27 @@ mod tests {
             created_at: "2026-05-28T20:00:00Z".to_owned(),
             revoked_at: None,
             scope: "read-only".to_owned(),
+            tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: Some(service.to_owned()),
+        })?;
+        Ok(())
+    }
+
+    fn seed_responder_api_key_for_service(
+        store: &mut Store,
+        id: &str,
+        raw_key: &str,
+        service: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        store.insert_api_key(ApiKeyInsert {
+            id: id.to_owned(),
+            name: format!("key {id}"),
+            key_prefix: raw_key.chars().take(API_KEY_PREFIX_LEN).collect(),
+            key_hash: bcrypt::hash(raw_key, TEST_BCRYPT_COST)?,
+            created_at: "2026-05-28T20:00:00Z".to_owned(),
+            revoked_at: None,
+            scope: "responder-write".to_owned(),
             tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
             project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
             service: Some(service.to_owned()),
