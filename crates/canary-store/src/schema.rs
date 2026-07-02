@@ -1,4 +1,4 @@
-//! Ordered SQLite schema migrations ported from the Phoenix Ecto migrations.
+//! Ordered SQLite schema migrations.
 
 use std::collections::{BTreeMap, BTreeSet};
 

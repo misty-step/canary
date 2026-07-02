@@ -97,8 +97,8 @@ pub enum StoreError {
 
 /// Canary's single writable SQLite connection.
 ///
-/// The Phoenix service deliberately runs `Canary.Repo` with `pool_size: 1`.
-/// The Rust rewrite keeps the same operational invariant by making writes go
+/// The service deliberately runs with a single writer.
+/// The Rust implementation keeps the same operational invariant by making writes go
 /// through this owned connection instead of exposing a generic connection pool.
 pub struct Store {
     connection: Connection,
@@ -360,7 +360,7 @@ impl Store {
     /// Return one active target configuration and state snapshot by id.
     ///
     /// If the target exists but has no state row yet, this method creates the
-    /// Phoenix-compatible `unknown` state while the single-writer store lock is
+    /// `unknown` state while the single-writer store lock is
     /// held by the caller.
     pub fn target_probe_snapshot_by_id(
         &mut self,
@@ -466,7 +466,7 @@ impl Store {
     /// Return one monitor configuration and state snapshot by check-in name.
     ///
     /// If the monitor exists but has no state row yet, this method creates the
-    /// Phoenix-compatible `unknown` state while the single-writer store lock is
+    /// `unknown` state while the single-writer store lock is
     /// held by the caller.
     pub fn monitor_check_in_snapshot_by_name(
         &mut self,
@@ -1008,7 +1008,7 @@ impl Store {
         webhook_deliveries::mark_discarded(&mut self.connection, delivery_id, reason, now)
     }
 
-    /// List webhook delivery ledger rows in Phoenix's deterministic order.
+    /// List webhook delivery ledger rows in deterministic order.
     pub fn webhook_deliveries(
         &self,
         options: WebhookDeliveryListOptions,
