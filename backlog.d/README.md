@@ -207,6 +207,7 @@ Bitterblossom workload. 020 stays blocked on Adminifi URLs.
 ## Migration Notes
 
 - Consolidated from `.backlog.d/` on 2026-03-30. Legacy items archived to `.backlog.d/_done/`.
+- `.backlog.d/` deleted 2026-07-01: the hidden root was superseded by `backlog.d/` (source of truth as of 2026-06-26). Unique Elixir-era items 073 and 074 were merged into `backlog.d/_done/`; the 6 colliding items (001-009) were already represented under renumbered Rust-era entries and dropped as duplicates.
 - `.backlog.d/006` (monorepo bootstrap) archived as shipped — commit `c87f28f`.
 - `.backlog.d/008` (monitor generation spike) superseded by 010-ramp-pattern.
 - The old Bitterblossom triage sprite path `bitterblossom/backlog.d/011-canary-triage-sprite.md`
