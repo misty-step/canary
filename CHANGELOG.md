@@ -1,3 +1,10 @@
+## [1.4.2](https://github.com/misty-step/canary/compare/v1.4.1...v1.4.2) (2026-07-02)
+
+
+### Bug Fixes
+
+* **081:** remove hardcoded operator domain from CLI test fixtures ([#202](https://github.com/misty-step/canary/issues/202)) ([6034133](https://github.com/misty-step/canary/commit/6034133a16a8b76e6d879224cb5d5e06e6361e2c)), closes [#081](https://github.com/misty-step/canary/issues/081)
+
 ## [1.4.1](https://github.com/misty-step/canary/compare/v1.4.0...v1.4.1) (2026-07-02)
 
 
