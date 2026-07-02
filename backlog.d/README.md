@@ -24,8 +24,8 @@ visible until a focused PR archives them with evidence.
 
 | # | Item | Priority | Status | Estimate |
 |---|------|----------|--------|----------|
-| 080 | Pin live incident-payload shape | P0 | pending | S |
-| 081 | Remove hardcoded operator domain fixture | P2 | pending | S |
+| 080 | Pin live incident-payload shape | P0 | done | S |
+| 081 | Remove hardcoded operator domain fixture | P2 | done | S |
 | 071 | Responder context read-audit events | P1 | pending | M |
 | 062 | Agent loop write surface | P0 | pending | XL |
 | 063 | Triage contract hardening | P1 | pending | XL |
