@@ -33,7 +33,7 @@ visible until a focused PR archives them with evidence.
 | 065 | Runtime hardening | P1 | pending | L |
 | 066 | Consolidation and archaeology deletion | P2 | pending | XL |
 | 058 | Cadence-aware SLI trajectory sample floor | P2 | pending | M |
-| 082 | Triage GitHub issue #129 | P3 | pending | S |
+| 082 | Triage GitHub issue #129 | P3 | done | S |
 | 070 | Archive shipped backlog tickets | P3 | done | S |
 | 072 | Webhook receiver conformance fixtures | P1 | done | M |
 | 001 | Annotations API | high | done | M |
