@@ -27,7 +27,7 @@ pub const HEADER_WEBHOOK_VERSION: &str = "x-webhook-version";
 /// Header name for the payload sequence.
 pub const HEADER_SEQUENCE: &str = "x-sequence";
 
-/// JSON content type sent by the Phoenix webhook worker.
+/// JSON content type sent by the webhook worker.
 pub const APPLICATION_JSON: &str = "application/json";
 /// Current outbound webhook contract version.
 pub const WEBHOOK_VERSION: &str = "1";
@@ -82,12 +82,12 @@ pub fn sign(body: impl AsRef<[u8]>, secret: impl AsRef<[u8]>) -> String {
     }
 }
 
-/// Build a Phoenix-compatible `x-signature` value.
+/// Build an `x-signature` value.
 pub fn signature_header(body: impl AsRef<[u8]>, secret: impl AsRef<[u8]>) -> String {
     format!("{}{}", SIGNATURE_PREFIX, sign(body, secret))
 }
 
-/// Verify a Phoenix-compatible `x-signature` value.
+/// Verify an `x-signature` value.
 pub fn verify_signature(body: impl AsRef<[u8]>, secret: impl AsRef<[u8]>, signature: &str) -> bool {
     let Some(hex) = signature.strip_prefix(SIGNATURE_PREFIX) else {
         return false;
@@ -249,27 +249,51 @@ mod tests {
     const BODY: &str = r#"{"event":"error.new_class","data":"test"}"#;
     const SECRET: &str = "test-webhook-secret";
     const TIMESTAMP: &str = "2026-05-28T20:00:00Z";
-    const PHOENIX_SIGNATURE: &str =
+    const KNOWN_SIGNATURE: &str =
         "fca9576b9dd9dad8ba9cc597354dba19a3a040b4f35f5217358b444b1462f006";
-    const PHOENIX_SIGNATURE_HEADER: &str =
+    const KNOWN_SIGNATURE_HEADER: &str =
         "sha256=fca9576b9dd9dad8ba9cc597354dba19a3a040b4f35f5217358b444b1462f006";
 
     #[test]
-    fn sign_matches_phoenix_hmac_fixture() {
+    fn sign_matches_hmac_fixture() {
         let signature = sign(BODY, SECRET);
-
-        assert_eq!(signature, PHOENIX_SIGNATURE);
+        assert_eq!(signature, KNOWN_SIGNATURE);
         assert_eq!(signature.len(), 64);
     }
 
     #[test]
-    fn signature_header_matches_phoenix_prefix_and_digest() {
-        assert_eq!(signature_header(BODY, SECRET), PHOENIX_SIGNATURE_HEADER);
+    fn signature_header_matches_prefix_and_digest() {
+        assert_eq!(signature_header(BODY, SECRET), KNOWN_SIGNATURE_HEADER);
+    }
+
+    #[test]
+    fn verify_accepts_valid_signature() {
+        assert!(verify_signature(BODY, SECRET, KNOWN_SIGNATURE_HEADER));
+    }
+
+    #[test]
+    fn verify_rejects_tampered_body() {
+        let tampered = br#"{"tampered":true}"#;
+        assert!(!verify_signature(tampered, SECRET, KNOWN_SIGNATURE_HEADER));
+    }
+
+    #[test]
+    fn verify_rejects_wrong_secret() {
+        assert!(!verify_signature(
+            BODY,
+            b"wrong-secret",
+            KNOWN_SIGNATURE_HEADER
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_bare_hex_without_prefix() {
+        assert!(!verify_signature(BODY, SECRET, KNOWN_SIGNATURE));
     }
 
     #[test]
     fn verify_signature_accepts_valid_header() {
-        assert!(verify_signature(BODY, SECRET, PHOENIX_SIGNATURE_HEADER));
+        assert!(verify_signature(BODY, SECRET, KNOWN_SIGNATURE_HEADER));
     }
 
     #[test]
@@ -277,7 +301,7 @@ mod tests {
         assert!(!verify_signature(
             BODY,
             "wrong-secret",
-            PHOENIX_SIGNATURE_HEADER
+            KNOWN_SIGNATURE_HEADER
         ));
     }
 
@@ -286,13 +310,13 @@ mod tests {
         assert!(!verify_signature(
             format!("{BODY}tampered"),
             SECRET,
-            PHOENIX_SIGNATURE_HEADER
+            KNOWN_SIGNATURE_HEADER
         ));
     }
 
     #[test]
     fn verify_signature_rejects_wrong_prefix_or_bad_hex() {
-        assert!(!verify_signature(BODY, SECRET, PHOENIX_SIGNATURE));
+        assert!(!verify_signature(BODY, SECRET, KNOWN_SIGNATURE));
         assert!(!verify_signature(BODY, SECRET, "sha1=abc"));
         assert!(!verify_signature(BODY, SECRET, "sha256=not-hex"));
     }
@@ -345,7 +369,7 @@ mod tests {
 
         let pairs = headers.as_pairs();
         assert!(pairs.contains(&(HEADER_CONTENT_TYPE, APPLICATION_JSON)));
-        assert!(pairs.contains(&(HEADER_SIGNATURE, PHOENIX_SIGNATURE_HEADER)));
+        assert!(pairs.contains(&(HEADER_SIGNATURE, KNOWN_SIGNATURE_HEADER)));
         assert!(pairs.contains(&(HEADER_EVENT, "error.new_class")));
         assert!(pairs.contains(&(HEADER_DELIVERY_ID, "DLV-test-delivery")));
         assert!(pairs.contains(&(HEADER_WEBHOOK_ID, "WHK-test-webhook")));

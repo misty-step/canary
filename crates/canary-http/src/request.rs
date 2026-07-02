@@ -4,7 +4,7 @@ use serde_json::{Map, Value};
 
 use crate::problem_details::{ProblemCode, ProblemDetails};
 
-/// Phoenix-compatible JSON request body limit.
+/// JSON request body limit.
 pub const MAX_JSON_BODY_BYTES: u64 = 102_400;
 
 /// Result type for request decoding helpers.

@@ -48,7 +48,7 @@ impl ProblemCode {
         }
     }
 
-    /// Return the title used by the existing Phoenix service.
+    /// Return the title used for this problem code.
     pub fn title(&self) -> String {
         match self {
             Self::InvalidRequest => "Invalid Request".to_owned(),
@@ -91,7 +91,7 @@ pub struct ProblemDetails {
 }
 
 impl ProblemDetails {
-    /// Build a problem response that preserves the Phoenix wire shape.
+    /// Build a problem response that preserves the wire shape.
     pub fn new(
         status: u16,
         code: ProblemCode,
@@ -147,7 +147,7 @@ pub fn invalid_target_url_problem(reason: impl Into<String>) -> ProblemDetails {
     )
 }
 
-/// Build the Phoenix-compatible invalid observed-at problem.
+/// Build the invalid observed-at problem.
 pub fn invalid_observed_at_problem() -> ProblemDetails {
     ProblemDetails::new(
         422,
@@ -414,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn known_problem_codes_match_phoenix_titles_and_type_slugs() {
+    fn known_problem_codes_match_titles_and_type_slugs() {
         let cases = [
             (
                 ProblemCode::InvalidRequest,
@@ -477,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_factories_preserve_phoenix_details_and_errors() {
+    fn validation_factories_preserve_details_and_errors() {
         let mut errors = BTreeMap::new();
         errors.insert("name".to_owned(), vec!["can't be blank".to_owned()]);
 

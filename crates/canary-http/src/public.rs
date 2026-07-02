@@ -1,15 +1,15 @@
 //! Public, unauthenticated HTTP endpoint contracts.
 //!
-//! These helpers model Phoenix's public routes without committing the rewrite
-//! to a router framework. The future Axum handlers should be thin adapters over
-//! these response builders.
+//! These helpers model the public route contracts without committing to a
+//! router framework. The Axum handlers are thin adapters over these response
+//! builders.
 
 use serde::{Deserialize, Serialize};
 
 /// The OpenAPI document served by `GET /api/v1/openapi.json`.
 pub const OPENAPI_JSON: &str = include_str!("../../../priv/openapi/openapi.json");
 
-/// JSON content type observed from Phoenix for these public endpoints.
+/// JSON content type for these public endpoints.
 pub const APPLICATION_JSON: &str = "application/json; charset=utf-8";
 
 /// Public route contract for unauthenticated endpoints.
@@ -53,7 +53,7 @@ pub const PUBLIC_ROUTES: &[PublicRoute] = &[
 pub struct PublicResponse<T> {
     /// HTTP status code.
     pub status: u16,
-    /// Phoenix-compatible response content type.
+    /// Response content type.
     pub content_type: &'static str,
     /// Response body.
     pub body: T,
@@ -62,7 +62,7 @@ pub struct PublicResponse<T> {
 /// Liveness response body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthzResponse {
-    /// Stable Phoenix liveness marker.
+    /// Stable liveness marker.
     pub status: HealthzStatus,
 }
 
@@ -169,7 +169,7 @@ pub enum WorkerHealthStatus {
     Stopped,
 }
 
-/// Build the Phoenix-compatible `GET /healthz` response.
+/// Build the `GET /healthz` response.
 pub const fn healthz_response() -> PublicResponse<HealthzResponse> {
     PublicResponse {
         status: 200,
@@ -180,7 +180,7 @@ pub const fn healthz_response() -> PublicResponse<HealthzResponse> {
     }
 }
 
-/// Build the Phoenix-compatible `GET /readyz` response.
+/// Build the `GET /readyz` response.
 pub fn readyz_response(
     database: DependencyStatus,
     supervisor: DependencyStatus,
@@ -216,7 +216,7 @@ pub fn readyz_response(
     }
 }
 
-/// Build the Phoenix-compatible `GET /api/v1/openapi.json` response.
+/// Build the `GET /api/v1/openapi.json` response.
 pub const fn openapi_response() -> PublicResponse<&'static str> {
     PublicResponse {
         status: 200,
@@ -232,7 +232,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn healthz_matches_phoenix_body_and_status() {
+    fn healthz_matches_body_and_status() {
         let response = healthz_response();
 
         assert_eq!(response.status, 200);
@@ -244,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn readyz_matches_phoenix_body_for_healthy_dependencies() {
+    fn readyz_matches_body_for_healthy_dependencies() {
         let response = readyz_response(DependencyStatus::Ok, DependencyStatus::Ok, Vec::new());
 
         assert_eq!(response.status, 200);
@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn readyz_matches_phoenix_body_for_failed_dependencies() {
+    fn readyz_matches_body_for_failed_dependencies() {
         let cases = [
             (DependencyStatus::Error, DependencyStatus::Ok),
             (DependencyStatus::Ok, DependencyStatus::Error),
