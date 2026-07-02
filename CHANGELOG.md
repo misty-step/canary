@@ -1,3 +1,10 @@
+# [1.8.0](https://github.com/misty-step/canary/compare/v1.7.1...v1.8.0) (2026-07-02)
+
+
+### Features
+
+* **ui:** add Canary human dashboard ([6d9c343](https://github.com/misty-step/canary/commit/6d9c3435dfb05cca367450055967db39dc8fa531)), closes [#219](https://github.com/misty-step/canary/issues/219)
+
 ## [1.7.1](https://github.com/misty-step/canary/compare/v1.7.0...v1.7.1) (2026-07-02)
 
 
