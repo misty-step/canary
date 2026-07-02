@@ -28,6 +28,7 @@ mod egress;
 mod health_fanout;
 mod health_routes;
 mod http_contract;
+mod incident_escalation;
 mod ingest_routes;
 pub mod keygen;
 mod metrics_routes;
@@ -70,6 +71,7 @@ pub use health_fanout::{
     EventFanoutReport, HealthEventFanout, HealthEventSource,
 };
 use health_routes::{health_status, status, target_checks};
+use incident_escalation::{deescalate_incident, escalate_incident};
 use ingest_routes::{create_check_in, create_error};
 use metrics_routes::metrics;
 pub use monitor_overdue::{
@@ -155,6 +157,11 @@ pub fn ingest_router(state: IngestState) -> Router {
         .route("/api/v1/targets/{id}/checks", get(target_checks))
         .route("/api/v1/incidents", get(list_incidents))
         .route("/api/v1/incidents/{id}", get(show_incident))
+        .route("/api/v1/incidents/{id}/escalate", post(escalate_incident))
+        .route(
+            "/api/v1/incidents/{id}/deescalate",
+            post(deescalate_incident),
+        )
         .route(
             "/api/v1/incidents/{incident_id}/annotations",
             get(list_incident_annotations).post(create_incident_annotation),
@@ -374,6 +381,18 @@ mod tests {
             "/api/v1/incidents/{id}",
             "/api/v1/incidents/INC-route",
             "read-only",
+        ),
+        auth_route(
+            "POST",
+            "/api/v1/incidents/{id}/escalate",
+            "/api/v1/incidents/INC-route/escalate",
+            "responder-write",
+        ),
+        auth_route(
+            "POST",
+            "/api/v1/incidents/{id}/deescalate",
+            "/api/v1/incidents/INC-route/deescalate",
+            "responder-write",
         ),
         auth_route(
             "GET",
@@ -7993,6 +8012,339 @@ mod tests {
     async fn incident_detail_rejects_ingest_scope() -> Result<(), Box<dyn Error>> {
         let response = ingest_router(test_ingest_state()?)
             .oneshot(read_request(INGEST_KEY, "/api/v1/incidents/INC-anything")?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "insufficient_scope");
+
+        Ok(())
+    }
+
+    /// Ingest one error and correlate it into an open incident for `test-svc`
+    /// (the service RESPONDER_KEY is bound to in `test_ingest_state`).
+    async fn open_test_incident(state: &IngestState) -> Result<String, Box<dyn Error>> {
+        let router = ingest_router(state.clone());
+        let created_error = router
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+        let body = json_body(created_error).await?;
+        let group_hash = body["group_hash"]
+            .as_str()
+            .ok_or("missing group hash")?
+            .to_owned();
+        let incident_id = {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            let id = canary_core::ids::IncidentId::generate().into_string();
+            store.correlate_incident(IncidentCorrelation {
+                tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
+                project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
+                signal_type: "error_group".to_owned(),
+                signal_ref: group_hash,
+                service: "test-svc".to_owned(),
+                incident_id: id.parse()?,
+                event_id: canary_core::ids::EventId::generate(),
+                now: "2026-05-28T20:00:00Z".to_owned(),
+            })?;
+            id
+        };
+        Ok(incident_id)
+    }
+
+    fn escalate_body(idempotency_key: &str) -> String {
+        json!({
+            "reason": "hypothesis confidence high, iteration guard exhausted",
+            "owner": "bitterblossom/canary-triage",
+            "purpose": "triage_escalation",
+            "idempotency_key": idempotency_key,
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn escalate_incident_requires_responder_write_scope() -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let incident_id = open_test_incident(&state).await?;
+
+        let response = ingest_router(state)
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/incidents/{incident_id}/escalate"),
+                READ_KEY,
+                &escalate_body("bb-run-1:escalate"),
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "insufficient_scope");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn escalate_incident_sets_escalation_and_enqueues_webhook() -> Result<(), Box<dyn Error>>
+    {
+        let sink = Arc::new(RecordingFailingSink::default());
+        let state = test_ingest_state_with_sink(sink.clone())?;
+        let incident_id = open_test_incident(&state).await?;
+
+        let response = ingest_router(state)
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/incidents/{incident_id}/escalate"),
+                RESPONDER_KEY,
+                &escalate_body("bb-run-1:escalate"),
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["escalation"]["incident_id"], incident_id);
+        assert_eq!(
+            body["escalation"]["escalated_by"],
+            "bitterblossom/canary-triage"
+        );
+        assert!(body["escalation"]["escalated_at"].is_string());
+        assert_eq!(
+            body["escalation"]["reason"],
+            "hypothesis confidence high, iteration guard exhausted"
+        );
+
+        let effects = sink.effects.lock().map_err(|_| "effect lock poisoned")?;
+        let webhook = effects
+            .iter()
+            .find_map(|effect| match effect {
+                IngestEffect::EnqueueWebhook {
+                    event,
+                    payload_json,
+                } if event == "incident.escalated" => Some(payload_json),
+                _ => None,
+            })
+            .ok_or("expected incident.escalated webhook effect")?;
+        let payload: Value = serde_json::from_str(webhook)?;
+        assert_eq!(payload["event"], "incident.escalated");
+        assert_eq!(payload["service"], "test-svc");
+        assert_eq!(payload["escalation"]["incident_id"], incident_id);
+        assert_eq!(
+            payload["escalation"]["escalated_by"],
+            "bitterblossom/canary-triage"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn escalate_incident_is_idempotent_by_key_over_http() -> Result<(), Box<dyn Error>> {
+        let sink = Arc::new(RecordingFailingSink::default());
+        let state = test_ingest_state_with_sink(sink.clone())?;
+        let incident_id = open_test_incident(&state).await?;
+        let router = ingest_router(state);
+
+        let first = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/incidents/{incident_id}/escalate"),
+                RESPONDER_KEY,
+                &escalate_body("bb-run-1:escalate"),
+            )?)
+            .await?;
+        assert_eq!(first.status(), StatusCode::CREATED);
+        let first_body = json_body(first).await?;
+
+        let replay = router
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/incidents/{incident_id}/escalate"),
+                RESPONDER_KEY,
+                &escalate_body("bb-run-1:escalate"),
+            )?)
+            .await?;
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay_body = json_body(replay).await?;
+        assert_eq!(replay_body["escalation"], first_body["escalation"]);
+
+        let escalated_webhooks = sink
+            .effects
+            .lock()
+            .map_err(|_| "effect lock poisoned")?
+            .iter()
+            .filter(|effect| {
+                matches!(effect, IngestEffect::EnqueueWebhook { event, .. } if event == "incident.escalated")
+            })
+            .count();
+        assert_eq!(
+            escalated_webhooks, 1,
+            "replay must not re-enqueue a webhook"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn escalate_incident_rejects_already_resolved_incident() -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let incident_id = open_test_incident(&state).await?;
+        {
+            // The attached error_group signal's `last_seen_at` was stamped
+            // at real ingest time. Correlating far enough in the future
+            // pushes it outside the 300s active window, which resolves the
+            // incident (and, in the same transaction, would clear any
+            // escalation — exercised separately at the store layer).
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            store.correlate_incident(IncidentCorrelation {
+                tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
+                project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
+                signal_type: "error_group".to_owned(),
+                signal_ref: "resolved-by-test".to_owned(),
+                service: "test-svc".to_owned(),
+                incident_id: canary_core::ids::IncidentId::generate(),
+                event_id: canary_core::ids::EventId::generate(),
+                now: "2099-01-01T00:00:00Z".to_owned(),
+            })?;
+        }
+
+        let response = ingest_router(state)
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/incidents/{incident_id}/escalate"),
+                RESPONDER_KEY,
+                &escalate_body("bb-run-1:escalate"),
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "incident_already_resolved");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn escalate_incident_returns_not_found_for_missing_incident() -> Result<(), Box<dyn Error>>
+    {
+        let response = ingest_router(test_ingest_state()?)
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/incidents/INC-missing/escalate",
+                ADMIN_KEY,
+                &escalate_body("bb-run-1:escalate"),
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["detail"], "Incident INC-missing not found.");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn escalate_incident_validates_required_fields() -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let incident_id = open_test_incident(&state).await?;
+
+        let response = ingest_router(state)
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/incidents/{incident_id}/escalate"),
+                RESPONDER_KEY,
+                r#"{"owner":"bitterblossom/canary-triage"}"#,
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body["errors"]["reason"],
+            json!(["must be a non-empty string"])
+        );
+        assert_eq!(
+            body["errors"]["purpose"],
+            json!(["must be a non-empty string"])
+        );
+        assert_eq!(
+            body["errors"]["idempotency_key"],
+            json!(["must be a non-empty string"])
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deescalate_incident_clears_escalation_and_enqueues_webhook()
+    -> Result<(), Box<dyn Error>> {
+        let sink = Arc::new(RecordingFailingSink::default());
+        let state = test_ingest_state_with_sink(sink.clone())?;
+        let incident_id = open_test_incident(&state).await?;
+        let router = ingest_router(state);
+
+        let escalated = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/incidents/{incident_id}/escalate"),
+                RESPONDER_KEY,
+                &escalate_body("bb-run-1:escalate"),
+            )?)
+            .await?;
+        assert_eq!(escalated.status(), StatusCode::CREATED);
+
+        let response = router
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/incidents/{incident_id}/deescalate"),
+                RESPONDER_KEY,
+                r#"{"owner":"operator@example.com","reason":"false positive"}"#,
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["escalation"]["incident_id"], incident_id);
+        assert_eq!(body["escalation"]["escalated_at"], Value::Null);
+        assert_eq!(body["escalation"]["escalated_by"], Value::Null);
+        assert_eq!(body["escalation"]["reason"], Value::Null);
+
+        let effects = sink.effects.lock().map_err(|_| "effect lock poisoned")?;
+        let webhook = effects
+            .iter()
+            .find_map(|effect| match effect {
+                IngestEffect::EnqueueWebhook {
+                    event,
+                    payload_json,
+                } if event == "incident.deescalated" => Some(payload_json),
+                _ => None,
+            })
+            .ok_or("expected incident.deescalated webhook effect")?;
+        let payload: Value = serde_json::from_str(webhook)?;
+        assert_eq!(payload["event"], "incident.deescalated");
+        assert_eq!(payload["escalation"]["incident_id"], incident_id);
+        assert_eq!(payload["escalation"]["escalated_at"], Value::Null);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deescalate_incident_requires_responder_write_scope() -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let incident_id = open_test_incident(&state).await?;
+
+        let response = ingest_router(state)
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/incidents/{incident_id}/deescalate"),
+                READ_KEY,
+                r#"{"owner":"operator@example.com"}"#,
+            )?)
             .await?;
         let status = response.status();
         let body = json_body(response).await?;

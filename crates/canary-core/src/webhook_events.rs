@@ -1,6 +1,6 @@
 //! Webhook event names accepted by Canary's subscription API.
 
-const BUSINESS_EVENTS: [&str; 15] = [
+const BUSINESS_EVENTS: [&str; 17] = [
     "health_check.degraded",
     "health_check.down",
     "health_check.recovered",
@@ -10,6 +10,8 @@ const BUSINESS_EVENTS: [&str; 15] = [
     "incident.opened",
     "incident.updated",
     "incident.resolved",
+    "incident.escalated",
+    "incident.deescalated",
     "annotation.added",
     "remediation_claim.created",
     "remediation_claim.updated",

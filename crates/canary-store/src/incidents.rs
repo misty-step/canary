@@ -64,6 +64,10 @@ struct IncidentRow {
     title: Option<String>,
     opened_at: String,
     resolved_at: Option<String>,
+    escalated_at: Option<String>,
+    escalated_by: Option<String>,
+    escalated_reason: Option<String>,
+    escalated_idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,22 +282,55 @@ fn update_incident_state(
         (OPEN_STATE.to_owned(), None)
     };
 
+    // Escalation is an orthogonal overlay on top of the deterministic state
+    // machine (see the module comment). An escalation cannot outlive its
+    // incident: resolving the incident clears escalated_at (and the owner/
+    // reason/idempotency-key that ride with it) in this same transaction so
+    // a resolved incident can never report as escalated.
+    let escalation_cleared = state == RESOLVED_STATE && incident.escalated_at.is_some();
+    let (escalated_at, escalated_by, escalated_reason, escalated_idempotency_key) =
+        if state == RESOLVED_STATE {
+            (None, None, None, None)
+        } else {
+            (
+                incident.escalated_at.clone(),
+                incident.escalated_by.clone(),
+                incident.escalated_reason.clone(),
+                incident.escalated_idempotency_key.clone(),
+            )
+        };
+
     if incident.state == state
         && incident.severity == severity
         && incident.resolved_at == resolved_at
+        && !escalation_cleared
     {
         return Ok(false);
     }
 
     transaction.execute(
         "UPDATE incidents
-         SET state = ?1, severity = ?2, resolved_at = ?3
-         WHERE id = ?4",
-        params![state, severity, resolved_at, incident.id],
+         SET state = ?1, severity = ?2, resolved_at = ?3,
+             escalated_at = ?4, escalated_by = ?5, escalated_reason = ?6, escalated_idempotency_key = ?7
+         WHERE id = ?8",
+        params![
+            state,
+            severity,
+            resolved_at,
+            escalated_at,
+            escalated_by,
+            escalated_reason,
+            escalated_idempotency_key,
+            incident.id
+        ],
     )?;
     incident.state = state;
     incident.severity = severity;
     incident.resolved_at = resolved_at;
+    incident.escalated_at = escalated_at;
+    incident.escalated_by = escalated_by;
+    incident.escalated_reason = escalated_reason;
+    incident.escalated_idempotency_key = escalated_idempotency_key;
     Ok(true)
 }
 
@@ -364,7 +401,8 @@ fn open_incident(
 ) -> Result<Option<IncidentRow>> {
     transaction
         .query_row(
-            "SELECT id, tenant_id, project_id, service, state, severity, title, opened_at, resolved_at
+            "SELECT id, tenant_id, project_id, service, state, severity, title, opened_at, resolved_at,
+                    escalated_at, escalated_by, escalated_reason, escalated_idempotency_key
              FROM incidents
              WHERE tenant_id = ?1 AND project_id = ?2 AND service = ?3 AND state != ?4
              ORDER BY opened_at DESC
@@ -382,7 +420,8 @@ fn incident_by_id(
 ) -> Result<Option<IncidentRow>> {
     transaction
         .query_row(
-            "SELECT id, tenant_id, project_id, service, state, severity, title, opened_at, resolved_at
+            "SELECT id, tenant_id, project_id, service, state, severity, title, opened_at, resolved_at,
+                    escalated_at, escalated_by, escalated_reason, escalated_idempotency_key
              FROM incidents
              WHERE id = ?1",
             [incident_id],
@@ -403,6 +442,10 @@ fn incident_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IncidentRow> {
         title: row.get(6)?,
         opened_at: row.get(7)?,
         resolved_at: row.get(8)?,
+        escalated_at: row.get(9)?,
+        escalated_by: row.get(10)?,
+        escalated_reason: row.get(11)?,
+        escalated_idempotency_key: row.get(12)?,
     })
 }
 
@@ -597,6 +640,10 @@ mod tests {
             title: None,
             opened_at: "2026-07-01T00:00:00Z".to_owned(),
             resolved_at: None,
+            escalated_at: None,
+            escalated_by: None,
+            escalated_reason: None,
+            escalated_idempotency_key: None,
         }
     }
 

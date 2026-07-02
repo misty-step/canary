@@ -14,9 +14,9 @@ use canary_cli::{
     integration_plan, integration_status, json_envelope, mcp_tool_manifest, print_json,
     print_lines, resolve_endpoint_without_config, run_dogfood_inventory, summarize_annotations,
     summarize_claims, summarize_doctor, summarize_dogfood, summarize_dogfood_value,
-    summarize_event, summarize_incidents, summarize_integration, summarize_monitors,
-    summarize_query, summarize_report, summarize_services, summarize_targets, summarize_timeline,
-    tool_manifest,
+    summarize_event, summarize_incident_escalation, summarize_incidents, summarize_integration,
+    summarize_monitors, summarize_query, summarize_report, summarize_services, summarize_targets,
+    summarize_timeline, tool_manifest,
 };
 use clap::{Args, Parser, Subcommand};
 use serde_json::{Value, json};
@@ -47,7 +47,7 @@ enum Commands {
     Services(ServicesArgs),
     /// Inspect recent errors for one service.
     Errors(ServiceWindowArgs),
-    /// List active incidents.
+    /// List, escalate, or deescalate incidents.
     Incidents(IncidentsArgs),
     /// Inspect timeline events.
     Timeline(TimelineArgs),
@@ -96,8 +96,46 @@ struct ServiceWindowArgs {
 
 #[derive(Debug, Args)]
 struct IncidentsArgs {
+    #[command(subcommand)]
+    command: IncidentsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum IncidentsCommand {
+    /// List active incidents.
+    List(IncidentsListArgs),
+    /// Escalate one incident for human paging.
+    Escalate(IncidentEscalateArgs),
+    /// Clear a false-positive escalation.
+    Deescalate(IncidentDeescalateArgs),
+}
+
+#[derive(Debug, Args)]
+struct IncidentsListArgs {
     #[arg(long)]
     open: bool,
+}
+
+#[derive(Debug, Args)]
+struct IncidentEscalateArgs {
+    incident_id: String,
+    #[arg(long)]
+    reason: String,
+    #[arg(long)]
+    owner: String,
+    #[arg(long)]
+    purpose: String,
+    #[arg(long)]
+    idempotency_key: String,
+}
+
+#[derive(Debug, Args)]
+struct IncidentDeescalateArgs {
+    incident_id: String,
+    #[arg(long)]
+    owner: String,
+    #[arg(long)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -516,6 +554,9 @@ fn run_http_command(
         Commands::Annotations(args) => {
             run_annotations_command(args, endpoint, api_key, config_path, mode)
         }
+        Commands::Incidents(args) => {
+            run_incidents_command(args, endpoint, api_key, config_path, mode)
+        }
         command => {
             let config = match &command {
                 Commands::Events(_) => Config::resolve_for_ingest(endpoint, api_key, config_path)?,
@@ -554,16 +595,6 @@ fn run_http_command(
                     );
                     let response = client.get_auth_json(&path)?;
                     render("errors", client.endpoint(), response, mode, summarize_query)
-                }
-                Commands::Incidents(_args) => {
-                    let response = client.get_auth_json("/api/v1/incidents")?;
-                    render(
-                        "incidents",
-                        client.endpoint(),
-                        response,
-                        mode,
-                        summarize_incidents,
-                    )
                 }
                 Commands::Timeline(args) => {
                     let window = Window::parse(&args.window)?;
@@ -626,7 +657,8 @@ fn run_http_command(
                 | Commands::McpManifest
                 | Commands::McpServer
                 | Commands::Claims(_)
-                | Commands::Annotations(_) => {
+                | Commands::Annotations(_)
+                | Commands::Incidents(_) => {
                     unreachable!("handled before HTTP setup")
                 }
             }
@@ -933,6 +965,73 @@ fn run_claims_command(
                 response,
                 mode,
                 summarize_claims,
+            )
+        }
+    }
+}
+
+fn run_incidents_command(
+    args: IncidentsArgs,
+    endpoint: Option<String>,
+    api_key: Option<String>,
+    config_path: Option<PathBuf>,
+    mode: RenderMode,
+) -> Result<()> {
+    match args.command {
+        IncidentsCommand::List(_list_args) => {
+            let client = ApiClient::new(Config::resolve(endpoint, api_key, config_path)?)?;
+            let response = client.get_auth_json("/api/v1/incidents")?;
+            render(
+                "incidents",
+                client.endpoint(),
+                response,
+                mode,
+                summarize_incidents,
+            )
+        }
+        IncidentsCommand::Escalate(args) => {
+            let client = ApiClient::new(Config::resolve_for_responder_write(
+                endpoint,
+                api_key,
+                config_path,
+            )?)?;
+            let response = client.post_auth_json(
+                &format!("/api/v1/incidents/{}/escalate", encode(&args.incident_id)),
+                &json!({
+                    "reason": args.reason,
+                    "owner": args.owner,
+                    "purpose": args.purpose,
+                    "idempotency_key": args.idempotency_key,
+                }),
+            )?;
+            render(
+                "incidents escalate",
+                client.endpoint(),
+                response,
+                mode,
+                summarize_incident_escalation,
+            )
+        }
+        IncidentsCommand::Deescalate(args) => {
+            let client = ApiClient::new(Config::resolve_for_responder_write(
+                endpoint,
+                api_key,
+                config_path,
+            )?)?;
+            let mut body = json!({ "owner": args.owner });
+            if let Some(reason) = args.reason {
+                body["reason"] = json!(reason);
+            }
+            let response = client.post_auth_json(
+                &format!("/api/v1/incidents/{}/deescalate", encode(&args.incident_id)),
+                &body,
+            )?;
+            render(
+                "incidents deescalate",
+                client.endpoint(),
+                response,
+                mode,
+                summarize_incident_escalation,
             )
         }
     }

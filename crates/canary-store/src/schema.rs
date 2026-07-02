@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rusqlite::Connection;
 
 /// Current Rust schema version.
-pub const SCHEMA_VERSION: u32 = 2026061401;
+pub const SCHEMA_VERSION: u32 = 2026070200;
 
 pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
@@ -14,6 +14,7 @@ pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     scope_error_group_identity(&transaction)?;
     backfill_service_scope_columns(&transaction)?;
     add_service_event_telemetry_columns(&transaction)?;
+    add_incident_escalation_columns(&transaction)?;
     scope_monitor_name_index(&transaction)?;
     scope_incident_open_service_index(&transaction)?;
     validate_schema_columns(&transaction)?;
@@ -384,6 +385,14 @@ fn add_service_event_telemetry_columns(connection: &Connection) -> rusqlite::Res
     Ok(())
 }
 
+fn add_incident_escalation_columns(connection: &Connection) -> rusqlite::Result<()> {
+    add_text_column_if_missing(connection, "incidents", "escalated_at", "TEXT")?;
+    add_text_column_if_missing(connection, "incidents", "escalated_by", "TEXT")?;
+    add_text_column_if_missing(connection, "incidents", "escalated_reason", "TEXT")?;
+    add_text_column_if_missing(connection, "incidents", "escalated_idempotency_key", "TEXT")?;
+    Ok(())
+}
+
 fn error_group_identity_is_scoped(connection: &Connection) -> rusqlite::Result<bool> {
     let mut statement = connection.prepare("PRAGMA table_info(\"error_groups\")")?;
     let rows = statement.query_map([], |row| {
@@ -607,7 +616,11 @@ CREATE TABLE IF NOT EXISTS incidents (
   severity TEXT NOT NULL DEFAULT 'medium',
   title TEXT,
   opened_at TEXT NOT NULL,
-  resolved_at TEXT
+  resolved_at TEXT,
+  escalated_at TEXT,
+  escalated_by TEXT,
+  escalated_reason TEXT,
+  escalated_idempotency_key TEXT
 );
 
 CREATE INDEX IF NOT EXISTS incidents_service_state_index

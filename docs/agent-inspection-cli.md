@@ -42,7 +42,9 @@ without a key that matches the command's authority model.
 bin/canary summary --window 24h
 bin/canary services --state down --json
 bin/canary errors chrondle --window 24h
-bin/canary incidents --open
+bin/canary incidents list --open
+bin/canary incidents escalate INC-example --reason "iteration guard exhausted" --owner bitterblossom/canary-triage --purpose triage_escalation --idempotency-key run-1:INC-example:escalate
+bin/canary incidents deescalate INC-example --owner operator@example.com --reason "false positive"
 bin/canary timeline --service chrondle --window 7d --limit 20
 bin/canary claims list --subject-type target --subject-id TGT-chrondle --json
 bin/canary claims claim --subject-type target --subject-id TGT-chrondle --owner codex --purpose "verify fix" --json

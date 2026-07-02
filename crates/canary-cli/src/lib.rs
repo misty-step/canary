@@ -533,6 +533,23 @@ pub fn summarize_incidents(value: &Value) -> Vec<String> {
     ]
 }
 
+/// Summarize an incident escalate/deescalate response.
+pub fn summarize_incident_escalation(value: &Value) -> Vec<String> {
+    let escalation = value.get("escalation").unwrap_or(value);
+    vec![
+        format!("incident_id: {}", string_field(escalation, "incident_id")),
+        format!(
+            "escalated_at: {}",
+            nullable_string_field(escalation, "escalated_at")
+        ),
+        format!(
+            "escalated_by: {}",
+            nullable_string_field(escalation, "escalated_by")
+        ),
+        format!("reason: {}", nullable_string_field(escalation, "reason")),
+    ]
+}
+
 /// Summarize remediation claim responses.
 pub fn summarize_claims(value: &Value) -> Vec<String> {
     if value.get("claims").is_some() {
@@ -3118,7 +3135,7 @@ fn next_operator_action(
     }
     if let Some(incident) = open_canary_incident {
         return format!(
-            "Investigate open Canary incident {}; inspect `bin/canary incidents --open --json` and rerun `bin/canary doctor --json` after remediation.",
+            "Investigate open Canary incident {}; inspect `bin/canary incidents list --open --json` and rerun `bin/canary doctor --json` after remediation.",
             string_field(incident, "id")
         );
     }

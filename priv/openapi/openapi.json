@@ -73,7 +73,8 @@
             "ApiKeyCreateResponse",
             "SimpleStatusResponse",
             "RemediationClaim",
-            "TelemetryEvent"
+            "TelemetryEvent",
+            "IncidentEscalationResponse"
           ]
         },
         {
@@ -1019,6 +1020,140 @@
           "trust": "The response summary, action_brief, signals, annotations, and recent timeline are deterministic and bounded; truncation booleans identify when to fetch more.",
           "next": "If signals_truncated or annotations_truncated is true, fetch timeline, query, or annotations pages before acting; otherwise write back an annotation when follow-up completes."
         }
+      }
+    },
+    "/api/v1/incidents/{id}/escalate": {
+      "post": {
+        "tags": [
+          "Incidents"
+        ],
+        "summary": "Escalate an incident for human paging",
+        "description": "Sets escalated_at as an orthogonal overlay on an open incident (escalation never becomes a value of incidents.state), appends an incident.escalated timeline event, and fires the incident.escalated webhook event for any subscriber. Escalation cannot outlive the incident: resolving the incident clears it automatically in the same transaction. Replaying the same idempotency_key returns the existing escalation instead of erroring.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IncidentEscalateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Existing escalation returned for idempotent replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentEscalationResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Incident escalated.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentEscalationResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          },
+          "409": {
+            "description": "Incident already resolved; escalation rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          }
+        },
+        "x-canary-required-scope": "responder-write"
+      }
+    },
+    "/api/v1/incidents/{id}/deescalate": {
+      "post": {
+        "tags": [
+          "Incidents"
+        ],
+        "summary": "Clear a false-positive incident escalation",
+        "description": "Clears escalated_at, appends an incident.deescalated timeline event, and fires the incident.deescalated webhook event. For human/admin correction of an escalation raised in error; the normal close path (resolution) clears escalated_at automatically without calling this route. Deescalating an incident that is not currently escalated is a no-op that returns the cleared state.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IncidentDeescalateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Cleared escalation state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IncidentEscalationResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFoundProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          }
+        },
+        "x-canary-required-scope": "responder-write"
       }
     },
     "/api/v1/incidents/{incident_id}/annotations": {
@@ -2520,6 +2655,8 @@
           "incident.opened",
           "incident.updated",
           "incident.resolved",
+          "incident.escalated",
+          "incident.deescalated",
           "remediation_claim.created",
           "remediation_claim.updated",
           "remediation_claim.expired",
@@ -6184,6 +6321,101 @@
         ],
         "properties": {
           "owner": {
+            "type": "string"
+          }
+        }
+      },
+      "IncidentEscalation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "incident_id",
+          "escalated_at",
+          "escalated_by",
+          "reason"
+        ],
+        "properties": {
+          "incident_id": {
+            "type": "string",
+            "pattern": "^INC-"
+          },
+          "escalated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Null when the incident is not currently escalated."
+          },
+          "escalated_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "IncidentEscalationResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "escalation"
+        ],
+        "properties": {
+          "escalation": {
+            "$ref": "#/components/schemas/IncidentEscalation"
+          }
+        }
+      },
+      "IncidentEscalateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason",
+          "owner",
+          "purpose",
+          "idempotency_key"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Agent or human identity requesting the escalation, e.g. bitterblossom/canary-triage."
+          },
+          "purpose": {
+            "type": "string",
+            "minLength": 1
+          },
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Replaying the same key returns the existing escalation instead of erroring."
+          }
+        }
+      },
+      "IncidentDeescalateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "owner"
+        ],
+        "properties": {
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Human or admin identity correcting the escalation."
+          },
+          "reason": {
             "type": "string"
           }
         }

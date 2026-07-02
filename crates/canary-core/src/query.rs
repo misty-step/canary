@@ -386,6 +386,25 @@ pub struct RemediationClaimSummary {
     pub evidence_links: Vec<String>,
 }
 
+/// Escalation overlay state for one incident, returned by
+/// `POST /api/v1/incidents/{id}/escalate` and `.../deescalate`.
+///
+/// Escalation is orthogonal to `incidents.state`: it never appears as a
+/// value of that deterministic enum. `escalated_at` is `None` when the
+/// incident is not currently escalated (including after deescalation or
+/// after the incident resolves, which auto-clears any open escalation).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncidentEscalation {
+    /// Incident id.
+    pub incident_id: String,
+    /// Escalation timestamp, or `None` when the incident is not escalated.
+    pub escalated_at: Option<String>,
+    /// Owner who escalated (or last escalated) the incident.
+    pub escalated_by: Option<String>,
+    /// Reason given for the escalation.
+    pub reason: Option<String>,
+}
+
 /// Full remediation claim row returned by claim routes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemediationClaim {

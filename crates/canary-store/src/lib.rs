@@ -12,6 +12,7 @@ use time::format_description::well_known::Rfc3339;
 mod annotations;
 mod api_keys;
 mod claims;
+mod escalation;
 pub mod fixtures;
 mod health;
 mod incidents;
@@ -40,6 +41,10 @@ pub use canary_core::metrics::MetricsSnapshot;
 pub use claims::{
     ClaimCreateOutcome, ClaimError, ClaimInsert, ClaimListOptions, ClaimResult, ClaimTransition,
     subject_types as claim_subject_types,
+};
+pub use escalation::{
+    DeescalateOutcome, DeescalationRequest, EscalateOutcome, EscalationError, EscalationInsert,
+    EscalationResult,
 };
 pub use health::{
     ActiveTargetProbeSchedule, HealthCheckSummary, HealthMonitorStatus, HealthTargetStatus,
@@ -161,6 +166,22 @@ impl Store {
         correlation: IncidentCorrelation,
     ) -> Result<Option<IncidentCorrelationEvent>> {
         incidents::correlate(&mut self.connection, correlation)
+    }
+
+    /// Escalate one open incident. Idempotent by `idempotency_key`.
+    pub fn escalate_incident(
+        &mut self,
+        insert: EscalationInsert,
+    ) -> EscalationResult<EscalateOutcome> {
+        escalation::escalate(&mut self.connection, insert)
+    }
+
+    /// Clear a false-positive escalation on one incident. Idempotent.
+    pub fn deescalate_incident(
+        &mut self,
+        request: DeescalationRequest,
+    ) -> EscalationResult<DeescalateOutcome> {
+        escalation::deescalate(&mut self.connection, request)
     }
 
     /// Persist one target probe, including state and optional transition effects.
@@ -3341,6 +3362,266 @@ mod tests {
         assert_eq!(incident.1, "resolved");
         assert_eq!(incident.3.as_deref(), Some("2026-05-28T20:00:02Z"));
         assert_eq!(active_signal_count(&store, "INC-resolve00000")?, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn escalate_incident_sets_escalated_at_and_records_timeline_event()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        insert_incident(&store, "INC-escalate001", "cadence", "2026-07-02T00:00:00Z")?;
+
+        let outcome = store.escalate_incident(escalation_insert(
+            "INC-escalate001",
+            "EVT-escalate001",
+            "bitterblossom/canary-triage",
+            "hypothesis confidence high, iteration guard exhausted",
+            "bb-run-1:INC-escalate001:escalate",
+            "2026-07-02T00:05:00Z",
+        ))?;
+
+        assert!(outcome.created);
+        assert_eq!(outcome.escalation.incident_id, "INC-escalate001");
+        assert_eq!(
+            outcome.escalation.escalated_at.as_deref(),
+            Some("2026-07-02T00:05:00Z")
+        );
+        assert_eq!(
+            outcome.escalation.escalated_by.as_deref(),
+            Some("bitterblossom/canary-triage")
+        );
+        assert_eq!(
+            outcome.escalation.reason.as_deref(),
+            Some("hypothesis confidence high, iteration guard exhausted")
+        );
+        assert_eq!(
+            incident_escalated_at(&store, "INC-escalate001")?.as_deref(),
+            Some("2026-07-02T00:05:00Z")
+        );
+        assert_eq!(
+            service_event_count(&store.connection, "INC-escalate001", "incident.escalated")?,
+            1
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn escalate_incident_is_idempotent_by_key()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        insert_incident(&store, "INC-escalate002", "cadence", "2026-07-02T00:00:00Z")?;
+
+        let first = store.escalate_incident(escalation_insert(
+            "INC-escalate002",
+            "EVT-escalate002a",
+            "bitterblossom/canary-triage",
+            "reason-a",
+            "bb-run-1:INC-escalate002:escalate",
+            "2026-07-02T00:05:00Z",
+        ))?;
+        assert!(first.created);
+
+        let replay = store.escalate_incident(escalation_insert(
+            "INC-escalate002",
+            "EVT-escalate002b",
+            "bitterblossom/canary-triage",
+            "reason-b",
+            "bb-run-1:INC-escalate002:escalate",
+            "2026-07-02T00:06:00Z",
+        ))?;
+        assert!(!replay.created);
+        assert_eq!(replay.escalation, first.escalation);
+
+        assert_eq!(
+            service_event_count(&store.connection, "INC-escalate002", "incident.escalated")?,
+            1
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn escalate_incident_rejects_already_resolved()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        insert_incident(&store, "INC-escalate003", "cadence", "2026-07-02T00:00:00Z")?;
+        store.connection.execute(
+            "UPDATE incidents SET state = 'resolved', resolved_at = '2026-07-02T00:01:00Z'
+             WHERE id = 'INC-escalate003'",
+            [],
+        )?;
+
+        let outcome = store.escalate_incident(escalation_insert(
+            "INC-escalate003",
+            "EVT-escalate003",
+            "bitterblossom/canary-triage",
+            "reason",
+            "bb-run-1:INC-escalate003:escalate",
+            "2026-07-02T00:05:00Z",
+        ));
+        assert!(matches!(outcome, Err(EscalationError::AlreadyResolved)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn escalate_incident_rejects_missing_incident()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+
+        let outcome = store.escalate_incident(escalation_insert(
+            "INC-missing",
+            "EVT-missing",
+            "bitterblossom/canary-triage",
+            "reason",
+            "bb-run-1:INC-missing:escalate",
+            "2026-07-02T00:05:00Z",
+        ));
+        assert!(matches!(outcome, Err(EscalationError::NotFound)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn escalate_incident_rejects_empty_fields()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        insert_incident(&store, "INC-escalate004", "cadence", "2026-07-02T00:00:00Z")?;
+
+        let outcome = store.escalate_incident(escalation_insert(
+            "INC-escalate004",
+            "EVT-escalate004",
+            "bitterblossom/canary-triage",
+            "",
+            "bb-run-1:INC-escalate004:escalate",
+            "2026-07-02T00:05:00Z",
+        ));
+        assert!(matches!(outcome, Err(EscalationError::InvalidEscalation)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn deescalate_incident_clears_escalation_and_records_timeline_event()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        insert_incident(
+            &store,
+            "INC-deescalate001",
+            "cadence",
+            "2026-07-02T00:00:00Z",
+        )?;
+        store.escalate_incident(escalation_insert(
+            "INC-deescalate001",
+            "EVT-deescalate001a",
+            "bitterblossom/canary-triage",
+            "reason",
+            "bb-run-1:INC-deescalate001:escalate",
+            "2026-07-02T00:05:00Z",
+        ))?;
+
+        let outcome = store.deescalate_incident(deescalation_request(
+            "INC-deescalate001",
+            "EVT-deescalate001b",
+            "operator@example.com",
+            "2026-07-02T00:10:00Z",
+        ))?;
+
+        assert!(outcome.changed);
+        assert_eq!(outcome.escalation.escalated_at, None);
+        assert_eq!(outcome.escalation.escalated_by, None);
+        assert_eq!(outcome.escalation.reason, None);
+        assert_eq!(incident_escalated_at(&store, "INC-deescalate001")?, None);
+        assert_eq!(
+            service_event_count(
+                &store.connection,
+                "INC-deescalate001",
+                "incident.deescalated"
+            )?,
+            1
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn deescalate_incident_is_idempotent_when_not_escalated()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        insert_incident(
+            &store,
+            "INC-deescalate002",
+            "cadence",
+            "2026-07-02T00:00:00Z",
+        )?;
+
+        let outcome = store.deescalate_incident(deescalation_request(
+            "INC-deescalate002",
+            "EVT-deescalate002",
+            "operator@example.com",
+            "2026-07-02T00:10:00Z",
+        ))?;
+
+        assert!(!outcome.changed);
+        assert_eq!(
+            service_event_count(
+                &store.connection,
+                "INC-deescalate002",
+                "incident.deescalated"
+            )?,
+            0
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn correlate_incident_auto_clears_escalation_when_resolved()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        store.commit_error_ingest(error_ingest(
+            "ERR-escalateresolve1",
+            "EVT-escalateresolve1",
+            "group-escalate-resolve",
+            "2026-07-02T00:00:00Z",
+        ))?;
+        store.correlate_incident(incident_correlation(
+            "INC-escalateres1",
+            "EVT-escalateresolveopen",
+            "error_group",
+            "group-escalate-resolve",
+            "cadence",
+            "2026-07-02T00:00:01Z",
+        ))?;
+        store.escalate_incident(escalation_insert(
+            "INC-escalateres1",
+            "EVT-escalateresolveesc",
+            "bitterblossom/canary-triage",
+            "reason",
+            "bb-run-1:INC-escalateres1:escalate",
+            "2026-07-02T00:00:02Z",
+        ))?;
+        assert!(incident_escalated_at(&store, "INC-escalateres1")?.is_some());
+
+        store.connection.execute(
+            "UPDATE error_groups SET status = 'resolved' WHERE group_hash = 'group-escalate-resolve'",
+            [],
+        )?;
+        let event = store
+            .correlate_incident(incident_correlation(
+                "INC-unused-escalateresolve",
+                "EVT-escalateresolveclose",
+                "error_group",
+                "group-escalate-resolve",
+                "cadence",
+                "2026-07-02T00:00:03Z",
+            ))?
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+        assert_eq!(event.event, "incident.resolved");
+        assert_eq!(incident_escalated_at(&store, "INC-escalateres1")?, None);
 
         Ok(())
     }
@@ -6767,6 +7048,57 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .map_err(Into::into)
+    }
+
+    fn incident_escalated_at(store: &Store, incident_id: &str) -> Result<Option<String>> {
+        store
+            .connection
+            .query_row(
+                "SELECT escalated_at FROM incidents WHERE id = ?1",
+                [incident_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    fn escalation_insert(
+        incident_id: &str,
+        event_id: &str,
+        owner: &str,
+        reason: &str,
+        idempotency_key: &str,
+        now: &str,
+    ) -> EscalationInsert {
+        EscalationInsert {
+            incident_id: incident_id.to_owned(),
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: None,
+            owner: owner.to_owned(),
+            reason: reason.to_owned(),
+            purpose: "triage_escalation".to_owned(),
+            idempotency_key: idempotency_key.to_owned(),
+            event_id: event_id.to_owned(),
+            now: now.to_owned(),
+        }
+    }
+
+    fn deescalation_request(
+        incident_id: &str,
+        event_id: &str,
+        owner: &str,
+        now: &str,
+    ) -> DeescalationRequest {
+        DeescalationRequest {
+            incident_id: incident_id.to_owned(),
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: None,
+            owner: owner.to_owned(),
+            reason: None,
+            event_id: event_id.to_owned(),
+            now: now.to_owned(),
+        }
     }
 
     fn signal_count(
