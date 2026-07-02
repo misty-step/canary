@@ -50,7 +50,7 @@ impl WebhookDeliveryJobState {
 /// Fields required to insert one webhook delivery job.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WebhookDeliveryJobInsert {
-    /// Phoenix-compatible job args.
+    /// Job args.
     pub args: Value,
     /// Initial scheduled timestamp.
     pub scheduled_at: String,
@@ -67,7 +67,7 @@ pub struct WebhookDeliveryJobRow {
     pub id: i64,
     /// Current state.
     pub state: WebhookDeliveryJobState,
-    /// Phoenix-compatible args.
+    /// Args.
     pub args: Value,
     /// Current one-based attempt after claiming.
     pub attempt: u32,

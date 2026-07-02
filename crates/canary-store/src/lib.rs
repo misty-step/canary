@@ -1283,7 +1283,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_creates_the_current_phoenix_tables() -> Result<()> {
+    fn migrate_creates_the_current_tables() -> Result<()> {
         let mut store = migrated_store()?;
 
         assert_eq!(
@@ -3486,7 +3486,7 @@ mod tests {
     }
 
     #[test]
-    fn api_keys_table_preserves_phoenix_hash_storage_shape() -> Result<()> {
+    fn api_keys_table_preserves_hash_storage_shape() -> Result<()> {
         let store = migrated_store()?;
         let columns = columns(&store.connection, "api_keys")?;
 
@@ -3669,7 +3669,7 @@ mod tests {
     }
 
     #[test]
-    fn errors_by_service_returns_phoenix_group_shape_and_summary()
+    fn errors_by_service_returns_group_shape_and_summary()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut store = migrated_store()?;
         store.commit_error_ingest(error_ingest(
@@ -4245,7 +4245,7 @@ mod tests {
     }
 
     #[test]
-    fn report_read_models_match_phoenix_filters_ordering_and_search()
+    fn report_read_models_match_filters_ordering_and_search()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut store = migrated_store()?;
         store.insert_target(TargetInsert {
