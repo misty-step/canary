@@ -1,4 +1,28 @@
-//! Minimal Oban-compatible persistence for Rust-owned webhook delivery jobs.
+//! Webhook delivery job persistence.
+//!
+//! The `oban_jobs` SQLite table and the `Canary.Workers.WebhookDelivery` worker
+//! string are inherited from the deleted Elixir/Oban implementation. They are
+//! kept as-is because:
+//!
+//! 1. **Production databases already have rows in `oban_jobs`.** Renaming the
+//!    table requires a data migration that touches the single-writer store
+//!    during a deploy window. The risk/reward is not yet justified — the table
+//!    works correctly and the name does not affect runtime behavior.
+//!
+//! 2. **The `Canary.Workers.WebhookDelivery` worker string is persisted in
+//!    existing `oban_jobs.worker` rows.** Changing it requires an `UPDATE`
+//!    migration that could leave stale rows unclaimable if it runs
+//!    partially.
+//!
+//! 3. **The legacy fixture compat tests** (`tests/legacy_fixture_compat.rs`)
+//!    verify that the Rust migration path correctly handles databases created
+//!    by the Elixir app. Renaming the table would break that compatibility path
+//!    until the fixtures are regenerated.
+//!
+//! When the production database is next restamped (all Elixir-era rows are
+//! drained), this table should be renamed to `webhook_delivery_jobs` and the
+//! worker string updated to a Rust-idiomatic name. That is a coordinated
+//! migration tracked by 066 child 2.
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;

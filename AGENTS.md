@@ -67,6 +67,12 @@ Prefer these over re-deriving from the code base.
 |---|---|---|
 | **#010 Ramp pattern** (blocked, XL, north-star) | `backlog.d/010-ramp-pattern.md` | Blocked on bitterblossom triage sprite (`bitterblossom/backlog.d/011-canary-triage-sprite.md`). Agent-consumer shape of error→triage→fix. |
 | **#020 Adminifi HTTP surface verification** (blocked, S) | `backlog.d/020-adminifi-http-surface-verification.md` | Upstream Adminifi HTTP surface stability. |
+| **#048 Responder rich-context safety gate** (pending, XL, P0) | `backlog.d/048-responder-rich-context-safety-gate.md` | Context-envelope redesign, minimization/redaction policy, new responder scopes. Read-audit events landed (#071); scope-model decision is ADR-gated. |
+| **#062 Agent loop write surface** (pending, XL, P0) | `backlog.d/062-agent-loop-write-surface.md` | CLI/MCP annotation writeback so agents can complete the loop the vision promises. |
+| **#063 Triage contract hardening** (pending, XL, P1) | `backlog.d/063-triage-contract-hardening.md` | Durable webhook cooldown, dispatch budgets, claim-gated delivery. |
+| **#064 Trustworthy release/upgrade** (pending, L, P1) | `backlog.d/064-trustworthy-release-upgrade.md` | npm publish, Docker image publish, v1.0.0 release-note truth gap. Children 4+5 (upgrade/compatibility docs) shipped. |
+| **#065 Runtime hardening** (pending, L, P1) | `backlog.d/065-runtime-hardening.md` | bcrypt-outside-mutex, tracing adoption (server startup shipped), backup posture. Children 4 (tracing), 5 (anyhow), 6 (SLI floor) shipped. |
+| **#066 Consolidation and archaeology deletion** (pending, XL, P2) | `backlog.d/066-consolidation-and-archaeology-deletion.md` | Worker lifecycle quad unification, oban_jobs rename (gated on prod DB restamp), canary-ingest fold, legacy fixture retirement. Parity comment sweep complete; Burst bucket, stale yarn.lock, .backlog.d/ deleted. |
 | Recurring footgun surface | `CLAUDE.md` footgun list + Rust store/runtime/schema modules | See `CLAUDE.md` — load-bearing. Every remediation here must cite the footgun list and extend it when new failure modes appear. |
 
 All other tracked items are shipped and archived under `backlog.d/_done/`. Priority map + Lanes 1–5 in `backlog.d/README.md`.
