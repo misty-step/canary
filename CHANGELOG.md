@@ -1,3 +1,10 @@
+# [1.9.0](https://github.com/misty-step/canary/compare/v1.8.0...v1.9.0) (2026-07-02)
+
+
+### Features
+
+* **incidents:** add first-class escalation overlay + webhook events ([b6aa43a](https://github.com/misty-step/canary/commit/b6aa43a0036d444304535db3174189d38c7b30d3))
+
 # [1.8.0](https://github.com/misty-step/canary/compare/v1.7.1...v1.8.0) (2026-07-02)
 
 
