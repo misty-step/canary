@@ -15,13 +15,13 @@ pub type WebhookDeliveryPageResult<T> = std::result::Result<T, WebhookDeliveryPa
 /// Webhook delivery page validation or storage failure.
 #[derive(Debug, thiserror::Error)]
 pub enum WebhookDeliveryPageError {
-    /// Limit is not a positive integer up to the Phoenix maximum.
+    /// Limit is not a positive integer up to the accepted maximum.
     #[error("invalid webhook delivery limit")]
     InvalidLimit,
-    /// Cursor is not a valid Phoenix webhook delivery cursor.
+    /// Cursor is not a valid webhook delivery cursor.
     #[error("invalid webhook delivery cursor")]
     InvalidCursor,
-    /// Status is not one of the Phoenix ledger statuses.
+    /// Status is not one of the ledger statuses.
     #[error("invalid webhook delivery status")]
     InvalidStatus,
     /// SQLite rejected the read.
@@ -29,7 +29,7 @@ pub enum WebhookDeliveryPageError {
     Sqlite(#[from] rusqlite::Error),
 }
 
-/// Delivery status values accepted by the Phoenix schema.
+/// Delivery status values accepted by the schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebhookDeliveryStatus {
     /// Delivery has been enqueued but not attempted.
@@ -66,7 +66,7 @@ impl WebhookDeliveryStatus {
         }
     }
 
-    /// Parse a user-supplied Phoenix status filter.
+    /// Parse a user-supplied status filter.
     pub fn parse_filter(value: &str) -> Option<Self> {
         match value {
             "pending" => Some(Self::Pending),
@@ -79,7 +79,7 @@ impl WebhookDeliveryStatus {
     }
 }
 
-/// Return Phoenix's accepted webhook delivery statuses in wire order.
+/// Return accepted webhook delivery statuses in wire order.
 pub const fn statuses() -> &'static [&'static str] {
     &[
         "pending",

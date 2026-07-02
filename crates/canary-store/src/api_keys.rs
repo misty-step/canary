@@ -3,7 +3,7 @@ use rusqlite::{Connection, params};
 
 use crate::Result;
 
-/// Number of leading characters stored by Phoenix as `api_keys.key_prefix`.
+/// Number of leading characters stored by as `api_keys.key_prefix`.
 pub const API_KEY_PREFIX_LEN: usize = 12;
 /// Tenant assigned to pre-multitenant rows during the ownership migration.
 pub const BOOTSTRAP_TENANT_ID: &str = "TENANT-bootstrap";
@@ -27,7 +27,7 @@ pub struct ApiKeyInsert {
     pub created_at: String,
     /// ISO8601 revocation timestamp, when the key is inactive.
     pub revoked_at: Option<String>,
-    /// Phoenix wire-value scope, such as `admin` or `ingest-only`.
+    /// Wire-value scope, such as `admin` or `ingest-only`.
     pub scope: String,
     /// Tenant this key can operate within.
     pub tenant_id: String,
@@ -44,7 +44,7 @@ pub struct VerifiedApiKey {
     pub id: String,
     /// Human-readable key name.
     pub name: String,
-    /// Phoenix wire-value scope, such as `admin` or `ingest-only`.
+    /// Wire-value scope, such as `admin` or `ingest-only`.
     pub scope: String,
     /// Tenant this key can operate within.
     pub tenant_id: String,
@@ -61,7 +61,7 @@ pub struct ApiKeyRecord {
     pub id: String,
     /// Human-readable key name.
     pub name: String,
-    /// Phoenix wire-value scope.
+    /// Wire-value scope.
     pub scope: String,
     /// First 12 characters of the raw key.
     pub key_prefix: String,

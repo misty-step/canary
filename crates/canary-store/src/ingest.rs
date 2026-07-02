@@ -34,11 +34,11 @@ pub struct ErrorIngestPayload {
     pub service: String,
     /// Error class.
     pub error_class: String,
-    /// Message truncated to the Phoenix limit by the caller.
+    /// Message truncated to the limit by the caller.
     pub message: String,
     /// Normalized message template.
     pub message_template: String,
-    /// Optional stack trace truncated to the Phoenix limit by the caller.
+    /// Optional stack trace truncated to the limit by the caller.
     pub stack_trace: Option<String>,
     /// Optional JSON-encoded context.
     pub context_json: Option<String>,
