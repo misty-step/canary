@@ -1,3 +1,10 @@
+# [1.2.0](https://github.com/misty-step/canary/compare/v1.1.0...v1.2.0) (2026-07-02)
+
+
+### Features
+
+* **governance:** add canary-deploy repo-local skill ([#182](https://github.com/misty-step/canary/issues/182)) ([a48d7d5](https://github.com/misty-step/canary/commit/a48d7d56befc099bcc39fb945fb2b16f2a1050a3)), closes [harness-kit#151](https://github.com/harness-kit/issues/151)
+
 # [1.1.0](https://github.com/misty-step/canary/compare/v1.0.1...v1.1.0) (2026-07-02)
 
 
