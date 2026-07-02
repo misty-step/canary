@@ -24,11 +24,18 @@ visible until a focused PR archives them with evidence.
 
 | # | Item | Priority | Status | Estimate |
 |---|------|----------|--------|----------|
+| 080 | Pin live incident-payload shape | P0 | pending | S |
+| 081 | Remove hardcoded operator domain fixture | P2 | pending | S |
+| 071 | Responder context read-audit events | P1 | pending | M |
 | 062 | Agent loop write surface | P0 | pending | XL |
 | 063 | Triage contract hardening | P1 | pending | XL |
 | 064 | Trustworthy release/upgrade | P1 | pending | L |
 | 065 | Runtime hardening | P1 | pending | L |
 | 066 | Consolidation and archaeology deletion | P2 | pending | XL |
+| 058 | Cadence-aware SLI trajectory sample floor | P2 | pending | M |
+| 082 | Triage GitHub issue #129 | P3 | pending | S |
+| 070 | Archive shipped backlog tickets | P3 | pending | S |
+| 072 | Webhook receiver conformance fixtures | P1 | pending | M |
 | 001 | Annotations API | high | done | M |
 | 002 | Timeline agent polling | high | done | S |
 | 003 | Triage diagnostic webhooks non-fatal | high | done | S |
