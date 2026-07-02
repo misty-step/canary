@@ -13,6 +13,8 @@ use canary_core::{
 use rusqlite::{Connection, params_from_iter};
 use time::OffsetDateTime;
 
+use crate::scope::{owner_clause, owner_params, window_params};
+
 use crate::query::{QueryError, QueryResult};
 
 /// Per-service SLI projection returned by the unified report.
@@ -593,32 +595,6 @@ fn incident_sli_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IncidentSliRow>
 
 fn ratio(successful: u64, total: u64) -> Option<f64> {
     (total > 0).then_some(successful as f64 / total as f64)
-}
-
-fn owner_clause(alias: &str, first_parameter: usize, owner: Option<(&str, &str)>) -> String {
-    owner
-        .map(|_| {
-            format!(
-                "AND {alias}.tenant_id = ?{first_parameter} AND {alias}.project_id = ?{}",
-                first_parameter + 1
-            )
-        })
-        .unwrap_or_default()
-}
-
-fn owner_params<'a>(owner: Option<(&'a str, &'a str)>) -> Vec<&'a str> {
-    owner
-        .map(|(tenant_id, project_id)| vec![tenant_id, project_id])
-        .unwrap_or_default()
-}
-
-fn window_params<'a>(cutoff: &'a str, owner: Option<(&'a str, &'a str)>) -> Vec<&'a str> {
-    let mut values = vec![cutoff];
-    if let Some((tenant_id, project_id)) = owner {
-        values.push(tenant_id);
-        values.push(project_id);
-    }
-    values
 }
 
 #[cfg(test)]

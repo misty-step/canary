@@ -17,6 +17,8 @@ use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::T
 use serde_json::Value;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
+use crate::scope::owner_clause;
+
 const MAX_INCIDENT_SIGNALS: usize = 25;
 const MAX_INCIDENT_ANNOTATIONS: usize = 20;
 const MAX_INCIDENT_TIMELINE_EVENTS: usize = 5;
@@ -379,7 +381,7 @@ fn error_summary_at_scoped(
 ) -> QueryResult<Vec<ErrorSummaryItem>> {
     let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
     let cutoff = window.cutoff_at(now);
-    let owner_clause = owner_clause("error_groups", 2);
+    let owner_clause = owner_clause("error_groups", 2, owner);
     let sql = if owner.is_some() {
         format!(
             "SELECT service, SUM(total_count), COUNT(group_hash)
@@ -452,7 +454,7 @@ fn report_error_groups_at_scoped(
 ) -> QueryResult<Vec<ErrorGroupSummary>> {
     let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
     let cutoff = window.cutoff_at(now);
-    let owner_clause = owner_clause("g", 2);
+    let owner_clause = owner_clause("g", 2, owner);
     let sql = if owner.is_some() {
         format!(
             "SELECT
@@ -545,8 +547,8 @@ fn recent_transitions_at_scoped(
 ) -> QueryResult<Vec<RecentTransition>> {
     let window = QueryWindow::parse(window).ok_or(QueryError::InvalidWindow)?;
     let cutoff = window.cutoff_at(now);
-    let target_owner_clause = owner_clause("t", 2);
-    let monitor_owner_clause = owner_clause("m", 2);
+    let target_owner_clause = owner_clause("t", 2, owner);
+    let monitor_owner_clause = owner_clause("m", 2, owner);
     let sql = if owner.is_some() {
         format!(
             "SELECT 'target', t.id, t.name, COALESCE(NULLIF(t.service, ''), t.name), s.state, s.last_transition_at
@@ -645,7 +647,7 @@ fn search_errors_at_scoped(
     }
     let cutoff = window.cutoff_at(now);
     let quoted = format!("\"{}\"", trimmed.replace('"', "\"\""));
-    let owner_clause = owner_clause("e", 3);
+    let owner_clause = owner_clause("e", 3, owner);
     let sql = if owner.is_some() {
         format!(
             "SELECT e.id, e.service, e.error_class, e.message, e.group_hash, e.created_at,
@@ -1013,7 +1015,7 @@ fn error_class_aggregates(
     cutoff: &str,
     owner: Option<(&str, &str)>,
 ) -> QueryResult<Vec<ErrorClassAggregate>> {
-    let owner_clause = owner_clause("error_groups", 2);
+    let owner_clause = owner_clause("error_groups", 2, owner);
     let sql = if owner.is_some() {
         format!(
             "SELECT error_class, COALESCE(SUM(total_count), 0), COUNT(DISTINCT service)
@@ -1059,7 +1061,7 @@ fn error_class_totals(
     cutoff: &str,
     owner: Option<(&str, &str)>,
 ) -> QueryResult<(u64, u64)> {
-    let owner_clause = owner_clause("error_groups", 2);
+    let owner_clause = owner_clause("error_groups", 2, owner);
     let sql = if owner.is_some() {
         format!(
             "SELECT COALESCE(SUM(total_count), 0), COUNT(DISTINCT error_class)
@@ -1173,7 +1175,7 @@ fn incident_rows(
     connection: &Connection,
     owner: Option<(&str, &str)>,
 ) -> QueryResult<Vec<IncidentRow>> {
-    let owner_clause = owner_clause("incidents", 1);
+    let owner_clause = owner_clause("incidents", 1, owner);
     let sql = if owner.is_some() {
         format!(
             "SELECT id, tenant_id, project_id, service, title, opened_at, resolved_at
@@ -2366,13 +2368,6 @@ fn error_query_groups_from_rows(
 ) -> ErrorGroupQueryResult<Vec<ErrorGroupSummary>> {
     let groups = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(groups)
-}
-
-fn owner_clause(alias: &str, first_parameter: usize) -> String {
-    format!(
-        " AND {alias}.tenant_id = ?{first_parameter} AND {alias}.project_id = ?{}",
-        first_parameter + 1
-    )
 }
 
 fn group_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ErrorGroupSummary> {
