@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Canary</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/ui/aesthetic.css">
+    <link rel="stylesheet" href="/ui/dashboard.css">
+    <script defer src="/ui/app.js"></script>
+  </head>
+  <body>
+    <div class="canary-shell" data-canary-dashboard>
+      <header class="canary-topbar">
+        <div class="brand-block" aria-label="Canary">
+          <div class="brand">CANARY</div>
+        </div>
+        <nav class="canary-nav ae-nav" aria-label="Dashboard views">
+          <button type="button" data-view="health" aria-current="page">Health</button>
+          <button type="button" data-view="incidents">Incidents</button>
+          <button type="button" data-view="checks">Checks</button>
+          <button type="button" data-view="errors">Errors</button>
+        </nav>
+        <form class="session-form" id="session-form">
+          <label for="api-key">Bearer key</label>
+          <input id="api-key" name="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="paste bearer key">
+          <button type="submit">Use</button>
+          <button type="button" id="clear-key">Clear</button>
+        </form>
+        <button class="ae-mode" id="mode-toggle" type="button" aria-label="Toggle color mode">
+          <svg class="ae-icon ae-sun" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="4"></circle>
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
+          </svg>
+          <svg class="ae-icon ae-moon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"></path>
+          </svg>
+        </button>
+      </header>
+
+      <main class="canary-main" id="view-root" tabindex="-1"></main>
+
+      <footer class="canary-status ae-chrome">
+        <span id="connection-status">No session key</span>
+        <span id="last-refresh">Not refreshed</span>
+        <button type="button" id="refresh">Refresh</button>
+      </footer>
+    </div>
+  </body>
+</html>

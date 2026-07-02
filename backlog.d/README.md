@@ -32,6 +32,8 @@ visible until a focused PR archives them with evidence.
 | 064 | Trustworthy release/upgrade | P1 | pending | L |
 | 065 | Runtime hardening | P1 | pending | L |
 | 066 | Consolidation and archaeology deletion | P2 | pending | XL |
+| 067 | Human dashboard historical incident index | P2 | pending | M |
+| 068 | Human dashboard read contract and private-network mode | P2 | pending | M |
 | 058 | Cadence-aware SLI trajectory sample floor | P2 | done | M |
 | 082 | Triage GitHub issue #129 | P3 | done | S |
 | 070 | Archive shipped backlog tickets | P3 | done | S |
