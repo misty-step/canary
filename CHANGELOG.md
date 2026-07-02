@@ -1,3 +1,10 @@
+## [1.4.1](https://github.com/misty-step/canary/compare/v1.4.0...v1.4.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* **deps:** bump anyhow to clear RUSTSEC-2026-0190 ([#185](https://github.com/misty-step/canary/issues/185)) ([fc87c2a](https://github.com/misty-step/canary/commit/fc87c2ae21047d5bb1df8afdb747cd50add94666)), closes [#059](https://github.com/misty-step/canary/issues/059)
+
 # [1.4.0](https://github.com/misty-step/canary/compare/v1.3.0...v1.4.0) (2026-07-02)
 
 
