@@ -3,11 +3,19 @@
 use std::{error::Error, path::PathBuf, process};
 
 use canary_server::{CanaryServer, ServerProcessConfig, keygen};
+use tracing::info;
+use tracing_subscriber::EnvFilter;
 
 const DEFAULT_DB_PATH: &str = "/data/canary.db";
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
     if let Err(error) = run().await {
         eprintln!("canary-server: {error}");
         process::exit(1);
@@ -28,7 +36,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let local_addr = listener.local_addr()?;
     let server = CanaryServer::boot(config.server)?;
 
-    eprintln!("canary-server listening on {local_addr}");
+    info!(%local_addr, "canary-server listening");
     server.serve(listener, shutdown_signal()).await?;
     Ok(())
 }
@@ -72,7 +80,7 @@ fn run_mint_key(args: &[String]) -> Result<(), Box<dyn Error>> {
 async fn shutdown_signal() {
     let ctrl_c = async {
         if let Err(error) = tokio::signal::ctrl_c().await {
-            eprintln!("canary-server: failed to install Ctrl-C handler: {error}");
+            tracing::warn!(%error, "failed to install Ctrl-C handler");
         }
     };
 
@@ -84,7 +92,7 @@ async fn shutdown_signal() {
                     signal.recv().await;
                 }
                 Err(error) => {
-                    eprintln!("canary-server: failed to install SIGTERM handler: {error}");
+                    tracing::warn!(%error, "failed to install SIGTERM handler");
                 }
             }
         };
