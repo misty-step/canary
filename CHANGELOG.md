@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/misty-step/canary/compare/v1.0.1...v1.1.0) (2026-07-02)
+
+
+### Features
+
+* version canary incident events ([#180](https://github.com/misty-step/canary/issues/180)) ([c8e281b](https://github.com/misty-step/canary/commit/c8e281bafcd05f29a78bfbe88ddc7384e2ea988c))
+
 ## [1.0.1](https://github.com/misty-step/canary/compare/v1.0.0...v1.0.1) (2026-07-01)
 
 
