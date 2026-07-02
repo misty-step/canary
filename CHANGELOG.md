@@ -1,3 +1,10 @@
+# [1.10.0](https://github.com/misty-step/canary/compare/v1.9.0...v1.10.0) (2026-07-02)
+
+
+### Features
+
+* **ui:** kit-adoption mechanics — Geist, mode boot, the trail primitive ([#220](https://github.com/misty-step/canary/issues/220)) ([cfc125e](https://github.com/misty-step/canary/commit/cfc125ebf03986b4d512121f7d500d266b98e59b)), closes [misty-step/aesthetic#7](https://github.com/misty-step/aesthetic/issues/7) [#7](https://github.com/misty-step/canary/issues/7) [#8](https://github.com/misty-step/canary/issues/8)
+
 # [1.9.0](https://github.com/misty-step/canary/compare/v1.8.0...v1.9.0) (2026-07-02)
 
 
