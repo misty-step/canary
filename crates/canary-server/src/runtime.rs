@@ -32,7 +32,7 @@ use crate::{
     TargetProbeOptions, TargetProbeRuntime, TlsExpiryScanLifecycle, TlsExpiryScanLifecycleConfig,
     TlsExpiryScanLifecycleWorker, WebhookDeliveryDrain, WebhookDeliveryDrainWorker,
     WebhookDeliveryRuntime, WebhookEnqueueEffectSink, WebhookTransport, WorkerHealthRegistry,
-    ingest_router, public_router,
+    dashboard_router, ingest_router, public_router,
     server_time::{current_rfc3339, current_unix_millis},
 };
 
@@ -240,7 +240,9 @@ impl CanaryServer {
             store: store.clone(),
             workers: worker_health.clone(),
         }));
-        let router = public_router(readiness).merge(ingest_router(ingest_state));
+        let router = public_router(readiness)
+            .merge(dashboard_router())
+            .merge(ingest_router(ingest_state));
 
         Ok(Self {
             router,

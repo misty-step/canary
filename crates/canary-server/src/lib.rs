@@ -23,6 +23,7 @@ mod admin_webhooks;
 mod annotations;
 mod body_fields;
 mod claims;
+mod dashboard_routes;
 mod egress;
 mod health_fanout;
 mod health_routes;
@@ -63,6 +64,7 @@ use annotations::{
     list_group_annotations, list_incident_annotations,
 };
 use claims::{create_claim, list_claims, release_claim, show_claim, transition_claim};
+pub use dashboard_routes::dashboard_router;
 pub use health_fanout::{
     EnqueueFailure, EnqueueFailureKey, EnqueueFailureRecorder, EnqueueFailureSink,
     EventFanoutReport, HealthEventFanout, HealthEventSource,
@@ -220,7 +222,8 @@ mod tests {
     use axum::{
         body::{Body, to_bytes},
         http::{
-            HeaderMap, HeaderValue, Method, Request, Response, StatusCode, header::CONTENT_TYPE,
+            HeaderMap, HeaderValue, Method, Request, Response, StatusCode,
+            header::{CACHE_CONTROL, CONTENT_TYPE},
         },
     };
     use canary_core::{
@@ -690,6 +693,16 @@ mod tests {
             .await?;
         assert_eq!(health.status(), StatusCode::OK);
 
+        let dashboard = server
+            .router()
+            .oneshot(Request::get("/ui").body(Body::empty())?)
+            .await?;
+        assert_eq!(dashboard.status(), StatusCode::OK);
+        assert_eq!(
+            dashboard.headers().get(CONTENT_TYPE),
+            Some(&HeaderValue::from_static("text/html; charset=utf-8"))
+        );
+
         let query = server
             .router()
             .oneshot(read_request(READ_KEY, "/api/v1/query?service=test-svc")?)
@@ -761,6 +774,51 @@ mod tests {
         assert_eq!(keys[0].name, "bootstrap");
         assert_eq!(keys[0].scope, "admin");
         fs::remove_file(path)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dashboard_shell_serves_assets_without_private_data() -> Result<(), Box<dyn Error>> {
+        let router = dashboard_router();
+
+        let shell = router
+            .clone()
+            .oneshot(Request::get("/ui").body(Body::empty())?)
+            .await?;
+        assert_eq!(shell.status(), StatusCode::OK);
+        assert_eq!(
+            shell.headers().get(CONTENT_TYPE),
+            Some(&HeaderValue::from_static("text/html; charset=utf-8"))
+        );
+        assert_eq!(
+            shell.headers().get(CACHE_CONTROL),
+            Some(&HeaderValue::from_static("no-store"))
+        );
+        let shell_body = text_body(shell).await?;
+        assert!(shell_body.contains("data-canary-dashboard"));
+        assert!(!shell_body.contains("sk_live_"));
+        assert!(!shell_body.contains("/api/v1/status"));
+
+        let script = router
+            .clone()
+            .oneshot(Request::get("/ui/app.js").body(Body::empty())?)
+            .await?;
+        assert_eq!(script.status(), StatusCode::OK);
+        assert_eq!(
+            script.headers().get(CONTENT_TYPE),
+            Some(&HeaderValue::from_static("text/javascript; charset=utf-8"))
+        );
+        let script_body = text_body(script).await?;
+        assert!(script_body.contains("Authorization"));
+        assert!(script_body.contains("sessionStorage"));
+
+        let aesthetic = router
+            .oneshot(Request::get("/ui/aesthetic.css").body(Body::empty())?)
+            .await?;
+        assert_eq!(aesthetic.status(), StatusCode::OK);
+        let aesthetic_body = text_body(aesthetic).await?;
+        assert!(aesthetic_body.contains("aesthetic v2.8.1"));
 
         Ok(())
     }
