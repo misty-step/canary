@@ -69,7 +69,7 @@ pub trait WebhookCooldown: Send + Sync + 'static {
 
 /// In-process cooldown state for webhook enqueue suppression.
 ///
-/// Phoenix stores this in ETS. The Rust server keeps the same process-local
+/// The previous Elixir implementation stored this in ETS. The Rust server keeps the same process-local
 /// contract explicitly here: cooldown state is advisory, monotonic, and lost on
 /// restart.
 #[derive(Debug)]
@@ -81,8 +81,8 @@ pub struct InMemoryWebhookCooldown {
 impl InMemoryWebhookCooldown {
     const DEFAULT_TTL: StdDuration = StdDuration::from_secs(5 * 60);
 
-    /// Build the Phoenix-compatible five-minute webhook cooldown.
-    pub fn phoenix_default() -> Self {
+    /// Build the five-minute webhook cooldown.
+    pub fn default_config() -> Self {
         Self::with_ttl(Self::DEFAULT_TTL)
     }
 
@@ -97,7 +97,7 @@ impl InMemoryWebhookCooldown {
 
 impl Default for InMemoryWebhookCooldown {
     fn default() -> Self {
-        Self::phoenix_default()
+        Self::default_config()
     }
 }
 
@@ -136,7 +136,7 @@ impl HttpWebhookTransport {
     const DEFAULT_CONNECT_TIMEOUT: StdDuration = StdDuration::from_secs(3);
     const USER_AGENT: &'static str = concat!("canary-server/", env!("CARGO_PKG_VERSION"));
 
-    /// Build an HTTP transport with Phoenix-compatible timeout and no redirects.
+    /// Build an HTTP transport with timeout and no redirects.
     ///
     /// TLS certificate validation stays enabled. The blocking send path is meant
     /// for the webhook drain worker, not an Axum request task.

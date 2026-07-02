@@ -1,7 +1,7 @@
 //! Shared HTTP contract adapter for Canary's Rust server.
 //!
 //! Route modules own endpoint-specific translation. This module owns the
-//! repeated Axum wire mechanics that must stay Phoenix-compatible: response
+//! repeated Axum wire mechanics that must stay : response
 //! content types, Problem Details serialization, request-size preflight, and
 //! query-shape quirks that Axum's typed extractors intentionally hide.
 

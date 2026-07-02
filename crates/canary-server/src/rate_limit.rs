@@ -1,7 +1,7 @@
 //! Runtime fixed-window rate limiter.
 //!
 //! The HTTP crate owns policy and problem shape. This module owns process-local
-//! buckets, matching Phoenix's ETS-backed limiter without introducing a
+//! buckets, matching the ETS-backed limiter without introducing a
 //! database table or generic middleware framework.
 
 use std::{
@@ -98,7 +98,7 @@ pub(crate) enum RateLimitDecision {
     Allowed,
     /// Request exceeded its bucket.
     Limited {
-        /// Phoenix-compatible whole-second retry delay.
+        /// whole-second retry delay.
         retry_after_seconds: u64,
     },
 }
@@ -128,7 +128,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fixed_window_allows_limit_then_reports_phoenix_retry_after() {
+    fn fixed_window_allows_limit_then_reports_retry_after() {
         let mut limiter = RateLimiter::default();
         let start = Instant::now();
 

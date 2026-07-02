@@ -1,7 +1,7 @@
 //! TLS-expiry scan runtime adapter.
 //!
 //! Target probes own network access and persist `target_checks.tls_expires_at`.
-//! This worker only reads that persisted metadata, records the Phoenix-compatible
+//! This worker only reads that persisted metadata, records the
 //! timeline warning, and fans out the committed event to webhooks.
 
 use std::{

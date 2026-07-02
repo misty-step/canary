@@ -52,10 +52,10 @@ pub struct IngestState {
     allow_private_targets: bool,
 }
 
-/// Client identity source used only for Phoenix-compatible invalid-key
+/// Client identity source used only for invalid-key
 /// accounting.
 ///
-/// Phoenix records invalid supplied API keys against `conn.remote_ip` and
+/// The previous implementation recorded invalid supplied API keys against `conn.remote_ip` and
 /// deliberately ignores the rate-limit result. Rust keeps the same silent
 /// accounting contract while making proxy-header trust explicit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

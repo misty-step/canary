@@ -47,7 +47,7 @@ pub trait WebhookCircuit: Send + Sync + 'static {
 
 /// In-process per-webhook delivery circuit breaker.
 ///
-/// Phoenix opens a circuit after ten consecutive delivery failures and allows a
+/// The circuit breaker opens after ten consecutive delivery failures and allows a
 /// probe after five minutes. This adapter keeps that policy out of the delivery
 /// planner while making the runtime state explicit and testable.
 #[derive(Debug)]
@@ -67,8 +67,8 @@ impl InMemoryWebhookCircuit {
     const DEFAULT_FAILURE_THRESHOLD: u32 = 10;
     const DEFAULT_PROBE_INTERVAL: StdDuration = StdDuration::from_secs(5 * 60);
 
-    /// Build the Phoenix-compatible webhook circuit breaker.
-    pub fn phoenix_default() -> Self {
+    /// Build the webhook circuit breaker.
+    pub fn default_config() -> Self {
         Self::with_policy(
             Self::DEFAULT_FAILURE_THRESHOLD,
             Self::DEFAULT_PROBE_INTERVAL,
@@ -87,7 +87,7 @@ impl InMemoryWebhookCircuit {
 
 impl Default for InMemoryWebhookCircuit {
     fn default() -> Self {
-        Self::phoenix_default()
+        Self::default_config()
     }
 }
 

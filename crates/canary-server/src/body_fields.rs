@@ -1,7 +1,7 @@
 //! Shared JSON object field decoding for request bodies.
 //!
 //! Route modules should express endpoint-specific policy. This module owns the
-//! repeated Phoenix-compatible scalar rules: missing/null defaults, positive
+//! repeated scalar rules: missing/null defaults, positive
 //! integer validation text, required non-empty strings, string arrays, and
 //! optional scalar extraction from decoded JSON objects.
 
@@ -131,8 +131,8 @@ mod tests {
     }
 
     #[test]
-    fn optional_positive_numbers_default_on_missing_or_null_and_record_phoenix_errors()
-    -> Result<(), String> {
+    fn optional_positive_numbers_default_on_missing_or_null_and_record_errors() -> Result<(), String>
+    {
         let attrs = object(json!({
             "valid_i64": 42,
             "valid_u32": 7,

@@ -2,7 +2,7 @@
 //!
 //! Scheduling stays outside this module. This file owns the concrete runtime
 //! work needed to turn one target row into one persisted probe observation:
-//! SSRF validation, bounded HTTP execution, Phoenix-compatible result mapping,
+//! SSRF validation, bounded HTTP execution, result mapping,
 //! store commit, and post-commit webhook fanout.
 
 use std::{
@@ -1637,7 +1637,7 @@ mod tests {
     }
 
     #[test]
-    fn response_mapping_preserves_phoenix_status_body_and_redirect_semantics() {
+    fn response_mapping_preserves_status_body_and_redirect_semantics() {
         assert_eq!(
             evaluate_response(302, "ok", "200", Some("ok")),
             "redirect_not_followed"
