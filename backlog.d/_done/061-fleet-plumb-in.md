@@ -1,6 +1,6 @@
 # Plumb the Factory fleet into Canary
 
-Priority: P0 · Status: pending · Estimate: L
+Priority: P0 · Status: done · Estimate: L
 
 ## Goal
 Make every Factory app report errors, health, and uptime to the Misty Step
@@ -43,6 +43,12 @@ patches happen in those repos or through external agents.
   refused because the production server was not listening on the Fly 6PN-facing
   address family. Added a server bind fix to listen on `[::]:PORT`; deployment
   proof must include a curl from outside the Fly machine.
+- 2026-07-02: Enrolled powder and bitterblossom-plane targets into the live
+  Misty Step hub, enabled hub-side private-target probes for Fly 6PN, added
+  proof TTL check-ins for both services, verified bastion/powder/BB monitor
+  readback as `up`, and tightened dogfood strict mode so active check-in
+  services cannot pass on registry-only coverage. Evidence:
+  `docs/architecture/factory-fleet-enrollment-2026-07-02.md`.
 
 ## Children
 1. Define the active Factory app inventory and coverage statuses.

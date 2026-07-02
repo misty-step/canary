@@ -1,0 +1,112 @@
+# Factory Fleet Integration
+
+This is the 15-minute path for a Factory repo to report health, uptime, and
+an error or check-in signal to the Misty Step Canary instance. Use it from the
+consumer repo; keep service-specific code changes in that repo.
+
+## Inputs
+
+- `CANARY_ENDPOINT`: `https://canary-obs.fly.dev` for Misty Step.
+- A read/admin operator key for inspection and enrollment. Do not print it.
+- The service name agents should query, for example `powder`.
+- One production health URL when the app exposes HTTP health.
+- One check-in monitor name when the app has a worker, scheduler, CLI, or
+  process heartbeat.
+
+For private Fly 6PN targets such as `http://<app>.internal:<port>/healthz`, the
+Canary hub must be configured to allow private target probes:
+
+```bash
+flyctl secrets set --app canary-obs ALLOW_PRIVATE_TARGETS=true
+```
+
+That setting belongs on the Canary hub, not in the consumer repo. It keeps the
+default self-host posture conservative while allowing an operator-controlled
+Factory fleet to use Fly private networking.
+
+## Path
+
+1. Inspect current coverage from the consumer repo.
+
+```bash
+/path/to/canary/bin/canary integrate status /path/to/app \
+  --service <service> \
+  --production-url <health-url> \
+  --json
+```
+
+2. Verify the health URL from the Canary hub when the URL is private.
+
+```bash
+flyctl ssh console --app canary-obs \
+  --command 'curl -fsS http://<app>.internal:<port>/healthz'
+```
+
+Public URLs can be verified with a normal `curl -fsS <url>`.
+
+3. Enroll the HTTP target.
+
+```bash
+/path/to/canary/bin/canary integrate enroll \
+  --service <service> \
+  --url <health-url> \
+  --project-root /path/to/app \
+  --json
+```
+
+`--project-root` writes `.canary/integration.json` in the consumer repo. Use it
+only from that repo's own lane so resident work is not overwritten.
+
+4. Enroll a check-in monitor for non-HTTP uptime, then send one proof check-in.
+
+```bash
+curl -fsS -X POST "$CANARY_ENDPOINT/api/v1/monitors" \
+  -H "Authorization: Bearer $CANARY_ADMIN_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"<service>-worker","service":"<service>","mode":"ttl","expected_every_ms":300000,"grace_ms":120000}'
+
+curl -fsS -X POST "$CANARY_ENDPOINT/api/v1/check-ins" \
+  -H "Authorization: Bearer $CANARY_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"monitor":"<service>-worker","status":"alive","summary":"fleet integration proof"}'
+```
+
+The app-owned steady-state version should use a scoped ingest key, not an admin
+key. The operator may use an admin key for a one-time proof because admin keys
+also satisfy ingest authority.
+
+5. Read back live proof.
+
+```bash
+curl -fsS -H "Authorization: Bearer $CANARY_READ_API_KEY" \
+  "$CANARY_ENDPOINT/api/v1/report?window=24h" \
+  | jq '.targets,.monitors'
+
+/path/to/canary/bin/dogfood-audit \
+  --manifest /path/to/instance/owned_services.json \
+  --strict --json
+```
+
+The service is integrated only when readback shows either:
+
+- HTTP target coverage: target present, URL matches, and report includes a
+  target state.
+- Check-in coverage: monitor present, report includes a monitor state, and
+  `last_check_in_at` is non-empty.
+
+For Factory composition, use both when the app has both an HTTP health surface
+and a non-HTTP runtime heartbeat.
+
+## Status Receipt
+
+Each Factory repo ends in one of these states:
+
+- `integrated`: live Canary readback proves the target and/or monitor signal.
+- `intentionally deferred`: the repo is not an active runtime app for this
+  fleet slice, or the responsible resident lane owns the app-side patch.
+- `blocked`: the missing production URL, credential, route, or resident-lane
+  boundary is named without printing secret values.
+
+The receipt should include the service name, health URL or monitor name,
+target/monitor IDs when created, the exact readback command, and the next app
+lane action.

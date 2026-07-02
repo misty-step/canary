@@ -137,6 +137,14 @@ packages:
 - operator scripts: entrypoint, DR, and dogfood audit tests
 - production image: Docker build plus `/healthz` and `/readyz` smoke
 
+### Fleet Integration
+
+Agents wiring another runtime into Canary should use the 15-minute recipe in
+[`docs/factory-fleet-integration.md`](docs/factory-fleet-integration.md). It
+covers HTTP target enrollment, Fly private-network reachability, non-HTTP
+check-in monitors, and strict dogfood readback without requiring route trivia
+or secret values in receipts.
+
 The default gate also includes the git-history secrets scan. Run live
 dependency advisory scans explicitly when you want current registry state as
 part of a stricter local release check:
