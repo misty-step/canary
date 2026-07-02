@@ -67,7 +67,7 @@ pub struct TlsExpiryScanCandidate {
     pub target_id: String,
     /// Target display name.
     pub name: String,
-    /// Service name resolved with Phoenix's target service fallback.
+    /// Service name resolved with the target service fallback.
     pub service: String,
     /// Target URL.
     pub url: String,
@@ -84,7 +84,7 @@ pub struct TlsExpiryEventInsert {
     pub target_id: String,
     /// Target display name.
     pub name: String,
-    /// Service name resolved with Phoenix's target service fallback.
+    /// Service name resolved with the target service fallback.
     pub service: String,
     /// Target URL.
     pub url: String,
@@ -114,7 +114,7 @@ pub struct MonitorInsert {
     pub id: String,
     /// Unique monitor name used by check-in clients.
     pub name: String,
-    /// Service name resolved with Phoenix's monitor service fallback.
+    /// Service name resolved with the monitor service fallback.
     pub service: String,
     /// Monitor mode, `schedule` or `ttl`.
     pub mode: String,
@@ -135,7 +135,7 @@ pub struct TargetInsert {
     pub url: String,
     /// Target display name.
     pub name: String,
-    /// Service name resolved with Phoenix's target service fallback.
+    /// Service name resolved with the target service fallback.
     pub service: String,
     /// HTTP method, currently `GET` or `HEAD`.
     pub method: String,
@@ -170,7 +170,7 @@ pub struct TargetRecord {
     pub url: String,
     /// Target display name.
     pub name: String,
-    /// Service name resolved with Phoenix's target service fallback.
+    /// Service name resolved with the target service fallback.
     pub service: String,
     /// HTTP method.
     pub method: String,
@@ -202,7 +202,7 @@ pub struct MonitorRecord {
     pub id: String,
     /// Unique monitor name used by check-in clients.
     pub name: String,
-    /// Service name resolved with Phoenix's monitor service fallback.
+    /// Service name resolved with the monitor service fallback.
     pub service: String,
     /// Monitor mode, `schedule` or `ttl`.
     pub mode: String,
@@ -341,7 +341,7 @@ pub struct TargetProbeCommit {
 pub struct TargetTransitionEvent {
     /// Target display name.
     pub name: String,
-    /// Service name resolved with Phoenix's target service fallback.
+    /// Service name resolved with the target service fallback.
     pub service: String,
     /// Target URL.
     pub url: String,
@@ -362,7 +362,7 @@ pub struct TargetCheckObservation {
     pub status_code: Option<i64>,
     /// Probe latency in milliseconds.
     pub latency_ms: Option<i64>,
-    /// Phoenix-compatible probe result, for example `ok` or `error`.
+    /// Probe result, for example `ok` or `error`.
     pub result: String,
     /// TLS certificate expiration timestamp, when known.
     pub tls_expires_at: Option<String>,
@@ -377,7 +377,7 @@ pub struct TargetCheckObservation {
 pub struct HealthCheckSummary {
     /// Probe timestamp.
     pub checked_at: String,
-    /// Phoenix-compatible probe result.
+    /// Probe result.
     pub result: String,
     /// HTTP status code returned by the target, when available.
     pub status_code: Option<i64>,
@@ -390,7 +390,7 @@ pub struct HealthCheckSummary {
 pub struct TargetCheckRead {
     /// Probe timestamp.
     pub checked_at: String,
-    /// Phoenix-compatible probe result.
+    /// Probe result.
     pub result: String,
     /// HTTP status code returned by the target, when available.
     pub status_code: Option<i64>,
@@ -409,7 +409,7 @@ pub struct HealthTargetStatus {
     pub id: String,
     /// Target display name.
     pub name: String,
-    /// Service name resolved with Phoenix's target service fallback.
+    /// Service name resolved with the target service fallback.
     pub service: String,
     /// Probe URL.
     pub url: String,
@@ -436,7 +436,7 @@ pub struct HealthMonitorStatus {
     pub id: String,
     /// Monitor display name.
     pub name: String,
-    /// Service name resolved with Phoenix's monitor service fallback.
+    /// Service name resolved with the monitor service fallback.
     pub service: String,
     /// Monitor mode, `schedule` or `ttl`.
     pub mode: String,
@@ -505,7 +505,7 @@ pub struct MonitorOverdueCommit {
 pub struct MonitorTransitionEvent {
     /// Monitor display name.
     pub name: String,
-    /// Service name resolved with Phoenix's monitor service fallback.
+    /// Service name resolved with the monitor service fallback.
     pub service: String,
     /// Monitor mode, `schedule` or `ttl`.
     pub mode: String,
@@ -530,7 +530,7 @@ pub struct MonitorCheckInObservation {
     pub id: String,
     /// Caller supplied idempotency key or external check-in id.
     pub external_id: Option<String>,
-    /// Phoenix-compatible check-in status.
+    /// Check-in status.
     pub status: String,
     /// Observed timestamp.
     pub observed_at: String,
