@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════
-   aesthetic v2.8.1
+   aesthetic v2.10.0
    The Misty Step design system. https://github.com/misty-step/aesthetic
 
    The law:
@@ -1174,6 +1174,76 @@ input.ae-switch:checked::before {
   border-top: 1px solid var(--ae-line);
   padding-top: 0.8em;
   margin-top: 1.1em;
+}
+
+/* the trail: a chronological run of events as the conversation it is —
+   a hairline spine, an ink tick per entry, time and actor in the
+   instrument register, the body in prose. Not a table: entries carry
+   variable-length bodies and states, so alignment comes from the spine,
+   not columns. The tick is a square, never a circle — the choice mark's
+   rule holds here too. Status, if an entry carries one, rides a glyph
+   in the body, never the tick or a filled pill. */
+.ae-trail {
+  list-style: none;
+  margin: 0 0 0 0.25em;
+  padding: 0;
+  border-left: 1px solid var(--ae-line);
+}
+
+.ae-trail-item {
+  position: relative;
+  padding: 0 0 1.3em 1.5em;
+}
+
+.ae-trail-item:last-child {
+  padding-bottom: 0;
+}
+
+.ae-trail-item::before {
+  content: '';
+  position: absolute;
+  left: -0.31em;
+  top: 0.5em;
+  width: 0.5em;
+  height: 0.5em;
+  background: var(--ae-ink-faint);
+}
+
+.ae-trail-item.is-active::before {
+  background: var(--ae-accent);
+}
+
+.ae-trail-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.7em;
+  flex-wrap: wrap;
+  margin-bottom: 0.25em;
+}
+
+.ae-trail-time {
+  font-family: var(--ae-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--ae-ink-muted);
+}
+
+.ae-trail-who {
+  font-family: var(--ae-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--ae-ink-muted);
+  border: 1px solid currentColor;
+  padding: 0.1em 0.55em;
+}
+
+.ae-trail-body {
+  font-size: 13px;
+  color: var(--ae-ink);
+}
+
+.ae-trail-body .ae-dim {
+  color: var(--ae-ink-muted);
 }
 
 /* ── instruments: ink on a ruled line ─────────────────────────────── */
