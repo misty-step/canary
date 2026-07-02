@@ -1,7 +1,7 @@
 //! HTTP authorization contracts for scoped Canary API keys.
 //!
 //! This module deliberately stops at the router boundary: it parses bearer
-//! headers, models scope decisions, and builds Phoenix-compatible problem
+//! headers, models scope decisions, and builds problem
 //! responses. Key storage and hash verification belong in the persistence layer.
 
 use serde::{Deserialize, Serialize};
@@ -39,7 +39,7 @@ pub enum ApiKeyScope {
 }
 
 impl ApiKeyScope {
-    /// Return the existing Phoenix wire value for the scope.
+    /// Return the wire value for the scope.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Admin => "admin",
@@ -49,7 +49,7 @@ impl ApiKeyScope {
         }
     }
 
-    /// Parse the existing Phoenix wire value for a scope.
+    /// Parse the wire value for a scope.
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "admin" => Some(Self::Admin),
@@ -85,7 +85,7 @@ pub enum Permission {
 }
 
 impl Permission {
-    /// Return scopes accepted by the existing Phoenix router for this permission.
+    /// Return scopes accepted by the router for this permission.
     pub const fn allowed_scopes(self) -> &'static [ApiKeyScope] {
         match self {
             Self::Admin => &[ApiKeyScope::Admin],
@@ -112,7 +112,7 @@ impl Permission {
 /// Result of parsing an HTTP Authorization header.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BearerToken<'a> {
-    /// A Phoenix-compatible `Bearer ...` token.
+    /// A `Bearer ...` token.
     Present(&'a str),
     /// Header is absent or not exactly a single `Bearer ` value.
     Missing,
@@ -271,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_parser_accepts_only_phoenix_wire_values() {
+    fn scope_parser_accepts_only_wire_values() {
         assert_eq!(ApiKeyScope::parse("admin"), Some(ApiKeyScope::Admin));
         assert_eq!(
             ApiKeyScope::parse("ingest-only"),
@@ -287,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn bearer_parser_matches_phoenix_extract_key_shape() {
+    fn bearer_parser_matches_extract_key_shape() {
         assert_eq!(
             extract_bearer(&["Bearer sk_live_abc "]),
             BearerToken::Present("sk_live_abc")
@@ -301,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn auth_failure_problems_match_phoenix_wire_shape() {
+    fn auth_failure_problems_match_wire_shape() {
         let missing = to_value(missing_authorization_problem(None)).unwrap_or(Value::Null);
         assert_eq!(missing["status"], 401);
         assert_eq!(missing["code"], "invalid_api_key");
@@ -320,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn insufficient_scope_problem_matches_phoenix_wire_shape() {
+    fn insufficient_scope_problem_matches_wire_shape() {
         let encoded = to_value(insufficient_scope_problem(
             ApiKeyScope::ReadOnly,
             Permission::Ingest,
