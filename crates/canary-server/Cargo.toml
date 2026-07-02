@@ -22,6 +22,8 @@ thiserror = "2.0"
 time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread", "signal"] }
 tower-http = { version = "0.6", features = ["cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
 x509-parser = "0.18"
 
 [dev-dependencies]
