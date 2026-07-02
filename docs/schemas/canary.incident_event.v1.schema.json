@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/misty-step/canary/blob/master/docs/schemas/canary.incident_event.v1.schema.json",
+  "title": "Canary Incident Event v1",
+  "description": "Signed Canary webhook body for incident wake-up hints consumed by Bitterblossom triage workloads. The webhook is a hint; consumers must replay Canary state before acting.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "event",
+    "subject",
+    "signal",
+    "replay"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "canary.incident_event.v1"
+    },
+    "event": {
+      "type": "string",
+      "enum": [
+        "incident.opened",
+        "incident.updated",
+        "incident.resolved"
+      ]
+    },
+    "tenant_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "project_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "subject": {
+      "type": "object",
+      "required": [
+        "type",
+        "id",
+        "service"
+      ],
+      "properties": {
+        "type": {
+          "const": "incident"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^INC-[A-Za-z0-9_-]+$"
+        },
+        "service": {
+          "type": "string",
+          "minLength": 1
+        },
+        "environment": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "signal": {
+      "type": "object",
+      "required": [
+        "kind",
+        "fingerprint",
+        "severity",
+        "observed_at"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "error_group",
+            "target",
+            "monitor",
+            "telemetry_event",
+            "health_transition",
+            "incident"
+          ]
+        },
+        "fingerprint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "info",
+            "low",
+            "medium",
+            "warning",
+            "error",
+            "high",
+            "critical"
+          ]
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "additionalProperties": false
+    },
+    "replay": {
+      "type": "object",
+      "required": [
+        "timeline_url",
+        "report_url",
+        "incident_url"
+      ],
+      "properties": {
+        "timeline_url": {
+          "type": "string",
+          "pattern": "^/api/v1/timeline"
+        },
+        "report_url": {
+          "type": "string",
+          "pattern": "^/api/v1/report"
+        },
+        "incident_url": {
+          "type": "string",
+          "pattern": "^/api/v1/incidents/INC-[A-Za-z0-9_-]+$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "incident": {
+      "description": "Backward-compatible incident detail object retained for existing webhook consumers."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": true
+}
