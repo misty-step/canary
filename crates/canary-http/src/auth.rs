@@ -34,6 +34,8 @@ pub enum ApiKeyScope {
     IngestOnly,
     /// Access to read/query routes only.
     ReadOnly,
+    /// Access to read routes plus responder claim/annotation writeback.
+    ResponderWrite,
 }
 
 impl ApiKeyScope {
@@ -43,6 +45,7 @@ impl ApiKeyScope {
             Self::Admin => "admin",
             Self::IngestOnly => "ingest-only",
             Self::ReadOnly => "read-only",
+            Self::ResponderWrite => "responder-write",
         }
     }
 
@@ -52,6 +55,7 @@ impl ApiKeyScope {
             "admin" => Some(Self::Admin),
             "ingest-only" => Some(Self::IngestOnly),
             "read-only" => Some(Self::ReadOnly),
+            "responder-write" => Some(Self::ResponderWrite),
             _ => None,
         }
     }
@@ -61,7 +65,8 @@ impl ApiKeyScope {
         match permission {
             Permission::Admin => matches!(self, Self::Admin),
             Permission::Ingest => matches!(self, Self::Admin | Self::IngestOnly),
-            Permission::Read => matches!(self, Self::Admin | Self::ReadOnly),
+            Permission::Read => matches!(self, Self::Admin | Self::ReadOnly | Self::ResponderWrite),
+            Permission::ResponderWrite => matches!(self, Self::Admin | Self::ResponderWrite),
         }
     }
 }
@@ -75,6 +80,8 @@ pub enum Permission {
     Ingest,
     /// Query and reporting routes.
     Read,
+    /// Responder claim and annotation writeback routes.
+    ResponderWrite,
 }
 
 impl Permission {
@@ -83,7 +90,12 @@ impl Permission {
         match self {
             Self::Admin => &[ApiKeyScope::Admin],
             Self::Ingest => &[ApiKeyScope::Admin, ApiKeyScope::IngestOnly],
-            Self::Read => &[ApiKeyScope::Admin, ApiKeyScope::ReadOnly],
+            Self::Read => &[
+                ApiKeyScope::Admin,
+                ApiKeyScope::ReadOnly,
+                ApiKeyScope::ResponderWrite,
+            ],
+            Self::ResponderWrite => &[ApiKeyScope::Admin, ApiKeyScope::ResponderWrite],
         }
     }
 
@@ -92,6 +104,7 @@ impl Permission {
             Self::Admin => "admin",
             Self::Ingest => "ingest",
             Self::Read => "read",
+            Self::ResponderWrite => "responder-write",
         }
     }
 }
@@ -239,14 +252,22 @@ mod tests {
         assert!(ApiKeyScope::Admin.allows(Permission::Admin));
         assert!(ApiKeyScope::Admin.allows(Permission::Ingest));
         assert!(ApiKeyScope::Admin.allows(Permission::Read));
+        assert!(ApiKeyScope::Admin.allows(Permission::ResponderWrite));
 
         assert!(!ApiKeyScope::IngestOnly.allows(Permission::Admin));
         assert!(ApiKeyScope::IngestOnly.allows(Permission::Ingest));
         assert!(!ApiKeyScope::IngestOnly.allows(Permission::Read));
+        assert!(!ApiKeyScope::IngestOnly.allows(Permission::ResponderWrite));
 
         assert!(!ApiKeyScope::ReadOnly.allows(Permission::Admin));
         assert!(!ApiKeyScope::ReadOnly.allows(Permission::Ingest));
         assert!(ApiKeyScope::ReadOnly.allows(Permission::Read));
+        assert!(!ApiKeyScope::ReadOnly.allows(Permission::ResponderWrite));
+
+        assert!(!ApiKeyScope::ResponderWrite.allows(Permission::Admin));
+        assert!(!ApiKeyScope::ResponderWrite.allows(Permission::Ingest));
+        assert!(ApiKeyScope::ResponderWrite.allows(Permission::Read));
+        assert!(ApiKeyScope::ResponderWrite.allows(Permission::ResponderWrite));
     }
 
     #[test]
@@ -257,6 +278,10 @@ mod tests {
             Some(ApiKeyScope::IngestOnly)
         );
         assert_eq!(ApiKeyScope::parse("read-only"), Some(ApiKeyScope::ReadOnly));
+        assert_eq!(
+            ApiKeyScope::parse("responder-write"),
+            Some(ApiKeyScope::ResponderWrite)
+        );
         assert_eq!(ApiKeyScope::parse("ingest_only"), None);
         assert_eq!(ApiKeyScope::parse(""), None);
     }

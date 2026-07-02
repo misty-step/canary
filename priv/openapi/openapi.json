@@ -19,7 +19,7 @@
       "crash_recovery": "After a crash or restart, resume from the last persisted cursor, replay missed timeline events, and continue polling until the API returns no further cursor.",
       "cursor_precedence": "When both `after` and `cursor` are provided on timeline-style pagination endpoints, Canary resolves `after` first and ignores `cursor` for that request.",
       "incident_entrypoint": "On an `incident.opened` webhook, call `GET /api/v1/incidents/{id}` once — the response carries summary, the full incident metadata, a deterministic action brief, up to 25 correlated signals with per-type context, up to 20 newest annotations, and up to 5 most recent timeline events. Only fall through to /query, /timeline, or /errors/{id} when `signals_truncated` or `annotations_truncated` is true, or the agent needs raw stack traces.",
-      "scope_semantics": "`x-canary-required-scope` names the least-privilege key scope to provision for the operation. Admin keys may also satisfy read-only and ingest-only route permissions at runtime, but agents should request the narrow scope unless they are managing Canary configuration.",
+      "scope_semantics": "`x-canary-required-scope` names the least-privilege key scope to provision for the operation. Admin keys may also satisfy read-only, ingest-only, and responder-write route permissions at runtime, but agents should request the narrow scope unless they are managing Canary configuration.",
       "cold_start": {
         "entrypoint": "When an agent has no saved cursor, call GET /api/v1/report?window=1h first. The report is the bounded current-state snapshot for targets, monitors, active incidents, and active error groups.",
         "pagination": "If report.truncated is true or report.cursor is non-null, keep calling /api/v1/report with that report cursor until the response is no longer truncated. Report cursors are only for report pagination and are not timeline cursors.",
@@ -1115,7 +1115,7 @@
             "$ref": "#/components/responses/RateLimitedProblem"
           }
         },
-        "x-canary-required-scope": "admin",
+        "x-canary-required-scope": "responder-write",
         "x-agent-guidance": {
           "when_to_call": "Use to record incident-level triage, fix proposal, verification, or dismissal once downstream work has produced evidence.",
           "trust": "The response is the stored annotation row and the annotation.added webhook is a wake-up hint for other consumers.",
@@ -1217,7 +1217,7 @@
             "$ref": "#/components/responses/RateLimitedProblem"
           }
         },
-        "x-canary-required-scope": "admin",
+        "x-canary-required-scope": "responder-write",
         "x-agent-guidance": {
           "when_to_call": "Use to record code-fix or classification work against a stable error_group when the same issue may appear in multiple incidents.",
           "trust": "The response is the stored annotation row; Canary does not interpret metadata beyond preserving and emitting it.",
@@ -1348,7 +1348,7 @@
             "$ref": "#/components/responses/RateLimitedProblem"
           }
         },
-        "x-canary-required-scope": "admin",
+        "x-canary-required-scope": "responder-write",
         "x-agent-guidance": {
           "when_to_call": "Use for generic write-back to incident, error_group, target, or monitor subjects when subject_type and subject_id are already known.",
           "trust": "The response is the stored annotation row with opaque metadata preserved exactly as submitted.",
@@ -2117,7 +2117,7 @@
             "$ref": "#/components/responses/RateLimitedProblem"
           }
         },
-        "x-canary-required-scope": "admin"
+        "x-canary-required-scope": "responder-write"
       }
     },
     "/api/v1/claims/{id}": {
@@ -2223,7 +2223,7 @@
             "$ref": "#/components/responses/RateLimitedProblem"
           }
         },
-        "x-canary-required-scope": "admin"
+        "x-canary-required-scope": "responder-write"
       }
     },
     "/api/v1/claims/{id}/release": {
@@ -2271,7 +2271,7 @@
             "$ref": "#/components/responses/RateLimitedProblem"
           }
         },
-        "x-canary-required-scope": "admin",
+        "x-canary-required-scope": "responder-write",
         "requestBody": {
           "required": true,
           "content": {
@@ -5875,7 +5875,8 @@
         "enum": [
           "admin",
           "ingest-only",
-          "read-only"
+          "read-only",
+          "responder-write"
         ],
         "description": "Authorization scope attached to an API key."
       },

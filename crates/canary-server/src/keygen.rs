@@ -15,13 +15,15 @@ use canary_store::{
 use crate::server_time::current_rfc3339;
 
 /// Scopes accepted by the minting path, mirroring the router's permission model.
-const VALID_SCOPES: [&str; 3] = ["admin", "read-only", "ingest-only"];
+const VALID_SCOPES: [&str; 4] = ["admin", "read-only", "ingest-only", "responder-write"];
 
 /// Failure modes when minting an operator API key.
 #[derive(Debug)]
 pub enum MintKeyError {
-    /// The requested scope is not one of `admin`, `read-only`, `ingest-only`.
+    /// The requested scope is not one of Canary's stable key scopes.
     InvalidScope(String),
+    /// The service binding is missing or invalid for the requested scope.
+    InvalidServiceBinding(String),
     /// Opening, migrating, or writing to the store failed.
     Store(canary_store::StoreError),
     /// Bcrypt hashing of the raw key failed.
@@ -33,8 +35,9 @@ impl std::fmt::Display for MintKeyError {
         match self {
             MintKeyError::InvalidScope(scope) => write!(
                 f,
-                "invalid scope {scope:?}; expected one of admin, read-only, ingest-only"
+                "invalid scope {scope:?}; expected one of admin, read-only, ingest-only, responder-write"
             ),
+            MintKeyError::InvalidServiceBinding(message) => write!(f, "{message}"),
             MintKeyError::Store(error) => write!(f, "store error: {error}"),
             MintKeyError::Hash(error) => write!(f, "hash error: {error}"),
         }
@@ -48,9 +51,33 @@ impl std::error::Error for MintKeyError {}
 /// The raw key is shown only here; the store persists the bcrypt hash. Opening
 /// a second connection while the server runs is safe for this one-shot insert:
 /// SQLite WAL serializes the brief write transaction behind the live writer.
-pub fn mint_key(db_path: &Path, scope: &str, name: &str) -> Result<String, MintKeyError> {
+pub fn mint_key(
+    db_path: &Path,
+    scope: &str,
+    name: &str,
+    service: Option<&str>,
+) -> Result<String, MintKeyError> {
     if !VALID_SCOPES.contains(&scope) {
         return Err(MintKeyError::InvalidScope(scope.to_owned()));
+    }
+    let service = match service {
+        Some(value) if !value.trim().is_empty() => Some(value.trim().to_owned()),
+        Some(_) => {
+            return Err(MintKeyError::InvalidServiceBinding(
+                "--service must not be blank".to_owned(),
+            ));
+        }
+        None if scope == "responder-write" => {
+            return Err(MintKeyError::InvalidServiceBinding(
+                "--service is required for responder-write keys".to_owned(),
+            ));
+        }
+        None => None,
+    };
+    if scope == "admin" && service.is_some() {
+        return Err(MintKeyError::InvalidServiceBinding(
+            "--service cannot be set on admin keys".to_owned(),
+        ));
     }
 
     let mut store = Store::open(db_path).map_err(MintKeyError::Store)?;
@@ -70,7 +97,7 @@ pub fn mint_key(db_path: &Path, scope: &str, name: &str) -> Result<String, MintK
             scope: scope.to_owned(),
             tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
             project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
-            service: None,
+            service,
         })
         .map_err(MintKeyError::Store)?;
 
@@ -112,7 +139,7 @@ mod tests {
         let db_path = unique_db_path("roundtrip");
         let _guard = DbGuard(db_path.clone());
 
-        let raw_key = mint_key(&db_path, "admin", "recovery")?;
+        let raw_key = mint_key(&db_path, "admin", "recovery", None)?;
 
         let store = Store::open(&db_path)?;
         let verified = store
@@ -127,10 +154,31 @@ mod tests {
         let db_path = unique_db_path("badscope");
         let _guard = DbGuard(db_path.clone());
 
-        let result = mint_key(&db_path, "superuser", "x");
+        let result = mint_key(&db_path, "superuser", "x", None);
         assert!(
             matches!(&result, Err(MintKeyError::InvalidScope(scope)) if scope == "superuser"),
             "expected InvalidScope(\"superuser\"), got {result:?}"
         );
+    }
+
+    #[test]
+    fn responder_write_key_requires_service_binding() -> Result<(), Box<dyn std::error::Error>> {
+        let db_path = unique_db_path("responder");
+        let _guard = DbGuard(db_path.clone());
+
+        let missing = mint_key(&db_path, "responder-write", "bot", None);
+        assert!(
+            matches!(&missing, Err(MintKeyError::InvalidServiceBinding(message)) if message.contains("--service is required")),
+            "expected missing service binding, got {missing:?}"
+        );
+
+        let raw_key = mint_key(&db_path, "responder-write", "bot", Some("billing"))?;
+        let store = Store::open(&db_path)?;
+        let verified = store
+            .verify_api_key(&raw_key)?
+            .ok_or("minted key should verify as active")?;
+        assert_eq!(verified.scope, "responder-write");
+        assert_eq!(verified.service.as_deref(), Some("billing"));
+        Ok(())
     }
 }

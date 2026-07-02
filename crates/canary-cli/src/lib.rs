@@ -75,6 +75,8 @@ pub struct FileConfig {
     pub read_api_key: Option<String>,
     /// Admin-scoped API key.
     pub admin_api_key: Option<String>,
+    /// Responder-write API key.
+    pub responder_api_key: Option<String>,
     /// Fallback API key.
     pub api_key: Option<String>,
 }
@@ -107,6 +109,20 @@ impl Config {
         Self::resolve_with_mode(endpoint_flag, key_flag, config_path, KeyMode::Ingest)
     }
 
+    /// Resolve config for responder claim and annotation writeback.
+    pub fn resolve_for_responder_write(
+        endpoint_flag: Option<String>,
+        key_flag: Option<String>,
+        config_path: Option<PathBuf>,
+    ) -> Result<Self> {
+        Self::resolve_with_mode(
+            endpoint_flag,
+            key_flag,
+            config_path,
+            KeyMode::ResponderWrite,
+        )
+    }
+
     fn resolve_with_mode(
         endpoint_flag: Option<String>,
         key_flag: Option<String>,
@@ -130,8 +146,17 @@ impl Config {
                 ("CANARY_ADMIN_KEY", env::var("CANARY_ADMIN_KEY").ok()),
                 ("CANARY_READ_API_KEY", env::var("CANARY_READ_API_KEY").ok()),
                 ("CANARY_READ_KEY", env::var("CANARY_READ_KEY").ok()),
+                (
+                    "CANARY_RESPONDER_API_KEY",
+                    env::var("CANARY_RESPONDER_API_KEY").ok(),
+                ),
+                (
+                    "CANARY_RESPONDER_KEY",
+                    env::var("CANARY_RESPONDER_KEY").ok(),
+                ),
                 ("config.admin_api_key", file_config.admin_api_key),
                 ("config.read_api_key", file_config.read_api_key),
+                ("config.responder_api_key", file_config.responder_api_key),
                 ("config.api_key", file_config.api_key),
                 ("CANARY_API_KEY", env::var("CANARY_API_KEY").ok()),
             ],
@@ -148,6 +173,26 @@ impl Config {
                 ),
                 ("CANARY_ADMIN_KEY", env::var("CANARY_ADMIN_KEY").ok()),
                 ("config.ingest_api_key", file_config.ingest_api_key),
+                ("config.admin_api_key", file_config.admin_api_key),
+                ("config.api_key", file_config.api_key),
+                ("CANARY_API_KEY", env::var("CANARY_API_KEY").ok()),
+            ],
+            KeyMode::ResponderWrite => vec![
+                ("--api-key", key_flag),
+                (
+                    "CANARY_RESPONDER_API_KEY",
+                    env::var("CANARY_RESPONDER_API_KEY").ok(),
+                ),
+                (
+                    "CANARY_RESPONDER_KEY",
+                    env::var("CANARY_RESPONDER_KEY").ok(),
+                ),
+                (
+                    "CANARY_ADMIN_API_KEY",
+                    env::var("CANARY_ADMIN_API_KEY").ok(),
+                ),
+                ("CANARY_ADMIN_KEY", env::var("CANARY_ADMIN_KEY").ok()),
+                ("config.responder_api_key", file_config.responder_api_key),
                 ("config.admin_api_key", file_config.admin_api_key),
                 ("config.api_key", file_config.api_key),
                 ("CANARY_API_KEY", env::var("CANARY_API_KEY").ok()),
@@ -187,7 +232,7 @@ impl Config {
     fn api_key(&self) -> Result<&str> {
         self.api_key.as_deref().ok_or_else(|| {
             CliError::Message(
-                "missing Canary API key; set --api-key, CANARY_ADMIN_API_KEY, CANARY_ADMIN_KEY, CANARY_INGEST_API_KEY, CANARY_INGEST_KEY, CANARY_READ_API_KEY, CANARY_READ_KEY, CANARY_API_KEY, or config api_key".to_owned(),
+                "missing Canary API key; set --api-key, CANARY_RESPONDER_API_KEY, CANARY_RESPONDER_KEY, CANARY_ADMIN_API_KEY, CANARY_ADMIN_KEY, CANARY_INGEST_API_KEY, CANARY_INGEST_KEY, CANARY_READ_API_KEY, CANARY_READ_KEY, CANARY_API_KEY, or config api_key".to_owned(),
             )
         })
     }
@@ -197,6 +242,7 @@ impl Config {
 enum KeyMode {
     Read,
     Ingest,
+    ResponderWrite,
 }
 
 /// Resolve an endpoint for local-only commands without reading config files.
@@ -513,6 +559,30 @@ pub fn summarize_claims(value: &Value) -> Vec<String> {
             ),
             format!("owner: {}", string_field(value, "owner")),
             format!("state: {}", string_field(value, "state")),
+        ]
+    }
+}
+
+/// Summarize annotation list or create responses.
+pub fn summarize_annotations(value: &Value) -> Vec<String> {
+    if value.get("annotations").is_some() {
+        vec![
+            format!("summary: {}", string_field(value, "summary")),
+            format!("annotations: {}", array_len(value, "annotations")),
+            format!("limit: {}", number_field(value, "limit")),
+            format!("truncated: {}", bool_field(value, "truncated")),
+            format!("cursor: {}", nullable_string_field(value, "cursor")),
+        ]
+    } else {
+        vec![
+            format!("id: {}", string_field(value, "id")),
+            format!(
+                "subject: {} {}",
+                string_field(value, "subject_type"),
+                string_field(value, "subject_id")
+            ),
+            format!("agent: {}", string_field(value, "agent")),
+            format!("action: {}", string_field(value, "action")),
         ]
     }
 }
@@ -4385,7 +4455,7 @@ impl McpToolContext {
                 ))
             }
             "canary_claim_create" => {
-                let client = self.read_client()?;
+                let client = self.responder_write_client()?;
                 let response = client.post_auth_json(
                     "/api/v1/claims",
                     &json!({
@@ -4405,7 +4475,7 @@ impl McpToolContext {
                 ))
             }
             "canary_claim_transition" => {
-                let client = self.read_client()?;
+                let client = self.responder_write_client()?;
                 let claim_id = required_string(arguments, "claim_id")?;
                 let response = client.post_auth_json(
                     &format!("/api/v1/claims/{}/transition", encode(&claim_id)),
@@ -4422,7 +4492,7 @@ impl McpToolContext {
                 ))
             }
             "canary_claim_release" => {
-                let client = self.read_client()?;
+                let client = self.responder_write_client()?;
                 let claim_id = required_string(arguments, "claim_id")?;
                 let response = client.post_auth_json(
                     &format!("/api/v1/claims/{}/release", encode(&claim_id)),
@@ -4430,6 +4500,45 @@ impl McpToolContext {
                 )?;
                 Ok(json_envelope(
                     "canary_claim_release",
+                    client.endpoint(),
+                    response,
+                ))
+            }
+            "canary_annotations_list" => {
+                let client = self.read_client()?;
+                let mut path = format!(
+                    "/api/v1/annotations?subject_type={}&subject_id={}",
+                    encode(&required_string(arguments, "subject_type")?),
+                    encode(&required_string(arguments, "subject_id")?)
+                );
+                if let Some(limit) = optional_u16(arguments, "limit")? {
+                    path.push_str(&format!("&limit={limit}"));
+                }
+                if let Some(cursor) = optional_string(arguments, "cursor")? {
+                    path.push_str("&cursor=");
+                    path.push_str(&encode(&cursor));
+                }
+                let response = client.get_auth_json(&path)?;
+                Ok(json_envelope(
+                    "canary_annotations_list",
+                    client.endpoint(),
+                    response,
+                ))
+            }
+            "canary_annotation_create" => {
+                let client = self.responder_write_client()?;
+                let response = client.post_auth_json(
+                    "/api/v1/annotations",
+                    &json!({
+                        "subject_type": required_string(arguments, "subject_type")?,
+                        "subject_id": required_string(arguments, "subject_id")?,
+                        "agent": required_string(arguments, "agent")?,
+                        "action": required_string(arguments, "action")?,
+                        "metadata": optional_object(arguments, "metadata")?,
+                    }),
+                )?;
+                Ok(json_envelope(
+                    "canary_annotation_create",
                     client.endpoint(),
                     response,
                 ))
@@ -4500,6 +4609,14 @@ impl McpToolContext {
 
     fn ingest_client(&self) -> Result<ApiClient> {
         ApiClient::new(Config::resolve_for_ingest(
+            self.endpoint.clone(),
+            self.api_key.clone(),
+            self.config_path.clone(),
+        )?)
+    }
+
+    fn responder_write_client(&self) -> Result<ApiClient> {
+        ApiClient::new(Config::resolve_for_responder_write(
             self.endpoint.clone(),
             self.api_key.clone(),
             self.config_path.clone(),
@@ -4723,6 +4840,16 @@ pub fn tool_manifest() -> Vec<ToolSpec> {
             name: "canary_claim_release",
             description: "Release one remediation claim.",
             input_schema: json!({"type":"object","required":["claim_id","owner"],"properties":{"claim_id":{"type":"string"},"owner":{"type":"string"}}}),
+        },
+        ToolSpec {
+            name: "canary_annotations_list",
+            description: "List annotations for one Canary subject with read or responder-write authority.",
+            input_schema: json!({"type":"object","required":["subject_type","subject_id"],"properties":{"subject_type":{"type":"string","enum":["incident","error_group","target","monitor"]},"subject_id":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":50},"cursor":{"type":"string"}}}),
+        },
+        ToolSpec {
+            name: "canary_annotation_create",
+            description: "Write an annotation with responder-write authority after an agent completes follow-up work.",
+            input_schema: json!({"type":"object","required":["subject_type","subject_id","agent","action"],"properties":{"subject_type":{"type":"string","enum":["incident","error_group","target","monitor"]},"subject_id":{"type":"string"},"agent":{"type":"string"},"action":{"type":"string"},"metadata":{"type":"object"}}}),
         },
         ToolSpec {
             name: "canary_integrate_discover",
@@ -5033,14 +5160,16 @@ mod tests {
         let config_path = root.join("config.json");
         fs::write(
             &config_path,
-            r#"{"endpoint":"https://canary.example","read_api_key":"sk_read","ingest_api_key":"sk_ingest","admin_api_key":"sk_admin"}"#,
+            r#"{"endpoint":"https://canary.example","read_api_key":"sk_read","ingest_api_key":"sk_ingest","admin_api_key":"sk_admin","responder_api_key":"sk_responder"}"#,
         )?;
 
         let read_config = Config::resolve(None, None, Some(config_path.clone()))?;
-        let ingest_config = Config::resolve_for_ingest(None, None, Some(config_path))?;
+        let ingest_config = Config::resolve_for_ingest(None, None, Some(config_path.clone()))?;
+        let responder_config = Config::resolve_for_responder_write(None, None, Some(config_path))?;
 
         assert_eq!(read_config.api_key()?, "sk_admin");
         assert_eq!(ingest_config.api_key()?, "sk_ingest");
+        assert_eq!(responder_config.api_key()?, "sk_responder");
         assert_eq!(
             ingest_config.redacted_key(),
             "config.ingest_api_key: redacted"
@@ -5913,6 +6042,8 @@ Vercel CLI completed
         assert!(names.contains("canary_claim_create"));
         assert!(names.contains("canary_claim_transition"));
         assert!(names.contains("canary_claim_release"));
+        assert!(names.contains("canary_annotations_list"));
+        assert!(names.contains("canary_annotation_create"));
         assert!(names.contains("canary_dogfood_value"));
         let tool_by_name = manifest
             .iter()

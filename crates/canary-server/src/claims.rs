@@ -22,7 +22,7 @@ use crate::{
     IngestState,
     body_fields::{optional_positive_i64, required_string},
     http_contract::{check_content_length, json_status_response, problem_response},
-    require_query_limited_admin_scope, require_read_scope,
+    require_read_scope, require_responder_write_scope,
     server_time::{current_rfc3339, current_utc, format_rfc3339},
 };
 
@@ -149,7 +149,7 @@ pub(crate) async fn create_claim(
     if let Err(problem) = check_content_length(&headers) {
         return problem_response(payload_too_large_problem(problem.detail));
     }
-    let authority = match require_query_limited_admin_scope(&state, &headers) {
+    let authority = match require_responder_write_scope(&state, &headers) {
         Ok(authority) => authority,
         Err(problem) => return problem_response(*problem),
     };
@@ -226,7 +226,7 @@ pub(crate) async fn transition_claim(
     if let Err(problem) = check_content_length(&headers) {
         return problem_response(payload_too_large_problem(problem.detail));
     }
-    let authority = match require_query_limited_admin_scope(&state, &headers) {
+    let authority = match require_responder_write_scope(&state, &headers) {
         Ok(authority) => authority,
         Err(problem) => return problem_response(*problem),
     };
@@ -250,7 +250,7 @@ pub(crate) async fn release_claim(
     if let Err(problem) = check_content_length(&headers) {
         return problem_response(payload_too_large_problem(problem.detail));
     }
-    let authority = match require_query_limited_admin_scope(&state, &headers) {
+    let authority = match require_responder_write_scope(&state, &headers) {
         Ok(authority) => authority,
         Err(problem) => return problem_response(*problem),
     };

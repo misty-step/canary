@@ -398,6 +398,75 @@
       "name": "canary_claim_release"
     },
     {
+      "description": "List annotations for one Canary subject with read or responder-write authority.",
+      "input_schema": {
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "subject_id": {
+            "type": "string"
+          },
+          "subject_type": {
+            "enum": [
+              "incident",
+              "error_group",
+              "target",
+              "monitor"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject_type",
+          "subject_id"
+        ],
+        "type": "object"
+      },
+      "name": "canary_annotations_list"
+    },
+    {
+      "description": "Write an annotation with responder-write authority after an agent completes follow-up work.",
+      "input_schema": {
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "metadata": {
+            "type": "object"
+          },
+          "subject_id": {
+            "type": "string"
+          },
+          "subject_type": {
+            "enum": [
+              "incident",
+              "error_group",
+              "target",
+              "monitor"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject_type",
+          "subject_id",
+          "agent",
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "canary_annotation_create"
+    },
+    {
       "description": "Discover local project integration state without reading secret values.",
       "input_schema": {
         "properties": {

@@ -196,14 +196,17 @@ Canary's MCP surface is the CLI contract served over stdio:
 ```bash
 CANARY_ENDPOINT="https://<your-fly-app>.fly.dev" \
 CANARY_READ_API_KEY=... \
+CANARY_RESPONDER_KEY=... \
 bin/canary mcp-server
 ```
 
 MCP clients can list and call the same generated tools exposed by
 `bin/canary mcp-manifest`: summary, services, errors, incidents, timeline,
-targets, monitors, doctor, dogfood, event capture, remediation claims, and
-integration helpers. The server returns MCP `inputSchema` fields at the wire
-boundary while the checked CLI manifest remains gated in
+targets, monitors, doctor, dogfood, event capture, remediation claims,
+annotations, and integration helpers. Read tools use read or responder
+authority. Claim and annotation writeback tools require `responder-write`
+authority, or admin for break-glass operator use. The server returns MCP
+`inputSchema` fields at the wire boundary while the checked CLI manifest remains gated in
 `priv/mcp/canary-cli-tools.json`.
 
 ## API
@@ -222,6 +225,7 @@ All other endpoints require a scoped API key:
 
 - `ingest-only` for `POST /api/v1/errors` and `POST /api/v1/check-ins`
 - `read-only` for query/report/timeline-style reads
+- `responder-write` for service-bound responder reads plus claim and annotation writeback
 - `admin` for onboarding, key management, target/monitor/webhook management, metrics, and other operator mutations
 
 Manual rotation steps live in [docs/api-key-rotation.md](docs/api-key-rotation.md).
@@ -497,6 +501,11 @@ curl -X POST $CANARY_ENDPOINT/api/v1/keys \
   -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{"name": "cadence-prod", "scope": "read-only"}'
+
+curl -X POST $CANARY_ENDPOINT/api/v1/keys \
+  -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "cadence-responder", "scope": "responder-write", "service": "cadence"}'
 ```
 
 ## Webhook Events

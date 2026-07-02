@@ -13,7 +13,8 @@ The CLI reads:
 - `CANARY_ENDPOINT` for the target Canary instance. Self-hosted operators
   should set this explicitly and should not rely on compiled legacy defaults.
 - `CANARY_ADMIN_API_KEY`, `CANARY_ADMIN_KEY`, `CANARY_READ_API_KEY`,
-  `CANARY_READ_KEY`, or `CANARY_API_KEY`
+  `CANARY_READ_KEY`, `CANARY_RESPONDER_API_KEY`, `CANARY_RESPONDER_KEY`, or
+  `CANARY_API_KEY`
 - `CANARY_CONFIG`, or `~/.config/canary/config.json`
 
 Config JSON:
@@ -22,15 +23,18 @@ Config JSON:
 {
   "endpoint": "https://<your-fly-app>.fly.dev",
   "admin_api_key": "sk_live_...",
-  "read_api_key": "sk_live_..."
+  "read_api_key": "sk_live_...",
+  "responder_api_key": "sk_live_..."
 }
 ```
 
-Admin keys are preferred over read keys when both are present because target
-and monitor inspection use admin-scoped routes. Scoped read/admin credentials
-from env or config are preferred over generic `CANARY_API_KEY` so app ingest
-keys do not shadow operator credentials. Diagnostics redact keys and fail
-closed when an authenticated command is run without a read/admin key.
+Responder keys are preferred for claim and annotation writeback. Admin keys are
+accepted for break-glass operator use, but a service-bound `responder-write`
+key is the intended runtime credential for agents. Scoped read, responder, and
+admin credentials from env or config are preferred over generic
+`CANARY_API_KEY` so app ingest keys do not shadow operator credentials.
+Diagnostics redact keys and fail closed when an authenticated command is run
+without a key that matches the command's authority model.
 
 ## Commands
 
@@ -40,6 +44,10 @@ bin/canary services --state down --json
 bin/canary errors chrondle --window 24h
 bin/canary incidents --open
 bin/canary timeline --service chrondle --window 7d --limit 20
+bin/canary claims list --subject-type target --subject-id TGT-chrondle --json
+bin/canary claims claim --subject-type target --subject-id TGT-chrondle --owner codex --purpose "verify fix" --json
+bin/canary annotations list --subject-type target --subject-id TGT-chrondle --json
+bin/canary annotations create --subject-type target --subject-id TGT-chrondle --agent codex --action fix-verified --metadata pr=https://github.com/example/repo/pull/1 --json
 bin/canary targets
 bin/canary monitors
 bin/canary dogfood audit --strict
@@ -253,7 +261,8 @@ the CLI:
   "args": ["mcp-server"],
   "env": {
     "CANARY_ENDPOINT": "https://<your-fly-app>.fly.dev",
-    "CANARY_READ_API_KEY": "redacted"
+    "CANARY_READ_API_KEY": "redacted",
+    "CANARY_RESPONDER_KEY": "redacted"
   }
 }
 ```
@@ -281,6 +290,7 @@ is gated against `tool_manifest()` so it cannot drift from the runtime list.
 The manifest covers the drill-down surfaces an agent needs after
 `canary_doctor`: summary, services, errors, incidents, timeline, targets,
 monitors, dogfood audit, dogfood value receipts, witness, DR status, event
-capture, remediation claims, and integration discovery/status/plan/patch/enroll.
-The MCP server implements those tools directly through the CLI-backed adapter;
-it does not define separate route semantics.
+capture, remediation claims, annotations, and integration
+discovery/status/plan/patch/enroll. The MCP server implements those tools
+directly through the CLI-backed adapter; it does not define separate route
+semantics.

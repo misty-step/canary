@@ -4,7 +4,8 @@ Canary API keys are scoped. Use the narrowest key that matches the caller:
 
 - `ingest-only`: `POST /api/v1/errors`
 - `read-only`: query, report, timeline, incidents, and read-only health endpoints
-- `admin`: target, webhook, onboarding, metrics, annotations write, and key management
+- `responder-write`: service-bound read access plus remediation claim and annotation writeback
+- `admin`: target, webhook, onboarding, metrics, key management, and break-glass responder writes
 
 Manual rotation is the supported path for now.
 
@@ -54,6 +55,31 @@ curl -X POST $CANARY_ENDPOINT/api/v1/keys \
    - `read-only`: `GET /api/v1/report?window=1h` returns `200`
    - `admin`: key management or target management routes return `200`
 4. Revoke the previous key only after the replacement is confirmed in use.
+
+## Rotate A Responder-Write Key
+
+`responder-write` keys must be bound to one service. They can read that
+service's responder context and write remediation claims or annotations for
+subjects owned by the same service; they cannot ingest data, administer Canary,
+or cross service boundaries.
+
+1. Create the replacement with the same service binding:
+
+```bash
+curl -X POST $CANARY_ENDPOINT/api/v1/keys \
+  -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "billing-api-responder-2026-04", "scope": "responder-write", "service": "billing-api"}'
+```
+
+2. Store the returned raw key as `CANARY_RESPONDER_KEY` or
+   `CANARY_RESPONDER_API_KEY` in the responder runtime.
+3. Verify the replacement can read and write only the bound service:
+   - `bin/canary annotations list --subject-type target --subject-id TGT-billing-api --json` returns `200`
+   - `bin/canary annotations create --subject-type target --subject-id TGT-billing-api --agent rotation-check --action verified --json` returns `201`
+   - the same create call against another service's target returns RFC 9457 `403`
+4. Revoke the previous responder key after the runtime is confirmed on the new
+   key.
 
 ## Zero-Downtime Rule
 
