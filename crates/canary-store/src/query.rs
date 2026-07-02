@@ -87,7 +87,7 @@ pub struct RecentTransition {
     pub entity_ref: String,
     /// Surface display name.
     pub name: String,
-    /// Service name resolved through Phoenix's fallback.
+    /// Service name resolved through the service fallback.
     pub service: String,
     /// Current state.
     pub state: String,
@@ -134,7 +134,7 @@ pub enum ErrorGroupQueryError {
     /// Query window is outside Canary's closed set.
     #[error("invalid query window")]
     InvalidWindow,
-    /// Cursor is not a valid Phoenix query cursor.
+    /// Cursor is not a valid query cursor.
     #[error("invalid query cursor")]
     InvalidCursor,
     /// SQLite rejected a read query.
@@ -151,10 +151,10 @@ pub enum TimelineQueryError {
     /// Query window is outside Canary's closed set.
     #[error("invalid query window")]
     InvalidWindow,
-    /// Requested limit is outside Phoenix's accepted range.
+    /// Requested limit is outside accepted range.
     #[error("invalid timeline limit")]
     InvalidLimit,
-    /// Cursor is not a valid Phoenix timeline cursor.
+    /// Cursor is not a valid timeline cursor.
     #[error("invalid timeline cursor")]
     InvalidCursor,
     /// Event type filter includes one or more non-business events.
@@ -177,7 +177,7 @@ pub struct TimelineQueryOptions {
     pub project_id: Option<String>,
     /// Optional service filter. Empty strings are treated as absent.
     pub service: Option<String>,
-    /// Optional limit. Defaults to Phoenix's 50-row page size.
+    /// Optional limit. Defaults to the default 50-row page size.
     pub limit: Option<String>,
     /// Optional cursor. Empty strings are treated as absent.
     pub cursor: Option<String>,

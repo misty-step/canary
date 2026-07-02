@@ -16,16 +16,16 @@ pub type AnnotationResult<T> = std::result::Result<T, AnnotationError>;
 /// Annotation validation or storage failure.
 #[derive(Debug, thiserror::Error)]
 pub enum AnnotationError {
-    /// Subject type is not one of the Phoenix types.
+    /// Subject type is not one of the accepted subject types.
     #[error("invalid annotation subject type")]
     InvalidSubjectType,
     /// Subject row does not exist.
     #[error("annotation subject not found")]
     NotFound,
-    /// Limit is not a positive integer up to the Phoenix maximum.
+    /// Limit is not a positive integer up to the accepted maximum.
     #[error("invalid annotation limit")]
     InvalidLimit,
-    /// Cursor is not a valid Phoenix annotation cursor.
+    /// Cursor is not a valid annotation cursor.
     #[error("invalid annotation cursor")]
     InvalidCursor,
     /// SQLite rejected the operation.
@@ -100,7 +100,7 @@ pub enum AnnotationSubjectType {
 }
 
 impl AnnotationSubjectType {
-    /// Parse a Phoenix subject type.
+    /// Parse a subject type.
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "incident" => Some(Self::Incident),
@@ -122,7 +122,7 @@ impl AnnotationSubjectType {
     }
 }
 
-/// Return Phoenix's accepted annotation subject types in wire order.
+/// Return accepted annotation subject types in wire order.
 pub const fn subject_types() -> &'static [&'static str] {
     &ANNOTATION_SUBJECT_TYPES
 }
