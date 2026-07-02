@@ -1,3 +1,10 @@
+## [1.7.1](https://github.com/misty-step/canary/compare/v1.7.0...v1.7.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* **witness:** stop canary-watchman's own overdue pressure from blocking its own recovery check-in ([#218](https://github.com/misty-step/canary/issues/218)) ([0547474](https://github.com/misty-step/canary/commit/05474744c9c5cfd7e094b610a2e00e46bdb9b0ea)), closes [#196](https://github.com/misty-step/canary/issues/196) [#196](https://github.com/misty-step/canary/issues/196)
+
 # [1.7.0](https://github.com/misty-step/canary/compare/v1.6.0...v1.7.0) (2026-07-02)
 
 
