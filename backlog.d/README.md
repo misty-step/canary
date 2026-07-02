@@ -81,7 +81,7 @@ visible until a focused PR archives them with evidence.
 | 060 | Cold-operator deploy path | P0 | done | XL |
 | 061 | Fleet plumb-in | P0 | done | L |
 | 058 | Cadence-aware SLI trajectory sample floor | P2 | pending | M |
-| 059 | Bump anyhow after RUSTSEC-2026-0190 | P2 | pending | S |
+| 059 | Bump anyhow after RUSTSEC-2026-0190 | P2 | done | S |
 | 020 | Adminifi HTTP surface verification | low | blocked | S |
 | 010 | Ramp pattern (north star) | high | blocked | XL |
 
@@ -133,7 +133,7 @@ visible until a focused PR archives them with evidence.
 046 ──→ 047 (shipped) ──→ 048 ──→ Bitterblossom 055 ──→ 049 ──→ 010
 049 + shipped 052/057 ──→ 050 (readiness proof consumes the integration and MCP surfaces; 047 alert-plane surface is already real)
 058 follows 047 as quality tuning; it does not block 048/049/050 unless trajectory sufficiency becomes a readiness proof requirement
-059 tracks the allowed `RUSTSEC-2026-0190` advisory for `anyhow`; keep it as a curated dependency bump, not mixed into feature work
+059 shipped 2026-07-01: `cargo update -p anyhow` bumped 1.0.102 -> 1.0.103, clearing RUSTSEC-2026-0190; the strict advisory lane no longer reports an allowed warning.
 ```
 
 ## Execution Lanes
