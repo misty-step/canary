@@ -182,7 +182,7 @@ export class Ci {
       .container()
       .from(PYTHON_IMAGE)
       .withExec(["apt-get", "update"])
-      .withExec(["apt-get", "install", "-y", "--no-install-recommends", "jq"])
+      .withExec(["apt-get", "install", "-y", "--no-install-recommends", "git", "jq"])
       .withMountedDirectory("/work", source)
       .withWorkdir("/work")
       .withExec(["bash", "test/bin/entrypoint_test.sh"])
@@ -194,6 +194,7 @@ export class Ci {
       .withExec(["bash", "-n", "bin/canary"])
       .withExec(["bash", "-n", "bin/canary-witness"])
       .withExec(["bash", "-n", "bin/canary-write-path-rehearsal"])
+      .withExec(["bash", "bin/check-aesthetic-currency"])
   }
 
   private async typescriptQualityContainer(source: Directory): Promise<Container> {
