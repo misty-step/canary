@@ -830,7 +830,9 @@ mod tests {
         );
         let script_body = text_body(script).await?;
         assert!(script_body.contains("Authorization"));
-        assert!(script_body.contains("sessionStorage"));
+        assert!(script_body.contains("localStorage"));
+        assert!(!script_body.contains("key: sessionStorage.getItem(KEY_STORAGE)"));
+        assert!(script_body.contains("renderAuthChrome"));
 
         let aesthetic = router
             .oneshot(Request::get("/ui/aesthetic.css").body(Body::empty())?)

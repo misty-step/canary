@@ -32,7 +32,7 @@ button {
 .canary-topbar,
 .canary-status {
   display: grid;
-  grid-template-columns: auto auto minmax(16rem, 1fr) auto;
+  grid-template-columns: auto minmax(16rem, 1fr) auto;
   align-items: center;
   gap: var(--ae-space-4) var(--ae-space-6);
   padding: var(--ae-space-4) var(--ae-space-6);
@@ -47,13 +47,25 @@ button {
 }
 
 .brand-block {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ae-space-4);
   border-right: 1px solid var(--ae-line);
   padding-right: var(--ae-space-6);
 }
 
+.auth-chrome {
+  justify-self: end;
+  min-width: 0;
+}
+
+.auth-chrome:empty {
+  display: block;
+}
+
 .session-form {
   display: grid;
-  grid-template-columns: auto minmax(9rem, 1fr) auto auto;
+  grid-template-columns: auto minmax(9rem, 1fr) auto;
   align-items: center;
   gap: var(--ae-space-3);
   justify-self: end;
@@ -517,6 +529,11 @@ button {
   .session-form,
   .canary-status {
     grid-template-columns: 1fr;
+  }
+
+  .auth-chrome {
+    grid-column: 1 / -1;
+    justify-self: stretch;
   }
 
   .figure {

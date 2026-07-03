@@ -16,7 +16,7 @@
   const state = {
     figure: "all",
     view: "all",
-    key: sessionStorage.getItem(KEY_STORAGE) || "",
+    key: storedSessionKey(),
     mode: sessionStorage.getItem(MODE_STORAGE) || "",
     loading: false,
     error: "",
@@ -40,14 +40,12 @@
   };
 
   const root = document.getElementById("view-root");
-  const keyInput = document.getElementById("api-key");
-  const connection = document.getElementById("connection-status");
+  const authChrome = document.getElementById("auth-chrome");
   const lastRefresh = document.getElementById("last-refresh");
   const sheet = document.getElementById("sheet");
   const scrim = document.getElementById("scrim");
 
   function init() {
-    keyInput.value = state.key;
     setMode(state.mode || preferredMode());
     bindEvents();
     render();
@@ -57,18 +55,26 @@
   }
 
   function bindEvents() {
-    document.getElementById("session-form").addEventListener("submit", (event) => {
+    authChrome.addEventListener("submit", (event) => {
+      if (!event.target.closest("#session-form")) {
+        return;
+      }
       event.preventDefault();
+      const keyInput = document.getElementById("api-key");
       state.key = keyInput.value.trim();
       if (state.key) {
-        sessionStorage.setItem(KEY_STORAGE, state.key);
+        localStorage.setItem(KEY_STORAGE, state.key);
+        sessionStorage.removeItem(KEY_STORAGE);
       }
       refresh();
     });
 
-    document.getElementById("clear-key").addEventListener("click", () => {
+    authChrome.addEventListener("click", (event) => {
+      if (!event.target.closest("[data-clear-key]")) {
+        return;
+      }
       state.key = "";
-      keyInput.value = "";
+      localStorage.removeItem(KEY_STORAGE);
       sessionStorage.removeItem(KEY_STORAGE);
       state.error = "";
       state.data = {
@@ -134,6 +140,19 @@
     state.mode = mode === "dark" ? "dark" : "light";
     document.documentElement.dataset.aeMode = state.mode;
     sessionStorage.setItem(MODE_STORAGE, state.mode);
+  }
+
+  function storedSessionKey() {
+    const durable = localStorage.getItem(KEY_STORAGE) || "";
+    if (durable) {
+      return durable;
+    }
+    const legacy = sessionStorage.getItem(KEY_STORAGE) || "";
+    if (legacy) {
+      localStorage.setItem(KEY_STORAGE, legacy);
+      sessionStorage.removeItem(KEY_STORAGE);
+    }
+    return legacy;
   }
 
   function setFigure(figure) {
@@ -266,10 +285,20 @@
   }
 
   function updateChrome() {
-    connection.textContent = state.key ? "Session key loaded" : "No session key";
+    renderAuthChrome();
     lastRefresh.textContent = state.lastRefresh
       ? `Refreshed ${formatTime(state.lastRefresh.toISOString())}`
       : "Not refreshed";
+  }
+
+  function renderAuthChrome() {
+    authChrome.innerHTML = state.key ? "" : `
+      <form class="session-form" id="session-form">
+        <label for="api-key">Bearer key</label>
+        <input id="api-key" name="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="paste bearer key">
+        <button type="submit">Sign in</button>
+      </form>
+    `;
   }
 
   function lockedView() {
