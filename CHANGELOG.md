@@ -1,3 +1,10 @@
+## [1.11.2](https://github.com/misty-step/canary/compare/v1.11.1...v1.11.2) (2026-07-03)
+
+
+### Bug Fixes
+
+* **ui:** add Canary bird favicon ([8d53a81](https://github.com/misty-step/canary/commit/8d53a813527ad63b7da057b70808a028bf7dcb1c))
+
 ## [1.11.1](https://github.com/misty-step/canary/compare/v1.11.0...v1.11.1) (2026-07-03)
 
 
