@@ -38,4 +38,6 @@ jobs:
           synthesis: "true"
           synthesis-required: "false"
           healthcheck: "true"
+          webhook-url: ${{ secrets.LANDMARK_WEBHOOK_URL }}
+          webhook-secret: ${{ secrets.LANDMARK_WEBHOOK_SECRET }}
           product-description: "Canary is a self-hosted, agent-first production health ledger for errors, uptime, incidents, timelines, webhooks, and remediation claims."
