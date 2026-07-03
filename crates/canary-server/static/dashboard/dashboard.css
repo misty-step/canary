@@ -393,6 +393,57 @@ button {
   align-self: center;
 }
 
+.sheet-glance {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border-top: 1px solid var(--ae-line);
+  border-left: 1px solid var(--ae-line);
+  margin-bottom: var(--ae-space-4);
+}
+
+.sheet-glance div {
+  min-width: 0;
+  border-right: 1px solid var(--ae-line);
+  border-bottom: 1px solid var(--ae-line);
+  padding: var(--ae-space-3);
+}
+
+.sheet-glance span {
+  display: block;
+  font-family: var(--ae-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  color: var(--ae-ink-muted);
+  text-transform: uppercase;
+}
+
+.sheet-glance strong {
+  display: block;
+  min-width: 0;
+  font-weight: var(--ae-w-medium);
+  overflow-wrap: anywhere;
+}
+
+.evi-link {
+  display: grid;
+  grid-template-columns: 1.35em minmax(8rem, auto) minmax(0, 1fr);
+  align-items: baseline;
+  gap: var(--ae-space-3);
+  border-top: 1px solid var(--ae-line);
+  padding: var(--ae-space-3) 0;
+  text-decoration: none;
+}
+
+.evi-link:last-child {
+  border-bottom: 1px solid var(--ae-line);
+}
+
+.evi-link .ae-icon {
+  width: 1em;
+  height: 1em;
+  align-self: center;
+}
+
 .meta,
 .empty,
 .problem,
@@ -534,6 +585,11 @@ button {
   .auth-chrome {
     grid-column: 1 / -1;
     justify-self: stretch;
+  }
+
+  .sheet-glance,
+  .evi-link {
+    grid-template-columns: 1fr;
   }
 
   .figure {

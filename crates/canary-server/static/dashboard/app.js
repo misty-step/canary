@@ -472,7 +472,7 @@
         <span class="type"><span class="ae-tag">${escapeHtml(incidentType(incident))}</span></span>
         <span class="app">${appIcon(incident.service, "")}${escapeHtml(incident.service || "unknown")}</span>
         <span class="ae-item">${escapeHtml(incident.title || incident.summary || incident.id)}</span>
-        <span class="state">${escapeHtml(incident.escalated_at ? "ESCALATED" : incident.state || "open")}</span>
+        <span class="state"><span class="ae-tag">${escapeHtml(incident.escalated_at ? "ESCALATED" : incident.state || "open")}</span></span>
       </button>
     `;
   }
@@ -499,8 +499,10 @@
     const richIncident = { ...incident, ...(detail?.incident || {}) };
     const signals = detail?.signals || incident.signals || [];
     const annotations = detail?.annotations || [];
-    const events = detail?.recent_timeline_events || [];
+    const events = incidentTimelineEvents(richIncident.id || incident.id, detail);
     const claim = detail?.action_brief?.current_claim || detail?.claims?.find((item) => isActiveClaim(item.state));
+    const escalation = richIncident.escalated_at ? `escalated ${formatTime(richIncident.escalated_at)}` : "escalation none";
+    const resolution = richIncident.resolved_at ? `resolved ${formatTime(richIncident.resolved_at)}` : "resolution pending";
     return `${sheetClose()}
       <div class="ae-group sheet-state">
         <p>${glyph(richIncident.escalated_at || incident.escalated_at ? "err" : "warn")} <span class="ae-strong ae-num">${escapeHtml(richIncident.id || incident.id)}</span></p>
@@ -508,25 +510,67 @@
           <span class="ae-tag">${escapeHtml(incidentType(richIncident))}</span>
           <span class="ae-tag">severity ${escapeHtml(richIncident.severity || "medium")}</span>
           <span class="ae-tag">${escapeHtml(richIncident.state || "open")}</span>
-          <span class="ae-num">opened ${escapeHtml(formatTime(richIncident.opened_at))} · ${signals.length || richIncident.signal_count || 0} signals · ${richIncident.escalated_at ? `escalated ${formatTime(richIncident.escalated_at)}` : "not escalated"}</span>
+          <span class="ae-tag">${escapeHtml(escalation)}</span>
+          <span class="ae-num">opened ${escapeHtml(formatTime(richIncident.opened_at))} · ${signals.length || richIncident.signal_count || 0} signals</span>
         </p>
       </div>
       <div class="ae-group">
         <div class="ae-plate">
-          <p class="ae-plate-cap">ORIGIN CONTEXT · WHAT CANARY SAW</p>
+          <p class="ae-plate-cap">WHAT IS GOING ON</p>
+          <div class="sheet-glance">
+            <div><span>what</span><strong>${escapeHtml(richIncident.title || incident.title || "incident")}</strong></div>
+            <div><span>where</span><strong>${escapeHtml(richIncident.service || incident.service || "unknown")}</strong></div>
+            <div><span>since</span><strong>${escapeHtml(formatTime(richIncident.opened_at || incident.opened_at))}</strong></div>
+            <div><span>state</span><strong>${escapeHtml(richIncident.escalated_at ? "escalated" : richIncident.state || "open")}</strong></div>
+            <div><span>assignee</span><strong>${escapeHtml(claim?.owner || "unassigned")}</strong></div>
+            <div><span>resolution</span><strong>${escapeHtml(resolution)}</strong></div>
+          </div>
           ${signals.length ? signals.map(signalLine).join("") : `<div class="evi">${glyph("warn")}<span>No bounded signals returned for this incident.</span></div>`}
           <p class="ae-plate-note">${escapeHtml(detail?.summary || richIncident.title || incident.title || "")}</p>
         </div>
       </div>
       <div class="ae-group">
-        <p class="ae-h">AGENT WORK LOG</p>
-        ${claim || annotations.length || events.length ? `<ol class="ae-trail">${renderClaim(claim)}${annotations.map(renderAnnotation).join("")}${events.map(renderTimelineEvent).join("")}</ol>` : `<div class="ae-empty"><p>No agent writeback yet.</p><p class="ae-dim">Annotations and claims from the real API render here.</p></div>`}
+        <p class="ae-h">EVIDENCE LINKS</p>
+        ${evidenceLinks(richIncident, signals).length ? evidenceLinks(richIncident, signals).map(renderEvidenceLink).join("") : `<p class="ae-dim">No deep evidence links returned for this incident.</p>`}
       </div>
       <div class="ae-group">
-        <p class="ae-h">RESOLUTION</p>
-        <p class="ae-dim">${richIncident.resolved_at ? `Resolved ${formatTime(richIncident.resolved_at)}` : "No proof of resolution yet."}</p>
-        <p class="ae-chrome">escalation: ${richIncident.escalated_at ? `live overlay set ${formatTime(richIncident.escalated_at)}` : "not escalated"}</p>
+        <p class="ae-h">ASSIGNEE + WORK LOG</p>
+        ${claim ? `<p class="ae-chrome">assigned to ${escapeHtml(claim.owner || "agent")} · ${escapeHtml(claim.purpose || claim.state || "claimed")}</p>` : `<p class="ae-chrome">unassigned · no active claim</p>`}
+        ${claim || annotations.length || events.length ? `<ol class="ae-trail">${renderClaim(claim)}${annotations.map(renderAnnotation).join("")}${events.map(renderTimelineEvent).join("")}</ol>` : `<div class="ae-empty"><p>No agent writeback yet.</p><p class="ae-dim">Annotations, claims, and incident timeline events from the real API render here.</p></div>`}
+      </div>
+      <div class="ae-group">
+        <p class="ae-h">RESOLUTION + ESCALATION</p>
+        <p class="ae-dim">Proof of resolution: ${escapeHtml(resolution)}.</p>
+        <p class="ae-chrome">escalation state: ${escapeHtml(escalation)}</p>
       </div>`;
+  }
+
+  function incidentTimelineEvents(id, detail) {
+    const localEvents = detail?.recent_timeline_events || [];
+    const globalEvents = (state.data.timeline?.events || []).filter((event) => event.entity_type === "incident" && event.entity_ref === id);
+    const seen = new Set();
+    return localEvents.concat(globalEvents).filter((event) => {
+      const key = `${event.event}:${event.created_at}:${event.summary}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    }).sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  }
+
+  function evidenceLinks(incident, signals) {
+    const links = [{ label: "incident detail", href: `/api/v1/incidents/${encodeURIComponent(incident.id)}` }];
+    for (const signal of signals) {
+      if ((signal.signal_type === "error_group" || signal.type === "error_group") && signal.signal_ref) {
+        links.push({ label: signal.summary || signal.signal_ref || "error group", href: `/api/v1/errors/${encodeURIComponent(signal.signal_ref)}` });
+      }
+    }
+    return links;
+  }
+
+  function renderEvidenceLink(link) {
+    return `<a class="evi-link" href="${escapeHtml(link.href)}" target="_blank" rel="noreferrer">${iconSvg("i-eye")}<span>${escapeHtml(link.label)}</span><span class="ae-chrome">${escapeHtml(link.href)}</span></a>`;
   }
 
   function signalLine(signal) {
@@ -685,30 +729,15 @@
   }
 
   function incidentFeed() {
-    const active = (state.data.incidents?.incidents || []).map((incident) => ({ ...incident, source: "open" }));
-    const known = new Set(active.map((incident) => incident.id));
-    const history = [];
     const escalations = escalationMap();
-    for (const event of state.data.timeline?.events || []) {
-      if (event.entity_type !== "incident" || !event.entity_ref || known.has(event.entity_ref)) {
-        continue;
-      }
-      history.push({
-        id: event.entity_ref,
-        service: event.service,
-        state: event.event?.replace("incident.", "") || "event",
-        severity: event.severity || "medium",
-        title: event.summary,
-        opened_at: event.created_at,
-        created_at: event.created_at,
-        source: "history",
-      });
-      known.add(event.entity_ref);
-    }
-    return active.concat(history).map((incident) => {
+    return activeIncidentFeed().map((incident) => {
       const detail = state.data.incidentDetails.get(incident.id);
       return { ...incident, escalated_at: incident.escalated_at || detail?.incident?.escalated_at || detail?.escalated_at || escalations.get(incident.id) || null };
     });
+  }
+
+  function activeIncidentFeed() {
+    return (state.data.incidents?.incidents || []).map((incident) => ({ ...incident, source: "open" }));
   }
 
   function escalationMap() {
