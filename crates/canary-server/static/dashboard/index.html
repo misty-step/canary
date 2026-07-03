@@ -21,17 +21,34 @@
     <script defer src="/ui/app.js"></script>
   </head>
   <body>
+    <svg class="icon-defs" aria-hidden="true">
+      <symbol id="i-activity" viewBox="0 0 24 24"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></symbol>
+      <symbol id="i-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 20h16a2 2 0 0 0 1.73-2Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+      <symbol id="i-bird" viewBox="0 0 24 24"><path d="M16 7h.01"/><path d="M3.4 18H12a8 8 0 0 0 8-8V7a4 4 0 0 0-7.28-2.3L2 20"/><path d="m20 7 2 .5-2 .5"/><path d="M10 18v3"/><path d="M14 17.75V21"/><path d="M7 18a6 6 0 0 0 3.84-10.61"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+      <symbol id="i-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.5"/></symbol>
+      <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.06 12.35a1 1 0 0 1 0-.7A10.75 10.75 0 0 1 12 5a10.75 10.75 0 0 1 9.94 6.65 1 1 0 0 1 0 .7A10.75 10.75 0 0 1 12 19a10.75 10.75 0 0 1-9.94-6.65Z"/><circle cx="12" cy="12" r="3"/></symbol>
+      <symbol id="i-flask-conical" viewBox="0 0 24 24"><path d="M10 2v7.31"/><path d="M14 9.3V2"/><path d="M8.5 2h7"/><path d="M14 9.3a6.5 6.5 0 1 1-4 0"/><path d="M5.58 16h12.85"/></symbol>
+      <symbol id="i-flower" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 16.5A4.5 4.5 0 1 1 7.5 12 4.5 4.5 0 1 1 12 7.5a4.5 4.5 0 1 1 4.5 4.5 4.5 4.5 0 1 1-4.5 4.5"/><path d="M12 7.5V9"/><path d="M7.5 12H9"/><path d="M16.5 12H15"/><path d="M12 16.5V15"/></symbol>
+      <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></symbol>
+      <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/></symbol>
+      <symbol id="i-kanban" viewBox="0 0 24 24"><path d="M6 5v11"/><path d="M12 5v6"/><path d="M18 5v14"/><rect width="18" height="18" x="3" y="3" rx="2"/></symbol>
+      <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12.83 2.18 8.89 4.44a1 1 0 0 1 0 1.79l-8.89 4.44a1.86 1.86 0 0 1-1.66 0L2.28 8.41a1 1 0 0 1 0-1.79l8.89-4.44a1.86 1.86 0 0 1 1.66 0Z"/><path d="m22 12.5-9.17 4.59a1.86 1.86 0 0 1-1.66 0L2 12.5"/><path d="m22 17.5-9.17 4.59a1.86 1.86 0 0 1-1.66 0L2 17.5"/></symbol>
+      <symbol id="i-milestone" viewBox="0 0 24 24"><path d="M12 13v8"/><path d="M12 3v3"/><path d="M3 6h18l-4 4 4 4H3l4-4Z"/></symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></symbol>
+      <symbol id="i-toolbox" viewBox="0 0 24 24"><path d="M10 6V5a2 2 0 0 1 2-2h0a2 2 0 0 1 2 2v1"/><path d="M10 14h4"/><path d="M5 6h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z"/></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+      <symbol id="i-zap" viewBox="0 0 24 24"><path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/></symbol>
+    </svg>
+
     <div class="canary-shell" data-canary-dashboard>
       <header class="canary-topbar">
-        <div class="brand-block" aria-label="Canary">
-          <div class="brand">CANARY</div>
-        </div>
-        <nav class="canary-nav ae-nav" aria-label="Dashboard views">
-          <button type="button" data-view="health" aria-current="page">Health</button>
-          <button type="button" data-view="incidents">Incidents</button>
-          <button type="button" data-view="checks">Checks</button>
-          <button type="button" data-view="errors">Errors</button>
-        </nav>
+        <span class="ae-logo brand-block">
+          <span class="ae-app-mark"><svg class="ae-icon" aria-hidden="true"><use href="#i-bird"/></svg></span>
+          <span class="ae-name">CANARY</span>
+        </span>
+        <span class="ae-chrome ae-num" id="connection-status">No session key</span>
         <form class="session-form" id="session-form">
           <label for="api-key">Bearer key</label>
           <input id="api-key" name="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="paste bearer key">
@@ -39,23 +56,21 @@
           <button type="button" id="clear-key">Clear</button>
         </form>
         <button class="ae-mode" id="mode-toggle" type="button" aria-label="Toggle color mode">
-          <svg class="ae-icon ae-sun" viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="12" r="4"></circle>
-            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
-          </svg>
-          <svg class="ae-icon ae-moon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"></path>
-          </svg>
+          <svg class="ae-icon ae-sun" aria-hidden="true"><use href="#i-sun"/></svg>
+          <svg class="ae-icon ae-moon" aria-hidden="true"><use href="#i-moon"/></svg>
         </button>
       </header>
 
       <main class="canary-main" id="view-root" tabindex="-1"></main>
 
       <footer class="canary-status ae-chrome">
-        <span id="connection-status">No session key</span>
         <span id="last-refresh">Not refreshed</span>
+        <span>squares filter the ledger · click a row for the work trail</span>
         <button type="button" id="refresh">Refresh</button>
       </footer>
     </div>
+
+    <div class="scrim" id="scrim"></div>
+    <aside class="sheet" id="sheet" role="dialog" aria-modal="true" aria-label="Incident ticket"></aside>
   </body>
 </html>
