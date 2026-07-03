@@ -1,3 +1,10 @@
+# [1.11.0](https://github.com/misty-step/canary/compare/v1.10.0...v1.11.0) (2026-07-03)
+
+
+### Features
+
+* **ui:** ship metric squares dashboard ([f901eba](https://github.com/misty-step/canary/commit/f901ebad1d4a4db5317e9941939c1740bd5ae15d)), closes [#222](https://github.com/misty-step/canary/issues/222)
+
 # [1.10.0](https://github.com/misty-step/canary/compare/v1.9.0...v1.10.0) (2026-07-02)
 
 
