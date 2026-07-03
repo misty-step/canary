@@ -1,3 +1,11 @@
+## [1.11.1](https://github.com/misty-step/canary/compare/v1.11.0...v1.11.1) (2026-07-03)
+
+
+### Bug Fixes
+
+* **ui:** hide authenticated auth chrome ([b6989a2](https://github.com/misty-step/canary/commit/b6989a293c06ef6f970293b7d03a2474b6b3bd3b))
+* **ui:** render incidents as incidents ([08a4458](https://github.com/misty-step/canary/commit/08a445869e11b89652178cf411645c00be9232c7))
+
 # [1.11.0](https://github.com/misty-step/canary/compare/v1.10.0...v1.11.0) (2026-07-03)
 
 
