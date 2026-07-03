@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════
-   aesthetic v2.10.0
+   aesthetic v2.16.0
    The Misty Step design system. https://github.com/misty-step/aesthetic
 
    The law:
@@ -10,7 +10,7 @@
      identity comes from ink, hairlines, type, and motion — never from
      a color-counting rule. Color earns its place; it is not ambient.
    · Status rides the glyph: danger, success, and warning color the
-     icon (✕ ✓ !), never the sentence, never a filled pill.
+     Lucide icon, never the sentence, never a filled pill.
    · Every view fits the viewport. 100dvh screens, no page scrolling;
      when content exceeds one screen, a quiet nav swaps views.
    · Motion is feedback, never decoration: small, brief, eased, and
@@ -43,6 +43,20 @@
   --ae-warn: #8a5f32;
   --ae-err: #a84138;
 
+  /* categorical inks: identity, not judgment — N agents, N series, N
+     actors need N distinguishable hues with no severity meaning. Ride
+     the word on .ae-chip (see below); this is the one place a hue is
+     allowed to color text, because there is no glyph to carry it and
+     nothing is being judged. */
+  --ae-cat-0: #8c2f1f;
+  --ae-cat-1: #2c6e62;
+  --ae-cat-2: #a67c1e;
+  --ae-cat-3: #6b4c86;
+  --ae-cat-4: #46586b;
+  --ae-cat-5: #5b7444;
+  --ae-cat-6: #3d5a80;
+  --ae-cat-7: #a1452e;
+
   /* dark counterparts, resolved by the mode blocks below */
   --ae-surface-dark: #121212;
   --ae-wash-dark: #1b1b1b;
@@ -54,6 +68,14 @@
   --ae-ok-dark: #6fd2a8;
   --ae-warn-dark: #c49d72;
   --ae-err-dark: #e58379;
+  --ae-cat-0-dark: #d06a4f;
+  --ae-cat-1-dark: #54bba4;
+  --ae-cat-2-dark: #d8b25a;
+  --ae-cat-3-dark: #b98fe0;
+  --ae-cat-4-dark: #93a8c2;
+  --ae-cat-5-dark: #9bc47a;
+  --ae-cat-6-dark: #7ea1d1;
+  --ae-cat-7-dark: #e08a6a;
 
   --ae-font: 'Geist', 'Helvetica Neue', Helvetica, Arial, sans-serif;
   --ae-font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -65,6 +87,9 @@
   --ae-measure: 38rem; /* rem: bars in the 13px chrome register must not shrink the measure */
   --ae-measure-wide: 68rem;
   --ae-radius: 0;
+  --ae-breakpoint-sm: 40rem; /* phones and narrow split-view: one-column data */
+  --ae-breakpoint-md: 48rem; /* tablet portrait: shell chrome leaves the side */
+  --ae-breakpoint-lg: 64rem; /* small laptop: boards can hold columns */
 
   /* the spacing scale: consumers use these instead of ad-hoc em values.
      The token-guard (015) will enforce them. Off-scale internal values
@@ -105,6 +130,14 @@
     --ae-ok: var(--ae-ok-dark);
     --ae-warn: var(--ae-warn-dark);
     --ae-err: var(--ae-err-dark);
+    --ae-cat-0: var(--ae-cat-0-dark);
+    --ae-cat-1: var(--ae-cat-1-dark);
+    --ae-cat-2: var(--ae-cat-2-dark);
+    --ae-cat-3: var(--ae-cat-3-dark);
+    --ae-cat-4: var(--ae-cat-4-dark);
+    --ae-cat-5: var(--ae-cat-5-dark);
+    --ae-cat-6: var(--ae-cat-6-dark);
+    --ae-cat-7: var(--ae-cat-7-dark);
   }
 }
 
@@ -129,6 +162,14 @@
   --ae-ok: var(--ae-ok-dark);
   --ae-warn: var(--ae-warn-dark);
   --ae-err: var(--ae-err-dark);
+  --ae-cat-0: var(--ae-cat-0-dark);
+  --ae-cat-1: var(--ae-cat-1-dark);
+  --ae-cat-2: var(--ae-cat-2-dark);
+  --ae-cat-3: var(--ae-cat-3-dark);
+  --ae-cat-4: var(--ae-cat-4-dark);
+  --ae-cat-5: var(--ae-cat-5-dark);
+  --ae-cat-6: var(--ae-cat-6-dark);
+  --ae-cat-7: var(--ae-cat-7-dark);
 }
 
 /* ── base ─────────────────────────────────────────────────────────── */
@@ -418,6 +459,200 @@ a:hover {
   vertical-align: -0.2em;
 }
 
+/* icon-forward rows: Lucide gives the eye a scan target, but the law
+   stays unchanged — status hue rides the SVG, words stay ink. */
+.ae-status {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--ae-space-2);
+  color: var(--ae-ink);
+}
+
+.ae-status .ae-icon {
+  flex: none;
+}
+
+.ae-status-label {
+  color: var(--ae-ink);
+}
+
+.ae-icon-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: var(--ae-space-3);
+  color: inherit;
+  text-decoration: none;
+}
+
+.ae-list-icon {
+  flex: none;
+  color: var(--ae-ink-muted);
+}
+
+.ae-icon-row:hover .ae-list-icon {
+  color: var(--ae-ink);
+}
+
+.ae-icon-row-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ae-icon-row-meta {
+  font-size: 13px;
+  color: var(--ae-ink-muted);
+}
+
+/* decomposed list rows: incident feeds and dense activity lists should not
+   collapse into "time · app · type · status" prose. Each field gets a
+   label, a value, and an optional Lucide/app mark; status hue still rides
+   only the glyph. Compose .ae-row-link when the whole row navigates. */
+.ae-list-rows {
+  display: grid;
+  border-block: 1px solid var(--ae-line);
+}
+
+.ae-list-row {
+  display: grid;
+  grid-template-columns:
+    minmax(5.5em, 0.8fr) minmax(9em, 1.25fr) minmax(9em, 1fr)
+    minmax(7em, 0.9fr);
+  align-items: center;
+  gap: var(--ae-space-4);
+  padding: 0.68em 0;
+  border-bottom: 1px solid var(--ae-line);
+  color: inherit;
+  text-decoration: none;
+}
+
+.ae-list-row:last-child {
+  border-bottom: 0;
+}
+
+.ae-list-row:hover {
+  color: inherit;
+}
+
+.ae-list-cell {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  column-gap: var(--ae-space-2);
+  align-items: center;
+}
+
+.ae-list-cell:has(> .ae-icon),
+.ae-list-cell:has(> .ae-app-mark) {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.ae-list-cell > .ae-icon,
+.ae-list-cell > .ae-app-mark {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  align-self: center;
+}
+
+.ae-list-cell > .ae-icon:not(.ae-ok):not(.ae-warn):not(.ae-err) {
+  flex: none;
+  color: var(--ae-ink-muted);
+}
+
+.ae-list-label {
+  grid-column: 1;
+  font-family: var(--ae-font-mono);
+  font-size: 11px;
+  line-height: 1.2;
+  letter-spacing: 0.12em;
+  color: var(--ae-ink-faint);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.ae-list-value {
+  grid-column: 1;
+  min-width: 0;
+  color: var(--ae-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ae-list-cell:has(> .ae-icon) > .ae-list-label,
+.ae-list-cell:has(> .ae-icon) > .ae-list-value,
+.ae-list-cell:has(> .ae-app-mark) > .ae-list-label,
+.ae-list-cell:has(> .ae-app-mark) > .ae-list-value {
+  grid-column: 2;
+}
+
+.ae-list-time .ae-list-value {
+  font-family: var(--ae-font-mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ae-ink-muted);
+}
+
+.ae-list-status {
+  justify-self: end;
+}
+
+.ae-list-status .ae-list-value {
+  font-weight: var(--ae-w-medium);
+}
+
+/* app identity: a Lucide project mark sized by the register it lives
+   in. The same mark works in a 13px rail and a 16px header. */
+.ae-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ae-space-3);
+  color: inherit;
+  text-decoration: none;
+  padding-block: 0.2em;
+  margin-block: 0;
+}
+
+.ae-logo:hover {
+  color: inherit;
+}
+
+.ae-logo .ae-name {
+  transition: color var(--ae-quick) var(--ae-ease);
+}
+
+.ae-logo:hover .ae-name {
+  color: var(--ae-accent);
+}
+
+.ae-logo-compact {
+  gap: var(--ae-space-2);
+  font-size: 13px;
+}
+
+.ae-app-mark {
+  width: 2em;
+  height: 2em;
+  border: 1px solid var(--ae-line);
+  color: var(--ae-ink);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.ae-app-mark .ae-icon {
+  width: 1.2em;
+  height: 1.2em;
+  vertical-align: 0;
+}
+
+.ae-logo-compact .ae-app-mark {
+  width: 1.8em;
+  height: 1.8em;
+}
+
 /* the mode toggle: an icon button; sun and moon rotate-crossfade.
    Markup: button.ae-mode > svg.ae-icon.ae-sun + svg.ae-icon.ae-moon */
 .ae-mode {
@@ -453,8 +688,8 @@ a:hover {
   width: 1.25em;
   height: 1.25em;
   transition:
-    opacity var(--ae-soft) var(--ae-ease),
-    transform var(--ae-soft) var(--ae-ease);
+    opacity var(--ae-quick) var(--ae-ease),
+    transform var(--ae-quick) var(--ae-ease);
 }
 
 .ae-mode .ae-sun {
@@ -816,6 +1051,104 @@ a.ae-name {
   padding: 0;
 }
 
+/* the chip: a categorical tag — N agents, N series, N actors need N
+   distinguishable hues with no severity meaning. This is not status
+   (.ae-ok/.ae-warn/.ae-err never apply here); the hue identifies, it
+   doesn't judge, so it's the one place the law lets a hue ride the
+   word instead of a glyph. Same grammar as .ae-tag — mono, hairline,
+   no fill — with the category's hue on both the border and the word
+   (currentColor ties them). Compose with .ae-cat-0 through .ae-cat-7;
+   .ae-chip-sub holds an optional muted trailing detail. */
+.ae-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.5em;
+  font-family: var(--ae-font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  letter-spacing: 0.06em;
+  border: 1px solid currentColor;
+  padding: 0.12em 0.55em;
+  color: var(--ae-ink-muted);
+}
+
+.ae-chip-sub {
+  opacity: 0.75;
+}
+
+/* stat badges: a compact header summary, not a prose run. Values are
+   tabular and strong; labels are quiet; status, when needed, rides the
+   optional mark slot with .ae-ok/.ae-warn/.ae-err. Compose .ae-chip
+   inside only for categorical side-detail, never severity. */
+.ae-stat-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: var(--ae-space-2);
+}
+
+.ae-stat-badge {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--ae-space-2);
+  border: 1px solid var(--ae-line);
+  padding: 0.34em 0.65em;
+  color: var(--ae-ink);
+  white-space: nowrap;
+}
+
+.ae-stat-mark {
+  font-family: var(--ae-font-mono);
+  font-size: 13px;
+  font-weight: var(--ae-w-black);
+}
+
+.ae-stat-value {
+  font-family: var(--ae-font-mono);
+  font-weight: var(--ae-w-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+.ae-stat-label {
+  color: var(--ae-ink-muted);
+}
+
+.ae-stat-badge .ae-chip {
+  margin-left: var(--ae-space-1);
+}
+
+.ae-cat-0 {
+  color: var(--ae-cat-0);
+}
+
+.ae-cat-1 {
+  color: var(--ae-cat-1);
+}
+
+.ae-cat-2 {
+  color: var(--ae-cat-2);
+}
+
+.ae-cat-3 {
+  color: var(--ae-cat-3);
+}
+
+.ae-cat-4 {
+  color: var(--ae-cat-4);
+}
+
+.ae-cat-5 {
+  color: var(--ae-cat-5);
+}
+
+.ae-cat-6 {
+  color: var(--ae-cat-6);
+}
+
+.ae-cat-7 {
+  color: var(--ae-cat-7);
+}
+
 /* the keycap: a quiet square of wash around the key's name */
 kbd {
   background: var(--ae-wash);
@@ -1153,6 +1486,57 @@ input.ae-switch:checked::before {
   font-weight: var(--ae-w-medium);
 }
 
+/* sm table stack: add data-label to each td when a dense instrument must
+   survive phone width. The row becomes a ruled list of label/value pairs
+   instead of shrinking columns until they are unreadable. */
+@media (max-width: 40rem) {
+  .ae-table:has(td[data-label]) {
+    display: block;
+  }
+
+  .ae-table:has(td[data-label]) thead {
+    display: none;
+  }
+
+  .ae-table:has(td[data-label]) tbody,
+  .ae-table:has(td[data-label]) tr,
+  .ae-table:has(td[data-label]) td {
+    display: block;
+  }
+
+  .ae-table:has(td[data-label]) tbody tr {
+    border-top: 1px solid var(--ae-line);
+    padding: 0.55em 0;
+  }
+
+  .ae-table:has(td[data-label]) tbody tr:first-child {
+    border-top: 0;
+  }
+
+  .ae-table:has(td[data-label]) td {
+    border-top: 0;
+    padding: 0.16em 0;
+    display: grid;
+    grid-template-columns: minmax(7em, 0.45fr) minmax(0, 1fr);
+    gap: var(--ae-space-3);
+    text-align: left;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .ae-table:has(td[data-label]) td::before {
+    content: attr(data-label);
+    color: var(--ae-ink-faint);
+    font-weight: var(--ae-w-regular);
+    letter-spacing: 0.08em;
+    text-align: left;
+  }
+
+  .ae-table:has(td[data-label]) td.num {
+    text-align: right;
+  }
+}
+
 /* the plate: a numbered figure frame around a table or specimen —
    mono caption above, hairline frame, footnote rule below */
 .ae-plate {
@@ -1244,6 +1628,130 @@ input.ae-switch:checked::before {
 
 .ae-trail-body .ae-dim {
   color: var(--ae-ink-muted);
+}
+
+/* the wall: a grid of instrument cards for many-of-a-kind status —
+   services, agents, targets. Each card is a hairline plate; status
+   rides the glyph (.ae-ok/.ae-warn/.ae-err on .ae-wall-mark), never a
+   filled tile or a colored border. The right column is optional: a
+   figure, a timestamp, a trace of recent readings. */
+.ae-wall {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+  gap: var(--ae-space-6);
+}
+
+.ae-wall-card {
+  border: 1px solid var(--ae-line);
+  padding: var(--ae-space-4) var(--ae-space-5);
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--ae-space-4);
+}
+
+.ae-wall-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--ae-space-2) var(--ae-space-3);
+}
+
+.ae-wall-mark {
+  font-family: var(--ae-font-mono);
+  font-weight: var(--ae-w-black);
+  flex: none;
+}
+
+.ae-wall-mark.ae-icon {
+  width: 1.1em;
+  height: 1.1em;
+  vertical-align: -0.18em;
+}
+
+.ae-wall-meta {
+  font-size: 13px;
+  color: var(--ae-ink-muted);
+  margin-top: 0.2em;
+}
+
+.ae-wall-figure {
+  text-align: right;
+}
+
+.ae-wall-figure .ae-num {
+  display: block;
+}
+
+.ae-wall-time {
+  font-size: 13px;
+  color: var(--ae-ink-muted);
+}
+
+/* a trace: the wall figure's recent-readings strip — glyphs, not a
+   sparkline; the discrete cousin of .ae-spark */
+.ae-wall-trace {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.18em;
+  color: var(--ae-ink-muted);
+  white-space: nowrap;
+}
+
+.ae-wall-trace .ae-icon {
+  width: 1em;
+  height: 1em;
+  vertical-align: 0;
+}
+
+/* the board: several columns of comparable work. Columns are hairline
+   lanes, not cards inside cards; at narrow widths they stack before their
+   contents are squeezed. */
+.ae-board {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  gap: var(--ae-space-6);
+  align-items: start;
+}
+
+.ae-column {
+  min-width: 0;
+  border-top: 1px solid var(--ae-line);
+  padding-top: var(--ae-space-4);
+}
+
+.ae-column-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--ae-space-4);
+  margin-bottom: var(--ae-space-4);
+}
+
+.ae-column-title {
+  font-weight: var(--ae-w-medium);
+}
+
+.ae-column-meta {
+  font-family: var(--ae-font-mono);
+  font-size: 13px;
+  color: var(--ae-ink-muted);
+  white-space: nowrap;
+}
+
+.ae-column-body {
+  display: grid;
+  gap: var(--ae-space-3);
+}
+
+.ae-board-card {
+  border-top: 1px solid var(--ae-line);
+  padding-top: var(--ae-space-3);
+}
+
+.ae-board-card:first-child {
+  border-top: 0;
+  padding-top: 0;
 }
 
 /* ── instruments: ink on a ruled line ─────────────────────────────── */
@@ -1874,28 +2382,29 @@ details.ae-fold:last-of-type {
   border-bottom-color: var(--ae-ink);
 }
 
-/* ── the mode change: one soft breath ─────────────────────────────── */
+/* ── the mode change: quick and interruptible ─────────────────────── */
 
 /* the recipe wraps the flip in document.startViewTransition and sets
-   .ae-vt-mode on the root for the duration (700ms, the house ease) */
+   .ae-vt-mode on the root for one quick beat. Rapid toggles call
+   skipTransition() and cut the in-flight animation. */
 .ae-vt-mode::view-transition-old(root),
 .ae-vt-mode::view-transition-new(root) {
-  animation-duration: 700ms;
+  animation-duration: var(--ae-quick);
   animation-timing-function: var(--ae-ease);
 }
 
 /* fallback where view transitions are unsupported: every surface
-   eases its colors together for one gentle beat */
+   eases its colors together for one quick beat */
 .ae-mode-easing,
 .ae-mode-easing *,
 .ae-mode-easing *::before,
 .ae-mode-easing *::after {
   transition:
-    background-color var(--ae-gentle) var(--ae-ease),
-    color var(--ae-gentle) var(--ae-ease),
-    border-color var(--ae-gentle) var(--ae-ease),
-    fill var(--ae-gentle) var(--ae-ease),
-    stroke var(--ae-gentle) var(--ae-ease) !important;
+    background-color var(--ae-quick) var(--ae-ease),
+    color var(--ae-quick) var(--ae-ease),
+    border-color var(--ae-quick) var(--ae-ease),
+    fill var(--ae-quick) var(--ae-ease),
+    stroke var(--ae-quick) var(--ae-ease) !important;
 }
 
 /* ── the app shell: a chrome rail beside the working desk ─────────── */
@@ -1966,6 +2475,67 @@ details.ae-fold:last-of-type {
   min-width: 0;
   overflow-y: auto;
   padding: 2.2em 2.8em;
+}
+
+/* md breakpoint: tokens.layout.breakpoints.md = 48rem. The rail becomes
+   bottom chrome rather than disappearing; places stay visible and the desk
+   keeps the only vertical scroll. */
+@media (max-width: 48rem) {
+  .ae-shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .ae-rail {
+    grid-column: 1;
+    grid-row: 2;
+    min-width: 0;
+    border-right: 0;
+    border-top: 1px solid var(--ae-line);
+    padding: 0 1.2rem;
+    overflow: auto hidden;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--ae-space-5);
+  }
+
+  .ae-rail .ae-h {
+    display: none;
+  }
+
+  .ae-rail a,
+  .ae-rail button:not(.ae-mode) {
+    flex: none;
+    width: auto;
+    padding: 0.85em 0;
+    white-space: nowrap;
+  }
+
+  .ae-rail-foot {
+    flex: none;
+    margin-top: 0;
+    margin-left: auto;
+    padding-top: 0;
+  }
+
+  .ae-desk {
+    grid-column: 1;
+    grid-row: 1;
+    min-height: 0;
+    padding: 1.8em 1.6rem;
+  }
+
+  .ae-list-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ae-list-status {
+    justify-self: stretch;
+  }
+
+  .ae-board {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ── the document: long-form prose, unclassed inside ──────────────── */
@@ -2146,7 +2716,9 @@ details.ae-fold:last-of-type {
 
 /* ── small screens ────────────────────────────────────────────────── */
 
-@media (max-width: 640px) {
+/* sm breakpoint: tokens.layout.breakpoints.sm = 40rem. Media queries inline
+   token values because CSS custom properties cannot drive @media. */
+@media (max-width: 40rem) {
   .ae-bar,
   .ae-stage {
     width: calc(100% - 2.4rem);
@@ -2157,17 +2729,38 @@ details.ae-fold:last-of-type {
   }
 
   /* the shell folds to one column; compose a bar for the places the
-     rail held — the rail itself steps aside */
+     rail held, then tighten the bottom chrome for phone width */
   .ae-shell {
     grid-template-columns: 1fr;
   }
 
   .ae-rail {
-    display: none;
+    padding-inline: 1.2rem;
+    gap: var(--ae-space-4);
   }
 
   .ae-desk {
     padding: 1.6em 1.2rem;
+  }
+
+  .ae-wall-card {
+    grid-template-columns: 1fr;
+  }
+
+  .ae-wall-figure {
+    text-align: left;
+  }
+
+  .ae-list-row {
+    grid-template-columns: 1fr;
+    gap: var(--ae-space-3);
+  }
+
+  .ae-list-value {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 }
 

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CSS_PATH="${1:-crates/canary-server/static/dashboard/aesthetic.css}"
+AESTHETIC_REMOTE="${AESTHETIC_REMOTE:-https://github.com/misty-step/aesthetic.git}"
+
+warn() {
+  if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    printf '::warning title=Aesthetic kit currency::%s\n' "$*"
+  else
+    printf 'warning: %s\n' "$*" >&2
+  fi
+}
+
+css="$ROOT/$CSS_PATH"
+if [[ ! -f "$css" ]]; then
+  warn "vendored kit file missing: $CSS_PATH"
+  exit 0
+fi
+
+vendored="$(
+  sed -nE 's/^[[:space:]]*aesthetic (v[0-9]+\.[0-9]+\.[0-9]+).*/\1/p' "$css" | head -n1
+)"
+if [[ -z "$vendored" ]]; then
+  warn "could not read aesthetic version header from $CSS_PATH"
+  exit 0
+fi
+
+latest="$(
+  git ls-remote --tags --sort='version:refname' "$AESTHETIC_REMOTE" 'refs/tags/v*' 2>/dev/null |
+    sed -nE 's#.*refs/tags/(v[0-9]+\.[0-9]+\.[0-9]+)$#\1#p' |
+    tail -n1
+)"
+if [[ -z "$latest" ]]; then
+  warn "could not determine latest aesthetic git tag from $AESTHETIC_REMOTE; vendored=$vendored"
+  exit 0
+fi
+
+if [[ "$vendored" != "$latest" ]]; then
+  warn "$CSS_PATH vendors aesthetic $vendored; latest tag is $latest"
+fi
+
+exit 0
