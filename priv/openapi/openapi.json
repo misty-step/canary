@@ -3869,6 +3869,7 @@
           },
           "severity": {
             "type": "string",
+            "description": "Computed as a floor over currently-active correlated signals: 3 or more active signals produce 'high', otherwise 'medium'. This is never derived from an originating signal's own reported severity -- a lone signal reported with severity 'low' still opens an incident at severity 'medium'. There is no 'low' incident severity tier.",
             "enum": [
               "medium",
               "high"
@@ -3947,6 +3948,7 @@
           },
           "severity": {
             "type": "string",
+            "description": "Computed as a floor over currently-active correlated signals: 3 or more active signals produce 'high', otherwise 'medium'. This is never derived from an originating signal's own reported severity -- a lone signal reported with severity 'low' still opens an incident at severity 'medium'. There is no 'low' incident severity tier.",
             "enum": [
               "medium",
               "high"

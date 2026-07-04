@@ -588,6 +588,15 @@ curl -X POST $CANARY_ENDPOINT/api/v1/keys \
 All webhooks are HMAC-SHA256 signed. Secret returned on subscription creation.
 `POST /api/v1/webhooks/:id/test` sends a non-business `canary.ping` payload and does not write to the timeline.
 
+**Incident severity floor:** an incident's own `severity` is only ever `medium`
+or `high` -- there is no `low` incident severity tier. It is computed from the
+count of currently-active correlated signals (3 or more active signals =>
+`high`, otherwise `medium`) and never inherits an originating signal's own
+reported severity. A lone signal reported with severity `low` (see the
+`incident.opened`/`incident.updated` payload's `signal.severity` field) still
+opens or updates an incident at severity `medium`. See the OpenAPI `Incident`
+schema (`priv/openapi/openapi.json`) for the authoritative contract.
+
 ### Webhook Consumer Contract
 
 - Deliveries are at-least-once. Deduplicate on `X-Delivery-Id`.
