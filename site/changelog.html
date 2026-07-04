@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Canary release notes</title>
+    <meta
+      name="description"
+      content="User-facing release notes for Canary."
+    />
+    <script>
+      try {
+        var m = localStorage.getItem('ae-mode');
+        if (m === 'dark' || m === 'light') {
+          document.documentElement.classList.add(m);
+          document.documentElement.style.colorScheme = m;
+        }
+      } catch (e) {}
+    </script>
+    <link rel="stylesheet" href="aesthetic.css" />
+    <link rel="stylesheet" href="marketing.css" />
+  </head>
+  <body>
+    <svg aria-hidden="true" width="0" height="0" style="position: absolute">
+      <symbol id="i-bird" viewBox="0 0 24 24">
+        <path d="M16 7h.01" />
+        <path d="M3.4 18H12a8 8 0 0 0 8-8V7a4 4 0 0 0-7.28-2.3L2 20" />
+        <path d="m20 7 2 .5-2 .5" />
+        <path d="M10 18v3" />
+        <path d="M14 17.75V21" />
+        <path d="M7 18a6 6 0 0 0 3.84-10.61" />
+      </symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v2" />
+        <path d="M12 20v2" />
+        <path d="m4.93 4.93 1.41 1.41" />
+        <path d="m17.66 17.66 1.41 1.41" />
+        <path d="M2 12h2" />
+        <path d="M20 12h2" />
+        <path d="m6.34 17.66-1.41 1.41" />
+        <path d="m19.07 4.93-1.41 1.41" />
+      </symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24">
+        <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+      </symbol>
+      <symbol id="i-circle-check" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="10" />
+        <path d="m9 12 2 2 4-4" />
+      </symbol>
+    </svg>
+
+    <div class="ae-screen ae-wide">
+      <header class="ae-bar msk-bar">
+        <a class="ae-logo" href="./" aria-label="Canary home">
+          <span class="ae-app-mark" aria-hidden="true">
+            <svg class="ae-icon" data-lucide="bird">
+              <use href="#i-bird" />
+            </svg>
+          </span>
+          <span class="ae-name">Canary</span>
+        </a>
+        <span class="msk-actions">
+          <nav class="ae-chrome msk-nav" aria-label="Site">
+            <a href="./">home</a>
+            <a href="changelog.html" aria-current="page">release notes</a>
+          </nav>
+          <button class="ae-mode" aria-label="toggle color mode">
+            <svg class="ae-icon ae-sun"><use href="#i-sun" /></svg>
+            <svg class="ae-icon ae-moon"><use href="#i-moon" /></svg>
+          </button>
+        </span>
+      </header>
+
+      <main class="ae-stage ae-stage-scroll">
+        <article class="ae-doc msk-page" aria-labelledby="release-notes-title">
+          <h1 id="release-notes-title">Release notes</h1>
+          <p class="ae-lede">
+            Recent, real, and dated — written for someone deciding whether
+            Canary is alive and worth trying. Full commit-level history lives
+            in the
+            <a href="https://github.com/misty-step/canary/blob/master/CHANGELOG.md"
+              >repository changelog</a
+            >.
+          </p>
+
+          <section class="msk-release">
+            <p class="ae-chrome">2026-07-04 - v1.14.0</p>
+            <h2>Agents can verify themselves before they act</h2>
+            <ul>
+              <li>
+                A cold-agent readiness proof entrypoint lets an agent check
+                that it is correctly wired up to Canary before it starts
+                doing real work, instead of finding out mid-task.
+              </li>
+            </ul>
+            <p class="ae-status">
+              <svg class="ae-icon ae-ok" data-lucide="circle-check">
+                <use href="#i-circle-check" />
+              </svg>
+              <span class="ae-status-label">Evidence: tagged release v1.14.0.</span>
+            </p>
+          </section>
+
+          <section class="msk-release">
+            <p class="ae-chrome">2026-07-04 - v1.13.0</p>
+            <h2>Scoped incident context, publish-ready SDK</h2>
+            <ul>
+              <li>
+                Responders now read incident context through a gated,
+                scoped path instead of an open one.
+              </li>
+              <li>
+                The TypeScript SDK (<code>@canary-obs/sdk</code>) is
+                publish-ready with its own npm release pipeline.
+              </li>
+            </ul>
+          </section>
+
+          <section class="msk-release">
+            <p class="ae-chrome">2026-07-04 - v1.12.0</p>
+            <h2>Responders can close the loop</h2>
+            <ul>
+              <li>
+                A responder that handles an incident can now write back and
+                close it, instead of leaving closure to a human every time.
+              </li>
+            </ul>
+          </section>
+
+          <section class="msk-release">
+            <p class="ae-chrome">2026-07-03/04 - v1.11.0 - v1.11.3</p>
+            <h2>Dashboard polish</h2>
+            <ul>
+              <li>Incidents render as incidents, not generic events.</li>
+              <li>Authenticated chrome no longer leaks into logged-out views.</li>
+              <li>Canary shipped its own bird favicon.</li>
+              <li>The dashboard's metrics view moved to a squares layout.</li>
+            </ul>
+          </section>
+
+          <section class="msk-release">
+            <p class="ae-chrome">2026-07-02 - v1.10.0</p>
+            <h2>Dashboard adopted the Misty Step Aesthetic kit</h2>
+            <ul>
+              <li>
+                New typography, a light/dark mode toggle that boots from the
+                system preference, and a consistent navigation primitive
+                across the dashboard.
+              </li>
+            </ul>
+          </section>
+        </article>
+      </main>
+
+      <footer class="ae-bar msk-footer">
+        <p class="ae-chrome">
+          Canary release notes are public by default.
+        </p>
+        <nav class="ae-foot-links ae-chrome" aria-label="Footer">
+          <a
+            data-footer-link="github"
+            href="https://github.com/misty-step/canary"
+            >GitHub</a
+          >
+          <a data-footer-link="misty-step" href="https://mistystep.io"
+            >Misty Step</a
+          >
+        </nav>
+      </footer>
+    </div>
+
+    <script src="mode.js"></script>
+    <script src="theme.js"></script>
+  </body>
+</html>
