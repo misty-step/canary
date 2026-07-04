@@ -2762,7 +2762,7 @@ fn update_package_dependency(root: &Path) -> Result<Value> {
             "package.json dependencies must be a JSON object".to_owned(),
         ));
     };
-    deps.insert("@canary-obs/sdk".to_owned(), json!("^0.1.0"));
+    deps.insert("@canary-obs/sdk".to_owned(), json!("^1.0.0"));
     write_json_file(&path, &package)?;
     Ok(json!({"path": path.display().to_string(), "status": "updated"}))
 }

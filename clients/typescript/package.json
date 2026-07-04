@@ -1,6 +1,6 @@
 {
   "name": "@canary-obs/sdk",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Canary error reporting SDK for TypeScript/Next.js",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -21,6 +21,31 @@
   "files": [
     "dist"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/misty-step/canary.git",
+    "directory": "clients/typescript"
+  },
+  "homepage": "https://github.com/misty-step/canary/blob/master/clients/typescript/INTEGRATION.md",
+  "bugs": {
+    "url": "https://github.com/misty-step/canary/issues"
+  },
+  "keywords": [
+    "canary",
+    "error-tracking",
+    "observability",
+    "nextjs",
+    "monitoring",
+    "sdk"
+  ],
+  "author": "Misty Step",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsup",
     "prepare": "tsup",
@@ -38,6 +63,5 @@
   "overrides": {
     "esbuild": "^0.28.1",
     "postcss": "^8.5.15"
-  },
-  "license": "MIT"
+  }
 }
