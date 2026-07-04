@@ -1,3 +1,10 @@
+# [1.12.0](https://github.com/misty-step/canary/compare/v1.11.3...v1.12.0) (2026-07-04)
+
+
+### Features
+
+* **agent-loop:** close incident writeback loop ([#230](https://github.com/misty-step/canary/issues/230)) ([5f8863b](https://github.com/misty-step/canary/commit/5f8863bbe69b30511c2399e1bae9f5afe44c951a))
+
 ## [1.11.3](https://github.com/misty-step/canary/compare/v1.11.2...v1.11.3) (2026-07-04)
 
 
