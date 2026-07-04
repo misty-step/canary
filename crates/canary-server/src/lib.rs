@@ -38,6 +38,7 @@ mod query_routes;
 mod rate_limit;
 mod read_audit;
 mod report_routes;
+mod responder_context;
 mod retention_prune;
 mod route_state;
 mod runtime;
@@ -8023,6 +8024,249 @@ mod tests {
 
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["code"], "insufficient_scope");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn responder_incident_detail_returns_redacted_context_and_audit_event()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let incident_id = open_test_incident(&state).await?;
+        let router = ingest_router(state);
+
+        let claim = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/claims",
+                RESPONDER_KEY,
+                &format!(
+                    r#"{{
+                        "subject_type":"incident",
+                        "subject_id":"{incident_id}",
+                        "owner":"alice@example.com",
+                        "purpose":"follow token=sk_live_claim_secret before paging",
+                        "ttl_ms":900000,
+                        "idempotency_key":"responder-context-redaction",
+                        "evidence_links":["https://ops.example/run?token=sk_live_evidence_secret&user=alice@example.com"]
+                    }}"#
+                ),
+            )?)
+            .await?;
+        assert_eq!(claim.status(), StatusCode::CREATED);
+
+        let annotation = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/incidents/{incident_id}/annotations"),
+                RESPONDER_KEY,
+                r#"{
+                    "agent":"alice@example.com",
+                    "action":"triaged",
+                    "metadata":{
+                        "authorization":"Bearer abc.def.ghi",
+                        "api_key":"sk_live_nested_secret",
+                        "nested":{"email":"bob@example.com","note":"password=\"hunter2\""}
+                    }
+                }"#,
+            )?)
+            .await?;
+        assert_eq!(annotation.status(), StatusCode::CREATED);
+
+        let detail = router
+            .clone()
+            .oneshot(read_request(
+                RESPONDER_KEY,
+                &format!("/api/v1/incidents/{incident_id}"),
+            )?)
+            .await?;
+        let detail_status = detail.status();
+        let detail_body = json_body(detail).await?;
+        assert_eq!(detail_status, StatusCode::OK, "{detail_body}");
+
+        assert_eq!(
+            detail_body["context_envelope"]["schema"],
+            "canary.responder_context.incident.v1"
+        );
+        assert_eq!(
+            detail_body["context_envelope"]["tenant_id"],
+            canary_store::BOOTSTRAP_TENANT_ID
+        );
+        assert_eq!(
+            detail_body["context_envelope"]["project_id"],
+            canary_store::BOOTSTRAP_PROJECT_ID
+        );
+        assert_eq!(detail_body["context_envelope"]["service"], "test-svc");
+        assert_eq!(
+            detail_body["context_envelope"]["subject"]["type"],
+            "incident"
+        );
+        assert_eq!(
+            detail_body["context_envelope"]["subject"]["id"],
+            incident_id
+        );
+        assert_eq!(
+            detail_body["context_envelope"]["retention"]["class"],
+            "audit"
+        );
+        assert_eq!(
+            detail_body["context_envelope"]["privacy_policy"]["classification"],
+            "redacted"
+        );
+        assert_eq!(
+            detail_body["context_envelope"]["bounds"]["signals"]["max"],
+            25
+        );
+        assert_eq!(
+            detail_body["context_envelope"]["bounds"]["annotations"]["max"],
+            20
+        );
+        assert!(
+            detail_body["context_envelope"]["audit_event_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("EVT-"))
+        );
+
+        let rendered = serde_json::to_string(&detail_body)?;
+        for leaked in [
+            "sk_live_claim_secret",
+            "sk_live_evidence_secret",
+            "sk_live_nested_secret",
+            "alice@example.com",
+            "bob@example.com",
+            "abc.def.ghi",
+            "hunter2",
+        ] {
+            assert!(!rendered.contains(leaked), "{leaked} leaked in {rendered}");
+        }
+        assert_eq!(
+            detail_body["annotations"][0]["metadata"]["authorization"],
+            "[REDACTED]"
+        );
+        assert_eq!(
+            detail_body["annotations"][0]["metadata"]["api_key"],
+            "[REDACTED]"
+        );
+        assert_eq!(
+            detail_body["annotations"][0]["metadata"]["nested"]["email"],
+            "[EMAIL]"
+        );
+        assert_eq!(detail_body["claims"][0]["owner"], "[EMAIL]");
+        assert_eq!(
+            detail_body["claims"][0]["evidence_links"][0],
+            "https://ops.example/run?token=[REDACTED]&user=[EMAIL]"
+        );
+
+        let audit = router
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/timeline?service=test-svc&event_type=telemetry.event&limit=5",
+            )?)
+            .await?;
+        let audit_status = audit.status();
+        let audit_body = json_body(audit).await?;
+        assert_eq!(audit_status, StatusCode::OK, "{audit_body}");
+        assert_eq!(audit_body["returned_count"], 1);
+        let event = &audit_body["events"][0];
+        assert_eq!(event["signal_name"], "responder.context_read");
+        assert_eq!(event["retention_class"], "audit");
+        assert_eq!(event["privacy_policy"], "redacted");
+        assert_eq!(event["attributes"]["reader"]["key_id"], "KEY-responder");
+        assert_eq!(event["attributes"]["reader"]["scope"], "responder-write");
+        assert_eq!(event["attributes"]["reader"]["service"], "test-svc");
+        assert_eq!(event["attributes"]["subject"]["type"], "incident");
+        assert_eq!(event["attributes"]["subject"]["id"], incident_id);
+        assert_eq!(
+            event["attributes"]["context_envelope"]["schema"],
+            "canary.responder_context.incident.v1"
+        );
+        assert!(event["attributes"].get("response_body").is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn responder_incident_detail_rejects_cross_service_reads_with_scope_problem()
+    -> Result<(), Box<dyn Error>> {
+        const API_RESPONDER_KEY: &str = "sk_live_incident_api_responder_secret";
+        let state = test_ingest_state()?;
+        let incident_id = {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            seed_responder_api_key_for_service(
+                &mut store,
+                "KEY-incident-api-responder",
+                API_RESPONDER_KEY,
+                "api",
+            )?;
+            let error_id = canary_core::ids::ErrorId::generate().into_string();
+            let event_id = canary_core::ids::EventId::generate().into_string();
+            store.commit_error_ingest(owned_error_ingest(
+                canary_store::BOOTSTRAP_TENANT_ID,
+                canary_store::BOOTSTRAP_PROJECT_ID,
+                &error_id,
+                &event_id,
+                "group-web-read-deny",
+                "web",
+                "web incident",
+            )?)?;
+            let incident_id = canary_core::ids::IncidentId::generate().into_string();
+            store.correlate_incident(IncidentCorrelation {
+                tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
+                project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
+                signal_type: "error_group".to_owned(),
+                signal_ref: "group-web-read-deny".to_owned(),
+                service: "web".to_owned(),
+                incident_id: incident_id.parse()?,
+                event_id: canary_core::ids::EventId::generate(),
+                now: server_time::current_rfc3339(),
+            })?;
+            incident_id
+        };
+
+        let response = ingest_router(state)
+            .oneshot(read_request(
+                API_RESPONDER_KEY,
+                &format!("/api/v1/incidents/{incident_id}"),
+            )?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "insufficient_scope");
+        assert_eq!(body["bound_service"], "api");
+        assert_eq!(body["requested_service"], "web");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_routes_reject_unbound_responder_write_keys() -> Result<(), Box<dyn Error>> {
+        const UNBOUND_RESPONDER_KEY: &str = "sk_live_unbound_responder_secret";
+        let state = test_ingest_state()?;
+        {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            seed_api_key(
+                &mut store,
+                "KEY-unbound-responder",
+                UNBOUND_RESPONDER_KEY,
+                "responder-write",
+                None,
+            )?;
+        }
+
+        let response = ingest_router(state)
+            .oneshot(read_request(UNBOUND_RESPONDER_KEY, "/api/v1/incidents")?)
+            .await?;
+        let status = response.status();
+        let body = json_body(response).await?;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "insufficient_scope");
+        assert_eq!(body["scope"], "responder-write");
+        assert_eq!(body["required_service_binding"], true);
 
         Ok(())
     }

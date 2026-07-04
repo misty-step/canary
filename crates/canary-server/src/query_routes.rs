@@ -287,20 +287,37 @@ pub(crate) async fn show_incident(
         Err(_) => return problem_response(internal_problem()),
     };
 
-    let response = match store.incident_detail_scoped(&id, &key.tenant_id, &key.project_id) {
+    match store.incident_detail_scoped(&id, &key.tenant_id, &key.project_id) {
         Ok(Some(result)) => {
             if let Some(bound_service) = key.service.as_deref()
                 && result.incident.service != bound_service
             {
-                return problem_response(not_found_problem(format!("Incident {id} not found.")));
+                return problem_response(crate::service_authority_problem(
+                    bound_service,
+                    &result.incident.service,
+                ));
             }
-            json_status_response(StatusCode::OK.as_u16(), result)
+            let audit_event_id = match crate::read_audit::record_context_read_audit(
+                &mut store,
+                &key,
+                crate::read_audit::ReadAuditContext {
+                    route: "GET /api/v1/incidents/{id}",
+                    subject_type: "incident",
+                    subject_id: &result.incident.id,
+                    subject_service: &result.incident.service,
+                    context_schema: crate::responder_context::INCIDENT_CONTEXT_SCHEMA,
+                },
+            ) {
+                Ok(audit_event_id) => audit_event_id,
+                Err(_) => return problem_response(internal_problem()),
+            };
+            json_status_response(
+                StatusCode::OK.as_u16(),
+                crate::responder_context::incident_context_response(result, &key, audit_event_id),
+            )
         }
         Ok(None) => problem_response(not_found_problem(format!("Incident {id} not found."))),
         Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
         Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
-    };
-
-    crate::read_audit::record_read_audit(&mut store, &key, "GET /api/v1/incidents/{id}");
-    response
+    }
 }
