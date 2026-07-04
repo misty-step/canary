@@ -14,7 +14,7 @@ visible until a focused PR archives them with evidence.
 |---|------|----------|--------------|
 | 060 | Cold-operator deploy path | P0 | Shipped 2026-07-01. Folded in self-host docs, app-name dehardcoding, bootstrap-key docs, dogfood instance split, and clean-room receipt. |
 | 061 | Fleet plumb-in | P0 | Shipped 2026-07-02. Folded in Factory fleet integration docs, powder/BB live enrollment, bastion/powder/BB check-in readback, and check-in-aware dogfood strictness. |
-| 062 | Agent loop write surface | P0 | Next pickup: adds CLI/MCP annotation writeback and scoped responder-key loop; adopts 048. |
+| 062 | Agent loop write surface | P0 | In PR: completes the incident CLI/MCP loop and durable annotation timeline replay; leaves 048 rich-context safety and monitor/check ergonomics open. |
 | 063 | Triage contract hardening | P1 | Durable cooldown, dispatch budget caps, claim-gated delivery, and drills. |
 | 064 | Trustworthy release/upgrade | P1 | Absorbs 051; fixes release truth, npm/Docker claims, and upgrade docs. |
 | 065 | Runtime hardening | P1 | Absorbs 056/058/059 plus bcrypt-outside-mutex, tracing, and backup posture. |

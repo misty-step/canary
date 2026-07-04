@@ -7,7 +7,7 @@ use canary_core::query::{
     encode_annotation_cursor,
 };
 use rusqlite::{Connection, OptionalExtension, params};
-use serde_json::Value;
+use serde_json::{Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 /// Result type returned by annotation read/write models.
@@ -38,6 +38,8 @@ pub enum AnnotationError {
 pub struct AnnotationInsert {
     /// Stable annotation id.
     pub id: String,
+    /// Stable timeline event id for the annotation write.
+    pub event_id: String,
     /// Tenant namespace.
     pub tenant_id: String,
     /// Project namespace.
@@ -128,15 +130,20 @@ pub const fn subject_types() -> &'static [&'static str] {
 }
 
 pub(crate) fn create(
-    connection: &Connection,
+    connection: &mut Connection,
     insert: AnnotationInsert,
 ) -> AnnotationResult<Annotation> {
     let subject_type = parse_subject_type(&insert.subject_type)?;
+    let annotation_id = insert.id.clone();
+    let event_id = insert.event_id.clone();
+    let tenant_id = insert.tenant_id.clone();
+    let project_id = insert.project_id.clone();
+    let transaction = connection.transaction()?;
     let subject_service = require_subject(
-        connection,
+        &transaction,
         subject_type,
         &insert.subject_id,
-        Some((&insert.tenant_id, &insert.project_id)),
+        Some((&tenant_id, &project_id)),
         None,
     )?;
     let service = insert.service.or(subject_service);
@@ -144,27 +151,36 @@ pub(crate) fn create(
     let (incident_id, group_hash) = legacy_keys(subject_type, &insert.subject_id);
     let metadata_json = metadata_to_storage(insert.metadata)?;
 
-    connection.execute(
+    transaction.execute(
         "INSERT INTO annotations (
              id, tenant_id, project_id, service, incident_id, group_hash, agent, action, metadata, created_at, subject_type, subject_id
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
-            insert.id,
-            insert.tenant_id,
-            insert.project_id,
-            service,
+            annotation_id.as_str(),
+            tenant_id.as_str(),
+            project_id.as_str(),
+            service.as_deref(),
             incident_id,
             group_hash,
-            insert.agent,
-            insert.action,
+            insert.agent.as_str(),
+            insert.action.as_str(),
             metadata_json,
-            insert.created_at,
+            insert.created_at.as_str(),
             subject_type.as_str(),
-            insert.subject_id,
+            insert.subject_id.as_str(),
         ],
     )?;
 
-    let row = row_by_id(connection, &insert.id)?.ok_or(AnnotationError::NotFound)?;
+    let row = row_by_id(&transaction, &annotation_id)?.ok_or(AnnotationError::NotFound)?;
+    insert_event(
+        &transaction,
+        &event_id,
+        &row,
+        &tenant_id,
+        &project_id,
+        service.as_deref(),
+    )?;
+    transaction.commit()?;
     Ok(row)
 }
 
@@ -494,6 +510,49 @@ fn annotation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Annotation> 
         metadata: metadata.map(decode_metadata),
         created_at: row.get(8)?,
     })
+}
+
+fn insert_event(
+    connection: &Connection,
+    event_id: &str,
+    annotation: &Annotation,
+    tenant_id: &str,
+    project_id: &str,
+    service: Option<&str>,
+) -> AnnotationResult<()> {
+    let service = service.unwrap_or("unknown");
+    let payload = json!({
+        "event": "annotation.added",
+        "tenant_id": tenant_id,
+        "project_id": project_id,
+        "service": service,
+        "annotation": annotation,
+        "timestamp": annotation.created_at,
+    });
+    connection.execute(
+        "INSERT INTO service_events (
+             id, tenant_id, project_id, service, event, entity_type, entity_ref, severity, summary, payload, created_at
+         ) VALUES (?1, ?2, ?3, ?4, 'annotation.added', ?5, ?6, NULL, ?7, ?8, ?9)",
+        params![
+            event_id,
+            tenant_id,
+            project_id,
+            service,
+            annotation.subject_type.as_str(),
+            annotation.subject_id.as_str(),
+            annotation_summary(annotation),
+            payload.to_string(),
+            annotation.created_at.as_str(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn annotation_summary(annotation: &Annotation) -> String {
+    format!(
+        "{} annotated {} {} with {}.",
+        annotation.agent, annotation.subject_type, annotation.subject_id, annotation.action
+    )
 }
 
 fn decode_metadata(value: String) -> Value {

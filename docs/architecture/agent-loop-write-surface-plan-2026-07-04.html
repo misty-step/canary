@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en" data-ae-mode="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canary 062 Incident Loop Plan</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/misty-step/aesthetic@v2.5.1/aesthetic.css">
+  <style>
+    .ae-stage, .ae-bar { width: min(88rem, 100% - 4rem); }
+    .hero { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(24rem, .72fr); gap: 2rem; align-items: end; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--ae-line); margin-top: 1px; }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .cell { background: var(--ae-surface); padding: 1rem 1.2rem; }
+    .wash { background: var(--ae-wash); }
+    .phase { border-top: 1px solid var(--ae-line); padding-top: .9rem; margin-top: .9rem; display: grid; grid-template-columns: 8rem minmax(0, 1fr); gap: 1rem; }
+    .phase:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+    @media (max-width: 900px) { .hero, .grid, .grid.three, .phase { grid-template-columns: 1fr; } .ae-stage, .ae-bar { width: min(100% - 2rem, 88rem); } }
+  </style>
+</head>
+<body>
+<div class="ae-screen">
+  <header class="ae-bar">
+    <a class="ae-name" href="#">CANARY / BACKLOG 062</a>
+    <p class="ae-chrome">incident loop write surface plan</p>
+  </header>
+  <main class="ae-stage ae-stage-scroll">
+    <article class="ae-view">
+      <section class="hero">
+        <div>
+          <p class="ae-chrome">GOAL</p>
+          <h1 class="ae-strong">Make the incident read -&gt; claim -&gt; annotate -&gt; release or verify loop replayable through CLI and MCP.</h1>
+          <p class="ae-lede">The chosen slice completes incidents, not monitors/checks: add the missing durable annotation timeline event and incident detail-by-id adapter, then prove service-bound responder-write authority through a local server transcript.</p>
+        </div>
+        <aside class="ae-panel">
+          <h2 class="ae-h">QUALITY SYSTEM</h2>
+          <p><strong>Standards:</strong> Rust-only code, existing Store single-writer, RFC 9457 server errors, current bearer/actor identity, no widened responder reads.</p>
+          <p><strong>Proof:</strong> store tests, CLI/MCP stdio integration smoke, live local server transcript, fresh-context critic, then <code>./bin/validate</code>.</p>
+          <p><strong>Stop:</strong> halt if resolving incidents requires changing source-signal semantics or if 048 redaction/audit work becomes necessary for this slice.</p>
+        </aside>
+      </section>
+
+      <section class="grid" aria-label="contract">
+        <article class="cell">
+          <h2 class="ae-h">ACCEPT</h2>
+          <p>Cold agents can list/read incident detail, claim it, see a second claimant refused, annotate evidence, then release or verify the claim.</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">DURABLE</h2>
+          <p>Claim and annotation writes both append timeline rows with actor identity, subject, service, payload, and timestamp.</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">AUTH</h2>
+          <p>Service-bound <code>responder-write</code> can only read/write its service and gets RFC 9457 denial outside the boundary.</p>
+        </article>
+        <article class="cell wash">
+          <h2 class="ae-h">OUT</h2>
+          <p>048 rich-context redaction, read-audit envelopes, monitor/check write helpers, and browser/public-ingest relay are follow-ups.</p>
+        </article>
+      </section>
+
+      <section class="grid three" aria-label="anchors">
+        <article class="cell">
+          <h2 class="ae-h">ANCHORS</h2>
+          <p><code>backlog.d/062-agent-loop-write-surface.md</code>, <code>VISION.md</code>, <code>crates/canary-store/src/annotations.rs</code>, <code>crates/canary-cli/src/lib.rs</code>, <code>crates/canary-cli/tests/mcp_stdio.rs</code>.</p>
+        </article>
+        <article class="cell">
+          <h2 class="ae-h">CHANGE</h2>
+          <p>Store annotation timeline persistence, CLI <code>incidents get</code>, MCP <code>canary_incident_get</code>, manifest/doc alignment, and conformance receipt.</p>
+        </article>
+        <article class="cell wash">
+          <h2 class="ae-h">LIVE ORACLE</h2>
+          <p>Disposable SQLite server, service-bound responder key, CLI transcript, MCP JSON-RPC transcript, timeline/detail readback, receipt at <code>/tmp/lane-canary-062-receipt.md</code>.</p>
+        </article>
+      </section>
+
+      <section class="ae-panel" style="margin-top: 2rem">
+        <h2 class="ae-h">EXECUTION</h2>
+        <div class="phase"><strong class="ae-accent">1 tests</strong><p>Add failing store proof for annotation timeline rows and failing CLI/MCP proof for incident detail and loop tools.</p></div>
+        <div class="phase"><strong class="ae-accent">2 code</strong><p>Patch the smallest store and CLI surfaces; regenerate the MCP manifest snapshot.</p></div>
+        <div class="phase"><strong class="ae-accent">3 verify</strong><p>Run focused Rust tests, live local server CLI/MCP transcript, fresh critic, then repo gate.</p></div>
+        <div class="phase"><strong class="ae-accent">4 pr</strong><p>Update backlog/docs honestly, commit, push, open PR, and write the lane receipt with residuals.</p></div>
+      </section>
+    </article>
+  </main>
+</div>
+</body>
+</html>
