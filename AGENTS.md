@@ -85,6 +85,10 @@ User-ratified composition: **`/settle → /refactor → /code-review → merge`.
 
 Canary reports its own errors through the Rust runtime direct-ingest path, no HTTP loopback. Query Canary itself (`GET /api/v1/query?service=canary&window=1h`) for post-deploy signal.
 
+## Cold-agent readiness proof
+
+`bin/canary-readiness-proof --json` is the one discoverable entrypoint proving a cold agent can inspect and operate this instance: doctor, mcp-manifest/mcp-server, dogfood discovery, and `bin/validate --fast`, ending in a redacted receipt. See `docs/agent-inspection-cli.md#cold-agent-readiness-proof`.
+
 ## Deploy (operational crib)
 
 ```bash

@@ -221,6 +221,32 @@ If the GitHub CLI or auth is unavailable, the verdict still returns the
 replacement command plus the receipt artifact convention
 `canary-witness-<run_id>`.
 
+## Cold-Agent Readiness Proof
+
+A cold agent dropped into this repo with only credentials (or only a repo
+checkout) should not have to re-derive which of the commands above prove the
+CLI, MCP, and coverage surfaces actually work. `bin/canary-readiness-proof`
+is the one discoverable entrypoint that runs them in sequence and writes a
+redacted receipt:
+
+```bash
+bin/canary-readiness-proof --json
+```
+
+It runs `bin/canary doctor --json`, `bin/canary mcp-manifest --json` (checked
+against the checked-in `priv/mcp/canary-cli-tools.json` snapshot for drift), a
+`bin/canary mcp-server` stdio smoke (`initialize` → `tools/list` → one
+`tools/call` against a read-only tool), `bin/dogfood-inventory --json`, and
+`bin/validate --fast`. Missing `CANARY_ENDPOINT`/`CANARY_API_KEY` or an
+unconfigured dogfood registry are reported as concrete `blocked_fields` with a
+replacement command — the proof still exits `0`, because that is the expected
+state for a not-yet-configured instance. It exits nonzero only on a real
+defect: a stale generated MCP manifest, a broken MCP tool call, an unreadable
+dogfood registry, or a failing `bin/validate --fast`. See
+`bin/canary-readiness-proof --help` for flags, and
+`test/bin/canary_readiness_proof_test.sh` for the fixture coverage gating this
+script in CI.
+
 ## Integration Agent
 
 `integrate` is the agent-native setup loop for deployed applications. It is
