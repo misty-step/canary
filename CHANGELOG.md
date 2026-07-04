@@ -1,3 +1,10 @@
+# [1.14.0](https://github.com/misty-step/canary/compare/v1.13.0...v1.14.0) (2026-07-04)
+
+
+### Features
+
+* **agent-ops:** add cold-agent readiness proof entrypoint ([#050](https://github.com/misty-step/canary/issues/050)) ([#233](https://github.com/misty-step/canary/issues/233)) ([fb551ed](https://github.com/misty-step/canary/commit/fb551edb9b99347ff6ce75eff50575a087ac0971)), closes [#052](https://github.com/misty-step/canary/issues/052)
+
 # [1.13.0](https://github.com/misty-step/canary/compare/v1.12.0...v1.13.0) (2026-07-04)
 
 
