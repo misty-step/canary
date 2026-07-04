@@ -243,6 +243,18 @@ authority, or admin for break-glass operator use. The server returns MCP
 `inputSchema` fields at the wire boundary while the checked CLI manifest remains gated in
 `priv/mcp/canary-cli-tools.json`.
 
+### Cold-Agent Readiness Proof
+
+```bash
+bin/canary-readiness-proof --json
+```
+
+One discoverable entrypoint proving a cold agent can inspect and operate this
+instance: `doctor`, `mcp-manifest`/`mcp-server`, dogfood discovery, and
+`bin/validate --fast`, ending in a redacted receipt. Missing credentials or an
+unconfigured dogfood registry report as concrete blocked fields rather than
+failing the proof; see `docs/agent-inspection-cli.md#cold-agent-readiness-proof`.
+
 ## API
 
 The machine-readable contract lives at `GET /api/v1/openapi.json`. That
