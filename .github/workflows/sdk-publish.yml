@@ -1,0 +1,79 @@
+name: Publish SDK
+
+on:
+  push:
+    tags:
+      - "sdk-v*"
+  workflow_dispatch:
+
+concurrency:
+  group: sdk-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: clients/typescript
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm run test:ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify tag matches package.json version
+        if: github.event_name == 'push'
+        run: |
+          tag_version="${GITHUB_REF_NAME#sdk-v}"
+          pkg_version="$(node -p "require('./package.json').version")"
+          if [[ "$tag_version" != "$pkg_version" ]]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match clients/typescript/package.json version ${pkg_version}. Bump package.json and re-tag."
+            exit 1
+          fi
+
+      - name: Verify package contents
+        run: npm pack --dry-run
+
+      - name: Check NPM_TOKEN availability
+        id: npm_token
+        run: |
+          if [[ -z "${NPM_TOKEN}" ]]; then
+            echo "::warning::NPM_TOKEN secret is not set on this repo. The SDK built, tested, and packed cleanly, but publish is SKIPPED — no package was pushed to the registry. Operator action: create the @canary-obs npm org (free for public packages, see docs/compatibility-policy.md), mint an automation token with publish rights, add it as the NPM_TOKEN repo secret, then re-run this workflow via workflow_dispatch (no need to re-tag)."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish to npm
+        if: steps.npm_token.outputs.present == 'true'
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -33,8 +33,16 @@ require explicit migration steps and are documented here.
 
 ## TypeScript SDK (`clients/typescript/`)
 
-- The SDK is not yet published to npm (tracked in #051).
-- Until npm publish ships, install from source via `file:` linking
+- Publish pipeline: `.github/workflows/sdk-publish.yml` runs the same
+  typecheck/test/build gate as CI, then publishes with npm provenance
+  (`npm publish --provenance --access public`) on every `sdk-v*` tag.
+- The first publish is held pending an operator step: the `@canary-obs` scope
+  has no npm org yet (`npm view @canary-obs/sdk` 404s). Creating an
+  organization for public-only packages is free on npm; once it exists, mint
+  an automation token with publish rights and add it as the `NPM_TOKEN` repo
+  secret, then push an `sdk-v*` tag (or re-run the workflow via
+  `workflow_dispatch`) to fire the first release.
+- Until that first publish lands, install from source via `file:` linking
   (see `clients/typescript/INTEGRATION.md`).
 - The package exports `@canary-obs/sdk` (main) and
   `@canary-obs/sdk/nextjs` (Next.js integration); these entry points
