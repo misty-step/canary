@@ -84,6 +84,15 @@ with `--subject-type incident --subject-id <id>`. Claim, annotation, transition,
 and release writes are replayable from the incident detail timeline and the
 service timeline.
 
+Incident detail reads are the responder context boundary. A service-bound
+`responder-write` key may read `incidents get <id>` only for its bound service;
+cross-service and unbound responder reads fail with `insufficient_scope`. The
+JSON response includes `context_envelope.schema =
+canary.responder_context.incident.v1`, redacts sensitive-looking annotation
+metadata and claim evidence, and records a durable `responder.context_read`
+audit event for non-admin reads. See
+[`docs/responder-context-safety.md`](responder-context-safety.md).
+
 `dogfood audit --strict --json` still prints the JSON report before exiting
 nonzero when coverage gaps remain, so agents can inspect the failure details.
 

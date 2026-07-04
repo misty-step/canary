@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Canary 048 Responder Context Safety Plan</title>
+  <style>
+    :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; background: #f7f7f4; color: #191a17; }
+    main { max-width: 1040px; margin: 0 auto; padding: 40px 24px 64px; }
+    h1 { font-size: 36px; line-height: 1.05; margin: 0 0 16px; }
+    h2 { font-size: 18px; margin: 28px 0 10px; text-transform: uppercase; letter-spacing: 0; }
+    p, li, td, th { font-size: 15px; line-height: 1.45; }
+    .hero { border-top: 4px solid #191a17; border-bottom: 1px solid #b8b8ae; padding: 24px 0 28px; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+    .panel { border: 1px solid #b8b8ae; border-radius: 6px; padding: 16px; background: #fff; }
+    table { width: 100%; border-collapse: collapse; background: #fff; }
+    th, td { border: 1px solid #b8b8ae; padding: 10px; text-align: left; vertical-align: top; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #171815; color: #f0efe7; }
+      .hero { border-color: #f0efe7 #55584f; }
+      .panel, table { background: #20211d; }
+      .panel, th, td { border-color: #55584f; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Gate incident responder context behind service-bound authority, redaction, and read audit.</h1>
+    <p><strong>Chosen design:</strong> keep the store read model raw and reusable; adapt <code>GET /api/v1/incidents/{id}</code> at the server boundary into a redacted incident context envelope with tenant/project/service/subject metadata, bounded arrays, sanitized annotation metadata and claim evidence, and a durable <code>responder.context_read</code> audit row.</p>
+    <p><strong>Stop rules:</strong> stop if the slice requires a new key class, changes source-signal correlation semantics, weakens route gates, or exposes unredacted secret/PII-shaped data in responder context.</p>
+  </section>
+
+  <div class="grid">
+    <article class="panel">
+      <h2>Outcome</h2>
+      <p>A service-bound responder can read its incident context, claim and annotate through existing authority, and replay an audit trail. Cross-service incident reads fail. The context includes only the incident detail allowlist and redacted bounded metadata.</p>
+    </article>
+    <article class="panel">
+      <h2>Standards</h2>
+      <p>Rust-only code, no new DB table unless required, no LLM request path, RFC 9457 failures, service-bound responder authority, no raw response body in audit events, OpenAPI and docs match runtime behavior.</p>
+    </article>
+  </div>
+
+  <h2>Verification System</h2>
+  <table>
+    <tr><th>Claim</th><td>External incident responders receive authorized, minimized, redacted, auditable context.</td></tr>
+    <tr><th>Falsifier</th><td>Responder reads another service, context contains <code>sk_live_</code>, bearer tokens, emails, or sensitive-key values, or no durable audit row exists.</td></tr>
+    <tr><th>Driver</th><td>Focused Rust route tests, redaction unit tests, OpenAPI contract assertions, local live request replay, <code>./bin/validate</code>.</td></tr>
+    <tr><th>Grader</th><td>403 Problem Details for cross-service read; response has <code>context_envelope</code>; audit timeline has reader/subject/envelope metadata; negative string checks pass.</td></tr>
+    <tr><th>Evidence</th><td><code>/tmp/lane-canary-048-receipt.md</code> plus test/gate transcript and PR diff.</td></tr>
+    <tr><th>Cadence</th><td>Tests before code, focused tests after each milestone, full gate before PR, fresh diff-only critic before closeout.</td></tr>
+  </table>
+
+  <h2>Acceptance Slice</h2>
+  <ul>
+    <li>Incident detail response carries tenant, project, service, subject, retention, privacy policy, bounds, and audit metadata.</li>
+    <li>Responder-write reads require a service binding and cannot read sibling-service incidents.</li>
+    <li>Annotation metadata and claim evidence are scrubbed for credential and PII-shaped strings, with response size bounds.</li>
+    <li>Successful rich incident reads record durable audit events without copying the response payload.</li>
+    <li>Docs/OpenAPI name the redaction vocabulary and residual target/monitor/browser/receiver-fixture work.</li>
+  </ul>
+</main>
+</body>
+</html>

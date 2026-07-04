@@ -4840,7 +4840,7 @@ pub fn tool_manifest() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "canary_incident_get",
-            description: "Read one incident detail by id, including bounded signals, annotations, remediation claims, and recent timeline events.",
+            description: "Read one redacted incident context envelope by id, including bounded signals, annotations, remediation claims, recent timeline events, and responder read-audit metadata.",
             input_schema: json!({"type":"object","required":["incident_id"],"properties":{"incident_id":{"type":"string"}}}),
         },
         ToolSpec {

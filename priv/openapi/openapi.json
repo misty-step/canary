@@ -18,8 +18,14 @@
       "webhook_contract": "Verify x-canary-signature with the secret selected by x-webhook-id over `x-timestamp.x-delivery-id.body`, reject stale x-timestamp values in the receiver, and deduplicate deliveries by x-delivery-id. Canary also sends legacy x-signature over the body for older consumers. For disputed or failed deliveries, read `GET /api/v1/webhook-deliveries/{delivery_id}` for diagnostics, then replay durable state through `GET /api/v1/timeline` before acting. Webhooks are non-authoritative wake-up hints; the timeline is the durable event log and must be replayed for correctness.",
       "crash_recovery": "After a crash or restart, resume from the last persisted cursor, replay missed timeline events, and continue polling until the API returns no further cursor.",
       "cursor_precedence": "When both `after` and `cursor` are provided on timeline-style pagination endpoints, Canary resolves `after` first and ignores `cursor` for that request.",
-      "incident_entrypoint": "On an `incident.opened` webhook, call `GET /api/v1/incidents/{id}` once — the response carries summary, the full incident metadata, a deterministic action brief, up to 25 correlated signals with per-type context, up to 20 newest annotations, and up to 5 most recent timeline events. Only fall through to /query, /timeline, or /errors/{id} when `signals_truncated` or `annotations_truncated` is true, or the agent needs raw stack traces.",
+      "incident_entrypoint": "On an `incident.opened` webhook, call `GET /api/v1/incidents/{id}` once — the response carries a redacted context envelope, summary, bounded incident metadata, a deterministic action brief, up to 25 correlated signals with per-type context, up to 20 newest annotations, and up to 5 most recent timeline events. Only fall through to /query, /timeline, or /errors/{id} when `signals_truncated` or `annotations_truncated` is true, or the agent needs raw stack traces under a broader read authority.",
       "scope_semantics": "`x-canary-required-scope` names the least-privilege key scope to provision for the operation. Admin keys may also satisfy read-only, ingest-only, and responder-write route permissions at runtime, but agents should request the narrow scope unless they are managing Canary configuration.",
+      "responder_context_safety": {
+        "incident_schema": "canary.responder_context.incident.v1",
+        "authority": "Service-bound responder-write keys may read responder incident context only for their bound service; cross-service reads return RFC 9457 insufficient_scope and unbound responder-write keys are rejected.",
+        "redaction": "Incident context applies bearer_token, canary_api_key, email, and sensitive_key_value redaction plus field allowlists and size bounds before serialization.",
+        "audit": "Successful non-admin incident context reads emit telemetry.event signal responder.context_read with retention_class audit, privacy_policy redacted, and reader/subject/context envelope metadata only."
+      },
       "cold_start": {
         "entrypoint": "When an agent has no saved cursor, call GET /api/v1/report?window=1h first. The report is the bounded current-state snapshot for targets, monitors, active incidents, and active error groups.",
         "pagination": "If report.truncated is true or report.cursor is non-null, keep calling /api/v1/report with that report cursor until the response is no longer truncated. Report cursors are only for report pagination and are not timeline cursors.",
@@ -979,7 +985,7 @@
           "Incidents"
         ],
         "summary": "Get incident detail with bounded signals, annotations, and timeline",
-        "description": "One-call payload for responder agents: deterministic summary, incident metadata, a read-only action brief derived from existing state, up to 25 correlated signals, up to 20 newest annotations, and up to 5 most recent timeline events. Truncation is signalled by `signals_truncated` and `annotations_truncated`.",
+        "description": "One-call payload for responder agents: redacted context envelope, deterministic summary, incident metadata, a read-only action brief derived from existing state, up to 25 correlated signals, up to 20 newest annotations, and up to 5 most recent timeline events. Truncation is signalled by `signals_truncated` and `annotations_truncated`; successful non-admin reads emit a responder.context_read audit event.",
         "parameters": [
           {
             "name": "id",
@@ -1015,9 +1021,15 @@
           }
         },
         "x-canary-required-scope": "read-only",
+        "x-canary-accepted-scopes": [
+          "read-only",
+          "responder-write",
+          "admin"
+        ],
+        "x-canary-responder-scope": "Service-bound responder-write keys are accepted for same-service incident context reads. Unbound responder-write keys and cross-service incident reads return RFC 9457 insufficient_scope.",
         "x-agent-guidance": {
           "when_to_call": "Use as the first detail call after an incident.opened or incident.updated event references an incident id.",
-          "trust": "The response summary, action_brief, signals, annotations, and recent timeline are deterministic and bounded; truncation booleans identify when to fetch more.",
+          "trust": "The response context_envelope, summary, action_brief, signals, annotations, and recent timeline are deterministic, redacted, audited, and bounded; truncation booleans identify when to fetch more.",
           "next": "If signals_truncated or annotations_truncated is true, fetch timeline, query, or annotations pages before acting; otherwise write back an annotation when follow-up completes."
         }
       }
@@ -4173,6 +4185,7 @@
         "additionalProperties": false,
         "required": [
           "summary",
+          "context_envelope",
           "incident",
           "signals",
           "signals_truncated",
@@ -4185,6 +4198,9 @@
         "properties": {
           "summary": {
             "type": "string"
+          },
+          "context_envelope": {
+            "$ref": "#/components/schemas/ResponderContextEnvelope"
           },
           "incident": {
             "$ref": "#/components/schemas/IncidentDetailIncident"
@@ -4221,6 +4237,169 @@
             "items": {
               "$ref": "#/components/schemas/RemediationClaim"
             }
+          }
+        }
+      },
+      "ResponderContextEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "tenant_id",
+          "project_id",
+          "service",
+          "subject",
+          "retention",
+          "privacy_policy",
+          "bounds",
+          "audit_event_id"
+        ],
+        "properties": {
+          "schema": {
+            "type": "string",
+            "enum": [
+              "canary.responder_context.incident.v1"
+            ]
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "id"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "incident"
+                ]
+              },
+              "id": {
+                "type": "string"
+              }
+            }
+          },
+          "retention": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "class",
+              "audit_event"
+            ],
+            "properties": {
+              "class": {
+                "type": "string",
+                "enum": [
+                  "audit"
+                ]
+              },
+              "audit_event": {
+                "type": "string",
+                "enum": [
+                  "responder.context_read"
+                ]
+              }
+            }
+          },
+          "privacy_policy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "classification",
+              "redaction_rules",
+              "max_string_chars",
+              "max_metadata_bytes",
+              "max_evidence_link_chars"
+            ],
+            "properties": {
+              "classification": {
+                "type": "string",
+                "enum": [
+                  "redacted"
+                ]
+              },
+              "redaction_rules": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "bearer_token",
+                    "canary_api_key",
+                    "email",
+                    "sensitive_key_value"
+                  ]
+                }
+              },
+              "max_string_chars": {
+                "type": "integer"
+              },
+              "max_metadata_bytes": {
+                "type": "integer"
+              },
+              "max_evidence_link_chars": {
+                "type": "integer"
+              }
+            }
+          },
+          "bounds": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "signals",
+              "annotations",
+              "claims",
+              "recent_timeline_events"
+            ],
+            "properties": {
+              "signals": {
+                "$ref": "#/components/schemas/ResponderContextBound"
+              },
+              "annotations": {
+                "$ref": "#/components/schemas/ResponderContextBound"
+              },
+              "claims": {
+                "$ref": "#/components/schemas/ResponderContextBound"
+              },
+              "recent_timeline_events": {
+                "$ref": "#/components/schemas/ResponderContextBound"
+              }
+            }
+          },
+          "audit_event_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Event id of the durable responder.context_read audit event. Null only for admin reads."
+          }
+        }
+      },
+      "ResponderContextBound": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "returned",
+          "max"
+        ],
+        "properties": {
+          "returned": {
+            "type": "integer"
+          },
+          "max": {
+            "type": "integer"
+          },
+          "truncated": {
+            "type": "boolean"
           }
         }
       },
@@ -4293,7 +4472,7 @@
                 "type": "null"
               }
             ],
-            "description": "Opaque metadata preserved by Canary. Expected keys are optional coordination hints, not Canary behavior switches.",
+            "description": "Opaque metadata preserved by Canary. Expected keys are optional coordination hints, not Canary behavior switches. Incident responder context redacts sensitive-looking keys and bounds metadata before serialization.",
             "x-canary-expected-keys": [
               "external_url",
               "external_id",

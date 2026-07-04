@@ -57,6 +57,9 @@ curl -fsS -X POST http://localhost:4000/api/v1/keys \
 
 See [`docs/api-key-rotation.md`](docs/api-key-rotation.md) for the full scope
 matrix and rotation procedure.
+Responder incident context uses a redacted envelope, service-bound
+`responder-write` read authority, and durable read-audit events; see
+[`docs/responder-context-safety.md`](docs/responder-context-safety.md).
 
 For Fly deployment (including key recovery if the first boot log was missed),
 see [`docs/self-host-fly.md`](docs/self-host-fly.md).
