@@ -23,6 +23,7 @@ coordination philosophy live in
 ```bash
 git clone https://github.com/misty-step/canary && cd canary
 cp .env.example .env
+set -a; . ./.env; set +a
 ./bin/bootstrap    # installs deps for the core service and SDK packages
 cargo run -p canary-server
 ```
@@ -36,6 +37,7 @@ On first boot, Canary seeds a one-time bootstrap admin key and prints it to
 **stderr**. Capture it immediately — it is not shown again:
 
 ```bash
+set -a; . ./.env; set +a
 cargo run -p canary-server 2>&1 | grep "Bootstrap API key:"
 ```
 
