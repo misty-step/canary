@@ -30,6 +30,8 @@ cargo run -p canary-server
 
 No Docker is required for local development outside the Dagger gate. The repo
 includes the Rust service workspace and the TypeScript SDK package.
+For a Docker-only self-hosted first boot, use
+[`docs/self-host-docker.md`](docs/self-host-docker.md).
 
 ### First run: capturing the bootstrap API key
 
@@ -45,6 +47,16 @@ Store the key as an environment variable for API calls:
 
 ```bash
 export CANARY_ADMIN_KEY="sk_live_..."
+```
+
+Immediately run the agent-facing doctor against the new instance. Treat
+non-clean doctor output as a failed production setup until the reported field
+is fixed or explicitly waived:
+
+```bash
+CANARY_ENDPOINT="http://localhost:4000" \
+CANARY_API_KEY="$CANARY_ADMIN_KEY" \
+bin/canary doctor --json
 ```
 
 All authenticated endpoints require a scoped API key. The bootstrap key has
@@ -63,8 +75,11 @@ Responder incident context uses a redacted envelope, service-bound
 `responder-write` read authority, and durable read-audit events; see
 [`docs/responder-context-safety.md`](docs/responder-context-safety.md).
 
-For Fly deployment (including key recovery if the first boot log was missed),
-see [`docs/self-host-fly.md`](docs/self-host-fly.md).
+For non-Fly Docker deployment, including Compose, local volume persistence,
+doctor, and an ingest/query smoke, see
+[`docs/self-host-docker.md`](docs/self-host-docker.md). For Fly deployment,
+including Tigris backups and key recovery if the first boot log was missed, see
+[`docs/self-host-fly.md`](docs/self-host-fly.md).
 
 Canary has no human dashboard by design — agents are the UI. Operators who
 need to look at current state use the query API directly (`GET
@@ -589,9 +604,14 @@ All webhooks are HMAC-SHA256 signed. Secret returned on subscription creation.
 
 ## Deployment
 
-Deploy to Fly.io with SQLite persistence and a Fly Tigris-backed Litestream
-restore path. A full cold-operator runbook lives in
-[docs/self-host-fly.md](docs/self-host-fly.md).
+Deploy with either a generic Docker host or Fly.io. The Fly path uses SQLite
+persistence and a Fly Tigris-backed Litestream restore path; the Docker path
+uses the same image with a local volume and no Fly-specific variables.
+
+- Generic Docker or Compose:
+  [docs/self-host-docker.md](docs/self-host-docker.md)
+- Fly.io:
+  [docs/self-host-fly.md](docs/self-host-fly.md)
 
 ```bash
 export CANARY_FLY_APP="<your-fly-app>"
