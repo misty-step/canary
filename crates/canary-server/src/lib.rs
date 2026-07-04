@@ -611,6 +611,7 @@ mod tests {
                         due_count: 0,
                         in_flight_count: 0,
                         oldest_due_age_ms: None,
+                        oldest_due_item: None,
                         backoff_or_circuit_open: false,
                     },
                     WorkerReadyzCheck {
@@ -625,6 +626,7 @@ mod tests {
                         due_count: 0,
                         in_flight_count: 0,
                         oldest_due_age_ms: None,
+                        oldest_due_item: None,
                         backoff_or_circuit_open: false,
                     },
                 ],

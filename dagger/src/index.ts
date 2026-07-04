@@ -508,11 +508,14 @@ for attempt in $(seq 1 30); do
     and .response.worker_readiness.status == "ready"
     and .response.worker_readiness.pressured_workers >= 1
     and .response.alert_plane.status == "impaired"
-    and (.response.alert_plane.reasons | index("monitor_overdue pressured") != null)
+    and any(.response.alert_plane.reasons[]?; startswith("monitor_overdue pressured"))
     and any(.response.alert_plane.workers[]?;
       .name == "monitor_overdue"
       and .health == "pressured"
-      and ((.oldest_due_age_ms // 0) > 120000))
+      and ((.oldest_due_age_ms // 0) > 120000)
+      and .oldest_due_item.subject_type == "monitor"
+      and (.oldest_due_item.subject_id | startswith("MON-"))
+      and (.oldest_due_item.name | startswith("canary-alert-plane-")))
     and any(.response.verdict.blocking_signals[]?;
       startswith("alert-plane impaired:"))
   ' /tmp/canary-alert-plane-doctor.json >/dev/null; then
@@ -530,7 +533,7 @@ for attempt in $(seq 1 30); do
     jq -e '
       .status == "degraded"
       and .alert_plane.status == "impaired"
-      and (.alert_plane.reasons | index("monitor_overdue pressured") != null)
+      and any(.alert_plane.reasons[]?; startswith("monitor_overdue pressured"))
       and .check_in.skipped == true
     ' /tmp/canary-alert-plane-witness.json >/dev/null
     jq '{

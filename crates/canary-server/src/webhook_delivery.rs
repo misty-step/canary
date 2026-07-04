@@ -573,6 +573,7 @@ fn run_drain_worker(
                     due_count: u64::from(report.due_count),
                     in_flight_count: u64::from(report.in_flight_count),
                     oldest_due_age_ms: report.oldest_due_age_ms,
+                    oldest_due_item: None,
                     backoff_or_circuit_open: report.retried > 0
                         || report.discarded > 0
                         || report.circuit_open_suppressed > 0

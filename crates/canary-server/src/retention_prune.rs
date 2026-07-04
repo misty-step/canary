@@ -330,6 +330,7 @@ fn run_lifecycle_worker(
                             + report.target_checks_deleted,
                         in_flight_count: 0,
                         oldest_due_age_ms: None,
+                        oldest_due_item: None,
                         backoff_or_circuit_open: report.interrupted,
                     },
                 ),

@@ -139,8 +139,34 @@ pub struct WorkerReadyzCheck {
     pub in_flight_count: u64,
     /// Milliseconds by which the oldest due work item is overdue, when known.
     pub oldest_due_age_ms: Option<u64>,
+    /// Identifying metadata for the oldest due work item, when the worker can expose it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_due_item: Option<WorkerDueItem>,
     /// Whether the last observed pass saw backoff, circuit-open, or interruption pressure.
     pub backoff_or_circuit_open: bool,
+}
+
+/// Readiness-safe metadata for one due background-worker subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerDueItem {
+    /// Durable subject type, such as monitor.
+    pub subject_type: String,
+    /// Durable subject id.
+    pub subject_id: String,
+    /// Human-readable subject name.
+    pub name: String,
+    /// Owning service name.
+    pub service: String,
+    /// Expected cadence in milliseconds, when applicable.
+    pub expected_every_ms: Option<u64>,
+    /// Grace period in milliseconds, when applicable.
+    pub grace_ms: Option<u64>,
+    /// Last observed timestamp for the subject, when applicable.
+    pub last_observed_at: Option<String>,
+    /// Current due deadline timestamp, when applicable.
+    pub deadline_at: Option<String>,
+    /// Milliseconds since the subject became due, when known.
+    pub age_ms: Option<u64>,
 }
 
 /// Background worker lifecycle state.
@@ -297,6 +323,7 @@ mod tests {
                     due_count: 0,
                     in_flight_count: 0,
                     oldest_due_age_ms: None,
+                    oldest_due_item: None,
                     backoff_or_circuit_open: false,
                 },
                 WorkerReadyzCheck {
@@ -311,6 +338,7 @@ mod tests {
                     due_count: 0,
                     in_flight_count: 0,
                     oldest_due_age_ms: None,
+                    oldest_due_item: None,
                     backoff_or_circuit_open: false,
                 },
             ],
@@ -345,6 +373,7 @@ mod tests {
                     due_count: 12,
                     in_flight_count: 0,
                     oldest_due_age_ms: Some(90_000),
+                    oldest_due_item: None,
                     backoff_or_circuit_open: true,
                 }],
             );
@@ -372,6 +401,17 @@ mod tests {
                 due_count: 1,
                 in_flight_count: 0,
                 oldest_due_age_ms: Some(690_853),
+                oldest_due_item: Some(WorkerDueItem {
+                    subject_type: "monitor".to_owned(),
+                    subject_id: "MON-powder".to_owned(),
+                    name: "powder".to_owned(),
+                    service: "powder".to_owned(),
+                    expected_every_ms: Some(300_000),
+                    grace_ms: Some(60_000),
+                    last_observed_at: Some("2026-06-12T19:54:29Z".to_owned()),
+                    deadline_at: Some("2026-06-12T20:00:00Z".to_owned()),
+                    age_ms: Some(690_853),
+                }),
                 backoff_or_circuit_open: false,
             }],
         );
@@ -384,6 +424,20 @@ mod tests {
         assert_eq!(body["checks"]["workers"][0]["health"], "pressured");
         assert_eq!(body["checks"]["workers"][0]["due_count"], 1);
         assert_eq!(body["checks"]["workers"][0]["oldest_due_age_ms"], 690_853);
+        assert_eq!(
+            body["checks"]["workers"][0]["oldest_due_item"],
+            json!({
+                "subject_type": "monitor",
+                "subject_id": "MON-powder",
+                "name": "powder",
+                "service": "powder",
+                "expected_every_ms": 300000,
+                "grace_ms": 60000,
+                "last_observed_at": "2026-06-12T19:54:29Z",
+                "deadline_at": "2026-06-12T20:00:00Z",
+                "age_ms": 690853
+            })
+        );
     }
 
     #[test]
@@ -424,6 +478,25 @@ mod tests {
                 "in_flight_count",
                 "oldest_due_age_ms",
                 "backoff_or_circuit_open"
+            ])
+        );
+        assert_eq!(
+            document["components"]["schemas"]["WorkerReadyzCheck"]["properties"]["oldest_due_item"]
+                ["anyOf"][0]["$ref"],
+            "#/components/schemas/WorkerDueItem"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["WorkerDueItem"]["required"],
+            json!([
+                "subject_type",
+                "subject_id",
+                "name",
+                "service",
+                "expected_every_ms",
+                "grace_ms",
+                "last_observed_at",
+                "deadline_at",
+                "age_ms"
             ])
         );
     }

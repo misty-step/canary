@@ -9,7 +9,9 @@ use std::sync::{
     atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
 };
 
-use canary_http::public::{WorkerHealthStatus, WorkerLifecycleState, WorkerReadyzCheck};
+use canary_http::public::{
+    WorkerDueItem, WorkerHealthStatus, WorkerLifecycleState, WorkerReadyzCheck,
+};
 
 /// Stable names for lifecycle workers exposed through readiness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,7 +143,7 @@ pub struct WorkerHealthHandle {
 }
 
 /// Last-observed work pressure for a lifecycle pass.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkerPressureSnapshot {
     /// Work items due at the last observed lifecycle pass.
     pub due_count: u64,
@@ -149,6 +151,8 @@ pub struct WorkerPressureSnapshot {
     pub in_flight_count: u64,
     /// Milliseconds by which the oldest due work item is overdue, when known.
     pub oldest_due_age_ms: Option<u64>,
+    /// Identifying metadata for the oldest due work item, when known.
+    pub oldest_due_item: Option<WorkerDueItem>,
     /// Whether the pass saw backoff, circuit-open, or interruption pressure.
     pub backoff_or_circuit_open: bool,
 }
@@ -241,7 +245,7 @@ impl WorkerHealthHandle {
             state,
             last_success_age_ms,
             consecutive_failures,
-            details.pressure,
+            &details.pressure,
         );
 
         WorkerReadyzCheck {
@@ -256,6 +260,7 @@ impl WorkerHealthHandle {
             due_count: details.pressure.due_count,
             in_flight_count: details.pressure.in_flight_count,
             oldest_due_age_ms: details.pressure.oldest_due_age_ms,
+            oldest_due_item: details.pressure.oldest_due_item,
             backoff_or_circuit_open: details.pressure.backoff_or_circuit_open,
         }
     }
@@ -291,7 +296,7 @@ fn health_status(
     state: WorkerLifecycleState,
     last_success_age_ms: Option<u64>,
     consecutive_failures: u64,
-    pressure: WorkerPressureSnapshot,
+    pressure: &WorkerPressureSnapshot,
 ) -> WorkerHealthStatus {
     if !matches!(state, WorkerLifecycleState::Started) {
         return WorkerHealthStatus::Stopped;
@@ -354,6 +359,7 @@ mod tests {
                 due_count: 2,
                 in_flight_count: 1,
                 oldest_due_age_ms: Some(250),
+                oldest_due_item: None,
                 backoff_or_circuit_open: false,
             },
         );
