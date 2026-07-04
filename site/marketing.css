@@ -1,0 +1,145 @@
+/* Product brand hooks: edit these from DESIGN.md, then leave the rest alone.
+   These match the live dashboard's own unthemed Aesthetic tokens exactly. */
+:root {
+  --ae-accent: #2643d0;
+  --ae-accent-dark: #8c9eff;
+}
+
+.msk-bar,
+.msk-footer {
+  width: min(var(--ae-measure-wide), 100% - 5rem);
+}
+
+.msk-actions {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--ae-space-5);
+}
+
+.msk-nav {
+  display: inline-flex;
+  gap: var(--ae-space-5);
+}
+
+.msk-nav a[aria-current='page'] {
+  color: var(--ae-ink);
+  text-decoration-color: currentColor;
+}
+
+.msk-page {
+  width: min(var(--ae-measure-wide), 100%);
+  display: grid;
+  gap: var(--ae-space-8);
+}
+
+.msk-hero {
+  display: grid;
+  gap: var(--ae-space-4);
+  max-width: 45rem;
+  padding-top: var(--ae-space-6);
+}
+
+.msk-pitch {
+  font-weight: var(--ae-w-medium);
+}
+
+.msk-section {
+  border-top: 1px solid var(--ae-line);
+  padding-top: var(--ae-space-6);
+  display: grid;
+  gap: var(--ae-space-5);
+}
+
+.msk-section-head {
+  display: grid;
+  gap: var(--ae-space-2);
+  max-width: 42rem;
+}
+
+.msk-gallery {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--ae-space-5);
+}
+
+.msk-shot {
+  appearance: none;
+  border: 1px solid var(--ae-line);
+  background: var(--ae-surface);
+  color: var(--ae-ink);
+  padding: var(--ae-space-3);
+  display: grid;
+  gap: var(--ae-space-3);
+  text-align: left;
+  cursor: pointer;
+}
+
+.msk-shot:hover,
+.msk-shot:focus-visible {
+  border-color: var(--ae-ink);
+}
+
+.msk-shot img {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+  border: 1px solid var(--ae-line);
+  background: var(--ae-wash);
+}
+
+.msk-release-slot {
+  max-width: 42rem;
+}
+
+.msk-footer {
+  align-items: baseline;
+}
+
+.msk-zoom {
+  width: min(76rem, calc(100vw - 3rem));
+}
+
+.msk-zoom-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--ae-space-4);
+  margin-bottom: var(--ae-space-4);
+}
+
+.msk-zoom-img {
+  display: block;
+  width: 100%;
+  max-height: min(72vh, 48rem);
+  object-fit: contain;
+  border: 1px solid var(--ae-line);
+  background: var(--ae-wash);
+}
+
+.msk-release {
+  border-top: 1px solid var(--ae-line);
+  padding-top: var(--ae-space-5);
+  display: grid;
+  gap: var(--ae-space-3);
+}
+
+.msk-release:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+@media (max-width: 780px) {
+  .msk-bar,
+  .msk-footer {
+    width: min(var(--ae-measure), 100% - 2rem);
+  }
+
+  .msk-actions,
+  .msk-nav {
+    gap: var(--ae-space-3);
+  }
+
+  .msk-gallery {
+    grid-template-columns: 1fr;
+  }
+}

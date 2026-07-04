@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Canary - Misty Step product site</title>
+    <meta
+      name="description"
+      content="Canary helps operators of agent infrastructure catch outages and errors before an agent does, without running a hosted observability vendor."
+    />
+    <script>
+      try {
+        var m = localStorage.getItem('ae-mode');
+        if (m === 'dark' || m === 'light') {
+          document.documentElement.classList.add(m);
+          document.documentElement.style.colorScheme = m;
+        }
+      } catch (e) {}
+    </script>
+    <link rel="stylesheet" href="aesthetic.css" />
+    <link rel="stylesheet" href="marketing.css" />
+  </head>
+  <body>
+    <svg aria-hidden="true" width="0" height="0" style="position: absolute">
+      <symbol id="i-bird" viewBox="0 0 24 24">
+        <path d="M16 7h.01" />
+        <path d="M3.4 18H12a8 8 0 0 0 8-8V7a4 4 0 0 0-7.28-2.3L2 20" />
+        <path d="m20 7 2 .5-2 .5" />
+        <path d="M10 18v3" />
+        <path d="M14 17.75V21" />
+        <path d="M7 18a6 6 0 0 0 3.84-10.61" />
+      </symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v2" />
+        <path d="M12 20v2" />
+        <path d="m4.93 4.93 1.41 1.41" />
+        <path d="m17.66 17.66 1.41 1.41" />
+        <path d="M2 12h2" />
+        <path d="M20 12h2" />
+        <path d="m6.34 17.66-1.41 1.41" />
+        <path d="m19.07 4.93-1.41 1.41" />
+      </symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24">
+        <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+      </symbol>
+      <symbol id="i-circle-check" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="10" />
+        <path d="m9 12 2 2 4-4" />
+      </symbol>
+      <symbol id="i-x" viewBox="0 0 24 24">
+        <path d="M18 6 6 18" />
+        <path d="m6 6 12 12" />
+      </symbol>
+    </svg>
+
+    <div class="ae-screen ae-wide">
+      <header class="ae-bar msk-bar">
+        <a class="ae-logo" href="./" aria-label="Canary home">
+          <span class="ae-app-mark" aria-hidden="true">
+            <svg class="ae-icon" data-lucide="bird">
+              <use href="#i-bird" />
+            </svg>
+          </span>
+          <span class="ae-name">Canary</span>
+        </a>
+        <span class="msk-actions">
+          <nav class="ae-chrome msk-nav" aria-label="Site">
+            <a href="#features">features</a>
+            <a href="#screens">screens</a>
+            <a href="changelog.html">release notes</a>
+          </nav>
+          <button class="ae-mode" aria-label="toggle color mode">
+            <svg class="ae-icon ae-sun"><use href="#i-sun" /></svg>
+            <svg class="ae-icon ae-moon"><use href="#i-moon" /></svg>
+          </button>
+        </span>
+      </header>
+
+      <main class="ae-stage ae-stage-scroll" id="content">
+        <div class="msk-page">
+          <section class="msk-hero" aria-labelledby="hero-title">
+            <p class="ae-chrome">SELF-HOSTED OBSERVABILITY FOR AGENT INFRA</p>
+            <h1 class="ae-h" id="hero-title">
+              Canary helps operators of agent infrastructure catch outages
+              and errors before an agent does, without running a hosted
+              observability vendor.
+            </h1>
+            <p class="msk-pitch">
+              One Rust service, one SQLite file, deployable on Fly or plain
+              Docker. Agents and services report in through signed
+              webhooks, TTL monitors, and an error-ingest API; Canary turns
+              that into health checks, incident timelines, and correlated
+              error groups an operator can read at a glance.
+            </p>
+            <p class="ae-status">
+              <svg class="ae-icon ae-ok" data-lucide="circle-check">
+                <use href="#i-circle-check" />
+              </svg>
+              <span class="ae-status-label"
+                >Built from Aesthetic tokens, local assets, and GitHub
+                Pages.</span
+              >
+            </p>
+          </section>
+
+          <section
+            class="msk-section"
+            id="features"
+            aria-labelledby="features-title"
+          >
+            <h2 class="ae-h" id="features-title">Why it matters</h2>
+            <div class="ae-list-rows">
+              <div class="ae-list-row">
+                <span class="ae-list-cell">
+                  <span class="ae-list-label">job</span>
+                  <span class="ae-list-value"
+                    >See every monitored service's health, open incidents,
+                    and error rate on one dashboard.</span
+                  >
+                </span>
+                <span class="ae-list-cell">
+                  <span class="ae-list-label">proof</span>
+                  <span class="ae-list-value"
+                    >Dashboard overview and incident drill-down,
+                    screenshots below.</span
+                  >
+                </span>
+              </div>
+              <div class="ae-list-row">
+                <span class="ae-list-cell">
+                  <span class="ae-list-label">shape</span>
+                  <span class="ae-list-value"
+                    >TTL monitors, HTTP target probes, and a signed error-ingest
+                    API feed one incident correlation engine.</span
+                  >
+                </span>
+                <span class="ae-list-cell">
+                  <span class="ae-list-label">trust</span>
+                  <span class="ae-list-value"
+                    >Self-hosted: your SQLite file, your Fly app or your own
+                    Docker host, no vendor holding your production data.</span
+                  >
+                </span>
+              </div>
+              <div class="ae-list-row">
+                <span class="ae-list-cell">
+                  <span class="ae-list-label">delivery</span>
+                  <span class="ae-list-value"
+                    >`canary doctor` proves a fresh install end to end before
+                    you trust it with real traffic.</span
+                  >
+                </span>
+                <span class="ae-list-cell">
+                  <span class="ae-list-label">fit</span>
+                  <span class="ae-list-value"
+                    >No Fly account required — plain `docker compose up`
+                    works too.</span
+                  >
+                </span>
+              </div>
+            </div>
+          </section>
+
+          <section
+            class="msk-section"
+            id="screens"
+            aria-labelledby="screens-title"
+          >
+            <div class="msk-section-head">
+              <h2 class="ae-h" id="screens-title">Screenshots</h2>
+              <p class="ae-dim">
+                Click a frame to inspect it. Captured from a seeded local
+                instance with three monitored services, three open
+                incidents, and one ingested error.
+              </p>
+            </div>
+            <div class="msk-gallery" aria-label="Product screenshots">
+              <button
+                class="msk-shot"
+                type="button"
+                data-full="assets/screenshots/01-overview.png"
+                data-title="Dashboard overview"
+              >
+                <img
+                  src="assets/screenshots/01-overview.png"
+                  alt="Canary dashboard overview showing three applications, three down, three open incidents, and one error in the last 24 hours"
+                />
+                <span class="ae-chrome"
+                  >The whole fleet's health at a glance.</span
+                >
+              </button>
+              <button
+                class="msk-shot"
+                type="button"
+                data-full="assets/screenshots/02-incident.png"
+                data-title="Incident detail"
+              >
+                <img
+                  src="assets/screenshots/02-incident.png"
+                  alt="Canary incident detail view for the ingest-worker service, showing its incident stream from a real ingested error"
+                />
+                <span class="ae-chrome"
+                  >Drill into one service's incident stream.</span
+                >
+              </button>
+              <button
+                class="msk-shot"
+                type="button"
+                data-full="assets/screenshots/03-narrow.png"
+                data-title="Dashboard, mobile width"
+              >
+                <img
+                  src="assets/screenshots/03-narrow.png"
+                  alt="Canary dashboard overview rendered at 390px mobile width"
+                />
+                <span class="ae-chrome">The same read, on a phone screen.</span>
+              </button>
+            </div>
+          </section>
+
+          <section
+            class="msk-section msk-release-slot"
+            aria-labelledby="release-title"
+          >
+            <h2 class="ae-h" id="release-title">Release notes</h2>
+            <p>
+              Read what shipped in <a href="changelog.html">release
+              notes</a> — recent, real, and dated. Full commit history lives
+              in the <a href="https://github.com/misty-step/canary/blob/master/CHANGELOG.md">repository changelog</a>.
+            </p>
+          </section>
+        </div>
+      </main>
+
+      <footer class="ae-bar msk-footer">
+        <p class="ae-chrome">Canary is part of the Misty Step fleet.</p>
+        <nav class="ae-foot-links ae-chrome" aria-label="Footer">
+          <a
+            data-footer-link="github"
+            href="https://github.com/misty-step/canary"
+            >GitHub</a
+          >
+          <a data-footer-link="misty-step" href="https://mistystep.io"
+            >Misty Step</a
+          >
+        </nav>
+      </footer>
+    </div>
+
+    <dialog class="ae-dialog msk-zoom" aria-labelledby="zoom-title">
+      <div class="msk-zoom-head">
+        <h2 class="ae-dialog-title" id="zoom-title">Screenshot</h2>
+        <button
+          class="ae-button"
+          type="button"
+          data-zoom-close
+          aria-label="Close screenshot"
+        >
+          <svg class="ae-icon" aria-hidden="true"><use href="#i-x" /></svg>
+        </button>
+      </div>
+      <img class="msk-zoom-img" alt="" />
+    </dialog>
+
+    <script src="mode.js"></script>
+    <script src="theme.js"></script>
+    <script src="marketing.js"></script>
+  </body>
+</html>
