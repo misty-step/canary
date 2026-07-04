@@ -1,3 +1,10 @@
+## [1.11.3](https://github.com/misty-step/canary/compare/v1.11.2...v1.11.3) (2026-07-04)
+
+
+### Bug Fixes
+
+* **ci:** isolate Dagger Rust target cache by checkout ([#229](https://github.com/misty-step/canary/issues/229)) ([4ce9a24](https://github.com/misty-step/canary/commit/4ce9a24795ceb8689c97d392bd297379d415eaf7))
+
 ## [1.11.2](https://github.com/misty-step/canary/compare/v1.11.1...v1.11.2) (2026-07-03)
 
 
