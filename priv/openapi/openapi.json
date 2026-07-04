@@ -2952,8 +2952,87 @@
             ],
             "minimum": 0
           },
+          "oldest_due_item": {
+            "description": "Identifying metadata for the oldest due work item, when the worker can expose it.",
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkerDueItem"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "backoff_or_circuit_open": {
             "type": "boolean"
+          }
+        }
+      },
+      "WorkerDueItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "subject_type",
+          "subject_id",
+          "name",
+          "service",
+          "expected_every_ms",
+          "grace_ms",
+          "last_observed_at",
+          "deadline_at",
+          "age_ms"
+        ],
+        "properties": {
+          "subject_type": {
+            "type": "string",
+            "description": "Durable subject type, such as monitor."
+          },
+          "subject_id": {
+            "type": "string",
+            "description": "Durable subject id."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-readable subject name."
+          },
+          "service": {
+            "type": "string",
+            "description": "Owning service name."
+          },
+          "expected_every_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "grace_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "last_observed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "deadline_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "age_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
           }
         }
       },

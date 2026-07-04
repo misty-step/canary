@@ -870,6 +870,7 @@ fn run_lifecycle_worker(
                         due_count: report.due as u64,
                         in_flight_count: report.in_flight as u64,
                         oldest_due_age_ms: report.oldest_due_age_ms,
+                        oldest_due_item: None,
                         backoff_or_circuit_open: report.failed > 0
                             || report.event_fanout_failed > 0,
                     },

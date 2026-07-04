@@ -3396,8 +3396,10 @@ fn alert_plane_detail(worker: &Value) -> Value {
         "due_count": worker.get("due_count").and_then(Value::as_u64).unwrap_or(0),
         "in_flight_count": worker.get("in_flight_count").and_then(Value::as_u64).unwrap_or(0),
         "oldest_due_age_ms": worker.get("oldest_due_age_ms").cloned().unwrap_or(Value::Null),
+        "oldest_due_item": worker.get("oldest_due_item").cloned().unwrap_or(Value::Null),
         "backoff_or_circuit_open": worker.get("backoff_or_circuit_open").and_then(Value::as_bool).unwrap_or(false),
-        "reason": alert_worker_reason(worker)
+        "reason": alert_worker_reason(worker),
+        "detail": alert_worker_detail(worker)
     })
 }
 
@@ -3454,6 +3456,76 @@ fn alert_worker_reason(worker: &Value) -> String {
     format!("{name} impaired")
 }
 
+fn alert_worker_detail(worker: &Value) -> String {
+    oldest_due_item_reason(worker).unwrap_or_else(|| alert_worker_reason(worker))
+}
+
+fn oldest_due_item_reason(worker: &Value) -> Option<String> {
+    let item = worker.get("oldest_due_item")?;
+    if item.is_null() {
+        return None;
+    }
+    let worker_name = string_field(worker, "name");
+    let subject_type = string_field(item, "subject_type");
+    let subject_id = string_field(item, "subject_id");
+    let item_name = string_field(item, "name");
+    let expected = item
+        .get("expected_every_ms")
+        .and_then(Value::as_u64)
+        .map(format_duration_ms)
+        .unwrap_or_else(|| "unknown cadence".to_owned());
+    let grace = item
+        .get("grace_ms")
+        .and_then(Value::as_u64)
+        .map(format_duration_ms)
+        .unwrap_or_else(|| "unknown grace".to_owned());
+    let age = item
+        .get("age_ms")
+        .or_else(|| worker.get("oldest_due_age_ms"))
+        .and_then(Value::as_u64)
+        .map(format_duration_ms)
+        .unwrap_or_else(|| "unknown age".to_owned());
+
+    Some(format!(
+        "{worker_name} pressured: {subject_type} {item_name} ({subject_id}) expected every {expected} + {grace} grace; overdue {age}"
+    ))
+}
+
+fn format_duration_ms(ms: u64) -> String {
+    if ms < 1_000 {
+        return format!("{ms}ms");
+    }
+    let seconds = ms / 1_000;
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        let remainder = seconds % 60;
+        return if remainder == 0 {
+            format!("{minutes}m")
+        } else {
+            format!("{minutes}m {remainder}s")
+        };
+    }
+    let hours = minutes / 60;
+    if hours < 24 {
+        let remainder = minutes % 60;
+        return if remainder == 0 {
+            format!("{hours}h")
+        } else {
+            format!("{hours}h {remainder}m")
+        };
+    }
+    let days = hours / 24;
+    let remainder = hours % 24;
+    if remainder == 0 {
+        format!("{days}d")
+    } else {
+        format!("{days}d {remainder}h")
+    }
+}
+
 fn alert_plane_reason(worker: &Value) -> String {
     worker
         .get("reason")
@@ -3462,6 +3534,20 @@ fn alert_plane_reason(worker: &Value) -> String {
 }
 
 fn alert_plane_reason_summary(alert_plane: &Value) -> String {
+    let details = alert_plane
+        .get("workers")
+        .and_then(Value::as_array)
+        .map(|workers| {
+            workers
+                .iter()
+                .filter_map(|worker| worker.get("detail").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !details.is_empty() {
+        return details.join(", ");
+    }
+
     let reasons = alert_plane
         .get("reasons")
         .and_then(Value::as_array)
@@ -3507,6 +3593,7 @@ fn worker_pressure_detail(worker: &Value) -> Value {
         "due_count": worker.get("due_count").and_then(Value::as_u64).unwrap_or(0),
         "in_flight_count": worker.get("in_flight_count").and_then(Value::as_u64).unwrap_or(0),
         "oldest_due_age_ms": worker.get("oldest_due_age_ms").cloned().unwrap_or(Value::Null),
+        "oldest_due_item": worker.get("oldest_due_item").cloned().unwrap_or(Value::Null),
         "backoff_or_circuit_open": worker.get("backoff_or_circuit_open").and_then(Value::as_bool).unwrap_or(false)
     })
 }
@@ -5117,7 +5204,27 @@ mod tests {
             "failing_workers": 0,
             "pressured_workers": 1,
             "workers": [
-                {"name": "monitor_overdue", "state": "started", "health": "pressured", "failure_count": 0, "consecutive_failures": 0, "due_count": 1, "oldest_due_age_ms": 7200000, "backoff_or_circuit_open": false},
+                {
+                    "name": "monitor_overdue",
+                    "state": "started",
+                    "health": "pressured",
+                    "failure_count": 0,
+                    "consecutive_failures": 0,
+                    "due_count": 1,
+                    "oldest_due_age_ms": 7200000,
+                    "oldest_due_item": {
+                        "subject_type": "monitor",
+                        "subject_id": "MON-4uhhh40u445u",
+                        "name": "powder",
+                        "service": "powder",
+                        "expected_every_ms": 300000,
+                        "grace_ms": 60000,
+                        "last_observed_at": "2026-07-03T22:00:00Z",
+                        "deadline_at": "2026-07-03T22:06:00Z",
+                        "age_ms": 7200000
+                    },
+                    "backoff_or_circuit_open": false
+                },
                 {"name": "target_probe", "state": "started", "health": "ok", "failure_count": 0, "consecutive_failures": 0, "due_count": 0, "oldest_due_age_ms": null, "backoff_or_circuit_open": false}
             ]
         });
@@ -5140,15 +5247,21 @@ mod tests {
         );
 
         assert_eq!(alert_plane["status"], "impaired");
+        assert_eq!(alert_plane["reasons"], json!(["monitor_overdue pressured"]));
+        assert_eq!(
+            alert_plane["workers"][0]["detail"],
+            "monitor_overdue pressured: monitor powder (MON-4uhhh40u445u) expected every 5m + 1m grace; overdue 2h"
+        );
         assert_eq!(verdict["overall"], "degraded");
         assert_eq!(verdict["alert_plane"]["status"], "impaired");
         assert!(
             verdict["blocking_signals"]
                 .as_array()
-                .is_some_and(|signals| signals.iter().any(|signal| signal
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("alert-plane impaired: monitor_overdue pressured")))
+                .is_some_and(|signals| signals
+                    .iter()
+                    .any(|signal| signal.as_str().unwrap_or_default().contains(
+                        "alert-plane impaired: monitor_overdue pressured: monitor powder"
+                    )))
         );
         assert!(
             verdict["next_operator_action"]

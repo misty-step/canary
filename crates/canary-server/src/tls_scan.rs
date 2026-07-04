@@ -368,6 +368,7 @@ fn run_lifecycle_worker(
                         due_count: report.loaded as u64,
                         in_flight_count: 0,
                         oldest_due_age_ms: None,
+                        oldest_due_item: None,
                         backoff_or_circuit_open: report.failed > 0
                             || report.event_fanout_failed > 0
                             || report.interrupted,
