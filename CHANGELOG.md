@@ -1,3 +1,11 @@
+# [1.13.0](https://github.com/misty-step/canary/compare/v1.12.0...v1.13.0) (2026-07-04)
+
+
+### Features
+
+* **responders:** gate incident context reads ([#232](https://github.com/misty-step/canary/issues/232)) ([7dba106](https://github.com/misty-step/canary/commit/7dba10609e2432a8c763ea57f3a2a5b743e92afa))
+* **sdk:** make @canary-obs/sdk publish-ready and add npm publish pipeline ([#231](https://github.com/misty-step/canary/issues/231)) ([f8d929b](https://github.com/misty-step/canary/commit/f8d929b2ede595f098728ec46c5364e9d0c088db))
+
 # [1.12.0](https://github.com/misty-step/canary/compare/v1.11.3...v1.12.0) (2026-07-04)
 
 
