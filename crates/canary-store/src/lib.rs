@@ -863,7 +863,7 @@ impl Store {
         &mut self,
         insert: AnnotationInsert,
     ) -> AnnotationResult<canary_core::query::Annotation> {
-        annotations::create(&self.connection, insert)
+        annotations::create(&mut self.connection, insert)
     }
 
     /// List annotations for legacy incident and error-group routes.
@@ -2093,6 +2093,7 @@ mod tests {
         ] {
             store.create_annotation(AnnotationInsert {
                 id: id.to_owned(),
+                event_id: EventId::generate().into_string(),
                 tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
                 project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
                 service: None,
@@ -2215,6 +2216,71 @@ mod tests {
             }),
             Err(AnnotationError::NotFound)
         ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn annotation_create_records_incident_timeline_event_with_actor_identity()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        insert_incident(&store, "INC-loop", "api", "2026-05-28T20:00:00Z")?;
+
+        let annotation = store.create_annotation(AnnotationInsert {
+            id: "ANN-loop".to_owned(),
+            event_id: "EVT-ann-loop".to_owned(),
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: None,
+            subject_type: "incident".to_owned(),
+            subject_id: "INC-loop".to_owned(),
+            agent: "codex".to_owned(),
+            action: "fix-verified".to_owned(),
+            metadata: Some(json!({
+                "evidence": "https://example.com/proof",
+                "claim_id": "CLM-loop"
+            })),
+            created_at: "2026-05-28T20:05:00Z".to_owned(),
+        })?;
+
+        assert_eq!(annotation.subject_type, "incident");
+        let event: (String, String, String, String, String, String) = store.connection.query_row(
+            "SELECT service, event, entity_type, entity_ref, summary, payload
+                 FROM service_events WHERE id = 'EVT-ann-loop'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )?;
+        assert_eq!(event.0, "api");
+        assert_eq!(event.1, "annotation.added");
+        assert_eq!(event.2, "incident");
+        assert_eq!(event.3, "INC-loop");
+        assert_eq!(
+            event.4,
+            "codex annotated incident INC-loop with fix-verified."
+        );
+        let payload: Value = serde_json::from_str(&event.5)?;
+        assert_eq!(payload["annotation"]["agent"], "codex");
+        assert_eq!(payload["annotation"]["action"], "fix-verified");
+        assert_eq!(payload["annotation"]["metadata"]["claim_id"], "CLM-loop");
+
+        let detail = store
+            .incident_detail("INC-loop")?
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        assert_eq!(detail.recent_timeline_events.len(), 1);
+        assert_eq!(detail.recent_timeline_events[0].event, "annotation.added");
+        assert_eq!(
+            detail.recent_timeline_events[0].summary,
+            "codex annotated incident INC-loop with fix-verified."
+        );
 
         Ok(())
     }

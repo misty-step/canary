@@ -75,8 +75,10 @@ curl -X POST $CANARY_ENDPOINT/api/v1/keys \
 2. Store the returned raw key as `CANARY_RESPONDER_KEY` or
    `CANARY_RESPONDER_API_KEY` in the responder runtime.
 3. Verify the replacement can read and write only the bound service:
-   - `bin/canary annotations list --subject-type target --subject-id TGT-billing-api --json` returns `200`
-   - `bin/canary annotations create --subject-type target --subject-id TGT-billing-api --agent rotation-check --action verified --json` returns `201`
+   - `bin/canary incidents get INC-billing-api --json` succeeds for a bound-service incident
+   - `bin/canary claims claim --subject-type incident --subject-id INC-billing-api --owner rotation-check --purpose key-rotation --json` succeeds
+   - `bin/canary annotations list --subject-type target --subject-id TGT-billing-api --json` succeeds
+   - `bin/canary annotations create --subject-type target --subject-id TGT-billing-api --agent rotation-check --action verified --json` succeeds
    - the same create call against another service's target returns RFC 9457 `403`
 4. Revoke the previous responder key after the runtime is confirmed on the new
    key.

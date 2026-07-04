@@ -1,9 +1,9 @@
 //! Fixture-backed parser tests for the Canary CLI.
 
 use canary_cli::{
-    dogfood_strict_failure_count, summarize_doctor, summarize_dogfood, summarize_incidents,
-    summarize_monitors, summarize_query, summarize_report, summarize_targets, summarize_timeline,
-    tool_manifest,
+    dogfood_strict_failure_count, summarize_doctor, summarize_dogfood, summarize_incident_detail,
+    summarize_incidents, summarize_monitors, summarize_query, summarize_report, summarize_targets,
+    summarize_timeline, tool_manifest,
 };
 use serde_json::{Value, json};
 
@@ -40,6 +40,48 @@ fn parses_incidents_fixture() -> Result<(), Box<dyn std::error::Error>> {
     let lines = summarize_incidents(&value);
     assert!(lines.iter().any(|line| line == "incidents: 1"));
     Ok(())
+}
+
+#[test]
+fn summarizes_incident_detail_for_agent_loop() {
+    let value = json!({
+        "summary": "incident INC-loop: api incident",
+        "action_brief": {
+            "current_claim": {
+                "id": "CLM-current",
+                "owner": "codex",
+                "state": "claimed"
+            }
+        },
+        "incident": {
+            "id": "INC-loop",
+            "service": "api",
+            "state": "investigating"
+        },
+        "signals": [{}],
+        "annotations": [{}],
+        "claims": [{
+            "id": "CLM-latest",
+            "owner": "codex",
+            "state": "released"
+        }],
+        "recent_timeline_events": [{}, {}]
+    });
+
+    let lines = summarize_incident_detail(&value);
+    assert!(lines.iter().any(|line| line == "incident_id: INC-loop"));
+    assert!(lines.iter().any(|line| line == "annotations: 1"));
+    assert!(lines.iter().any(|line| line == "timeline_events: 2"));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "current_claim: CLM-current:codex:claimed")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "latest_claim: CLM-latest:codex:released")
+    );
 }
 
 #[test]
@@ -323,6 +365,7 @@ fn mcp_manifest_exposes_operator_drilldowns() {
     for name in [
         "canary_services",
         "canary_incidents",
+        "canary_incident_get",
         "canary_timeline",
         "canary_targets",
         "canary_monitors",

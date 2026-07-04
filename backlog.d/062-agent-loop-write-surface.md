@@ -40,6 +40,14 @@ decision that annotation write must be available through CLI/MCP. The older
 Canary vision was correct about readback and claims; this makes the write side
 operational for agents.
 
+2026-07-04 incident slice: this PR completes the incident loop end to end
+through CLI and MCP: incident list/detail, collision-safe remediation claim,
+annotation evidence writeback, claim release or terminal verification, and
+timeline replay of claim plus annotation writes with actor identity. It does not
+complete `048` rich-context redaction/read-audit requirements, safe browser
+capture, or monitor/check-specific write ergonomics. Those remain explicit
+follow-ups rather than being smuggled into the incident loop.
+
 ## Children
 1. Finish `048-responder-rich-context-safety-gate.md` or the narrow part needed
    for scoped responder keys.
@@ -49,3 +57,5 @@ operational for agents.
    trivia.
 5. Align OpenAPI agent guidance, CLI help, and MCP manifests around one loop.
 6. Add responder-loop conformance fixtures and a redacted receipt.
+7. Add monitor/check-specific write ergonomics only after the incident loop and
+   048 safety boundaries are reviewed.

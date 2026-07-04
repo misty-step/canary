@@ -533,6 +533,45 @@ pub fn summarize_incidents(value: &Value) -> Vec<String> {
     ]
 }
 
+/// Summarize one incident detail response.
+pub fn summarize_incident_detail(value: &Value) -> Vec<String> {
+    let incident = value.get("incident").unwrap_or(value);
+    let latest_claim = value
+        .get("claims")
+        .and_then(Value::as_array)
+        .and_then(|claims| claims.first());
+    vec![
+        format!("summary: {}", string_field(value, "summary")),
+        format!("incident_id: {}", string_field(incident, "id")),
+        format!("service: {}", string_field(incident, "service")),
+        format!("state: {}", string_field(incident, "state")),
+        format!("signals: {}", array_len(value, "signals")),
+        format!("annotations: {}", array_len(value, "annotations")),
+        format!("claims: {}", array_len(value, "claims")),
+        format!(
+            "timeline_events: {}",
+            array_len(value, "recent_timeline_events")
+        ),
+        format!(
+            "current_claim: {}",
+            claim_summary(value.pointer("/action_brief/current_claim"))
+        ),
+        format!("latest_claim: {}", claim_summary(latest_claim)),
+    ]
+}
+
+fn claim_summary(claim: Option<&Value>) -> String {
+    match claim {
+        Some(claim) if !claim.is_null() => format!(
+            "{}:{}:{}",
+            string_field(claim, "id"),
+            string_field(claim, "owner"),
+            string_field(claim, "state")
+        ),
+        _ => "none".to_owned(),
+    }
+}
+
 /// Summarize an incident escalate/deescalate response.
 pub fn summarize_incident_escalation(value: &Value) -> Vec<String> {
     let escalation = value.get("escalation").unwrap_or(value);
@@ -4331,6 +4370,17 @@ impl McpToolContext {
                     response,
                 ))
             }
+            "canary_incident_get" => {
+                let client = self.read_client()?;
+                let incident_id = required_string(arguments, "incident_id")?;
+                let response =
+                    client.get_auth_json(&format!("/api/v1/incidents/{}", encode(&incident_id)))?;
+                Ok(json_envelope(
+                    "canary_incident_get",
+                    client.endpoint(),
+                    response,
+                ))
+            }
             "canary_timeline" => {
                 let client = self.read_client()?;
                 let window = window_argument(arguments, "window", "24h")?;
@@ -4785,8 +4835,13 @@ pub fn tool_manifest() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "canary_incidents",
-            description: "Inspect active incidents from `bin/canary incidents`; use this after doctor reports an open Canary incident.",
+            description: "List active incidents from `bin/canary incidents`; use this after doctor reports an open Canary incident.",
             input_schema: json!({"type":"object","properties":{"open":{"type":"boolean","default":true}}}),
+        },
+        ToolSpec {
+            name: "canary_incident_get",
+            description: "Read one incident detail by id, including bounded signals, annotations, remediation claims, and recent timeline events.",
+            input_schema: json!({"type":"object","required":["incident_id"],"properties":{"incident_id":{"type":"string"}}}),
         },
         ToolSpec {
             name: "canary_timeline",
@@ -6054,6 +6109,7 @@ Vercel CLI completed
         assert!(names.contains("canary_integrate_patch"));
         assert!(names.contains("canary_integrate_enroll"));
         assert!(names.contains("canary_event_capture"));
+        assert!(names.contains("canary_incident_get"));
         assert!(names.contains("canary_claims_list"));
         assert!(names.contains("canary_claim_get"));
         assert!(names.contains("canary_claim_create"));
@@ -6073,6 +6129,10 @@ Vercel CLI completed
         assert_eq!(
             tool_by_name["canary_claim_get"].input_schema["required"],
             json!(["claim_id"])
+        );
+        assert_eq!(
+            tool_by_name["canary_incident_get"].input_schema["required"],
+            json!(["incident_id"])
         );
         assert_eq!(
             tool_by_name["canary_event_capture"].input_schema["required"],

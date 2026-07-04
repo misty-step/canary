@@ -6099,6 +6099,7 @@ mod tests {
             for service in ["billing", "payments"] {
                 store.create_annotation(AnnotationInsert {
                     id: format!("ANN-{service}"),
+                    event_id: format!("EVT-ann-{service}"),
                     tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
                     project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
                     service: None,

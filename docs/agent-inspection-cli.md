@@ -43,13 +43,15 @@ bin/canary summary --window 24h
 bin/canary services --state down --json
 bin/canary errors chrondle --window 24h
 bin/canary incidents list --open
+bin/canary incidents get INC-example --json
 bin/canary incidents escalate INC-example --reason "iteration guard exhausted" --owner bitterblossom/canary-triage --purpose triage_escalation --idempotency-key run-1:INC-example:escalate
 bin/canary incidents deescalate INC-example --owner operator@example.com --reason "false positive"
 bin/canary timeline --service chrondle --window 7d --limit 20
-bin/canary claims list --subject-type target --subject-id TGT-chrondle --json
-bin/canary claims claim --subject-type target --subject-id TGT-chrondle --owner codex --purpose "verify fix" --json
-bin/canary annotations list --subject-type target --subject-id TGT-chrondle --json
-bin/canary annotations create --subject-type target --subject-id TGT-chrondle --agent codex --action fix-verified --metadata pr=https://github.com/example/repo/pull/1 --json
+bin/canary claims list --subject-type incident --subject-id INC-example --json
+bin/canary claims claim --subject-type incident --subject-id INC-example --owner codex --purpose "verify fix" --json
+bin/canary annotations list --subject-type incident --subject-id INC-example --json
+bin/canary annotations create --subject-type incident --subject-id INC-example --agent codex --action fix-verified --metadata pr=https://github.com/example/repo/pull/1 --json
+bin/canary claims release CLM-example --owner codex --json
 bin/canary targets
 bin/canary monitors
 bin/canary dogfood audit --strict
@@ -75,6 +77,12 @@ Every command supports `--json`. JSON output is wrapped in a stable envelope:
 ```
 
 Text output is deliberately compact for agent transcripts.
+
+For the incident responder loop, start with `incidents list`, drill into
+`incidents get <id>`, then use the generic `claims` and `annotations` commands
+with `--subject-type incident --subject-id <id>`. Claim, annotation, transition,
+and release writes are replayable from the incident detail timeline and the
+service timeline.
 
 `dogfood audit --strict --json` still prints the JSON report before exiting
 nonzero when coverage gaps remain, so agents can inspect the failure details.
@@ -290,9 +298,9 @@ with `input_schema`. The checked-in snapshot at `priv/mcp/canary-cli-tools.json`
 is gated against `tool_manifest()` so it cannot drift from the runtime list.
 
 The manifest covers the drill-down surfaces an agent needs after
-`canary_doctor`: summary, services, errors, incidents, timeline, targets,
-monitors, dogfood audit, dogfood value receipts, witness, DR status, event
-capture, remediation claims, annotations, and integration
+`canary_doctor`: summary, services, errors, incident list and incident detail,
+timeline, targets, monitors, dogfood audit, dogfood value receipts, witness, DR
+status, event capture, remediation claims, annotations, and integration
 discovery/status/plan/patch/enroll. The MCP server implements those tools
 directly through the CLI-backed adapter; it does not define separate route
 semantics.

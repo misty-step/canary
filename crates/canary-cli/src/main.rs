@@ -14,9 +14,9 @@ use canary_cli::{
     integration_plan, integration_status, json_envelope, mcp_tool_manifest, print_json,
     print_lines, resolve_endpoint_without_config, run_dogfood_inventory, summarize_annotations,
     summarize_claims, summarize_doctor, summarize_dogfood, summarize_dogfood_value,
-    summarize_event, summarize_incident_escalation, summarize_incidents, summarize_integration,
-    summarize_monitors, summarize_query, summarize_report, summarize_services, summarize_targets,
-    summarize_timeline, tool_manifest,
+    summarize_event, summarize_incident_detail, summarize_incident_escalation, summarize_incidents,
+    summarize_integration, summarize_monitors, summarize_query, summarize_report,
+    summarize_services, summarize_targets, summarize_timeline, tool_manifest,
 };
 use clap::{Args, Parser, Subcommand};
 use serde_json::{Value, json};
@@ -47,7 +47,7 @@ enum Commands {
     Services(ServicesArgs),
     /// Inspect recent errors for one service.
     Errors(ServiceWindowArgs),
-    /// List, escalate, or deescalate incidents.
+    /// List, read, escalate, or deescalate incidents.
     Incidents(IncidentsArgs),
     /// Inspect timeline events.
     Timeline(TimelineArgs),
@@ -104,6 +104,8 @@ struct IncidentsArgs {
 enum IncidentsCommand {
     /// List active incidents.
     List(IncidentsListArgs),
+    /// Read one incident detail by id.
+    Get(IncidentGetArgs),
     /// Escalate one incident for human paging.
     Escalate(IncidentEscalateArgs),
     /// Clear a false-positive escalation.
@@ -114,6 +116,11 @@ enum IncidentsCommand {
 struct IncidentsListArgs {
     #[arg(long)]
     open: bool,
+}
+
+#[derive(Debug, Args)]
+struct IncidentGetArgs {
+    incident_id: String,
 }
 
 #[derive(Debug, Args)]
@@ -987,6 +994,18 @@ fn run_incidents_command(
                 response,
                 mode,
                 summarize_incidents,
+            )
+        }
+        IncidentsCommand::Get(args) => {
+            let client = ApiClient::new(Config::resolve(endpoint, api_key, config_path)?)?;
+            let response = client
+                .get_auth_json(&format!("/api/v1/incidents/{}", encode(&args.incident_id)))?;
+            render(
+                "incidents get",
+                client.endpoint(),
+                response,
+                mode,
+                summarize_incident_detail,
             )
         }
         IncidentsCommand::Escalate(args) => {
