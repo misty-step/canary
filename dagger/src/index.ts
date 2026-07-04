@@ -15,6 +15,7 @@ import {
   check,
   argument,
 } from "@dagger.io/dagger"
+import { createHash } from "node:crypto"
 
 const NODE_IMAGE =
   "node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94"
@@ -95,6 +96,20 @@ async function lockfileDigest(
   return source.file(path).digest({ excludeMetadata: true })
 }
 
+async function sourceTreeDigest(source: Directory): Promise<string> {
+  return source.digest()
+}
+
+async function rustTargetCacheDigest(source: Directory): Promise<string> {
+  const scope = process.env.CANARY_DAGGER_CACHE_SCOPE?.trim()
+
+  if (scope) {
+    return `${DIGEST_PREFIX}${createHash("sha256").update(scope).digest("hex")}`
+  }
+
+  return sourceTreeDigest(source)
+}
+
 async function nodeContainer(
   source: Directory,
   workdir: string,
@@ -120,6 +135,7 @@ async function nodeContainer(
 
 async function rustContainer(source: Directory): Promise<Container> {
   const digest = await lockfileDigest(source, "Cargo.lock")
+  const targetDigest = await rustTargetCacheDigest(source)
   const platformKey = await cachePlatformKey()
   const imageKey = imageIdentity(RUST_IMAGE)
   const registryCache = dag.cacheVolume(
@@ -129,7 +145,7 @@ async function rustContainer(source: Directory): Promise<Container> {
     cacheVolumeName("canary-rust-git", platformKey, imageKey, digest),
   )
   const targetCache = dag.cacheVolume(
-    cacheVolumeName("canary-rust-target", platformKey, imageKey, digest),
+    cacheVolumeName("canary-rust-target", platformKey, imageKey, targetDigest),
   )
 
   return dag

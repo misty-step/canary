@@ -30,6 +30,7 @@ root = workspace_root()
 workflow = read_required_text(root / ".github/workflows/ci.yml", "GitHub workflow")
 dagger_source = read_required_text(root / "dagger/src/index.ts", "Dagger source")
 dagger_config = read_required_text(root / "dagger.json", "Dagger config")
+dagger_wrapper = read_required_text(root / "bin/dagger", "Dagger wrapper")
 source_argument_sync = root / "dagger/scripts/sync_source_arguments.py"
 real_path = os.environ.get("PATH", "")
 real_bash = shutil.which("bash", path=real_path) or "/bin/bash"
@@ -726,8 +727,29 @@ require(
     "Each Dagger dependency container must compute a platform cache key once",
 )
 require(
-    dagger_source.count("platformKey, imageKey, digest") == 4,
-    "Every Dagger cache volume must scope its key by platform, image, and lockfile digest",
+    dagger_source.count("platformKey, imageKey, digest") == 3,
+    "Every Dagger dependency cache volume must scope its key by platform, image, and lockfile digest",
+)
+require(
+    "async function sourceTreeDigest(source: Directory)" in dagger_source
+    and "return source.digest()" in dagger_source,
+    "dagger/src/index.ts must derive a full source-tree digest for source-sensitive cache fallback",
+)
+require(
+    'process.env.CANARY_DAGGER_CACHE_SCOPE?.trim()' in dagger_source
+    and 'createHash("sha256").update(scope).digest("hex")' in dagger_source
+    and "return sourceTreeDigest(source)" in dagger_source,
+    "dagger/src/index.ts must prefer a hashed checkout cache scope and fall back to source-tree digest",
+)
+require(
+    "const targetDigest = await rustTargetCacheDigest(source)" in dagger_source
+    and 'cacheVolumeName("canary-rust-target", platformKey, imageKey, targetDigest)' in dagger_source,
+    "Dagger must scope the Rust target cache by checkout/source identity to isolate concurrent divergent worktrees",
+)
+require(
+    'CANARY_DAGGER_CACHE_SCOPE="${CANARY_DAGGER_CACHE_SCOPE:-$(cd "$ROOT" && pwd -P)}"' in dagger_wrapper
+    and "export CANARY_DAGGER_CACHE_SCOPE" in dagger_wrapper,
+    "bin/dagger must provide a physical checkout path cache scope for local Dagger invocations",
 )
 require(
     "async function rustContainer(source: Directory)" in dagger_source
