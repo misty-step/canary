@@ -81,8 +81,14 @@
 
 .msk-shot img {
   width: 100%;
-  aspect-ratio: 16 / 10;
-  object-fit: cover;
+  /* object-fit: contain, not cover — evidence screenshots arrive in every
+     aspect ratio (portrait docs, wide terminal captures, tall dashboards).
+     A fixed 16/10 cover crop hid most of the frame on three separate
+     shipped sites (aesthetic-911); a fixed height keeps the gallery row
+     aligned without cropping any of them. */
+  aspect-ratio: auto;
+  height: 15rem;
+  object-fit: contain;
   border: 1px solid var(--ae-line);
   background: var(--ae-wash);
 }
@@ -129,13 +135,20 @@
 }
 
 @media (max-width: 780px) {
-  .msk-bar,
-  .msk-footer {
+  /* qualified with .ae-wide, not just .msk-bar/.msk-footer: aesthetic.css's
+     `.ae-wide .ae-bar` rule (two classes) otherwise outranks the plain
+     one-class selector here and this override never takes effect, leaving
+     80px of dead margin at phone widths — the actual cause of the nav
+     "crowding" bug (aesthetic-910), confirmed by measuring the live
+     bounding box at 390px. */
+  .ae-wide .msk-bar,
+  .ae-wide .msk-footer {
     width: min(var(--ae-measure), 100% - 2rem);
   }
 
   .msk-actions,
   .msk-nav {
+    flex-wrap: wrap;
     gap: var(--ae-space-3);
   }
 
