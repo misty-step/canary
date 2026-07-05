@@ -241,7 +241,7 @@ mod tests {
     use canary_http::{
         public::{
             APPLICATION_JSON, DependencyStatus, OPENAPI_JSON, WorkerHealthStatus,
-            WorkerLifecycleState, WorkerReadyzCheck,
+            WorkerLifecycleState, WorkerPressureShape, WorkerReadyzCheck,
         },
         request::MAX_JSON_BODY_BYTES,
     };
@@ -608,6 +608,7 @@ mod tests {
                         failure_count: 0,
                         consecutive_failures: 0,
                         last_error_class: None,
+                        pressure_shape: WorkerPressureShape::Queue,
                         due_count: 0,
                         in_flight_count: 0,
                         oldest_due_age_ms: None,
@@ -623,6 +624,7 @@ mod tests {
                         failure_count: 1,
                         consecutive_failures: 1,
                         last_error_class: Some("panic".to_owned()),
+                        pressure_shape: WorkerPressureShape::Queue,
                         due_count: 0,
                         in_flight_count: 0,
                         oldest_due_age_ms: None,
