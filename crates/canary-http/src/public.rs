@@ -133,17 +133,40 @@ pub struct WorkerReadyzCheck {
     pub consecutive_failures: u64,
     /// Last non-secret failure class observed by the worker loop.
     pub last_error_class: Option<String>,
-    /// Work items due at the last observed lifecycle pass.
+    /// How to interpret `due_count`/`oldest_due_age_ms` for this worker.
+    pub pressure_shape: WorkerPressureShape,
+    /// Meaning of this count depends on `pressure_shape`: for `queue` workers, items
+    /// currently due and waiting; for `sweep_result` workers, items processed in the
+    /// last completed pass (not a live backlog — do not alert on its magnitude alone).
     pub due_count: u64,
     /// Work items still in flight at the last observed lifecycle pass.
     pub in_flight_count: u64,
-    /// Milliseconds by which the oldest due work item is overdue, when known.
+    /// Milliseconds by which the oldest due work item is overdue, when known. Only
+    /// meaningful for `queue`-shaped workers; `sweep_result` workers never populate this.
     pub oldest_due_age_ms: Option<u64>,
     /// Identifying metadata for the oldest due work item, when the worker can expose it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oldest_due_item: Option<WorkerDueItem>,
     /// Whether the last observed pass saw backoff, circuit-open, or interruption pressure.
     pub backoff_or_circuit_open: bool,
+}
+
+/// How a worker's `due_count`/`oldest_due_age_ms` fields should be read.
+///
+/// Queue-backed workers (webhook delivery, target probe, monitor overdue) track a
+/// live backlog: `due_count` is items waiting right now, and staleness of the oldest
+/// item is a real pressure signal. Sweep-based workers (retention prune, TLS expiry
+/// scan) have no queue — they delete or scan everything past a cutoff in one pass —
+/// so `due_count` is only a report of the last completed pass's volume. Treating a
+/// sweep worker's `due_count` as a live backlog, or its cadence gap as staleness
+/// before its own `stale_after` threshold, produces a false pressure reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerPressureShape {
+    /// `due_count` is a live queue depth; `oldest_due_age_ms` is real overdue time.
+    Queue,
+    /// `due_count` is the last completed pass's processed-row count, not a backlog.
+    SweepResult,
 }
 
 /// Readiness-safe metadata for one due background-worker subject.
@@ -320,6 +343,7 @@ mod tests {
                     failure_count: 0,
                     consecutive_failures: 0,
                     last_error_class: None,
+                    pressure_shape: WorkerPressureShape::Queue,
                     due_count: 0,
                     in_flight_count: 0,
                     oldest_due_age_ms: None,
@@ -335,6 +359,7 @@ mod tests {
                     failure_count: 2,
                     consecutive_failures: 2,
                     last_error_class: Some("panic".to_owned()),
+                    pressure_shape: WorkerPressureShape::Queue,
                     due_count: 0,
                     in_flight_count: 0,
                     oldest_due_age_ms: None,
@@ -370,6 +395,7 @@ mod tests {
                     failure_count: 3,
                     consecutive_failures: 3,
                     last_error_class: Some("runtime_error".to_owned()),
+                    pressure_shape: WorkerPressureShape::Queue,
                     due_count: 12,
                     in_flight_count: 0,
                     oldest_due_age_ms: Some(90_000),
@@ -398,6 +424,7 @@ mod tests {
                 failure_count: 0,
                 consecutive_failures: 0,
                 last_error_class: None,
+                pressure_shape: WorkerPressureShape::Queue,
                 due_count: 1,
                 in_flight_count: 0,
                 oldest_due_age_ms: Some(690_853),
@@ -474,6 +501,7 @@ mod tests {
                 "failure_count",
                 "consecutive_failures",
                 "last_error_class",
+                "pressure_shape",
                 "due_count",
                 "in_flight_count",
                 "oldest_due_age_ms",

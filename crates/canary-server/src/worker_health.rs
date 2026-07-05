@@ -10,7 +10,7 @@ use std::sync::{
 };
 
 use canary_http::public::{
-    WorkerDueItem, WorkerHealthStatus, WorkerLifecycleState, WorkerReadyzCheck,
+    WorkerDueItem, WorkerHealthStatus, WorkerLifecycleState, WorkerPressureShape, WorkerReadyzCheck,
 };
 
 /// Stable names for lifecycle workers exposed through readiness.
@@ -51,6 +51,22 @@ impl WorkerName {
         match self {
             Self::WebhookDelivery | Self::TargetProbe | Self::MonitorOverdue => 120_000,
             Self::RetentionPrune | Self::TlsExpiryScan => 25 * 60 * 60 * 1_000,
+        }
+    }
+
+    /// How this worker's `due_count`/`oldest_due_age_ms` fields should be read.
+    ///
+    /// Root-caused by canary-911: retention_prune and tls_scan sweep everything past
+    /// a cutoff in one pass rather than draining a queue, so their `due_count` is a
+    /// last-pass volume report, not a live backlog. Callers must branch on this shape
+    /// before treating a large `due_count` or a sub-`stale_after_ms` cadence gap as
+    /// pressure.
+    pub const fn pressure_shape(self) -> WorkerPressureShape {
+        match self {
+            Self::WebhookDelivery | Self::TargetProbe | Self::MonitorOverdue => {
+                WorkerPressureShape::Queue
+            }
+            Self::RetentionPrune | Self::TlsExpiryScan => WorkerPressureShape::SweepResult,
         }
     }
 }
@@ -257,6 +273,7 @@ impl WorkerHealthHandle {
             failure_count,
             consecutive_failures,
             last_error_class: details.last_error_class,
+            pressure_shape: self.inner.name.pressure_shape(),
             due_count: details.pressure.due_count,
             in_flight_count: details.pressure.in_flight_count,
             oldest_due_age_ms: details.pressure.oldest_due_age_ms,
@@ -322,6 +339,80 @@ fn health_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pressure_shape_marks_sweep_workers_distinctly_from_queue_workers() {
+        assert_eq!(
+            WorkerName::WebhookDelivery.pressure_shape(),
+            WorkerPressureShape::Queue
+        );
+        assert_eq!(
+            WorkerName::TargetProbe.pressure_shape(),
+            WorkerPressureShape::Queue
+        );
+        assert_eq!(
+            WorkerName::MonitorOverdue.pressure_shape(),
+            WorkerPressureShape::Queue
+        );
+        assert_eq!(
+            WorkerName::RetentionPrune.pressure_shape(),
+            WorkerPressureShape::SweepResult
+        );
+        assert_eq!(
+            WorkerName::TlsExpiryScan.pressure_shape(),
+            WorkerPressureShape::SweepResult
+        );
+    }
+
+    /// Regression for canary-911: a live audit read `retention_prune`'s
+    /// `due_count: 518` and a ~19.5h success gap as a stuck 518-item backlog.
+    /// The worker was healthy the whole time — `due_count` for a sweep worker is
+    /// last-pass volume, not a backlog, and its cadence is 24h (stale_after is 25h).
+    /// This pins both halves: a large due_count from a completed pass never taints
+    /// health, and the wire snapshot is now self-describing via `pressure_shape` so
+    /// a consumer cannot repeat that misread.
+    #[test]
+    fn retention_prune_large_due_count_from_completed_pass_is_not_pressure() {
+        let worker = WorkerHealthHandle::new(WorkerName::RetentionPrune);
+        worker.record_success_with_pressure(
+            "2026-07-04T23:29:18Z".to_owned(),
+            0,
+            WorkerPressureSnapshot {
+                due_count: 518,
+                in_flight_count: 0,
+                oldest_due_age_ms: None,
+                oldest_due_item: None,
+                backoff_or_circuit_open: false,
+            },
+        );
+
+        // ~19.5h later: well inside the 24h tick cadence and the 25h stale threshold.
+        let snapshot = worker.snapshot_at(19 * 3_600_000 + 1_800_000);
+
+        assert_eq!(snapshot.health, WorkerHealthStatus::Ok);
+        assert_eq!(snapshot.due_count, 518);
+        assert_eq!(snapshot.pressure_shape, WorkerPressureShape::SweepResult);
+    }
+
+    /// A genuinely wedged retention_prune (no successful pass past its own 25h
+    /// stale threshold) must still surface as unhealthy — the sweep-vs-queue
+    /// distinction changes how `due_count` is read, not whether staleness fires.
+    #[test]
+    fn retention_prune_genuine_staleness_past_25h_still_surfaces_as_stale() {
+        let worker = WorkerHealthHandle::new(WorkerName::RetentionPrune);
+        worker.record_success_with_pressure(
+            "2026-07-03T23:29:18Z".to_owned(),
+            0,
+            WorkerPressureSnapshot {
+                due_count: 518,
+                ..WorkerPressureSnapshot::default()
+            },
+        );
+
+        let snapshot = worker.snapshot_at(25 * 3_600_000 + 1);
+
+        assert_eq!(snapshot.health, WorkerHealthStatus::Stale);
+    }
 
     #[test]
     fn registry_returns_all_lifecycle_workers_in_stable_order() {

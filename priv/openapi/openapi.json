@@ -2875,6 +2875,7 @@
           "failure_count",
           "consecutive_failures",
           "last_error_class",
+          "pressure_shape",
           "due_count",
           "in_flight_count",
           "oldest_due_age_ms",
@@ -2936,6 +2937,14 @@
               "null"
             ],
             "description": "Sanitized failure class such as runtime_error or panic; never a raw error message."
+          },
+          "pressure_shape": {
+            "type": "string",
+            "enum": [
+              "queue",
+              "sweep_result"
+            ],
+            "description": "How to read due_count/oldest_due_age_ms for this worker. queue: due_count is a live backlog depth and oldest_due_age_ms is real overdue time. sweep_result: due_count is the last completed pass's processed-row count, not a backlog; oldest_due_age_ms is never populated."
           },
           "due_count": {
             "type": "integer",
