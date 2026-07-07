@@ -235,7 +235,6 @@ health_file="$tmpdir/healthz.json"
 ready_file="$tmpdir/readyz.json"
 query_file="$tmpdir/canary-query.json"
 alert_plane_file="$tmpdir/alert-plane.json"
-status_file="$tmpdir/monitor-status.json"
 check_in_file="$tmpdir/check-in.json"
 observed_at="$(now_utc)"
 encoded_window="$(urlencode "$WINDOW")"
@@ -342,7 +341,29 @@ alert_plane_ok="$(jq -r '.status == "healthy"' "$alert_plane_file")"
 query_ok="$(jq -r 'try (.curl_exit == 0 and .http_status == 200 and (.response | type == "object") and .response.service == "canary" and (.response.total_errors | type == "number")) catch false' "$query_file")"
 transport_failures="$(jq -s '[.[] | select((.skipped // false | not) and (.curl_exit != 0))] | length' "$health_file" "$ready_file" "$query_file")"
 
-if [[ "$health_ok" == "true" && "$ready_ok" == "true" && "$query_ok" == "true" && "$alert_plane_ok" == "true" ]]; then
+# Witness self-heal scope: this witness's own health verdict is scoped to
+# its own signals -- healthz, readyz worker health, and the canary-query
+# self-check -- not the entire alert plane. `monitor_overdue` tracks every
+# monitor's heartbeat schedule, including monitors owned by other services
+# (e.g. linejam-production-smoke) and this witness's own monitor
+# ($MONITOR). Neither is in scope for whether Canary/the witness process
+# itself is healthy: an unrelated service's overdue heartbeat must never
+# block this witness, and refusing the witness's own check-in while its
+# own heartbeat is the thing overdue would deadlock forever (the check-in
+# is the only thing that clears it). Any OTHER impaired worker
+# (webhook_delivery, retention_prune, target_probe, tls_scan) still blocks
+# exactly as before. See docs/canary-witness.md.
+monitor_overdue_is_sole_impairment="$(jq -r '
+  try (
+    (.workers | length) == 1
+    and (.workers[0].name == "monitor_overdue")
+    and (.workers[0].health == "pressured")
+  ) catch false
+' "$alert_plane_file")"
+witness_alert_plane_ok="$([[ "$alert_plane_ok" == "true" || "$monitor_overdue_is_sole_impairment" == "true" ]] && echo true || echo false)"
+self_heal_check_in="$([[ "$alert_plane_ok" != "true" && "$witness_alert_plane_ok" == "true" ]] && echo true || echo false)"
+
+if [[ "$health_ok" == "true" && "$ready_ok" == "true" && "$query_ok" == "true" && "$witness_alert_plane_ok" == "true" ]]; then
   status="healthy"
 elif [[ "$transport_failures" != "0" ]]; then
   status="unreachable"
@@ -350,40 +371,12 @@ else
   status="degraded"
 fi
 
-# Self-witness deadlock guard: $MONITOR's own check-in is the only thing that
-# clears its overdue pressure. If monitor_overdue is impaired *solely*
-# because $MONITOR itself is overdue -- no other worker and no other
-# monitor is unhealthy -- refusing the check-in locks $MONITOR overdue
-# forever: its own missed heartbeat permanently blocks the heartbeat that
-# would resolve it. Impairment involving any other worker or monitor still
-# blocks the check-in exactly as before (see the alert-plane rehearsal gate).
-self_only_pressure="false"
-if [[ "$health_ok" == "true" && "$ready_ok" == "true" && "$query_ok" == "true" \
-      && "$alert_plane_ok" != "true" && "$status" != "unreachable" ]]; then
-  only_monitor_overdue_pressured="$(jq -r '
-    try (
-      (.workers | length) == 1
-      and (.workers[0].name == "monitor_overdue")
-      and (.workers[0].health == "pressured")
-    ) catch false
-  ' "$alert_plane_file")"
-  if [[ "$only_monitor_overdue_pressured" == "true" ]]; then
-    request_json "monitor-status" "GET" "/api/v1/status" "read" "$status_file"
-    self_only_pressure="$(jq -r --arg monitor "$MONITOR" '
-      try (
-        (.response.monitors | type == "array")
-        and ([.response.monitors[] | select(.name != $monitor and .state != "up")] | length) == 0
-      ) catch false
-    ' "$status_file")"
-  fi
-fi
-
-if [[ "$status" == "healthy" || "$self_only_pressure" == "true" ]]; then
+if [[ "$status" == "healthy" ]]; then
   total_errors="$(jq -r '.response.total_errors // 0' "$query_file")"
   ttl_ms_json="${CHECK_IN_TTL_MS:-null}"
   summary="Canary witness saw healthy self-signals and ${total_errors} recent canary errors."
-  if [[ "$self_only_pressure" == "true" ]]; then
-    summary="Canary witness self-heal: $MONITOR was the sole source of monitor_overdue pressure; sending check-in to clear it."
+  if [[ "$self_heal_check_in" == "true" ]]; then
+    summary="Canary witness self-heal: monitor_overdue pressure was out of the witness's own scope; sending check-in regardless."
   fi
   context="$(
     jq -n \
@@ -434,7 +427,7 @@ jq -n \
   --arg window "$WINDOW" \
   --arg status "$status" \
   --argjson require_check_in "$REQUIRE_CHECK_IN" \
-  --argjson self_heal_check_in "$([[ "$self_only_pressure" == "true" ]] && echo true || echo false)" \
+  --argjson self_heal_check_in "$([[ "$self_heal_check_in" == "true" ]] && echo true || echo false)" \
   --slurpfile health "$health_file" \
   --slurpfile ready "$ready_file" \
   --slurpfile query "$query_file" \

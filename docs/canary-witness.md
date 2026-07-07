@@ -22,25 +22,39 @@ is checking.
 |---|---|---|
 | Liveness | `GET /healthz` | HTTP 200 and `{"status":"ok"}` |
 | Readiness | `GET /readyz` | HTTP 200, `{"status":"ready"}`, database and supervisor `ok`, and all five worker lifecycle snapshots started with zero failures. This is route readiness, not alert-plane health. |
-| Alert plane | `/readyz` worker snapshots | Every required worker has `health: ok`, no backoff/circuit pressure, and no stale due-work pressure. A `pressured` worker can remain route-ready, but the witness reports a degraded alert plane and does not send the healthy check-in. |
+| Alert plane | `/readyz` worker snapshots | Every required worker except `monitor_overdue` has `health: ok`, no backoff/circuit pressure, and no stale due-work pressure. `monitor_overdue` pressure is out of the witness's own scope (see below) and does not by itself degrade the witness. Any other `pressured` worker still keeps route-ready but blocks the witness from reporting healthy. |
 | Error readback | `GET /api/v1/query?service=canary&window=1h` | HTTP 200, service `canary`, and numeric `total_errors` |
 
-### Self-heal exception
+### Witness scope: `monitor_overdue` never blocks the witness alone
 
-`$MONITOR`'s own check-in is the only thing that clears its overdue pressure.
-If `monitor_overdue` is impaired *solely* because `$MONITOR` itself (normally
-`canary-watchman`) is overdue — no other worker and no other monitor is
-unhealthy, confirmed via `GET /api/v1/status` — the witness sends the
-check-in anyway instead of skipping it. Without this, a single missed
-heartbeat becomes permanent: the overdue heartbeat keeps the alert plane
-impaired, and the impaired alert plane keeps blocking the only check-in that
-would resolve it (found live in production 2026-07-02, `canary-watchman`
-stuck overdue for 11+ hours because its own pressure had locked out its own
-recovery). Impairment involving any other worker or monitor still blocks the
-check-in exactly as before — this exception does not weaken the alert-plane
-bar for unrelated degradation, and does not change the reported `status`
-(it stays `degraded`, not `healthy`, until the next run confirms recovery).
-The receipt's `self_heal_check_in` field records when this fired.
+The witness's own health verdict is scoped to its own signals — healthz,
+readyz worker health, and the canary-query self-check — not the entire alert
+plane. `monitor_overdue` tracks *every* monitor's heartbeat schedule,
+including monitors owned by other services (found live in production
+2026-07-06: `linejam-production-smoke`, an unrelated monitor, kept this
+witness's own GitHub issue open indefinitely even after its actual key fault
+was fixed) and this witness's own monitor (normally `canary-watchman`,
+found live 2026-07-02 stuck overdue for 11+ hours because its own pressure
+had locked out its own recovery check-in). Neither case is in scope for
+whether Canary/the witness process itself is healthy:
+
+- An unrelated service's overdue heartbeat must never block this witness —
+  the witness has no way to resolve someone else's monitor and should not be
+  held hostage to it.
+- The witness's own overdue heartbeat must not block its own check-in either,
+  since the check-in is the only thing that clears it — refusing it would
+  deadlock forever.
+
+So whenever `monitor_overdue` is the *only* impaired worker — regardless of
+which monitor(s) triggered it — the witness still reports `status: healthy`
+and still sends its check-in. Impairment involving any other worker
+(`webhook_delivery`, `retention_prune`, `target_probe`, `tls_scan`) still
+blocks the witness exactly as before; this scoping does not weaken the bar
+for genuine Canary-process degradation. The receipt's `alert_plane` block
+still reports the true, unscoped alert-plane status and impaired workers for
+observability, and `self_heal_check_in` records whenever the witness's own
+`healthy` verdict or check-in relied on this scoping rather than a fully
+clean alert plane.
 
 When all route and alert-plane signals are healthy, the witness sends an ingest check-in:
 
