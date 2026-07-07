@@ -5,9 +5,40 @@
   --ae-accent-dark: #8c9eff;
 }
 
+.msk-shell {
+  position: relative;
+  isolation: isolate;
+}
+
+.msk-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-image: url('assets/hero.jpg');
+  background-size: cover;
+  background-position: center;
+  opacity: 0.35;
+}
+
+.msk-shell > header,
+.msk-shell > main,
+.msk-shell > footer {
+  position: relative;
+  z-index: 1;
+}
+
 .msk-bar,
 .msk-footer {
   width: min(var(--ae-measure-wide), 100% - 5rem);
+}
+
+.msk-bar {
+  align-items: center;
+}
+
+.msk-logo .ae-name {
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
 }
 
 .msk-actions {
@@ -26,21 +57,43 @@
   text-decoration-color: currentColor;
 }
 
+.msk-hero-stage {
+  justify-content: flex-end;
+}
+
+.msk-hero-panel {
+  box-sizing: border-box;
+  width: min(38rem, 100%);
+  margin-block: auto var(--ae-space-8);
+  padding: var(--ae-space-6);
+  border: 1px solid var(--ae-line);
+  background: color-mix(in srgb, var(--ae-surface) 85%, transparent);
+  backdrop-filter: blur(18px);
+  display: grid;
+  gap: var(--ae-space-5);
+}
+
+.msk-hero-panel .ae-button {
+  justify-self: start;
+}
+
+.msk-hero-panel h1 {
+  margin: 0;
+  font-size: clamp(1.7rem, 2.8vw, 2.6rem);
+  line-height: 1.25;
+  font-weight: var(--ae-w-bold, var(--ae-w-black));
+  letter-spacing: -0.01em;
+  max-width: 24ch;
+}
+
 .msk-page {
   width: min(var(--ae-measure-wide), 100%);
   display: grid;
   gap: var(--ae-space-8);
 }
 
-.msk-hero {
-  display: grid;
-  gap: var(--ae-space-4);
-  max-width: 45rem;
-  padding-top: var(--ae-space-6);
-}
-
-.msk-pitch {
-  font-weight: var(--ae-w-medium);
+.msk-doc-page {
+  width: min(52rem, 100%);
 }
 
 .msk-section {
@@ -48,6 +101,11 @@
   padding-top: var(--ae-space-6);
   display: grid;
   gap: var(--ae-space-5);
+}
+
+.msk-section:first-child {
+  border-top: 0;
+  padding-top: 0;
 }
 
 .msk-section-head {
@@ -81,24 +139,66 @@
 
 .msk-shot img {
   width: 100%;
-  /* object-fit: contain, not cover — evidence screenshots arrive in every
-     aspect ratio (portrait docs, wide terminal captures, tall dashboards).
-     A fixed 16/10 cover crop hid most of the frame on three separate
-     shipped sites (aesthetic-911); a fixed height keeps the gallery row
-     aligned without cropping any of them. */
-  aspect-ratio: auto;
   height: 15rem;
   object-fit: contain;
   border: 1px solid var(--ae-line);
   background: var(--ae-wash);
 }
 
-.msk-release-slot {
-  max-width: 42rem;
+.msk-command-list {
+  display: grid;
+  gap: var(--ae-space-5);
+}
+
+.msk-command {
+  border-top: 1px solid var(--ae-line);
+  padding-top: var(--ae-space-5);
+  display: grid;
+  gap: var(--ae-space-3);
+}
+
+.msk-command:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.msk-command pre {
+  margin: 0;
+  overflow-x: auto;
+}
+
+.msk-release {
+  border-top: 1px solid var(--ae-line);
+  padding-top: var(--ae-space-5);
+  display: grid;
+  gap: var(--ae-space-3);
+}
+
+.msk-release:first-of-type {
+  border-top: 0;
+  padding-top: 0;
 }
 
 .msk-footer {
-  align-items: baseline;
+  align-items: center;
+}
+
+.msk-project-links {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ae-space-3);
+}
+
+.msk-github-icon {
+  display: inline-flex;
+  align-items: center;
+  color: inherit;
+}
+
+.msk-github-icon svg {
+  width: 1.15em;
+  height: 1.15em;
+  fill: currentColor;
 }
 
 .msk-zoom {
@@ -122,34 +222,35 @@
   background: var(--ae-wash);
 }
 
-.msk-release {
-  border-top: 1px solid var(--ae-line);
-  padding-top: var(--ae-space-5);
-  display: grid;
-  gap: var(--ae-space-3);
-}
-
-.msk-release:first-of-type {
-  border-top: 0;
-  padding-top: 0;
-}
-
 @media (max-width: 780px) {
-  /* qualified with .ae-wide, not just .msk-bar/.msk-footer: aesthetic.css's
-     `.ae-wide .ae-bar` rule (two classes) otherwise outranks the plain
-     one-class selector here and this override never takes effect, leaving
-     80px of dead margin at phone widths — the actual cause of the nav
-     "crowding" bug (aesthetic-910), confirmed by measuring the live
-     bounding box at 390px. */
   .ae-wide .msk-bar,
   .ae-wide .msk-footer {
     width: min(var(--ae-measure), 100% - 2rem);
+  }
+
+  .msk-bar {
+    align-items: flex-start;
   }
 
   .msk-actions,
   .msk-nav {
     flex-wrap: wrap;
     gap: var(--ae-space-3);
+  }
+
+  .msk-nav {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .msk-hero-panel {
+    width: 100%;
+    margin-block-end: var(--ae-space-5);
+    padding: var(--ae-space-5);
+  }
+
+  .msk-footer {
+    flex-wrap: nowrap;
   }
 
   .msk-gallery {
