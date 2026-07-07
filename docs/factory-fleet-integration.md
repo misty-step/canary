@@ -4,6 +4,14 @@ This is the 15-minute path for a Factory repo to report health, uptime, and
 an error or check-in signal to the Misty Step Canary instance. Use it from the
 consumer repo; keep service-specific code changes in that repo.
 
+> **Rust apps reporting their own errors/check-ins from inside the process**
+> (services, workers, CLIs, build tools) should follow
+> [`rust-consumer-integration.md`](rust-consumer-integration.md) — the
+> in-process reporter pattern (env-gated `src/canary.rs`, error ingest +
+> check-in loop, fleet-proven against `memory-engine-canary` and
+> `bitterblossom/src/canary.rs`). This file is the operator-side enrollment
+> path for URL-polled HTTP targets.
+
 ## Inputs
 
 - `CANARY_ENDPOINT`: `https://canary-obs.fly.dev` for Misty Step.
