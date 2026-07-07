@@ -24,17 +24,17 @@ services:
     environment:
       CARGO_TARGET_DIR: /cargo-target
       PATH: /usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      # No inline value: Compose passes this through from the invoking
+      # shell's own environment, so the key never appears as a literal
+      # `-e CANARY_API_KEY=<value>` argument on the `docker compose run`
+      # command line. See docs/self-host-docker.md.
+      CANARY_API_KEY:
     volumes:
       - .:/workspace:ro
       - canary-cargo-git:/usr/local/cargo/git
       - canary-cargo-registry:/usr/local/cargo/registry
       - canary-cargo-target:/cargo-target
-    entrypoint: ["/bin/bash", "-lc"]
-    command:
-      - |
-        test -n "$${CANARY_API_KEY:-}" ||
-        { echo "set CANARY_API_KEY to an admin or read-only key" >&2; exit 2; }
-        /usr/local/cargo/bin/cargo run -q -p canary-cli -- --endpoint http://canary:4000 --api-key "$$CANARY_API_KEY" --json doctor
+    entrypoint: ["/bin/bash", "/workspace/bin/canary-doctor-entrypoint.sh"]
 
 volumes:
   canary-data:
