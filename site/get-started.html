@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Canary - Agent-first observability</title>
+    <title>Get started with Canary</title>
     <meta
       name="description"
-      content="Agent-first observability for the Misty Step fleet."
+      content="Verified local and Docker first-run commands for Canary."
     />
     <script>
       try {
@@ -46,8 +46,7 @@
       </symbol>
     </svg>
 
-    <div class="ae-screen ae-wide msk-shell">
-      <div class="msk-bg" aria-hidden="true"></div>
+    <div class="ae-screen ae-wide">
       <header class="ae-bar msk-bar">
         <a class="ae-logo msk-logo" href="./" aria-label="Canary home">
           <span class="ae-app-mark" aria-hidden="true">
@@ -59,17 +58,69 @@
         </a>
         <nav class="ae-chrome msk-nav" aria-label="Site">
           <a href="features.html">features</a>
-          <a href="get-started.html">get started</a>
+          <a href="get-started.html" aria-current="page">get started</a>
           <a href="changelog.html">changelog</a>
           <a href="https://github.com/misty-step/canary">github</a>
         </nav>
       </header>
 
-      <main class="ae-stage msk-hero-stage" id="content">
-        <section class="msk-hero-panel" aria-labelledby="hero-title">
-          <h1 id="hero-title">Agent-first observability.</h1>
-          <a class="ae-button" href="get-started.html">Get started</a>
-        </section>
+      <main class="ae-stage ae-stage-scroll" id="content">
+        <article class="ae-doc msk-doc-page" aria-labelledby="start-title">
+          <h1 id="start-title">Get started</h1>
+          <p class="ae-lede">
+            These commands are sourced from the current README and Docker
+            self-hosting guide on <code>origin/master</code>.
+          </p>
+
+          <section class="msk-command-list" aria-label="First run commands">
+            <div class="msk-command">
+              <p class="ae-chrome">local Rust service</p>
+              <pre><code>git clone https://github.com/misty-step/canary &amp;&amp; cd canary
+cp .env.example .env
+set -a; . ./.env; set +a
+./bin/bootstrap
+cargo run -p canary-server</code></pre>
+            </div>
+
+            <div class="msk-command">
+              <p class="ae-chrome">capture the bootstrap key</p>
+              <pre><code>set -a; . ./.env; set +a
+cargo run -p canary-server 2&gt;&amp;1 | grep "Bootstrap API key:"
+export CANARY_ADMIN_KEY="sk_live_..."</code></pre>
+            </div>
+
+            <div class="msk-command">
+              <p class="ae-chrome">agent-facing doctor</p>
+              <pre><code>CANARY_ENDPOINT="http://localhost:4000" \
+CANARY_API_KEY="$CANARY_ADMIN_KEY" \
+bin/canary doctor --json</code></pre>
+            </div>
+
+            <div class="msk-command">
+              <p class="ae-chrome">Docker Compose first boot</p>
+              <pre><code>docker compose up --build -d canary
+docker compose logs canary | grep "Bootstrap API key:"
+export CANARY_ADMIN_KEY="&lt;store-the-bootstrap-key-securely&gt;"</code></pre>
+            </div>
+
+            <div class="msk-command">
+              <p class="ae-chrome">Docker-only doctor</p>
+              <pre><code>export CANARY_ENDPOINT="http://localhost:4000"
+export CANARY_API_KEY="$CANARY_ADMIN_KEY"
+docker compose run --rm canary-doctor</code></pre>
+            </div>
+          </section>
+
+          <section class="msk-section" aria-labelledby="docs-title">
+            <h2 id="docs-title">Next references</h2>
+            <ul>
+              <li><a href="https://github.com/misty-step/canary/tree/master/docs">docs/</a></li>
+              <li><a href="https://github.com/misty-step/canary/blob/master/docs/self-host-docker.md">Docker self-hosting</a></li>
+              <li><a href="https://github.com/misty-step/canary/blob/master/docs/self-host-fly.md">Fly self-hosting</a></li>
+              <li><a href="https://github.com/misty-step/canary/blob/master/AGENTS.md">agent surface and gates</a></li>
+            </ul>
+          </section>
+        </article>
       </main>
 
       <footer class="ae-bar msk-footer">
