@@ -208,10 +208,12 @@ export class Ci {
       .withExec(["bash", "test/bin/canary_witness_test.sh"])
       .withExec(["bash", "test/bin/canary_write_path_rehearsal_test.sh"])
       .withExec(["bash", "test/bin/canary_readiness_proof_test.sh"])
+      .withExec(["bash", "test/bin/canary_doctor_entrypoint_test.sh"])
       .withExec(["bash", "-n", "bin/canary"])
       .withExec(["bash", "-n", "bin/canary-witness"])
       .withExec(["bash", "-n", "bin/canary-write-path-rehearsal"])
       .withExec(["bash", "-n", "bin/canary-readiness-proof"])
+      .withExec(["bash", "-n", "bin/canary-doctor-entrypoint.sh"])
       .withExec(["bash", "bin/check-aesthetic-currency"])
   }
 

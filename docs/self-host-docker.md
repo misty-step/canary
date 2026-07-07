@@ -80,10 +80,15 @@ Rust container and named Cargo cache volumes, so no Rust installation is needed
 on the host:
 
 ```bash
-docker compose run --rm \
-  -e CANARY_API_KEY="$CANARY_ADMIN_KEY" \
-  canary-doctor
+export CANARY_API_KEY="$CANARY_ADMIN_KEY"
+docker compose run --rm canary-doctor
 ```
+
+Do not pass the key with `-e CANARY_API_KEY=<value>` on the `docker compose
+run` command line — that puts the raw key in the host's process list for
+every process running `docker compose run` while it executes. `docker-compose.yml`
+declares `CANARY_API_KEY` with no inline value, so Compose passes it through
+from your shell's own exported environment instead.
 
 Treat any non-clean doctor output as a failed production setup until the
 reported field is understood and either fixed or explicitly waived. A local
