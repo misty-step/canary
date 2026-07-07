@@ -466,6 +466,17 @@ prefix="dagger-alert-plane-$(date -u +%Y%m%d%H%M%S)-$$"
 monitor="canary-alert-plane-$prefix"
 observed_at="$(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
 
+# Seed the witness's own monitor (matches docs/canary-witness.md's
+# production monitor configuration) before impairing an unrelated
+# monitor below, so the witness's own self-heal check-in below has
+# somewhere to land instead of 404ing against an unknown monitor.
+curl --fail --silent --show-error \
+  -X POST "$CANARY_ENDPOINT/api/v1/monitors" \
+  -H "Authorization: Bearer $CANARY_API_KEY" \
+  -H "Content-Type: application/json" \
+  --data '{"name":"canary-watchman","service":"canary","mode":"ttl","expected_every_ms":600000,"grace_ms":120000}' \
+  >/tmp/canary-alert-plane-watchman-monitor.json
+
 monitor_payload="$(
   jq -cn \
     --arg name "$monitor" \
@@ -531,12 +542,18 @@ for attempt in $(seq 1 30); do
       --json >/tmp/canary-alert-plane-witness.out
     witness_status=$?
     set -e
-    test "$witness_status" != "0"
+    # The synthetic monitor created above is out of this witness's own
+    # scope (it isn't the witness's own canary-watchman monitor), the same
+    # shape as an unrelated service's overdue monitor blocking the witness
+    # in production (canary-920). The witness must still report healthy
+    # and still send its own check-in -- see docs/canary-witness.md.
+    test "$witness_status" == "0"
     jq -e '
-      .status == "degraded"
+      .status == "healthy"
       and .alert_plane.status == "impaired"
       and any(.alert_plane.reasons[]?; startswith("monitor_overdue pressured"))
-      and .check_in.skipped == true
+      and .check_in.skipped == false
+      and .self_heal_check_in == true
     ' /tmp/canary-alert-plane-witness.json >/dev/null
     jq '{
       route_ready: .response.reachability.readyz.response.status,
