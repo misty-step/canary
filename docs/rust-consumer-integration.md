@@ -231,8 +231,30 @@ impl tracing::field::Visit for Visitor<'_> {
 }
 ```
 
-Register it alongside your fmt layer at startup:
-`tracing_subscriber::registry().with(fmt_layer).with(canary::CanaryLayer).init();`
+Register it with a **per-layer** filter, never behind a global one:
+```rust
+use tracing_subscriber::{prelude::*, EnvFilter, filter::LevelFilter};
+tracing_subscriber::registry()
+    .with(fmt_layer.with_filter(EnvFilter::from_default_env()))   // RUST_LOG affects the CONSOLE only
+    .with(canary::CanaryLayer.with_filter(LevelFilter::ERROR))    // Canary sees EVERY error, always
+    .init();
+```
+
+> **GOTCHA — filter swallow (bit cairn live, 2026-07-07):** do NOT write
+> `registry().with(fmt_layer).with(EnvFilter).with(CanaryLayer)` or
+> `Subscriber::builder()...finish().with(CanaryLayer)`. A **global** `EnvFilter`
+> (or the fmt subscriber's built-in filter) runs *before* the layer, so at any
+> realistic `RUST_LOG` (e.g. `myapp=info`) every ERROR whose target isn't your
+> crate — `tower_http::catch_panic`, `tower_http::trace::on_failure`, a
+> dependency's error — is dropped before `CanaryLayer` ever sees it. Attach the
+> `EnvFilter` **per-layer to the fmt layer** and give `CanaryLayer` its own
+> `LevelFilter::ERROR`. Verify by firing an error at `RUST_LOG=off` and
+> confirming it still lands at the hub.
+
+> **GOTCHA — self-recursion:** because `CanaryLayer` is unfiltered, a failed
+> send that itself logs `error!` (via `hyper`/`reqwest`/`rustls`/`h2`) would
+> re-enter the layer. Deny those transport targets in `on_event` (early-return
+> if `event.metadata().target()` starts with a transport crate).
 
 > **Secret-sensitive apps (mint):** the layer is a new leak surface. `redact()`
 > must scrub the message/fields to failure *shape* (op name, policy id, upstream
@@ -250,16 +272,28 @@ pub fn install_panic_hook() {
         let msg = info.payload().downcast_ref::<&str>().map(|s| (*s).to_owned())
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "panic".to_owned());
-        report_error(&format!("{}.panic", service()), &format!("{msg} @ {loc}"));
-        flush();            // best-effort before the process dies
+        report_error_blocking(&format!("{}.panic", service()), &format!("{msg} @ {loc}"));
         default(info);
     }));
 }
 ```
 
+> **GOTCHA — panic send must be BLOCKING (bit cairn live, 2026-07-07):** if your
+> reporter sends via `tokio::spawn` (async reporters using `reqwest`), the spawn
+> is **cancelled when the runtime drops during process teardown**, so an uncaught
+> panic's report never leaves the box. The panic hook must send **synchronously**
+> — its own `std::thread` + a bounded current-thread runtime (or a blocking HTTP
+> client like `ureq`) — and complete before returning to the default hook. A
+> `std::thread`/`ureq` reporter (the module at the top of this doc) is already
+> blocking, so `report_error` + `flush()` is fine there; only async/`tokio`
+> reporters need the dedicated `report_error_blocking`. Prove it with a test that
+> triggers the hook with **no ambient tokio runtime** and asserts the POST lands.
+
 For Axum, also add `tower_http::catch_panic::CatchPanicLayer::new(...)` so a
 panicking handler **reports and returns 500** instead of silently killing the
-worker task.
+worker task. (For a *caught* handler panic the process survives, so a
+fire-and-forget send has time to land; the blocking requirement above is for the
+*uncaught* panic that ends the process.)
 
 ### 3. Continuous health in *every* standing-service bootstrap
 
@@ -285,6 +319,16 @@ Mirror `memory-engine-canary/tests/reporter.rs`: bind a `TcpListener` on
 reporter, and assert the request body. Add one test that points at a **dead
 port** and asserts the call returns without panic/hang — that proves invariant
 2 (an outage never reaches the caller).
+
+> **GOTCHA — tests fire REAL events if `CANARY_*` is in your shell (fleet-wide,
+> 2026-07-07):** the reporter is env-gated, so any `cargo test`/smoke run in a
+> shell that already exports `CANARY_ENDPOINT` + `CANARY_API_KEY` will send real
+> check-ins/errors to production under your service name — especially tests that
+> spawn the real binary as a subprocess (it inherits the env). Every test that
+> exercises a real run must **clear the env** (`Command::env_remove(...)` for
+> subprocesses; the reporter's own unit tests set only the mock's endpoint), and
+> run the gate with `env -u CANARY_ENDPOINT -u CANARY_API_KEY -u CANARY_INGEST_KEY`.
+> Tracked fleet-wide as `canary-102`.
 
 ## Fire the proof event (the wiring oracle)
 
