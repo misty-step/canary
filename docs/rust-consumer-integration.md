@@ -166,17 +166,117 @@ fn spawn_send(endpoint: String, key: String, path: &'static str, body: serde_jso
 
 ## Wiring points
 
-- **Services / long-running workers** (glass, mint, cairn, memory-engine-api,
-  bitterblossom): call `canary::start_health_loop()` once in `main`/server
-  bootstrap; call `canary::report_error(class, msg)` at your typed failure
-  sites; wrap the request handler and any worker run in `catch_unwind` and
-  report `"<app>.panic"` on unwind.
-- **CLIs / build tools** (crucible, roster, glance-next, doomscrum): call
-  `canary::check_in()` once when a run completes (`status: "ok"` on success),
-  and `canary::report_error("<app>.<subcommand>.failed", &err)` on the error
-  return path in `main`. No background loop — the tool isn't a standing
-  service, so its monitor expects an occasional (daily) check-in; overdue
-  between runs is expected, not an incident.
+- **Standing services** (glass, mint, cairn, roster-api, roster-mcp,
+  memory-engine-api, bitterblossom; also the long-running *modes* of
+  otherwise-CLI binaries: `crucible serve`/`mcp`, `doomscrum serve`,
+  `glance-next serve-local`, `cairn mcp`): install the panic hook and the
+  tracing→Canary layer once at process start, call
+  `canary::start_health_loop()` **in every long-running bootstrap** (each
+  `serve`/`mcp`/daemon entry, not just `main`), and report at the service
+  boundary (Axum 5xx mapping, MCP tool error arm, detached-task error arm).
+  A one-shot `check_in()` is **not enough** for a process that outlives the
+  TTL — it goes falsely overdue. See **Comprehensive coverage** below.
+- **CLIs / build tools** (`roster`, `glance-next`, `crucible`, `doomscrum`
+  one-shot subcommands): install the panic hook + tracing layer, call
+  `canary::check_in()` once per run, and rely on the tracing layer +
+  top-level `report_error` for errors. No background loop for the one-shot
+  path — overdue between runs is expected, not an incident. **But if the same
+  binary has a `serve`/`mcp` mode, that mode is a standing service** and needs
+  `start_health_loop()`.
+
+> **A single top-level `report_error` at `main()`'s `Err` arm is the shallow
+> pattern** — it only sees errors that *propagate* out of `main`. It is blind
+> to panics, request-handler errors, errors inside `tokio::spawn` tasks, and
+> anything logged-and-swallowed. The comprehensive pattern below makes error
+> capture a property of **logging** (every `error!` is reported) plus a panic
+> hook, so you stop hand-wiring call sites.
+
+## Comprehensive coverage (services, panics, app logging)
+
+Adoption is not "one fired event" — it is *every* error path and *continuous*
+health for every standing service. Four additions turn the shallow reporter
+into comprehensive coverage:
+
+### 1. Auto-capture every `ERROR` log (the high-leverage move)
+
+A `tracing` layer that forwards every `ERROR`-level event to `report_error`.
+Now "app logging" **is** error capture: any `tracing::error!(...)` anywhere in
+the app (or its libraries) lands in Canary with zero per-site wiring. Migrate
+raw `eprintln!`/`log::error!` error sites to `tracing::error!` (bridge
+`log`-only crates with `tracing_log::LogTracer::init()`).
+
+```rust
+// in canary.rs — deps: tracing, tracing-subscriber
+use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::layer::{Context, Layer};
+
+pub struct CanaryLayer;
+
+impl<S: Subscriber> Layer<S> for CanaryLayer {
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        if config().is_none() || *event.metadata().level() != Level::ERROR { return; }
+        let mut msg = String::new();
+        event.record(&mut Visitor(&mut msg));           // pulls `message` + fields
+        let class = format!("{}.{}", service(), event.metadata().target());
+        report_error(&class, &redact(&msg));            // redact() = identity unless secret-sensitive
+    }
+}
+
+struct Visitor<'a>(&'a mut String);
+impl tracing::field::Visit for Visitor<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if !self.0.is_empty() { self.0.push(' '); }
+        self.0.push_str(&format!("{}={:?}", field.name(), value));
+    }
+}
+```
+
+Register it alongside your fmt layer at startup:
+`tracing_subscriber::registry().with(fmt_layer).with(canary::CanaryLayer).init();`
+
+> **Secret-sensitive apps (mint):** the layer is a new leak surface. `redact()`
+> must scrub the message/fields to failure *shape* (op name, policy id, upstream
+> status) before sending — never a credential, token, or request/response body.
+> A redaction test on the auto-forwarded path is mandatory.
+
+### 2. Capture panics
+
+```rust
+pub fn install_panic_hook() {
+    if config().is_none() { return; }
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let loc = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        let msg = info.payload().downcast_ref::<&str>().map(|s| (*s).to_owned())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "panic".to_owned());
+        report_error(&format!("{}.panic", service()), &format!("{msg} @ {loc}"));
+        flush();            // best-effort before the process dies
+        default(info);
+    }));
+}
+```
+
+For Axum, also add `tower_http::catch_panic::CatchPanicLayer::new(...)` so a
+panicking handler **reports and returns 500** instead of silently killing the
+worker task.
+
+### 3. Continuous health in *every* standing-service bootstrap
+
+`start_health_loop()` fires once immediately, then every 60s from a named
+thread (TTL 120s). Call it at the top of **each** long-running entry point —
+the HTTP `serve`, the MCP stdio loop, any daemon — not only in a CLI one-shot.
+A process that outlives the TTL without a loop reads as `down` while perfectly
+healthy (the exact bug the audit found in cairn-mcp, crucible serve/mcp,
+doomscrum serve, glance-next serve-local).
+
+### 4. Report at the service boundary
+
+Report where a running service actually fails, not just at `main`:
+Axum's error→response mapping (e.g. `impl IntoResponse for AppError`), the MCP
+tool error arm, and each detached `tokio::spawn` task's error arm. Prefer
+emitting `tracing::error!` at those sites so layer #1 captures them
+automatically — that keeps it one declaration, not N manual calls.
 
 ## Test it without the network (mock server)
 
@@ -207,13 +307,22 @@ The app is integrated only when the readback shows the monitor's
 
 ## Per-repo checklist
 
+**Baseline reporter**
 - [ ] `src/canary.rs` (or `<app>-canary` crate) added, gated on env, no-ops without creds.
 - [ ] Deps: `serde_json` + `ureq` (or zero-dep `curl` variant).
-- [ ] `report_error` wired at typed failure sites + `catch_unwind` on request/worker boundaries.
-- [ ] `start_health_loop()` (service) **or** one `check_in()` per run (CLI/tool).
 - [ ] Monitor exists in Canary (name = your `MONITOR` const). Provisioned out-of-band.
 - [ ] Mock-server unit test + dead-port no-hang test.
+
+**Comprehensive coverage (required — the shallow single-call pattern is not enough)**
+- [ ] `install_panic_hook()` called once at process start; a forced panic reports `<app>.panic` at the hub.
+- [ ] `CanaryLayer` registered in the tracing subscriber; a `tracing::error!` anywhere is observed at the hub. Raw `eprintln!`/`log::error!` error sites migrated to `tracing::error!` (or `LogTracer` bridged).
+- [ ] **Every** long-running mode (`serve`/`mcp`/daemon) calls `start_health_loop()` — a process running past the 120s TTL stays `up`, not falsely overdue.
+- [ ] Service-boundary reporting: Axum 5xx mapping + MCP tool error arm + detached-task error arms emit `tracing::error!` (captured by the layer) or `report_error` directly. Axum gets `CatchPanicLayer`.
+- [ ] CLIs/tools: one `check_in()` per run (overdue-between-runs expected). Any `serve`/`mcp` subcommand still needs the health loop.
+- [ ] Secret-sensitive apps (mint): `redact()` proven on the auto-forwarded tracing path — failure shape only, never a credential/token/body.
+
+**Proof + gate**
 - [ ] `cargo build` / gate green; no gate lowered, no error silenced to look green.
-- [ ] **Fired-event proof**: live check-in and/or error observed at the hub. Record IDs.
+- [ ] **Fired-event proof (comprehensive)**: for a service — monitor STAYS up while the process runs; a forced handler/task error AND a forced panic observed at the hub. For a CLI — check-in + a forced error observed. Record IDs.
 </content>
 </invoke>
