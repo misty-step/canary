@@ -32,7 +32,10 @@ jobs:
         uses: misty-step/landmark@v1
         with:
           mode: full
-          github-token: ${{ secrets.GH_RELEASE_TOKEN }}
+          # github.token (with the job's write permissions above) instead of a
+          # PAT: releases it creates do not emit `release: published` events to
+          # other workflows, so synthesis must stay inline (`synthesis: true`).
+          github-token: ${{ github.token }}
           llm-api-key: ${{ secrets.OPENROUTER_API_KEY }}
           node-version: "24"
           synthesis: "true"
