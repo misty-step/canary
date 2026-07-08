@@ -4,7 +4,7 @@ dbs:
       - type: s3
         bucket: ${BUCKET_NAME}
         path: canary.db
-        endpoint: https://fly.storage.tigris.dev
-        region: auto
+        endpoint: ${LITESTREAM_ENDPOINT}
+        region: ${LITESTREAM_REGION}
         force-path-style: true
         snapshot-interval: 1h
