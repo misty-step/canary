@@ -433,15 +433,14 @@ BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "invalid registry exits non-zero"
 assert_contains "$BODY" "Invalid deployed-service registry" "invalid registry explains the schema failure"
 
-echo "Test 7: dogfood-audit strict json reports stale evidence and singular completed-ticket next actions"
+echo "Test 7: dogfood-audit strict json reports stale evidence"
 setup_stubbed_curl
 OUTPUT=$(CANARY_ENDPOINT=https://canary.example CANARY_API_KEY=sk_test run_failure "$DOGFOOD_AUDIT" --manifest "$STALE_MANIFEST" --now 2026-06-14T00:00:00Z --max-evidence-age-hours 24 --strict --json)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "stale strict json exits non-zero"
-assert_json_equals "$BODY" ".registry_policy_failures | length" "2" "json includes registry policy failures"
+assert_json_equals "$BODY" ".registry_policy_failures | length" "1" "json includes registry policy failures"
 assert_json_equals "$BODY" ".registry_policy_failures[0].kind" "stale_registry_evidence" "json names stale evidence failure"
-assert_json_equals "$BODY" ".registry_policy_failures[1].kind" "completed_ticket_next_action" "json names completed-ticket failure"
 
 echo "Test 8: dogfood-audit fails cleanly when curl is unavailable"
 setup_path_without_curl

@@ -10,7 +10,7 @@ Self-hosted observability substrate for AI agents (not humans). Rust + SQLite + 
 | TypeScript SDK | JS/TS client; `tsup` build + `vitest` | `clients/typescript/` |
 | CI module | Single source of truth for the gate (Dagger TS) | `dagger/` |
 | Bin scripts | Operator API — validate, dagger, bootstrap, DR | `bin/` |
-| Backlog | File-driven work with `_done/` archive + priority map | `backlog.d/` |
+| Backlog | 100% on Powder (repo `canary`) — cards, claims, status; no repo-local ticket files | `powder` CLI / MCP |
 
 (Rust workspace crates cover core service, HTTP contracts, SQLite store, ingest, workers, and the Axum runtime.)
 
@@ -67,12 +67,12 @@ Prefer these over re-deriving from the code base.
 
 | Area | File(s) | Issue |
 |---|---|---|
-| **#010 Ramp pattern** (blocked, XL, north-star) | `backlog.d/010-ramp-pattern.md` | Blocked on bitterblossom triage sprite (`bitterblossom/backlog.d/011-canary-triage-sprite.md`). Agent-consumer shape of error→triage→fix. |
-| **#020 Adminifi HTTP surface verification** (blocked, S) | `backlog.d/020-adminifi-http-surface-verification.md` | Upstream Adminifi HTTP surface stability. |
-| **#063 Triage contract hardening** (pending, XL, P1) | `backlog.d/063-triage-contract-hardening.md` | Durable webhook cooldown, dispatch budgets, claim-gated delivery. |
-| **#064 Trustworthy release/upgrade** (pending, L, P1) | `backlog.d/064-trustworthy-release-upgrade.md` | npm publish, Docker image publish, v1.0.0 release-note truth gap. Children 4+5 (upgrade/compatibility docs) shipped. |
-| **#065 Runtime hardening** (pending, L, P1) | `backlog.d/065-runtime-hardening.md` | bcrypt-outside-mutex, tracing adoption (server startup shipped), backup posture. Children 4 (tracing), 5 (anyhow), 6 (SLI floor) shipped. |
-| **#066 Consolidation and archaeology deletion** (pending, XL, P2) | `backlog.d/066-consolidation-and-archaeology-deletion.md` | Worker lifecycle quad unification, oban_jobs rename (gated on prod DB restamp), canary-ingest fold, legacy fixture retirement. Parity comment sweep complete; Burst bucket, stale yarn.lock, .backlog.d/ deleted. |
+| **canary-010 Ramp pattern** (blocked, XL, north-star) | Powder | Blocked ~3.5 months on nonexistent bitterblossom artifacts; unblock-or-kill proposal via canary-932 child 5. |
+| **canary-020 Adminifi HTTP surface verification** (blocked, S) | Powder | Upstream Adminifi HTTP surface stability. |
+| **canary-063 Triage contract hardening** (backlog, XL, P1) | Powder | Durable webhook cooldown, dispatch budgets, claim-gated delivery. |
+| **canary-064 Trustworthy release/upgrade** (backlog, L, P1) | Powder | Rescoped 2026-07-09: release restore → canary-931, pullable image → canary-934; likely closeable after both. |
+| **canary-065 Runtime hardening** (backlog, L, P1) | Powder | bcrypt child superseded by canary-930; proxy-header trust invariant, DO backup posture, witness cadence truth. |
+| **canary-066 Consolidation and archaeology deletion** (backlog, XL, P2) | Powder | Worker lifecycle QUINT unification (webhook_delivery is the divergent fifth), oban_jobs rename (gated on prod DB restamp), ValidationErrors relocation / canary-ingest fold, fixture WAL ignore. |
 | Recurring footgun surface | Footguns section below + Rust store/runtime/schema modules | Every remediation here must cite the footgun list and extend it when new failure modes appear. |
 | **canary-930 Request-path concurrency** (ready, P0) | Powder | bcrypt-under-store-lock root cause (live-reproduced), /readyz spiral, mutex poisoning, monitor_overdue scan, oban_jobs growth. Consolidates the slow-API/500 cards. |
 | **canary-931 Release pipeline restore** (ready, P0) | Powder | Releaser App secrets missing (releases hard-down), zero GitHub releases, version disagreement, npm SDK unpublished. |
@@ -82,7 +82,7 @@ Prefer these over re-deriving from the code base.
 | **canary-935 /ui first-class** (ready, P1) | Powder | Vendored fonts, graceful degradation, read contract, UI smoke, mobile-first. Folds 067/068/915 intent. |
 | **canary-936 Service-bound reads + redaction corpus** (ready, P0) | Powder | Unbound read keys read cross-service rich context; four-regex redaction. 048 successor; ADR-gated scope model. |
 
-All other tracked items are shipped and archived under `backlog.d/_done/`. Powder is the board of record; `backlog.d/` is the import seed. Priority map + Lanes 1–5 in `backlog.d/README.md`.
+The backlog is 100% on Powder (operator ruling 2026-07-09): query with `powder` CLI or the powder MCP (`list_cards`/`list_ready` with `repo: canary`); claim before work; done cards carry shipping evidence. The former `backlog.d/` tree was deleted — its history lives in git.
 
 ## Outer loop
 

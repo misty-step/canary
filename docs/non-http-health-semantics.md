@@ -202,5 +202,6 @@ That is insufficient for Canary's health lane.
 
 ## Follow-On
 
-The implementation follow-up is tracked in
-[backlog.d/021-check-in-monitors-for-non-http-runtimes.md](/Users/phaedrus/Development/canary/backlog.d/021-check-in-monitors-for-non-http-runtimes.md).
+The implementation follow-up (check-in monitors for non-HTTP runtimes,
+formerly ticket 021) shipped; see the Powder board (repo `canary`) for any
+remaining monitor-semantics work.
