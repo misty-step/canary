@@ -28,14 +28,22 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Mint release token
+        id: release-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.LANDMARK_RELEASER_APP_ID }}
+          private-key: ${{ secrets.LANDMARK_RELEASER_PRIVATE_KEY }}
+
       - name: Run Landmark
         uses: misty-step/landmark@v0
         with:
           mode: full
-          # github.token (with the job's write permissions above) instead of a
-          # PAT: releases it creates do not emit `release: published` events to
-          # other workflows, so synthesis must stay inline (`synthesis: true`).
-          github-token: ${{ github.token }}
+          # Short-lived installation token from the org's misty-step-releaser
+          # GitHub App (misty-step-940), replacing the github.token stopgap
+          # from #244: unlike GITHUB_TOKEN, App tokens still trigger
+          # downstream workflows on the tags/releases they create.
+          github-token: ${{ steps.release-token.outputs.token }}
           llm-api-key: ${{ secrets.OPENROUTER_API_KEY }}
           node-version: "24"
           synthesis: "true"
