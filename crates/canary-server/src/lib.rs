@@ -865,6 +865,75 @@ mod tests {
         Ok(())
     }
 
+    /// `report_error_groups_scoped` and `active_incidents` deliberately stay
+    /// off the read pool because they fuse a claim-expiry write into the
+    /// read (see `read_pool.rs` and `read_source.rs`). This guards that the
+    /// exclusion actually keeps a pooled `/api/v1/report` read correct end
+    /// to end: an expired claim must not still show as `current_claim`
+    /// (canary-930 child B review MINOR).
+    #[tokio::test]
+    async fn read_pool_report_reflects_claim_expiry_done_via_writer() -> Result<(), Box<dyn Error>>
+    {
+        let path = temp_db_path("read-pool-claim-expiry");
+        let mut store = Store::open(&path)?;
+        store.migrate()?;
+        seed_api_key(&mut store, "KEY-admin", ADMIN_KEY, "admin", None)?;
+        seed_api_key(&mut store, "KEY-read", READ_KEY, "read-only", None)?;
+        seed_api_key(&mut store, "KEY-ingest", INGEST_KEY, "ingest-only", None)?;
+        let read_pool = Arc::new(ReadPool::open(&path)?);
+        let state = IngestState::new(store, IngestConfig::default()).with_read_pool(read_pool);
+        let router = ingest_router(state);
+
+        let ingested = router
+            .clone()
+            .oneshot(error_request(
+                INGEST_KEY,
+                r#"{"service":"claim-svc","error_class":"RuntimeError","message":"claim expiry regression"}"#,
+            )?)
+            .await?;
+        assert_eq!(ingested.status(), StatusCode::CREATED);
+        let ingested_body = json_body(ingested).await?;
+        let group_hash = ingested_body["group_hash"]
+            .as_str()
+            .ok_or("missing error group hash")?
+            .to_owned();
+
+        let claimed = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/claims",
+                ADMIN_KEY,
+                &format!(
+                    r#"{{"subject_type":"error_group","subject_id":"{group_hash}","owner":"codex","purpose":"inspect","ttl_ms":1,"idempotency_key":"run-expiry"}}"#
+                ),
+            )?)
+            .await?;
+        assert_eq!(claimed.status(), StatusCode::CREATED);
+
+        // Let the 1ms TTL lapse so the claim is due for expiry by the time
+        // the report handler's writer block runs it.
+        thread::sleep(StdDuration::from_millis(50));
+
+        let report = router
+            .clone()
+            .oneshot(read_request(READ_KEY, "/api/v1/report?window=30d")?)
+            .await?;
+        assert_eq!(report.status(), StatusCode::OK);
+        let report_body = json_body(report).await?;
+        assert_eq!(report_body["error_groups"][0]["group_hash"], group_hash);
+        assert!(
+            report_body["error_groups"][0]["current_claim"].is_null(),
+            "expired claim must not still be reported as current: {report_body}"
+        );
+
+        fs::remove_file(&path)?;
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn dashboard_shell_serves_assets_without_private_data() -> Result<(), Box<dyn Error>> {
         let router = dashboard_router();

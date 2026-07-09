@@ -40,6 +40,25 @@ impl IngestState {
     }
 }
 
+impl ReadSource<'_> {
+    /// Run `f` so every read-model query it issues observes one consistent
+    /// snapshot. Callers whose block reads more than one row set that must
+    /// agree with each other (a multi-section report, for example) must use
+    /// this instead of calling query methods directly: a pool-backed source
+    /// gives each bare query its own WAL snapshot, so two sequential
+    /// queries could otherwise straddle a concurrent write and return a
+    /// self-contradictory result. A writer-backed source is already atomic
+    /// for the whole call because `IngestState::lock_store` holds the
+    /// single-writer mutex for as long as the guard lives, so this is a
+    /// plain call for that variant.
+    pub(crate) fn with_snapshot<T>(&self, f: impl FnOnce() -> T) -> std::result::Result<T, String> {
+        match self {
+            Self::Pool(conn) => conn.with_snapshot(f).map_err(|error| error.to_string()),
+            Self::Writer(_) => Ok(f()),
+        }
+    }
+}
+
 /// One request's read handle, backed by either a pooled read-only
 /// connection or the single-writer store guard.
 pub(crate) enum ReadSource<'a> {

@@ -43,12 +43,26 @@ pub(crate) async fn health_status(
         Ok(reader) => reader,
         Err(_) => return problem_response(internal_problem()),
     };
-    let mut targets = match reader.health_targets_scoped(&key.tenant_id, &key.project_id) {
-        Ok(targets) => targets,
-        Err(_) => return problem_response(internal_problem()),
-    };
-    let mut monitors = match reader.health_monitors_scoped(&key.tenant_id, &key.project_id) {
-        Ok(monitors) => monitors,
+    // Both queries must agree with each other, so they run inside one
+    // read-transaction snapshot instead of each independently observing
+    // whatever the database looks like when it happens to run (canary-930
+    // child B review fix).
+    type HealthStatusReads = (Vec<HealthTargetStatus>, Vec<HealthMonitorStatus>);
+    let reads = reader.with_snapshot(
+        || -> std::result::Result<HealthStatusReads, Box<Response<Body>>> {
+            let targets = reader
+                .health_targets_scoped(&key.tenant_id, &key.project_id)
+                .map_err(|_| Box::new(problem_response(internal_problem())))?;
+            let monitors = reader
+                .health_monitors_scoped(&key.tenant_id, &key.project_id)
+                .map_err(|_| Box::new(problem_response(internal_problem())))?;
+            Ok((targets, monitors))
+        },
+    );
+    drop(reader);
+    let (mut targets, mut monitors) = match reads {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(problem)) => return *problem,
         Err(_) => return problem_response(internal_problem()),
     };
     if let Some(bound_service) = key.service.as_deref() {
@@ -81,20 +95,43 @@ pub(crate) async fn status(
         Ok(reader) => reader,
         Err(_) => return problem_response(internal_problem()),
     };
-    let mut targets = match reader.health_targets_scoped(&key.tenant_id, &key.project_id) {
-        Ok(targets) => targets,
+    // All three queries must agree with each other (overall status is
+    // derived by combining them), so they share one read-transaction
+    // snapshot instead of each independently observing whatever the
+    // database looks like when it happens to run (canary-930 child B review
+    // fix).
+    type StatusReads = (
+        Vec<HealthTargetStatus>,
+        Vec<HealthMonitorStatus>,
+        Vec<ErrorSummaryItem>,
+    );
+    let reads = reader.with_snapshot(
+        || -> std::result::Result<StatusReads, Box<Response<Body>>> {
+            let targets = reader
+                .health_targets_scoped(&key.tenant_id, &key.project_id)
+                .map_err(|_| Box::new(problem_response(internal_problem())))?;
+            let monitors = reader
+                .health_monitors_scoped(&key.tenant_id, &key.project_id)
+                .map_err(|_| Box::new(problem_response(internal_problem())))?;
+            let error_summary =
+                match reader.error_summary_scoped(window, &key.tenant_id, &key.project_id) {
+                    Ok(summary) => summary,
+                    Err(QueryError::InvalidWindow) => {
+                        return Err(Box::new(problem_response(invalid_window_problem())));
+                    }
+                    Err(QueryError::Sqlite(_)) => {
+                        return Err(Box::new(problem_response(internal_problem())));
+                    }
+                };
+            Ok((targets, monitors, error_summary))
+        },
+    );
+    drop(reader);
+    let (mut targets, mut monitors, mut error_summary) = match reads {
+        Ok(Ok(triple)) => triple,
+        Ok(Err(problem)) => return *problem,
         Err(_) => return problem_response(internal_problem()),
     };
-    let mut monitors = match reader.health_monitors_scoped(&key.tenant_id, &key.project_id) {
-        Ok(monitors) => monitors,
-        Err(_) => return problem_response(internal_problem()),
-    };
-    let mut error_summary =
-        match reader.error_summary_scoped(window, &key.tenant_id, &key.project_id) {
-            Ok(summary) => summary,
-            Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
-            Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
-        };
     if let Some(bound_service) = key.service.as_deref() {
         targets.retain(|target| target.service == bound_service);
         monitors.retain(|monitor| monitor.service == bound_service);

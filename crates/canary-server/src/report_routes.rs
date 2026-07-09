@@ -10,15 +10,16 @@ use axum::{
     http::{HeaderMap, HeaderName, Response, StatusCode},
 };
 use canary_core::query::{
-    ErrorGroupSummary, ReportCursor, decode_report_cursor, encode_report_cursor,
+    ErrorGroupSummary, ReportCursor, TimelineEvent, decode_report_cursor, encode_report_cursor,
 };
 use canary_http::problem_details::{
     ProblemDetails, internal_problem, invalid_report_cursor_problem, invalid_report_limit_problem,
     invalid_string_param_problem, invalid_window_problem,
 };
 use canary_store::{
-    IncidentListOptions, QueryError, RecentTransition, SearchResult, ServiceSliSummary,
-    ServiceSliTrajectory, TimelineQueryError, TimelineQueryOptions,
+    HealthMonitorStatus, HealthTargetStatus, IncidentListOptions, QueryError, RecentTransition,
+    SearchResult, ServiceSliSummary, ServiceSliTrajectory, TimelineQueryError,
+    TimelineQueryOptions,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -38,6 +39,26 @@ pub(crate) struct ReportParams {
     q: Option<String>,
     limit: Option<String>,
     cursor: Option<String>,
+}
+
+/// Bundle of every pure-read query the report handler runs inside one
+/// `ReadSource::with_snapshot` block, so every field below agrees with
+/// every other field (see the consistency note in `report`).
+struct ReportPoolReads {
+    targets: Vec<HealthTargetStatus>,
+    monitors: Vec<HealthMonitorStatus>,
+    error_summary: Vec<canary_store::ErrorSummaryItem>,
+    service_sli: Vec<ServiceSliSummary>,
+    transitions: Vec<RecentTransition>,
+    recent_events: Vec<TimelineEvent>,
+    search_results: Option<Vec<SearchResult>>,
+}
+
+fn report_query_problem(error: QueryError) -> Box<Response<Body>> {
+    Box::new(match error {
+        QueryError::InvalidWindow => problem_response(invalid_window_problem()),
+        QueryError::Sqlite(_) => problem_response(internal_problem()),
+    })
 }
 
 pub(crate) async fn report(
@@ -71,6 +92,17 @@ pub(crate) async fn report(
     // it no longer serializes behind the writer mutex (canary-930 child B).
     // The audit write at the bottom of this handler still runs on the writer
     // too, once the response is known to succeed.
+    //
+    // Residual tradeoff: this writer block and the pool block below run as
+    // two separate critical sections (plus a third for the audit write), not
+    // one atomic snapshot across the whole response the way the pre-split
+    // handler was. A write landing between them can make error_groups/
+    // incidents reflect a slightly different instant than targets/monitors/
+    // etc. That cross-block skew is accepted deliberately in exchange for
+    // concurrency — the pool block itself stays internally consistent via
+    // `with_snapshot` (canary-930 child B review fix), which is the property
+    // that actually matters for a report reader: every field sourced from
+    // the pool agrees with every other field sourced from the pool.
     let (mut error_groups, mut incidents) = {
         let mut store = match state.lock_store() {
             Ok(store) => store,
@@ -100,60 +132,80 @@ pub(crate) async fn report(
         Ok(reader) => reader,
         Err(_) => return problem_response(internal_problem()),
     };
-    let mut targets = match reader.health_targets_scoped(&key.tenant_id, &key.project_id) {
-        Ok(targets) => targets,
-        Err(_) => return problem_response(internal_problem()),
-    };
-    let mut monitors = match reader.health_monitors_scoped(&key.tenant_id, &key.project_id) {
-        Ok(monitors) => monitors,
-        Err(_) => return problem_response(internal_problem()),
-    };
-    let mut error_summary =
-        match reader.error_summary_scoped(window, &key.tenant_id, &key.project_id) {
-            Ok(summary) => summary,
-            Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
-            Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
+    let pool_reads = reader.with_snapshot(|| -> Result<ReportPoolReads, Box<Response<Body>>> {
+        let targets = reader
+            .health_targets_scoped(&key.tenant_id, &key.project_id)
+            .map_err(|_| Box::new(problem_response(internal_problem())))?;
+        let monitors = reader
+            .health_monitors_scoped(&key.tenant_id, &key.project_id)
+            .map_err(|_| Box::new(problem_response(internal_problem())))?;
+        let error_summary = reader
+            .error_summary_scoped(window, &key.tenant_id, &key.project_id)
+            .map_err(report_query_problem)?;
+        let service_sli = reader
+            .service_sli_scoped(window, &key.tenant_id, &key.project_id)
+            .map_err(report_query_problem)?;
+        let transitions = reader
+            .recent_transitions_scoped(window, &key.tenant_id, &key.project_id)
+            .map_err(report_query_problem)?;
+        let recent_events = reader
+            .timeline(
+                window,
+                TimelineQueryOptions {
+                    tenant_id: Some(key.tenant_id.clone()),
+                    project_id: Some(key.project_id.clone()),
+                    service: key.service.clone(),
+                    limit: Some("10".to_owned()),
+                    event_type: Some("telemetry.event".to_owned()),
+                    ..TimelineQueryOptions::default()
+                },
+            )
+            .map(|events| events.events)
+            .map_err(|error| {
+                Box::new(match error {
+                    TimelineQueryError::InvalidWindow => problem_response(invalid_window_problem()),
+                    TimelineQueryError::InvalidLimit
+                    | TimelineQueryError::InvalidCursor
+                    | TimelineQueryError::InvalidEventType(_)
+                    | TimelineQueryError::Sqlite(_) => problem_response(internal_problem()),
+                })
+            })?;
+        let search_results = match params.q.as_deref() {
+            Some(query) => Some(
+                match reader.search_errors_scoped(query, window, &key.tenant_id, &key.project_id) {
+                    Ok(results) => results,
+                    Err(QueryError::InvalidWindow) => {
+                        return Err(Box::new(problem_response(invalid_window_problem())));
+                    }
+                    Err(QueryError::Sqlite(_)) => Vec::new(),
+                },
+            ),
+            None => None,
         };
-    let mut service_sli = match reader.service_sli_scoped(window, &key.tenant_id, &key.project_id) {
-        Ok(service_sli) => service_sli,
-        Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
-        Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
-    };
-    let mut transitions =
-        match reader.recent_transitions_scoped(window, &key.tenant_id, &key.project_id) {
-            Ok(transitions) => transitions,
-            Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
-            Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
-        };
-    let recent_events = match reader.timeline(
-        window,
-        TimelineQueryOptions {
-            tenant_id: Some(key.tenant_id.clone()),
-            project_id: Some(key.project_id.clone()),
-            service: key.service.clone(),
-            limit: Some("10".to_owned()),
-            event_type: Some("telemetry.event".to_owned()),
-            ..TimelineQueryOptions::default()
-        },
-    ) {
-        Ok(events) => events.events,
-        Err(TimelineQueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
-        Err(TimelineQueryError::InvalidLimit)
-        | Err(TimelineQueryError::InvalidCursor)
-        | Err(TimelineQueryError::InvalidEventType(_))
-        | Err(TimelineQueryError::Sqlite(_)) => return problem_response(internal_problem()),
-    };
-    let mut search_results = match params.q.as_deref() {
-        Some(query) => {
-            match reader.search_errors_scoped(query, window, &key.tenant_id, &key.project_id) {
-                Ok(results) => Some(results),
-                Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
-                Err(QueryError::Sqlite(_)) => Some(Vec::new()),
-            }
-        }
-        None => None,
-    };
+        Ok(ReportPoolReads {
+            targets,
+            monitors,
+            error_summary,
+            service_sli,
+            transitions,
+            recent_events,
+            search_results,
+        })
+    });
     drop(reader);
+    let ReportPoolReads {
+        mut targets,
+        mut monitors,
+        mut error_summary,
+        mut service_sli,
+        mut transitions,
+        recent_events,
+        mut search_results,
+    } = match pool_reads {
+        Ok(Ok(reads)) => reads,
+        Ok(Err(problem)) => return *problem,
+        Err(_) => return problem_response(internal_problem()),
+    };
     if let Some(bound_service) = key.service.as_deref() {
         targets.retain(|target| target.service == bound_service);
         monitors.retain(|monitor| monitor.service == bound_service);
