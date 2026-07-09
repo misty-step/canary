@@ -185,26 +185,38 @@ pub(crate) fn revoke_scoped(
 pub(crate) fn verify_key(connection: &Connection, raw_key: &str) -> Result<Option<VerifiedApiKey>> {
     let prefix = key_prefix(raw_key);
     let candidates = active_candidates(connection, &prefix)?;
+    Ok(verify_key_candidates(raw_key, candidates))
+}
 
+/// Verify a raw bearer token against pre-fetched active candidates.
+///
+/// Pure CPU work with no store access, so callers can (and the server must)
+/// run the bcrypt loop after releasing the single-writer store lock. Unknown
+/// prefixes still pay one dummy-hash verify so response timing does not
+/// reveal whether a prefix exists.
+pub fn verify_key_candidates(
+    raw_key: &str,
+    candidates: Vec<ApiKeyVerifyCandidate>,
+) -> Option<VerifiedApiKey> {
     if candidates.is_empty() {
         let _ = verify(raw_key, DUMMY_BCRYPT_HASH);
-        return Ok(None);
+        return None;
     }
 
     for candidate in candidates {
         if matches!(verify(raw_key, &candidate.key_hash), Ok(true)) {
-            return Ok(Some(VerifiedApiKey {
+            return Some(VerifiedApiKey {
                 id: candidate.id,
                 name: candidate.name,
                 scope: candidate.scope,
                 tenant_id: candidate.tenant_id,
                 project_id: candidate.project_id,
                 service: candidate.service,
-            }));
+            });
         }
     }
 
-    Ok(None)
+    None
 }
 
 pub(crate) fn active_key_prefix_exists(connection: &Connection, raw_key: &str) -> Result<bool> {
@@ -224,7 +236,10 @@ pub(crate) fn key_prefix(raw_key: &str) -> String {
     raw_key.chars().take(API_KEY_PREFIX_LEN).collect()
 }
 
-fn active_candidates(connection: &Connection, key_prefix: &str) -> Result<Vec<ApiKeyCandidate>> {
+pub(crate) fn active_candidates(
+    connection: &Connection,
+    key_prefix: &str,
+) -> Result<Vec<ApiKeyVerifyCandidate>> {
     let mut statement = connection.prepare(
         "SELECT id, name, scope, key_hash, tenant_id, project_id, service
          FROM api_keys
@@ -233,7 +248,7 @@ fn active_candidates(connection: &Connection, key_prefix: &str) -> Result<Vec<Ap
     )?;
     let candidates = statement
         .query_map([key_prefix], |row| {
-            Ok(ApiKeyCandidate {
+            Ok(ApiKeyVerifyCandidate {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 scope: row.get(2)?,
@@ -248,7 +263,11 @@ fn active_candidates(connection: &Connection, key_prefix: &str) -> Result<Vec<Ap
     Ok(candidates)
 }
 
-struct ApiKeyCandidate {
+/// Active same-prefix API-key row staged for out-of-lock verification.
+///
+/// Opaque outside this crate: consumers fetch candidates under a short store
+/// lock, drop the guard, and hand them to [`verify_key_candidates`].
+pub struct ApiKeyVerifyCandidate {
     id: String,
     name: String,
     scope: String,
