@@ -1,3 +1,10 @@
+## [0.15.2](https://github.com/misty-step/canary/compare/v0.15.1...v0.15.2) (2026-07-09)
+
+
+### Performance Improvements
+
+* **store:** serve read models from read-only connections ([#254](https://github.com/misty-step/canary/issues/254)) ([1fbdd94](https://github.com/misty-step/canary/commit/1fbdd94e56e235943ff61b89f7fbbcb6e97208ac))
+
 ## [0.15.1](https://github.com/misty-step/canary/compare/v0.15.0...v0.15.1) (2026-07-09)
 
 
