@@ -15,7 +15,7 @@
 //! read, so they always run on the writer. Callers needing them still use
 //! `IngestState::lock_store`.
 
-use std::sync::MutexGuard;
+use parking_lot::MutexGuard;
 
 use canary_core::query::{ErrorDetail, ErrorsByClass, TimelineResponse};
 use canary_store::{

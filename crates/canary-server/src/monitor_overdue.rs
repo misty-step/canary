@@ -16,7 +16,7 @@ use std::{
 
 use canary_core::health::state_machine::HealthState;
 use canary_http::public::WorkerDueItem;
-use canary_store::{MonitorOverdueCandidate, Store};
+use canary_store::MonitorOverdueCandidate;
 use canary_workers::health::{
     HealthPlanError, MonitorMode, MonitorOverdueSnapshot, ObservationContext, plan_monitor_overdue,
 };
@@ -25,6 +25,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use crate::{
     EventFanoutReport, HealthEventFanout, HealthEventSource, WorkerHealthHandle, WorkerName,
     WorkerPressureSnapshot,
+    route_state::SharedStore,
     server_time::{current_rfc3339, current_unix_millis},
 };
 
@@ -46,9 +47,6 @@ pub struct MonitorOverdueOutcome {
 /// Runtime failure that prevented one overdue candidate from completing.
 #[derive(Debug, thiserror::Error)]
 pub enum MonitorOverdueRuntimeError {
-    /// Store lock was poisoned.
-    #[error("store lock poisoned")]
-    StoreLock,
     /// Store returned an error.
     #[error("store error: {0}")]
     Store(#[from] canary_store::StoreError),
@@ -62,13 +60,13 @@ pub enum MonitorOverdueRuntimeError {
 
 /// Runtime boundary for evaluating non-HTTP monitor overdue rows.
 pub struct MonitorOverdueRuntime {
-    store: Arc<Mutex<Store>>,
+    store: SharedStore,
     health_fanout: HealthEventFanout,
 }
 
 impl MonitorOverdueRuntime {
     /// Build a monitor overdue runtime from explicit side-effect boundaries.
-    pub fn new(store: Arc<Mutex<Store>>, health_fanout: HealthEventFanout) -> Self {
+    pub fn new(store: SharedStore, health_fanout: HealthEventFanout) -> Self {
         Self {
             store,
             health_fanout,
@@ -124,13 +122,13 @@ pub struct MonitorOverdueLifecycleReport {
 
 /// Bounded lifecycle adapter for monitor overdue evaluation.
 pub struct MonitorOverdueLifecycle {
-    store: Arc<Mutex<Store>>,
+    store: SharedStore,
     runtime: MonitorOverdueRuntime,
 }
 
 impl MonitorOverdueLifecycle {
     /// Build a lifecycle adapter from the shared store and overdue runtime.
-    pub fn new(store: Arc<Mutex<Store>>, runtime: MonitorOverdueRuntime) -> Self {
+    pub fn new(store: SharedStore, runtime: MonitorOverdueRuntime) -> Self {
         Self { store, runtime }
     }
 
@@ -179,10 +177,7 @@ impl MonitorOverdueLifecycle {
     }
 
     fn load_candidates(&self) -> Result<Vec<MonitorOverdueCandidate>, String> {
-        let store = self
-            .store
-            .lock()
-            .map_err(|_| "store lock poisoned".to_owned())?;
+        let store = self.store.lock();
         store
             .monitor_overdue_candidates()
             .map_err(|error| error.to_string())
@@ -297,7 +292,7 @@ impl Drop for MonitorOverdueLifecycleWorker {
 
 /// Evaluate and persist exactly one overdue monitor candidate.
 pub fn run_monitor_overdue_once(
-    store: &Arc<Mutex<Store>>,
+    store: &SharedStore,
     health_fanout: &HealthEventFanout,
     candidate: MonitorOverdueCandidate,
     now: String,
@@ -319,9 +314,7 @@ pub fn run_monitor_overdue_once(
     let response_monitor_id = plan.commit.monitor_id.clone();
     let response_state = plan.commit.state.clone();
     let commit = {
-        let mut store = store
-            .lock()
-            .map_err(|_| MonitorOverdueRuntimeError::StoreLock)?;
+        let mut store = store.lock();
         store.commit_monitor_overdue(plan.commit)?
     };
 
@@ -522,6 +515,7 @@ mod tests {
     use crate::EventSink;
 
     use super::*;
+    use canary_store::Store;
 
     #[derive(Default)]
     struct RecordingSink {
@@ -579,7 +573,7 @@ mod tests {
             transition: None,
         })?;
 
-        let store = Arc::new(Mutex::new(store));
+        let store = Arc::new(parking_lot::Mutex::new(store));
         let sink = Arc::new(RecordingSink::default());
         let fanout = HealthEventFanout::new_without_failure_sink(sink.clone());
         let lifecycle =
@@ -667,7 +661,7 @@ mod tests {
             transition: None,
         })?;
 
-        let store = Arc::new(Mutex::new(store));
+        let store = Arc::new(parking_lot::Mutex::new(store));
         let recorder = Arc::new(crate::EnqueueFailureRecorder::default());
         let lifecycle = MonitorOverdueLifecycle::new(
             store.clone(),
@@ -701,7 +695,7 @@ mod tests {
         seed_overdue_monitor(&mut store, "MON-overdue-a")?;
         seed_overdue_monitor(&mut store, "MON-overdue-b")?;
 
-        let store = Arc::new(Mutex::new(store));
+        let store = Arc::new(parking_lot::Mutex::new(store));
         let sink = Arc::new(RecordingSink::default());
         let fanout = HealthEventFanout::new_without_failure_sink(sink);
         let lifecycle =
@@ -731,7 +725,7 @@ mod tests {
 
     #[test]
     fn worker_records_lifecycle_failures() -> Result<(), Box<dyn Error>> {
-        let store = Arc::new(Mutex::new(Store::open_in_memory()?));
+        let store = Arc::new(parking_lot::Mutex::new(Store::open_in_memory()?));
         let sink = Arc::new(RecordingSink::default());
         let fanout = HealthEventFanout::new_without_failure_sink(sink);
         let worker = MonitorOverdueLifecycleWorker::spawn(
@@ -763,7 +757,7 @@ mod tests {
     -> Result<(), Box<dyn Error>> {
         let mut store = Store::open_in_memory()?;
         store.migrate()?;
-        let store = Arc::new(Mutex::new(store));
+        let store = Arc::new(parking_lot::Mutex::new(store));
         let sink = Arc::new(RecordingSink::default());
         let fanout = HealthEventFanout::new_without_failure_sink(sink.clone());
 

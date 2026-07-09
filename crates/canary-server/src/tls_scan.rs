@@ -15,12 +15,13 @@ use std::{
 };
 
 use canary_core::ids::EventId;
-use canary_store::{Store, TlsExpiryEventInsert, TlsExpiryScanCandidate};
+use canary_store::{TlsExpiryEventInsert, TlsExpiryScanCandidate};
 use canary_workers::tls_scan::{TlsExpiryScanInput, plan_tls_expiry_event};
 use time::OffsetDateTime;
 
 use crate::{
     EventSink, WorkerHealthHandle, WorkerName, WorkerPressureSnapshot,
+    route_state::SharedStore,
     server_time::{current_unix_millis, current_utc, format_rfc3339},
 };
 
@@ -58,13 +59,13 @@ pub struct TlsExpiryScanLifecycleReport {
 
 /// Bounded lifecycle adapter for TLS-expiry warning evaluation.
 pub struct TlsExpiryScanLifecycle {
-    store: Arc<Mutex<Store>>,
+    store: SharedStore,
     event_sink: Arc<dyn EventSink>,
 }
 
 impl TlsExpiryScanLifecycle {
     /// Build a lifecycle adapter from explicit persistence and fanout boundaries.
-    pub fn new(store: Arc<Mutex<Store>>, event_sink: Arc<dyn EventSink>) -> Self {
+    pub fn new(store: SharedStore, event_sink: Arc<dyn EventSink>) -> Self {
         Self { store, event_sink }
     }
 
@@ -119,10 +120,7 @@ impl TlsExpiryScanLifecycle {
     }
 
     fn load_candidates(&self) -> Result<Vec<TlsExpiryScanCandidate>, String> {
-        let store = self
-            .store
-            .lock()
-            .map_err(|_| "store lock poisoned".to_owned())?;
+        let store = self.store.lock();
         store
             .tls_expiry_scan_candidates()
             .map_err(|error| error.to_string())
@@ -238,9 +236,6 @@ impl Drop for TlsExpiryScanLifecycleWorker {
 /// Runtime failure for one TLS-expiry scan candidate.
 #[derive(Debug, thiserror::Error)]
 pub enum TlsExpiryScanRuntimeError {
-    /// Store lock was poisoned.
-    #[error("store lock poisoned")]
-    StoreLock,
     /// Store returned an error.
     #[error("store error: {0}")]
     Store(#[from] canary_store::StoreError),
@@ -251,7 +246,7 @@ pub enum TlsExpiryScanRuntimeError {
 
 /// Evaluate and persist exactly one TLS-expiry scan candidate.
 pub fn run_tls_expiry_scan_once(
-    store: &Arc<Mutex<Store>>,
+    store: &SharedStore,
     event_sink: &dyn EventSink,
     candidate: TlsExpiryScanCandidate,
     now: OffsetDateTime,
@@ -261,9 +256,7 @@ pub fn run_tls_expiry_scan_once(
         return Ok(false);
     };
     let commit = {
-        let mut store = store
-            .lock()
-            .map_err(|_| TlsExpiryScanRuntimeError::StoreLock)?;
+        let mut store = store.lock();
         store.record_tls_expiring_event(TlsExpiryEventInsert {
             event_id: EventId::generate(),
             target_id: event.target_id,
@@ -404,6 +397,7 @@ mod tests {
     use time::format_description::well_known::Rfc3339;
 
     use super::*;
+    use canary_store::Store;
 
     #[derive(Default)]
     struct RecordingSink {
@@ -436,7 +430,7 @@ mod tests {
         let now_string = format_rfc3339(now);
         let tls_expires_at = format_rfc3339(now + time::Duration::days(7));
         seed_tls_target(&mut store, &tls_expires_at)?;
-        let store = Arc::new(Mutex::new(store));
+        let store = Arc::new(parking_lot::Mutex::new(store));
         let sink = Arc::new(RecordingSink::default());
         let lifecycle = TlsExpiryScanLifecycle::new(store.clone(), sink.clone());
 
@@ -457,7 +451,7 @@ mod tests {
             sink.events.lock().map_err(|_| "events lock poisoned")?[0],
             "health_check.tls_expiring"
         );
-        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let store = store.lock();
         let timeline = store.timeline("30d", TimelineQueryOptions::default())?;
         let event = timeline.events.first().ok_or("missing timeline event")?;
         assert_eq!(event.event, "health_check.tls_expiring");
@@ -480,7 +474,7 @@ mod tests {
         let now_string = format_rfc3339(now);
         let tls_expires_at = format_rfc3339(now + time::Duration::days(7));
         seed_tls_target(&mut store, &tls_expires_at)?;
-        let store = Arc::new(Mutex::new(store));
+        let store = Arc::new(parking_lot::Mutex::new(store));
         let lifecycle = TlsExpiryScanLifecycle::new(store.clone(), Arc::new(FailingSink));
 
         let report = lifecycle.run_due(now, now_string)?;
@@ -488,7 +482,7 @@ mod tests {
         assert_eq!(report.recorded, 1);
         assert_eq!(report.event_fanout_failed, 1);
         assert!(!report.interrupted);
-        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let store = store.lock();
         let timeline = store.timeline("30d", TimelineQueryOptions::default())?;
         assert_eq!(timeline.events.len(), 1);
         assert_eq!(timeline.events[0].event, "health_check.tls_expiring");
@@ -497,7 +491,7 @@ mod tests {
 
     #[test]
     fn worker_records_lifecycle_failures() -> Result<(), Box<dyn Error>> {
-        let store = Arc::new(Mutex::new(Store::open_in_memory()?));
+        let store = Arc::new(parking_lot::Mutex::new(Store::open_in_memory()?));
         let worker = TlsExpiryScanLifecycleWorker::spawn(
             TlsExpiryScanLifecycle::new(store, Arc::new(RecordingSink::default())),
             TlsExpiryScanLifecycleConfig {
@@ -529,7 +523,7 @@ mod tests {
         store.migrate()?;
         seed_tls_target_with_id(&mut store, "TGT-api-a", "api-a", "2026-06-05T00:00:00Z")?;
         seed_tls_target_with_id(&mut store, "TGT-api-b", "api-b", "2026-06-05T00:00:00Z")?;
-        let store = Arc::new(Mutex::new(store));
+        let store = Arc::new(parking_lot::Mutex::new(store));
         let sink = Arc::new(RecordingSink::default());
         let lifecycle = TlsExpiryScanLifecycle::new(store, sink);
         let now = OffsetDateTime::parse("2026-05-29T00:00:00Z", &Rfc3339)?;

@@ -14,12 +14,13 @@ use std::{
     time::Duration as StdDuration,
 };
 
-use canary_store::{RetentionPruneBatch, RetentionPruneTable, Store};
+use canary_store::{RetentionPruneBatch, RetentionPruneTable};
 use canary_workers::retention::{RetentionPolicy, plan_retention_prune};
 use time::OffsetDateTime;
 
 use crate::{
     WorkerHealthHandle, WorkerName, WorkerPressureSnapshot,
+    route_state::SharedStore,
     server_time::{current_unix_millis, current_utc, format_rfc3339},
 };
 
@@ -55,13 +56,13 @@ pub struct RetentionPruneLifecycleReport {
 
 /// Bounded lifecycle adapter for retention pruning.
 pub struct RetentionPruneLifecycle {
-    store: Arc<Mutex<Store>>,
+    store: SharedStore,
     policy: RetentionPolicy,
 }
 
 impl RetentionPruneLifecycle {
     /// Build a lifecycle adapter from the shared store and retention policy.
-    pub fn new(store: Arc<Mutex<Store>>, policy: RetentionPolicy) -> Self {
+    pub fn new(store: SharedStore, policy: RetentionPolicy) -> Self {
         Self { store, policy }
     }
 
@@ -124,10 +125,7 @@ impl RetentionPruneLifecycle {
     ) -> Result<bool, String> {
         loop {
             let batch = {
-                let mut store = self
-                    .store
-                    .lock()
-                    .map_err(|_| "store lock poisoned".to_owned())?;
+                let mut store = self.store.lock();
                 store
                     .prune_retention_batch(RetentionPruneBatch {
                         table,
@@ -366,6 +364,7 @@ mod tests {
     use time::format_description::well_known::Rfc3339;
 
     use super::*;
+    use canary_store::Store;
 
     #[test]
     fn lifecycle_prunes_all_tables_and_reports_batches() -> Result<(), Box<dyn Error>> {
@@ -376,7 +375,7 @@ mod tests {
         }
 
         let lifecycle = RetentionPruneLifecycle::new(
-            Arc::new(Mutex::new(store)),
+            Arc::new(parking_lot::Mutex::new(store)),
             RetentionPolicy {
                 error_retention_days: 30,
                 check_retention_days: 7,
@@ -407,8 +406,10 @@ mod tests {
             store.commit_error_ingest(error_ingest(index, "2026-04-01T00:00:00Z"))?;
         }
 
-        let lifecycle =
-            RetentionPruneLifecycle::new(Arc::new(Mutex::new(store)), RetentionPolicy::default());
+        let lifecycle = RetentionPruneLifecycle::new(
+            Arc::new(parking_lot::Mutex::new(store)),
+            RetentionPolicy::default(),
+        );
         let checks = AtomicU64::new(0);
         let report = lifecycle.run_due_until(
             OffsetDateTime::parse("2026-05-29T12:00:00Z", &Rfc3339)?,
@@ -435,7 +436,7 @@ mod tests {
         store.migrate()?;
         let worker = RetentionPruneLifecycleWorker::spawn(
             RetentionPruneLifecycle::new(
-                Arc::new(Mutex::new(store)),
+                Arc::new(parking_lot::Mutex::new(store)),
                 RetentionPolicy {
                     error_retention_days: -1,
                     check_retention_days: 7,

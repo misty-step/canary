@@ -120,7 +120,10 @@ pub use tls_scan::{
     TlsExpiryScanLifecycle, TlsExpiryScanLifecycleConfig, TlsExpiryScanLifecycleReport,
     TlsExpiryScanLifecycleWorker, TlsExpiryScanRuntimeError, run_tls_expiry_scan_once,
 };
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::{
+    catch_panic::CatchPanicLayer,
+    cors::{Any, CorsLayer},
+};
 pub use webhook_delivery::{
     InMemoryWebhookCircuit, WebhookCircuit, WebhookDeliveryDrain, WebhookDeliveryDrainReport,
     WebhookDeliveryDrainWorker, WebhookDeliveryRuntime,
@@ -135,6 +138,13 @@ pub(crate) use worker_health::{
 };
 
 /// Router for Canary's authenticated ingest endpoints.
+///
+/// Wrapped in [`CatchPanicLayer`] so one panicking handler yields a single
+/// RFC 9457 500 for that request instead of an aborted connection. Combined
+/// with the writer store's non-poisoning `parking_lot::Mutex`
+/// (`route_state::SharedStore`), a panic while holding the store lock can no
+/// longer wedge every subsequent authenticated request behind a poisoned
+/// mutex (canary-930: "request path must not poison the writer mutex").
 pub fn ingest_router(state: IngestState) -> Router {
     Router::<IngestState>::new()
         .route("/metrics", get(metrics))
@@ -201,6 +211,7 @@ pub fn ingest_router(state: IngestState) -> Router {
         .route("/api/v1/targets/{id}/pause", post(pause_target))
         .route("/api/v1/targets/{id}/resume", post(resume_target))
         .with_state(state)
+        .layer(CatchPanicLayer::custom(handle_request_panic))
 }
 
 fn browser_ingest_cors_layer() -> CorsLayer {
@@ -208,6 +219,27 @@ fn browser_ingest_cors_layer() -> CorsLayer {
         .allow_origin(Any)
         .allow_methods([Method::POST, Method::OPTIONS])
         .allow_headers([AUTHORIZATION, CONTENT_TYPE])
+}
+
+/// Convert a panic unwinding out of a request handler into one RFC 9457 500
+/// response. Applied to the whole authenticated router (`ingest_router`) so
+/// no single handler bug can turn into a dropped connection or -- combined
+/// with the non-poisoning writer mutex -- a stuck process (canary-930).
+fn handle_request_panic(
+    err: Box<dyn std::any::Any + Send + 'static>,
+) -> axum::http::Response<axum::body::Body> {
+    let message = if let Some(message) = err.downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(message) = err.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else {
+        "unknown panic".to_owned()
+    };
+    tracing::error!(
+        panic.message = %message,
+        "request handler panicked; converted to one 500 response"
+    );
+    http_contract::problem_response(canary_http::problem_details::internal_problem())
 }
 
 /// Headers set by the public adapter.
@@ -223,12 +255,13 @@ mod tests {
     use std::process;
     use std::str::FromStr;
     use std::sync::{
-        Arc, Mutex, Mutex as StdMutex,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     };
     use std::thread::{self, JoinHandle, ThreadId};
     use std::time::{Duration as StdDuration, Instant};
 
+    use crate::route_state::SharedStore;
     use axum::{
         body::{Body, to_bytes},
         http::{
@@ -1144,6 +1177,62 @@ mod tests {
                 );
             }
         }
+
+        Ok(())
+    }
+
+    /// Test-only handler proving a panic while holding the writer lock
+    /// neither poisons subsequent `lock_store()` calls nor produces more
+    /// than one failed response (canary-930).
+    #[allow(clippy::expect_used, clippy::panic)]
+    async fn test_panic_handler(
+        axum::extract::State(state): axum::extract::State<IngestState>,
+    ) -> StatusCode {
+        let _guard = state
+            .lock_store()
+            .expect("lock_store is infallible under parking_lot");
+        panic!("test_panic_handler: intentional panic to prove request-path panic containment");
+    }
+
+    /// `ingest_router` plus one test-only panicking route, merged in with
+    /// the same [`CatchPanicLayer`] production applies so the panic path
+    /// under test is the real one, not a stand-in.
+    fn router_with_test_panic_route(state: IngestState) -> Router {
+        let panic_router = Router::<IngestState>::new()
+            .route("/api/v1/__test/panic", get(test_panic_handler))
+            .with_state(state.clone())
+            .layer(CatchPanicLayer::custom(handle_request_panic));
+        ingest_router(state).merge(panic_router)
+    }
+
+    #[tokio::test]
+    async fn request_handler_panic_yields_one_500_and_does_not_poison_the_writer_lock()
+    -> Result<(), Box<dyn Error>> {
+        let router = router_with_test_panic_route(test_ingest_state()?);
+
+        let panicked = router
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/__test/panic")
+                    .header("authorization", format!("Bearer {ADMIN_KEY}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(panicked.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let panic_body = json_body(panicked).await?;
+        assert_eq!(panic_body["code"], "internal_error");
+
+        // The writer mutex must not be poisoned: the next authenticated
+        // request against the real store must succeed, not fail closed
+        // (canary-930: "request path must not poison the writer mutex").
+        let next = router
+            .oneshot(
+                Request::get("/metrics")
+                    .header("authorization", format!("Bearer {ADMIN_KEY}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(next.status(), StatusCode::OK);
 
         Ok(())
     }
@@ -2149,7 +2238,7 @@ mod tests {
         assert_eq!(requests[0].headers.delivery_id, "DLV-runtime-ok");
         drop(requests);
 
-        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let store = store.lock();
         let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
             delivery_id: Some("DLV-runtime-ok".to_owned()),
             ..Default::default()
@@ -2180,7 +2269,7 @@ mod tests {
         let execution = runtime.deliver(&webhook_job("DLV-runtime-retry", 2, 4))?;
 
         assert_eq!(execution.retry_after_seconds, Some(5));
-        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let store = store.lock();
         let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
             delivery_id: Some("DLV-runtime-retry".to_owned()),
             ..Default::default()
@@ -2225,7 +2314,7 @@ mod tests {
             0
         );
 
-        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let store = store.lock();
         let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
             delivery_id: Some("DLV-runtime-open".to_owned()),
             ..Default::default()
@@ -2260,7 +2349,7 @@ mod tests {
                 .len(),
             0
         );
-        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let store = store.lock();
         let inactive = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
             delivery_id: Some("DLV-runtime-inactive".to_owned()),
             ..Default::default()
@@ -2516,7 +2605,7 @@ mod tests {
             header_value(&captured.head, "x-delivery-id").as_deref(),
             Some("DLV-runtime-http")
         );
-        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let store = store.lock();
         let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
             delivery_id: Some("DLV-runtime-http".to_owned()),
             ..Default::default()
@@ -2535,7 +2624,7 @@ mod tests {
 
         scheduler.schedule(&webhook_job("DLV-scheduled", 1, 4))?;
 
-        let mut store = store.lock().map_err(|_| "store lock poisoned")?;
+        let mut store = store.lock();
         let jobs = store.claim_due_webhook_delivery_jobs("9999-01-01T00:00:00Z", 10)?;
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].args["delivery_id"], "DLV-scheduled");
@@ -2574,7 +2663,7 @@ mod tests {
                 .len(),
             1
         );
-        let mut store = store.lock().map_err(|_| "store lock poisoned")?;
+        let mut store = store.lock();
         let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
             delivery_id: Some("DLV-drain-ok".to_owned()),
             ..Default::default()
@@ -2603,7 +2692,7 @@ mod tests {
         assert_webhook_drain_report(&report, 1, 0, 1, 0);
         assert_eq!(report.due_count, 1);
         assert_eq!(report.oldest_due_age_ms, Some(0));
-        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let store = store.lock();
         let job = store
             .webhook_delivery_job(job_id)?
             .ok_or("missing webhook delivery job")?;
@@ -2636,7 +2725,7 @@ mod tests {
         assert_webhook_drain_report(&report, 1, 0, 1, 0);
         assert_eq!(report.due_count, 1);
         assert_eq!(report.oldest_due_age_ms, Some(0));
-        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let store = store.lock();
         let job = store
             .webhook_delivery_job(job_id)?
             .ok_or("missing webhook delivery job")?;
@@ -2663,7 +2752,7 @@ mod tests {
         };
 
         assert!(error.contains("invalid drain timestamp"));
-        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let store = store.lock();
         let job = store
             .webhook_delivery_job(job_id)?
             .ok_or("missing webhook delivery job")?;
@@ -2688,7 +2777,7 @@ mod tests {
         assert_webhook_drain_report(&second, 1, 0, 0, 1);
         assert_eq!(second.due_count, 1);
         assert_eq!(second.oldest_due_age_ms, Some(0));
-        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let store = store.lock();
         assert_eq!(
             store
                 .webhook_delivery_job(job_id)?
@@ -2740,7 +2829,7 @@ mod tests {
                 .len(),
             0
         );
-        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let store = store.lock();
         assert_eq!(
             store
                 .webhook_delivery_job(job_id)?
@@ -2778,7 +2867,7 @@ mod tests {
 
         assert_eq!(thread_ids.len(), 1);
         assert_ne!(thread_ids[0], test_thread_id);
-        let mut store = store.lock().map_err(|_| "store lock poisoned")?;
+        let mut store = store.lock();
         assert!(
             store
                 .claim_due_webhook_delivery_jobs("9999-01-01T00:00:00Z", 10)?
@@ -2867,7 +2956,7 @@ mod tests {
     fn shared_store_survives_concurrent_runtime_pressure() -> Result<(), Box<dyn Error>> {
         let store = runtime_store(true)?;
         {
-            let mut locked = store.lock().map_err(|_| "store lock poisoned")?;
+            let mut locked = store.lock();
             seed_target(&mut locked, "runtime-pressure")?;
             for index in 0..80 {
                 locked.commit_error_ingest(test_error_ingest(index, "2026-04-01T00:00:00Z"))?;
@@ -2880,9 +2969,7 @@ mod tests {
         let ingest_store = store.clone();
         let ingest = thread::spawn(move || -> Result<(), String> {
             for index in 100..140 {
-                let mut store = ingest_store
-                    .lock()
-                    .map_err(|_| "store lock poisoned".to_owned())?;
+                let mut store = ingest_store.lock();
                 store
                     .commit_error_ingest(test_error_ingest(index, "2026-05-28T20:00:00Z"))
                     .map_err(|error| error.to_string())?;
@@ -2893,9 +2980,7 @@ mod tests {
         let webhook_store = store.clone();
         let webhooks = thread::spawn(move || -> Result<(), String> {
             for _ in 0..4 {
-                let mut store = webhook_store
-                    .lock()
-                    .map_err(|_| "store lock poisoned".to_owned())?;
+                let mut store = webhook_store.lock();
                 let claimed = store
                     .claim_due_webhook_delivery_jobs("2026-05-28T20:00:10Z", 4)
                     .map_err(|error| error.to_string())?;
@@ -2926,9 +3011,7 @@ mod tests {
         let probe_store = store.clone();
         let probes = thread::spawn(move || -> Result<(), String> {
             for _ in 0..40 {
-                let store = probe_store
-                    .lock()
-                    .map_err(|_| "store lock poisoned".to_owned())?;
+                let store = probe_store.lock();
                 let schedules = store
                     .active_target_probe_schedules()
                     .map_err(|error| error.to_string())?;
@@ -2969,7 +3052,7 @@ mod tests {
             .map_err(|_| "retention pressure lane panicked")??;
         assert!(prune_report.batches >= 1);
 
-        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let store = store.lock();
         assert_eq!(store.active_target_probe_schedules()?.len(), 1);
         assert!(
             store.health_targets()?.iter().any(|target| {
@@ -3108,7 +3191,7 @@ mod tests {
         store.migrate()?;
         seed_api_key(&mut store, "KEY-ingest", INGEST_KEY, "ingest-only", None)?;
         seed_monitor(&mut store, "desktop-active-timer")?;
-        let store = Arc::new(Mutex::new(store));
+        let store = Arc::new(parking_lot::Mutex::new(store));
         let recorder = Arc::new(EnqueueFailureRecorder::default());
         let state = IngestState::new_with_shared_fanout(
             store,
@@ -10359,14 +10442,14 @@ mod tests {
         r#"{"monitor":"desktop-active-timer","status":"alive","observed_at":"2026-05-28T20:00:00Z","ttl_ms":120000}"#
     }
 
-    fn runtime_store(active_webhook: bool) -> Result<Arc<Mutex<Store>>, Box<dyn Error>> {
+    fn runtime_store(active_webhook: bool) -> Result<SharedStore, Box<dyn Error>> {
         runtime_store_with_url(active_webhook, "https://example.test/hook")
     }
 
     fn runtime_store_with_url(
         active_webhook: bool,
         url: &str,
-    ) -> Result<Arc<Mutex<Store>>, Box<dyn Error>> {
+    ) -> Result<SharedStore, Box<dyn Error>> {
         let mut store = Store::open_in_memory()?;
         store.migrate()?;
         store.insert_webhook_subscription(webhook_subscription_insert(
@@ -10378,7 +10461,7 @@ mod tests {
             "2026-05-28T20:00:00Z",
         ))?;
 
-        Ok(Arc::new(Mutex::new(store)))
+        Ok(Arc::new(parking_lot::Mutex::new(store)))
     }
 
     fn webhook_job(delivery_id: &str, attempt: u32, max_attempts: u32) -> WebhookJob {
@@ -10500,11 +10583,11 @@ mod tests {
     }
 
     fn insert_due_webhook_job(
-        store: &Arc<Mutex<Store>>,
+        store: &SharedStore,
         delivery_id: &str,
         max_attempts: u32,
     ) -> Result<i64, Box<dyn Error>> {
-        let mut store = store.lock().map_err(|_| "store lock poisoned")?;
+        let mut store = store.lock();
         Ok(store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
             args: json!({
                 "webhook_id": "WHK-test",
@@ -10539,14 +10622,14 @@ mod tests {
     }
 
     fn wait_for_delivery_status(
-        store: &Arc<Mutex<Store>>,
+        store: &SharedStore,
         delivery_id: &str,
         status: WebhookDeliveryStatus,
     ) -> Result<(), Box<dyn Error>> {
         let deadline = Instant::now() + StdDuration::from_secs(2);
         loop {
             {
-                let store = store.lock().map_err(|_| "store lock poisoned")?;
+                let store = store.lock();
                 let rows = store.webhook_deliveries(canary_store::WebhookDeliveryListOptions {
                     delivery_id: Some(delivery_id.to_owned()),
                     ..Default::default()
