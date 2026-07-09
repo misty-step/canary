@@ -1,6 +1,6 @@
 # Canary — Agent Router
 
-Self-hosted observability substrate for AI agents (not humans). Rust + SQLite + Litestream → Fly Tigris. Fly app **`canary-obs`**. v1: single region, single org, one Docker image, one SQLite file. Read `VISION.md` for the product north star before changing product scope, responder boundaries, or agent-facing surfaces; read `CLAUDE.md` for load-bearing footguns.
+Self-hosted observability substrate for AI agents (not humans). Rust + SQLite + Litestream → Fly Tigris. Fly app **`canary-obs`**. v1: single region, single org, one Docker image, one SQLite file. Read `VISION.md` for the product north star before changing product scope, responder boundaries, or agent-facing surfaces. Load-bearing footguns are inlined below (this file is now the single canonical harness doc — `CLAUDE.md` is a symlink to it).
 
 ## Stack & boundaries
 
@@ -12,7 +12,9 @@ Self-hosted observability substrate for AI agents (not humans). Rust + SQLite + 
 | Bin scripts | Operator API — validate, dagger, bootstrap, DR | `bin/` |
 | Backlog | File-driven work with `_done/` archive + priority map | `backlog.d/` |
 
-External responders (e.g. bitterblossom) consume Canary's signed webhooks and query back. They live **outside this repo**.
+(Rust workspace crates cover core service, HTTP contracts, SQLite store, ingest, workers, and the Axum runtime.)
+
+External responders (e.g. bitterblossom) consume Canary's signed webhooks and query back. They live **outside this repo** and are not part of it.
 
 ## Ground-truth pointers (files that ARE the contract)
 
@@ -36,7 +38,7 @@ Prefer these over re-deriving from the code base.
 - **Summaries are deterministic templates.** No LLM on the request path.
 - **RFC 9457 Problem Details** for every error response.
 - **Scoped API keys** (`ingest-only` / `read-only` / `admin`) enforced at the router. See `docs/api-key-rotation.md`.
-- **Responder boundary.** Canary owns ingest/health/correlation/timelines/queries/webhooks. Repo mutation, issue creation, and LLM triage live downstream. Webhook payloads are stable product contracts.
+- **Responder boundary.** Canary owns ingest/health/correlation/timelines/queries/webhooks. Repo mutation, issue creation, and LLM triage live downstream. Consumers subscribe via generic webhooks and query back into Canary for context. Webhook payloads are stable product contracts, not app-specific glue.
 - **No service names hardcoded.** Targets, monitors, and webhooks are configured at runtime via API. Seeds create only the bootstrap API key.
 - **Target vs Monitor:** `Target` = HTTP URL probed on an interval. `Monitor` = check-in watcher for non-HTTP runtimes (desktop apps, cron, workers). Modes `schedule` or `ttl`. See `docs/non-http-health-semantics.md`.
 
@@ -67,15 +69,20 @@ Prefer these over re-deriving from the code base.
 |---|---|---|
 | **#010 Ramp pattern** (blocked, XL, north-star) | `backlog.d/010-ramp-pattern.md` | Blocked on bitterblossom triage sprite (`bitterblossom/backlog.d/011-canary-triage-sprite.md`). Agent-consumer shape of error→triage→fix. |
 | **#020 Adminifi HTTP surface verification** (blocked, S) | `backlog.d/020-adminifi-http-surface-verification.md` | Upstream Adminifi HTTP surface stability. |
-| **#048 Responder rich-context safety gate** (pending, XL, P0) | `backlog.d/048-responder-rich-context-safety-gate.md` | Context-envelope redesign, minimization/redaction policy, new responder scopes. Read-audit events landed (#071); scope-model decision is ADR-gated. |
-| **#062 Agent loop write surface** (pending, XL, P0) | `backlog.d/062-agent-loop-write-surface.md` | CLI/MCP annotation writeback so agents can complete the loop the vision promises. |
 | **#063 Triage contract hardening** (pending, XL, P1) | `backlog.d/063-triage-contract-hardening.md` | Durable webhook cooldown, dispatch budgets, claim-gated delivery. |
 | **#064 Trustworthy release/upgrade** (pending, L, P1) | `backlog.d/064-trustworthy-release-upgrade.md` | npm publish, Docker image publish, v1.0.0 release-note truth gap. Children 4+5 (upgrade/compatibility docs) shipped. |
 | **#065 Runtime hardening** (pending, L, P1) | `backlog.d/065-runtime-hardening.md` | bcrypt-outside-mutex, tracing adoption (server startup shipped), backup posture. Children 4 (tracing), 5 (anyhow), 6 (SLI floor) shipped. |
 | **#066 Consolidation and archaeology deletion** (pending, XL, P2) | `backlog.d/066-consolidation-and-archaeology-deletion.md` | Worker lifecycle quad unification, oban_jobs rename (gated on prod DB restamp), canary-ingest fold, legacy fixture retirement. Parity comment sweep complete; Burst bucket, stale yarn.lock, .backlog.d/ deleted. |
-| Recurring footgun surface | `CLAUDE.md` footgun list + Rust store/runtime/schema modules | See `CLAUDE.md` — load-bearing. Every remediation here must cite the footgun list and extend it when new failure modes appear. |
+| Recurring footgun surface | Footguns section below + Rust store/runtime/schema modules | Every remediation here must cite the footgun list and extend it when new failure modes appear. |
+| **canary-930 Request-path concurrency** (ready, P0) | Powder | bcrypt-under-store-lock root cause (live-reproduced), /readyz spiral, mutex poisoning, monitor_overdue scan, oban_jobs growth. Consolidates the slow-API/500 cards. |
+| **canary-931 Release pipeline restore** (ready, P0) | Powder | Releaser App secrets missing (releases hard-down), zero GitHub releases, version disagreement, npm SDK unpublished. |
+| **canary-932 Coordination loop in anger** (ready, P0) | Powder | CLI/MCP read-half parity (incident get, timeline cursor, drill-downs, parity guard) + dogfood claims on real incidents. |
+| **canary-933 Gate proves live behavior** (ready, P1) | Powder | Latency floor, seeded-volume + concurrency rehearsal, post-deploy gate, Rust coverage ratchet, diff-scoped strict. Absorbs 914/972. |
+| **canary-934 De-Fly ops surface** (ready, P1) | Powder | DO Spaces backups, DR transport seam, pullable image, deploy/witness cutover, DR runbook rewrite. Coordinates with do-migration-104/105. |
+| **canary-935 /ui first-class** (ready, P1) | Powder | Vendored fonts, graceful degradation, read contract, UI smoke, mobile-first. Folds 067/068/915 intent. |
+| **canary-936 Service-bound reads + redaction corpus** (ready, P0) | Powder | Unbound read keys read cross-service rich context; four-regex redaction. 048 successor; ADR-gated scope model. |
 
-All other tracked items are shipped and archived under `backlog.d/_done/`. Priority map + Lanes 1–5 in `backlog.d/README.md`.
+All other tracked items are shipped and archived under `backlog.d/_done/`. Powder is the board of record; `backlog.d/` is the import seed. Priority map + Lanes 1–5 in `backlog.d/README.md`.
 
 ## Outer loop
 
@@ -94,10 +101,53 @@ bin/dr-status                                       # read-only Litestream prefl
 bin/dr-restore-check                                # non-destructive restore drill
 ```
 
-Nuclear reset (human-gated, do NOT automate): stop machine → mount volume into maintenance machine → delete `/data/canary.db*` → destroy maintenance → restart real machine. Exact tested sequence in `docs/backup-restore-dr.md`.
+**Nuclear reset (human-gated, do NOT automate).** The platform-agnostic invariant, in order: **stop the writer process** (SQLite must release its WAL/SHM handles) → **remove `canary.db`, `canary.db-wal`, `canary.db-shm`** from a context that has the volume mounted but is NOT running Canary against it → **restart the app** so `bin/entrypoint.sh` restores from the Litestream replica onto the empty path. On Fly this is the maintenance-machine sequence in `docs/backup-restore-dr.md` (validated 2026-04-16); on a Docker/DO host it is stop container → delete files via a throwaway container or host shell → start. Never use an in-place `flyctl ssh console … rm` — SSH requires a running machine, and a running machine holds the WAL handles (2026-07-09 groom ruling; supersedes an earlier scriptable-flyctl variant that circulated in CLAUDE.md).
+
+Note: the whole fleet (this instance included) is migrating Fly → DigitalOcean. Treat the flyctl crib above as the legacy path; new deploy/DR investment targets the substrate-agnostic Docker path (`docs/self-host-docker.md`, `docker-compose.yml`, env-driven `litestream.yml`).
 
 Bootstrap API key logged once on first boot — grep `"Bootstrap API key:"` in Fly logs. Cannot be re-shown.
 
 ## Footguns
 
-Load-bearing list lives in `CLAUDE.md`. Do not duplicate here — cite it.
+- **Single SQLite writer.** Production writes go through one `canary-store::Store`
+  instance behind the server lock. Do not add hidden write pools or long-held
+  store locks around network work.
+- **Schema ownership.** `crates/canary-store/src/schema.rs` is the Rust schema
+  source. `Store::migrate` must fail closed on partial existing schemas before
+  stamping `user_version`.
+- **Custom string IDs.** Stable prefixes (`ERR-`, `INC-`, `EVT-`, `WHK-`,
+  `MON-`) are product contracts. Keep ID generation in `canary-core::ids`.
+- **State machines stay pure.** Health transitions live in
+  `canary-core::health::state_machine`; persistence, webhooks, metrics, and
+  logging consume typed outcomes outside the pure transition logic.
+- **Outbound HTTP egress.** Target probes and webhook delivery are server-side
+  requests. Public egress validation belongs in `canary-server::egress`; tests
+  that intentionally use loopback must opt in explicitly.
+- **Webhook delivery jobs.** Claimed jobs must always be completed as succeeded,
+  retry, or discarded, including runtime errors and panics. Never leave
+  `executing` rows stranded.
+- **Readiness is live.** `/readyz` must query the writable store each request.
+  Do not replace it with static process state.
+- **SQLite WAL and `rm -f`.** Deleting the DB while the app is running does
+  nothing useful because SQLite WAL keeps file handles open. Stop the machine
+  before destructive maintenance.
+- **Retention prune lock time.** Retention deletes share the single writer with
+  ingest, probes, and webhook delivery. Keep pruning in bounded batches and
+  release the store lock between batches.
+- **Rate limiter locality.** Rate limits are process-local fixed-window buckets.
+  Do not claim fleet-wide rate limiting without adding a shared limiter.
+- **No CPU-bound work under the store lock.** bcrypt (and any other expensive
+  compute) must never run while holding the single-writer store mutex. The
+  2026-07-09 groom live-reproduced the failure: per-request bcrypt verify under
+  the lock serialized the whole service (~230 ms staircase per concurrent
+  client, 7.5 s at ~30 clients) and put `/readyz` in the same queue.
+- **Request path must not poison the writer mutex.** Workers wrap store work in
+  `catch_unwind`; request handlers do not. One panic while holding the std
+  `Mutex<Store>` makes every subsequent authenticated request 500 until
+  restart. Contain panics or use a non-poisoning lock.
+- **One egress oracle.** There is exactly one public-destination filter for
+  outbound HTTP; probe and webhook paths must share it. Hand-maintained copies
+  drift (the IPv4-mapped-address rejection landed in the probe copy only).
+
+This list is load-bearing — every remediation in the Known-debt map above must cite it and extend it when new failure modes appear.
+</content>

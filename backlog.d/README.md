@@ -14,7 +14,7 @@ visible until a focused PR archives them with evidence.
 |---|------|----------|--------------|
 | 060 | Cold-operator deploy path | P0 | Shipped 2026-07-01. Folded in self-host docs, app-name dehardcoding, bootstrap-key docs, dogfood instance split, and clean-room receipt. |
 | 061 | Fleet plumb-in | P0 | Shipped 2026-07-02. Folded in Factory fleet integration docs, powder/BB live enrollment, bastion/powder/BB check-in readback, and check-in-aware dogfood strictness. |
-| 062 | Agent loop write surface | P0 | Next pickup: adds CLI/MCP annotation writeback and scoped responder-key loop; adopts 048. |
+| 062 | Agent loop write surface | P0 | Shipped 2026-07-04. CLI/MCP annotation writeback + scoped responder-key loop (#230); adopted 048 (#232). |
 | 063 | Triage contract hardening | P1 | Durable cooldown, dispatch budget caps, claim-gated delivery, and drills. |
 | 064 | Trustworthy release/upgrade | P1 | Absorbs 051; fixes release truth, npm/Docker claims, and upgrade docs. |
 | 065 | Runtime hardening | P1 | Absorbs 056/058/059 plus bcrypt-outside-mutex, tracing, and backup posture. |
@@ -27,7 +27,7 @@ visible until a focused PR archives them with evidence.
 | 080 | Pin live incident-payload shape | P0 | done | S |
 | 081 | Remove hardcoded operator domain fixture | P2 | done | S |
 | 071 | Responder context read-audit events | P1 | done | M |
-| 062 | Agent loop write surface | P0 | pending | XL |
+| 062 | Agent loop write surface | P0 | done | XL |
 | 063 | Triage contract hardening | P1 | pending | XL |
 | 064 | Trustworthy release/upgrade | P1 | pending | L |
 | 065 | Runtime hardening | P1 | pending | L |
@@ -78,10 +78,10 @@ visible until a focused PR archives them with evidence.
 | 045 | Self-watch operator verdict | P0 | done | L |
 | 046 | Dogfood value receipts | P0 | done | L |
 | 047 | Alert-plane reliability and SLI trajectory | P0 | done | XL |
-| 048 | Responder rich-context safety gate | P0 | pending | XL |
+| 048 | Responder rich-context safety gate | P0 | done | XL |
 | 049 | Integration evidence and capture gaps | P1 | pending | XL |
-| 050 | Cold-agent readiness proof | P1 | pending | M |
-| 051 | TypeScript SDK npm publish | P1 | pending | S |
+| 050 | Cold-agent readiness proof | P1 | done | M |
+| 051 | TypeScript SDK npm publish | P1 | done | S |
 | 052 | Runnable MCP server | P1 | done | M |
 | 053 | Human alert delivery (decision) | P2 | pending | M |
 | 054 | Serving model: self-hosted, managed-later, not multi-tenant SaaS | P2 | done | S |

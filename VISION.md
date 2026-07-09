@@ -68,14 +68,19 @@ operator scripts. Complexity has to earn its way in.
 `canary-obs` instance, Phaedrus dogfood data, personal paths, or private
 operating lore. Instance configuration belongs outside product code.
 
-**Agent-first observability.** API, CLI, SDK, and MCP-shaped tools are the
-product surfaces. Humans use the same surfaces agents use. A browser dashboard
-is not the product.
+**Dual first-class interfaces.** Canary carries one first-class human
+interface and one first-class agent interface, and they are not the same
+surface: a mobile-friendly web UI for the operator, and MCP/CLI/HTTP for
+agents. The human UI is a thin renderer over the same read → claim → annotate
+contract agents use — never a parallel semantic API, never a second brain,
+never an incident-command war room.
 
-**One semantic contract across surfaces.** HTTP, CLI, MCP, and SDK adapters
+**One semantic contract across surfaces.** HTTP, CLI, MCP, and the web UI
 must expose the same loop and authority model. If an agent can read, claim, or
 annotate through one surface, the other agent-facing surfaces should not force
-raw route trivia or broader keys.
+raw route trivia or broader keys. The TypeScript SDK is deliberately narrower:
+it is an instrumentation surface (capture, check-in, events), not a loop
+surface — do not count it in loop-parity claims.
 
 **A trigger surface for responder agents.** Canary should make it obvious how
 an error, uptime failure, missed check-in, or operational event wakes one or more
@@ -103,7 +108,9 @@ ingest, query, webhook or monitor state, and a receipt.
 - Not an LLM trace/eval tool.
 - Not an incident-command suite for human war rooms.
 - Not a repo mutation, issue creation, or autonomous fix engine.
-- Not a dashboard. Agents are the UI; operators inspect the same API and CLI.
+- Not a human incident-command suite. The operator web UI is a glanceable
+  renderer of the shared contract, not a war room, and it must work in
+  private-network deploys (no CDN or third-party callouts).
 - Not a semantic workflow engine hidden behind provider-specific agents.
 - Not multi-tenant SaaS by default. External-user productization must be
   explicit, scoped, and security-reviewed (see Serving Model below).
@@ -218,16 +225,24 @@ deployment, backup setup, and first service onboarding documented and proven.
 
 ## Roadmap Bias
 
-The near-term product direction is not "add every observability feature." It is:
+The product direction is not "add every observability feature." The standing
+tie-break is **our own fleet first**: prove every loop in anger with the
+operator's own agents before polishing the stranger path. In priority order:
 
-- make a cold operator able to deploy and own their own instance
-- plumb the Factory fleet into Canary with fresh service-specific readback
-- close the read -> claim -> annotate -> release loop through CLI and MCP
-- make alert-plane reliability and SLO/error-budget feedback trustworthy
+- keep the instance itself fast and boring — its own read traffic must never
+  make it slow, 500, or restart
+- close the read -> claim -> annotate -> release loop through every agent
+  surface, and prove it in anger: Canary's own incidents triaged through
+  Canary claims, not an external board
+- keep releases and versions truthful (tags, releases, registries, and the
+  running binary agree)
 - make responder context safe enough for arbitrary-agent consumers
-- remove stale dogfood evidence and overclaiming in integration receipts
-- make the integration loop prove deployed value faster
-- keep MCP, CLI, SDK, and HTTP aligned to one semantic contract
+- stay substrate-agnostic: deploys, backups, and DR are Docker-first,
+  restore-proven, and never coupled to one host's tooling
+- make the operator web UI first-class: mobile-friendly, self-contained,
+  degrading gracefully, rendering the shared contract
+- then: cold-operator/stranger deployability, OTel GenAI ingest interop, and
+  decision-relevant bounded replay — deliberately after the loop is proven
 
 The long-term goal is that an agent can ask one question and act:
 
