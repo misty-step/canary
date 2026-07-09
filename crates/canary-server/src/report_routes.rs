@@ -64,51 +64,68 @@ pub(crate) async fn report(
         Err(problem) => return problem_response(*problem),
     };
 
-    let mut store = match state.lock_store() {
-        Ok(store) => store,
+    // `active_incidents` and `report_error_groups_scoped` fuse a claim-expiry
+    // write into the read (Store methods take `&mut self`), so this brief
+    // critical section covers just those two queries. Every other query in
+    // this handler is a pure read served from a read-only pool connection so
+    // it no longer serializes behind the writer mutex (canary-930 child B).
+    // The audit write at the bottom of this handler still runs on the writer
+    // too, once the response is known to succeed.
+    let (mut error_groups, mut incidents) = {
+        let mut store = match state.lock_store() {
+            Ok(store) => store,
+            Err(_) => return problem_response(internal_problem()),
+        };
+        let error_groups =
+            match store.report_error_groups_scoped(window, &key.tenant_id, &key.project_id) {
+                Ok(groups) => groups,
+                Err(QueryError::InvalidWindow) => {
+                    return problem_response(invalid_window_problem());
+                }
+                Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
+            };
+        let incidents = match store.active_incidents(IncidentListOptions {
+            tenant_id: Some(key.tenant_id.clone()),
+            project_id: Some(key.project_id.clone()),
+            ..IncidentListOptions::default()
+        }) {
+            Ok(incidents) => incidents.incidents,
+            Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
+            Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
+        };
+        (error_groups, incidents)
+    };
+
+    let reader = match state.read_source() {
+        Ok(reader) => reader,
         Err(_) => return problem_response(internal_problem()),
     };
-    let mut targets = match store.health_targets_scoped(&key.tenant_id, &key.project_id) {
+    let mut targets = match reader.health_targets_scoped(&key.tenant_id, &key.project_id) {
         Ok(targets) => targets,
         Err(_) => return problem_response(internal_problem()),
     };
-    let mut monitors = match store.health_monitors_scoped(&key.tenant_id, &key.project_id) {
+    let mut monitors = match reader.health_monitors_scoped(&key.tenant_id, &key.project_id) {
         Ok(monitors) => monitors,
         Err(_) => return problem_response(internal_problem()),
     };
     let mut error_summary =
-        match store.error_summary_scoped(window, &key.tenant_id, &key.project_id) {
+        match reader.error_summary_scoped(window, &key.tenant_id, &key.project_id) {
             Ok(summary) => summary,
             Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
             Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
         };
-    let mut service_sli = match store.service_sli_scoped(window, &key.tenant_id, &key.project_id) {
+    let mut service_sli = match reader.service_sli_scoped(window, &key.tenant_id, &key.project_id) {
         Ok(service_sli) => service_sli,
         Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
         Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
     };
-    let mut error_groups =
-        match store.report_error_groups_scoped(window, &key.tenant_id, &key.project_id) {
-            Ok(groups) => groups,
-            Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
-            Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
-        };
-    let mut incidents = match store.active_incidents(IncidentListOptions {
-        tenant_id: Some(key.tenant_id.clone()),
-        project_id: Some(key.project_id.clone()),
-        ..IncidentListOptions::default()
-    }) {
-        Ok(incidents) => incidents.incidents,
-        Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
-        Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
-    };
     let mut transitions =
-        match store.recent_transitions_scoped(window, &key.tenant_id, &key.project_id) {
+        match reader.recent_transitions_scoped(window, &key.tenant_id, &key.project_id) {
             Ok(transitions) => transitions,
             Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
             Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
         };
-    let recent_events = match store.timeline(
+    let recent_events = match reader.timeline(
         window,
         TimelineQueryOptions {
             tenant_id: Some(key.tenant_id.clone()),
@@ -128,7 +145,7 @@ pub(crate) async fn report(
     };
     let mut search_results = match params.q.as_deref() {
         Some(query) => {
-            match store.search_errors_scoped(query, window, &key.tenant_id, &key.project_id) {
+            match reader.search_errors_scoped(query, window, &key.tenant_id, &key.project_id) {
                 Ok(results) => Some(results),
                 Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
                 Err(QueryError::Sqlite(_)) => Some(Vec::new()),
@@ -136,6 +153,7 @@ pub(crate) async fn report(
         }
         None => None,
     };
+    drop(reader);
     if let Some(bound_service) = key.service.as_deref() {
         targets.retain(|target| target.service == bound_service);
         monitors.retain(|monitor| monitor.service == bound_service);
@@ -200,6 +218,10 @@ pub(crate) async fn report(
         json_status_response(StatusCode::OK.as_u16(), body)
     };
 
+    let mut store = match state.lock_store() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
     crate::read_audit::record_read_audit(&mut store, &key, "GET /api/v1/report");
     result
 }

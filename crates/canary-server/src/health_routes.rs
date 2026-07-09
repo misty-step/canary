@@ -39,15 +39,15 @@ pub(crate) async fn health_status(
         Err(problem) => return problem_response(*problem),
     };
 
-    let store = match state.lock_store() {
-        Ok(store) => store,
+    let reader = match state.read_source() {
+        Ok(reader) => reader,
         Err(_) => return problem_response(internal_problem()),
     };
-    let mut targets = match store.health_targets_scoped(&key.tenant_id, &key.project_id) {
+    let mut targets = match reader.health_targets_scoped(&key.tenant_id, &key.project_id) {
         Ok(targets) => targets,
         Err(_) => return problem_response(internal_problem()),
     };
-    let mut monitors = match store.health_monitors_scoped(&key.tenant_id, &key.project_id) {
+    let mut monitors = match reader.health_monitors_scoped(&key.tenant_id, &key.project_id) {
         Ok(monitors) => monitors,
         Err(_) => return problem_response(internal_problem()),
     };
@@ -77,20 +77,20 @@ pub(crate) async fn status(
     };
 
     let window = params.window.as_deref().unwrap_or("1h");
-    let store = match state.lock_store() {
-        Ok(store) => store,
+    let reader = match state.read_source() {
+        Ok(reader) => reader,
         Err(_) => return problem_response(internal_problem()),
     };
-    let mut targets = match store.health_targets_scoped(&key.tenant_id, &key.project_id) {
+    let mut targets = match reader.health_targets_scoped(&key.tenant_id, &key.project_id) {
         Ok(targets) => targets,
         Err(_) => return problem_response(internal_problem()),
     };
-    let mut monitors = match store.health_monitors_scoped(&key.tenant_id, &key.project_id) {
+    let mut monitors = match reader.health_monitors_scoped(&key.tenant_id, &key.project_id) {
         Ok(monitors) => monitors,
         Err(_) => return problem_response(internal_problem()),
     };
     let mut error_summary =
-        match store.error_summary_scoped(window, &key.tenant_id, &key.project_id) {
+        match reader.error_summary_scoped(window, &key.tenant_id, &key.project_id) {
             Ok(summary) => summary,
             Err(QueryError::InvalidWindow) => return problem_response(invalid_window_problem()),
             Err(QueryError::Sqlite(_)) => return problem_response(internal_problem()),
@@ -126,19 +126,19 @@ pub(crate) async fn target_checks(
     };
 
     let window = params.window.as_deref().unwrap_or("24h");
-    let store = match state.lock_store() {
-        Ok(store) => store,
+    let reader = match state.read_source() {
+        Ok(reader) => reader,
         Err(_) => return problem_response(internal_problem()),
     };
     let checks = match key.service.as_deref() {
-        Some(service) => store.target_checks_scoped_for_service(
+        Some(service) => reader.target_checks_scoped_for_service(
             &id,
             window,
             &key.tenant_id,
             &key.project_id,
             service,
         ),
-        None => store.target_checks_scoped(&id, window, &key.tenant_id, &key.project_id),
+        None => reader.target_checks_scoped(&id, window, &key.tenant_id, &key.project_id),
     };
     let checks = match checks {
         Ok(checks) => checks,

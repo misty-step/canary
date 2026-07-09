@@ -18,7 +18,7 @@ use std::{
 use axum::Router;
 use canary_http::public::DependencyStatus;
 use canary_ingest::{IngestConfig, IngestEffect};
-use canary_store::{IncidentCorrelation, Store};
+use canary_store::{IncidentCorrelation, ReadPool, Store};
 use canary_workers::retention::RetentionPolicy;
 
 use crate::{
@@ -151,6 +151,8 @@ impl CanaryServer {
                 eprintln!("Bootstrap API key created but not disclosed by process config.");
             }
         }
+        let read_pool =
+            Arc::new(ReadPool::open(&config.database_path).map_err(ServerBootError::Store)?);
         let store = Arc::new(Mutex::new(store));
         let worker_health = WorkerHealthRegistry::new();
 
@@ -235,7 +237,8 @@ impl CanaryServer {
         let ingest_state = ingest_state
             .with_target_control(Arc::new(target_probe_worker.controller()))
             .with_auth_fail_identity(config.auth_fail_identity)
-            .with_allow_private_targets(allow_private_targets);
+            .with_allow_private_targets(allow_private_targets)
+            .with_read_pool(read_pool);
         let readiness = PublicReadiness::from_probe(Arc::new(StoreReadinessProbe {
             store: store.clone(),
             workers: worker_health.clone(),

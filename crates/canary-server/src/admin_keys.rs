@@ -42,12 +42,12 @@ pub(crate) async fn list_api_keys(
         Err(problem) => return problem_response(*problem),
     };
 
-    let store = match state.lock_store() {
-        Ok(store) => store,
+    let reader = match state.read_source() {
+        Ok(reader) => reader,
         Err(_) => return problem_response(internal_problem()),
     };
 
-    match store.list_api_keys_scoped(&authority.tenant_id, &authority.project_id) {
+    match reader.list_api_keys_scoped(&authority.tenant_id, &authority.project_id) {
         Ok(keys) => json_status_response(
             StatusCode::OK.as_u16(),
             json!({"keys": keys.into_iter().map(api_key_response).collect::<Vec<_>>()}),

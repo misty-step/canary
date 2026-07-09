@@ -21,6 +21,7 @@ mod metrics;
 mod oban_jobs;
 mod query;
 mod rate_limits;
+mod read_pool;
 mod retention;
 mod schema;
 mod scope;
@@ -69,6 +70,7 @@ pub use query::{
     TimelineQueryOptions, TimelineQueryResult,
 };
 pub use rate_limits::DurableRateLimitDecision;
+pub use read_pool::{ReadConnection, ReadPool};
 pub use retention::{
     RetentionPrune, RetentionPruneBatch, RetentionPruneBatchReport, RetentionPruneReport,
     RetentionPruneTable,
@@ -96,6 +98,10 @@ pub enum StoreError {
     /// API-key hashing failed while preparing a persisted secret.
     #[error("secret hash error: {0}")]
     SecretHash(#[from] bcrypt::BcryptError),
+    /// A read pool was opened against a database that is not running in WAL
+    /// journal mode, so concurrent readers are not guaranteed.
+    #[error("read pool requires WAL journal mode, found `{0}`")]
+    ReadPoolNotWal(String),
     /// A service-onboarding target conflicts with an existing target row.
     #[error("target conflict")]
     TargetConflict(TargetConflict),

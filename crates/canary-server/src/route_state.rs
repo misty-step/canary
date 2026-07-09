@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use canary_ingest::{IngestConfig, IngestEffect};
-use canary_store::Store;
+use canary_store::{ReadPool, Store};
 use canary_workers::webhooks::{TransportResult, WebhookRequest};
 
 use crate::auth_cache::AuthCache;
@@ -52,6 +52,11 @@ pub struct IngestState {
     auth_fail_identity: AuthFailIdentityConfig,
     allow_private_targets: bool,
     auth_cache: Arc<AuthCache>,
+    /// Read-only connection source for read-model routes. `None` for
+    /// in-memory stores (all of this crate's test fixtures), which have no
+    /// second file to open a sibling connection against; those routes fall
+    /// back to the writer connection, exactly as before this existed.
+    read_pool: Option<Arc<ReadPool>>,
 }
 
 /// Client identity source used only for invalid-key
@@ -100,6 +105,7 @@ impl IngestState {
             auth_fail_identity: AuthFailIdentityConfig::default(),
             allow_private_targets: false,
             auth_cache: Arc::new(AuthCache::default()),
+            read_pool: None,
         }
     }
 
@@ -129,6 +135,7 @@ impl IngestState {
             auth_fail_identity: AuthFailIdentityConfig::default(),
             allow_private_targets: false,
             auth_cache: Arc::new(AuthCache::default()),
+            read_pool: None,
         }
     }
 
@@ -150,6 +157,7 @@ impl IngestState {
             auth_fail_identity: AuthFailIdentityConfig::default(),
             allow_private_targets: false,
             auth_cache: Arc::new(AuthCache::default()),
+            read_pool: None,
         }
     }
 
@@ -171,6 +179,7 @@ impl IngestState {
             auth_fail_identity: AuthFailIdentityConfig::default(),
             allow_private_targets: false,
             auth_cache: Arc::new(AuthCache::default()),
+            read_pool: None,
         }
     }
 
@@ -196,6 +205,13 @@ impl IngestState {
     /// Allow admin target creation to accept private/non-global probe hosts.
     pub fn with_allow_private_targets(mut self, allow_private_targets: bool) -> Self {
         self.allow_private_targets = allow_private_targets;
+        self
+    }
+
+    /// Attach a read pool so read-model routes serve queries from read-only
+    /// WAL connections instead of the single-writer store.
+    pub fn with_read_pool(mut self, read_pool: Arc<ReadPool>) -> Self {
+        self.read_pool = Some(read_pool);
         self
     }
 
@@ -243,6 +259,11 @@ impl IngestState {
 
     pub(crate) fn auth_cache(&self) -> &AuthCache {
         &self.auth_cache
+    }
+
+    /// Read pool for read-model routes, when this state was wired with one.
+    pub(crate) fn read_pool(&self) -> Option<&Arc<ReadPool>> {
+        self.read_pool.as_ref()
     }
 
     pub(crate) fn allow_private_targets(&self) -> bool {
