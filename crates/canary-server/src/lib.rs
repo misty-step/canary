@@ -38,6 +38,7 @@ mod public_routes;
 mod query_routes;
 mod rate_limit;
 mod read_audit;
+mod read_source;
 mod report_routes;
 mod responder_context;
 mod retention_prune;
@@ -249,10 +250,10 @@ mod tests {
     use canary_ingest::{IngestConfig, IngestEffect};
     use canary_store::{
         API_KEY_PREFIX_LEN, AnnotationInsert, ApiKeyInsert, ErrorIngest, ErrorIngestIds,
-        ErrorIngestPayload, MonitorCheckInCommit, MonitorCheckInObservation, MonitorInsert, Store,
-        TargetCheckObservation, TargetInsert, TargetProbeCommit, WebhookDeliveryInsert,
-        WebhookDeliveryJobCompletion, WebhookDeliveryJobInsert, WebhookDeliveryJobState,
-        WebhookDeliveryStatus, WebhookSubscriptionInsert,
+        ErrorIngestPayload, MonitorCheckInCommit, MonitorCheckInObservation, MonitorInsert,
+        ReadPool, Store, TargetCheckObservation, TargetInsert, TargetProbeCommit,
+        WebhookDeliveryInsert, WebhookDeliveryJobCompletion, WebhookDeliveryJobInsert,
+        WebhookDeliveryJobState, WebhookDeliveryStatus, WebhookSubscriptionInsert,
     };
     use canary_workers::{
         retention::RetentionPolicy,
@@ -799,6 +800,136 @@ mod tests {
         assert_eq!(keys[0].name, "bootstrap");
         assert_eq!(keys[0].scope, "admin");
         fs::remove_file(path)?;
+
+        Ok(())
+    }
+
+    /// Read routes must return identical results whether or not a
+    /// `ReadPool` is wired: booting with one (the production path) reads
+    /// through read-only connections instead of the writer, and the
+    /// response must match the pre-existing writer-only behavior exactly.
+    #[tokio::test]
+    async fn read_pool_serves_report_route_with_matching_data() -> Result<(), Box<dyn Error>> {
+        let path = temp_db_path("read-pool-parity");
+        let mut store = Store::open(&path)?;
+        store.migrate()?;
+        seed_api_key(&mut store, "KEY-read", READ_KEY, "read-only", None)?;
+        seed_api_key(&mut store, "KEY-ingest", INGEST_KEY, "ingest-only", None)?;
+        let read_pool = Arc::new(ReadPool::open(&path)?);
+        let state =
+            IngestState::new(store, IngestConfig::default()).with_read_pool(read_pool.clone());
+        let router = ingest_router(state.clone());
+
+        let ingested = router
+            .clone()
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+        assert_eq!(ingested.status(), StatusCode::CREATED);
+
+        let pooled = router
+            .clone()
+            .oneshot(read_request(READ_KEY, "/api/v1/report?window=1h")?)
+            .await?;
+        assert_eq!(pooled.status(), StatusCode::OK);
+        let pooled_body = json_body(pooled).await?;
+
+        let writer_only_state = IngestState::new_with_shared_effect_sink(
+            state.shared_store(),
+            IngestConfig::default(),
+            Arc::new(TestNoopIngestEffectSink),
+        );
+        let writer_only_router = ingest_router(writer_only_state);
+        let writer_only = writer_only_router
+            .oneshot(read_request(READ_KEY, "/api/v1/report?window=1h")?)
+            .await?;
+        assert_eq!(writer_only.status(), StatusCode::OK);
+        let writer_only_body = json_body(writer_only).await?;
+
+        assert_eq!(
+            pooled_body["error_groups"],
+            writer_only_body["error_groups"]
+        );
+        assert_eq!(pooled_body["summary"], writer_only_body["summary"]);
+        assert_eq!(
+            pooled_body["error_groups"]
+                .as_array()
+                .map(Vec::len)
+                .unwrap_or_default(),
+            1
+        );
+
+        fs::remove_file(&path)?;
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+
+        Ok(())
+    }
+
+    /// `report_error_groups_scoped` and `active_incidents` deliberately stay
+    /// off the read pool because they fuse a claim-expiry write into the
+    /// read (see `read_pool.rs` and `read_source.rs`). This guards that the
+    /// exclusion actually keeps a pooled `/api/v1/report` read correct end
+    /// to end: an expired claim must not still show as `current_claim`
+    /// (canary-930 child B review MINOR).
+    #[tokio::test]
+    async fn read_pool_report_reflects_claim_expiry_done_via_writer() -> Result<(), Box<dyn Error>>
+    {
+        let path = temp_db_path("read-pool-claim-expiry");
+        let mut store = Store::open(&path)?;
+        store.migrate()?;
+        seed_api_key(&mut store, "KEY-admin", ADMIN_KEY, "admin", None)?;
+        seed_api_key(&mut store, "KEY-read", READ_KEY, "read-only", None)?;
+        seed_api_key(&mut store, "KEY-ingest", INGEST_KEY, "ingest-only", None)?;
+        let read_pool = Arc::new(ReadPool::open(&path)?);
+        let state = IngestState::new(store, IngestConfig::default()).with_read_pool(read_pool);
+        let router = ingest_router(state);
+
+        let ingested = router
+            .clone()
+            .oneshot(error_request(
+                INGEST_KEY,
+                r#"{"service":"claim-svc","error_class":"RuntimeError","message":"claim expiry regression"}"#,
+            )?)
+            .await?;
+        assert_eq!(ingested.status(), StatusCode::CREATED);
+        let ingested_body = json_body(ingested).await?;
+        let group_hash = ingested_body["group_hash"]
+            .as_str()
+            .ok_or("missing error group hash")?
+            .to_owned();
+
+        let claimed = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/claims",
+                ADMIN_KEY,
+                &format!(
+                    r#"{{"subject_type":"error_group","subject_id":"{group_hash}","owner":"codex","purpose":"inspect","ttl_ms":1,"idempotency_key":"run-expiry"}}"#
+                ),
+            )?)
+            .await?;
+        assert_eq!(claimed.status(), StatusCode::CREATED);
+
+        // Let the 1ms TTL lapse so the claim is due for expiry by the time
+        // the report handler's writer block runs it.
+        thread::sleep(StdDuration::from_millis(50));
+
+        let report = router
+            .clone()
+            .oneshot(read_request(READ_KEY, "/api/v1/report?window=30d")?)
+            .await?;
+        assert_eq!(report.status(), StatusCode::OK);
+        let report_body = json_body(report).await?;
+        assert_eq!(report_body["error_groups"][0]["group_hash"], group_hash);
+        assert!(
+            report_body["error_groups"][0]["current_claim"].is_null(),
+            "expired claim must not still be reported as current: {report_body}"
+        );
+
+        fs::remove_file(&path)?;
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
 
         Ok(())
     }

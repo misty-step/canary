@@ -120,13 +120,16 @@ pub(crate) async fn query_errors(
         without_annotation: params.without_annotation,
     };
 
-    let mut store = match state.lock_store() {
-        Ok(store) => store,
-        Err(_) => return problem_response(internal_problem()),
-    };
-
+    // `errors_by_service` and `errors_by_error_class` fuse a claim-expiry
+    // write into the read (Store::errors_by_service/_by_error_class take
+    // `&mut self`), so those two branches stay on the writer. Only the
+    // class-listing branch is a pure read and can use the read pool.
     match query_kind {
         QueryKind::Service { service } => {
+            let mut store = match state.lock_store() {
+                Ok(store) => store,
+                Err(_) => return problem_response(internal_problem()),
+            };
             match store.errors_by_service(&service, window, options) {
                 Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
                 Err(ErrorGroupQueryError::InvalidWindow) => {
@@ -141,14 +144,28 @@ pub(crate) async fn query_errors(
         QueryKind::ErrorClass {
             error_class,
             service,
-        } => match store.errors_by_error_class(&error_class, window, service.as_deref(), options) {
-            Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
-            Err(ErrorGroupQueryError::InvalidWindow) => problem_response(invalid_window_problem()),
-            Err(ErrorGroupQueryError::InvalidCursor) => problem_response(invalid_cursor_problem()),
-            Err(ErrorGroupQueryError::Sqlite(_)) => problem_response(internal_problem()),
-        },
+        } => {
+            let mut store = match state.lock_store() {
+                Ok(store) => store,
+                Err(_) => return problem_response(internal_problem()),
+            };
+            match store.errors_by_error_class(&error_class, window, service.as_deref(), options) {
+                Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
+                Err(ErrorGroupQueryError::InvalidWindow) => {
+                    problem_response(invalid_window_problem())
+                }
+                Err(ErrorGroupQueryError::InvalidCursor) => {
+                    problem_response(invalid_cursor_problem())
+                }
+                Err(ErrorGroupQueryError::Sqlite(_)) => problem_response(internal_problem()),
+            }
+        }
         QueryKind::ErrorClasses => {
-            match store.errors_by_class_scoped(window, &key.tenant_id, &key.project_id) {
+            let reader = match state.read_source() {
+                Ok(reader) => reader,
+                Err(_) => return problem_response(internal_problem()),
+            };
+            match reader.errors_by_class_scoped(window, &key.tenant_id, &key.project_id) {
                 Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
                 Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
                 Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
@@ -187,12 +204,12 @@ pub(crate) async fn timeline(
         cursor,
         event_type: params.event_type,
     };
-    let store = match state.lock_store() {
-        Ok(store) => store,
+    let reader = match state.read_source() {
+        Ok(reader) => reader,
         Err(_) => return problem_response(internal_problem()),
     };
 
-    match store.timeline(window, options) {
+    match reader.timeline(window, options) {
         Ok(result) => json_status_response(StatusCode::OK.as_u16(), result),
         Err(TimelineQueryError::InvalidWindow) => problem_response(invalid_window_problem()),
         Err(TimelineQueryError::InvalidLimit) => problem_response(invalid_limit_problem()),
@@ -249,12 +266,12 @@ pub(crate) async fn show_error(
         Err(problem) => return problem_response(*problem),
     };
 
-    let mut store = match state.lock_store() {
-        Ok(store) => store,
+    let reader = match state.read_source() {
+        Ok(reader) => reader,
         Err(_) => return problem_response(internal_problem()),
     };
 
-    let response = match store.error_detail_scoped(&id, &key.tenant_id, &key.project_id) {
+    let response = match reader.error_detail_scoped(&id, &key.tenant_id, &key.project_id) {
         Ok(Some(result)) => {
             if let Some(bound_service) = key.service.as_deref()
                 && result.service != bound_service
@@ -267,7 +284,14 @@ pub(crate) async fn show_error(
         Err(QueryError::InvalidWindow) => problem_response(invalid_window_problem()),
         Err(QueryError::Sqlite(_)) => problem_response(internal_problem()),
     };
+    drop(reader);
 
+    // The audit event is a write, so it stays on the writer; the heavy read
+    // above already ran off the writer connection.
+    let mut store = match state.lock_store() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
     crate::read_audit::record_read_audit(&mut store, &key, "GET /api/v1/errors/{id}");
     response
 }
