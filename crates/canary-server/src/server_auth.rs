@@ -84,23 +84,40 @@ pub(crate) fn require_scope(
         BearerToken::Present(token) => token,
         BearerToken::Missing => return Err(Box::new(missing_authorization_problem(None))),
     };
-    let auth_fail_identity = reject_limited_unknown_prefix(state, headers, token)?;
+    let now_ms = current_unix_millis();
+    let key = match state.auth_cache().get(token, now_ms) {
+        Some(cached) => cached,
+        None => {
+            let auth_fail_identity = reject_limited_unknown_prefix(state, headers, token)?;
 
-    let key = {
-        let store = state
-            .lock_store()
-            .map_err(|_| Box::new(internal_problem()))?;
-        store
-            .verify_api_key(token)
-            .map_err(|_| Box::new(internal_problem()))?
-    };
-    let Some(key) = key else {
-        account_auth_fail_identity(state, &auth_fail_identity)?;
-        return Err(Box::new(invalid_api_key_problem(None)));
+            // Fetch candidates under a short store lock, then run the
+            // CPU-bound bcrypt loop AFTER dropping the guard: verification
+            // under the single-writer lock serialized every authenticated
+            // request behind ~230ms of bcrypt (canary-930). The epoch read
+            // fences the insert against a concurrent revocation.
+            let fetch_epoch = state.auth_cache().epoch();
+            let candidates = {
+                let store = state
+                    .lock_store()
+                    .map_err(|_| Box::new(internal_problem()))?;
+                store
+                    .api_key_verify_candidates(token)
+                    .map_err(|_| Box::new(internal_problem()))?
+            };
+            let Some(key) = canary_store::verify_key_candidates(token, candidates) else {
+                account_auth_fail_identity(state, &auth_fail_identity)?;
+                return Err(Box::new(invalid_api_key_problem(None)));
+            };
+            state
+                .auth_cache()
+                .insert(token, key.clone(), now_ms, fetch_epoch);
+            key
+        }
     };
 
     let Some(scope) = ApiKeyScope::parse(&key.scope) else {
-        account_auth_fail_identity(state, &auth_fail_identity)?;
+        let identity = auth_fail_identity(headers, state.auth_fail_identity());
+        account_auth_fail_identity(state, &identity)?;
         return Err(Box::new(invalid_api_key_problem(None)));
     };
     if scope == ApiKeyScope::Admin

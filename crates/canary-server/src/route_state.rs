@@ -11,6 +11,7 @@ use canary_ingest::{IngestConfig, IngestEffect};
 use canary_store::Store;
 use canary_workers::webhooks::{TransportResult, WebhookRequest};
 
+use crate::auth_cache::AuthCache;
 use crate::{
     HealthEventFanout, HttpWebhookTransport, InMemoryWebhookCooldown, RateLimiter,
     TargetProbeLifecycleCommand, TargetProbeLifecycleController, WebhookEnqueueEffectSink,
@@ -50,6 +51,7 @@ pub struct IngestState {
     rate_limiter: Arc<Mutex<RateLimiter>>,
     auth_fail_identity: AuthFailIdentityConfig,
     allow_private_targets: bool,
+    auth_cache: Arc<AuthCache>,
 }
 
 /// Client identity source used only for invalid-key
@@ -97,6 +99,7 @@ impl IngestState {
             rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
             auth_fail_identity: AuthFailIdentityConfig::default(),
             allow_private_targets: false,
+            auth_cache: Arc::new(AuthCache::default()),
         }
     }
 
@@ -125,6 +128,7 @@ impl IngestState {
             rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
             auth_fail_identity: AuthFailIdentityConfig::default(),
             allow_private_targets: false,
+            auth_cache: Arc::new(AuthCache::default()),
         }
     }
 
@@ -145,6 +149,7 @@ impl IngestState {
             rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
             auth_fail_identity: AuthFailIdentityConfig::default(),
             allow_private_targets: false,
+            auth_cache: Arc::new(AuthCache::default()),
         }
     }
 
@@ -165,6 +170,7 @@ impl IngestState {
             rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
             auth_fail_identity: AuthFailIdentityConfig::default(),
             allow_private_targets: false,
+            auth_cache: Arc::new(AuthCache::default()),
         }
     }
 
@@ -233,6 +239,10 @@ impl IngestState {
 
     pub(crate) fn auth_fail_identity(&self) -> AuthFailIdentityConfig {
         self.auth_fail_identity
+    }
+
+    pub(crate) fn auth_cache(&self) -> &AuthCache {
+        &self.auth_cache
     }
 
     pub(crate) fn allow_private_targets(&self) -> bool {

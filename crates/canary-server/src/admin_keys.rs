@@ -140,7 +140,12 @@ pub(crate) async fn revoke_api_key(
         &authority.tenant_id,
         &authority.project_id,
     ) {
-        Ok(true) => json_status_response(StatusCode::OK.as_u16(), json!({"status": "revoked"})),
+        Ok(true) => {
+            // Revocation must beat the auth cache: drop every cached token
+            // for this key so the next request re-verifies against the store.
+            state.auth_cache().invalidate_key_id(&id);
+            json_status_response(StatusCode::OK.as_u16(), json!({"status": "revoked"}))
+        }
         Ok(false) => problem_response(not_found_problem("API key not found.")),
         Err(_) => problem_response(internal_problem()),
     }

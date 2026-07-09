@@ -21,6 +21,7 @@ mod admin_monitors;
 mod admin_targets;
 mod admin_webhooks;
 mod annotations;
+mod auth_cache;
 mod body_fields;
 mod claims;
 mod dashboard_routes;
@@ -4908,6 +4909,36 @@ mod tests {
             json_body(missing_response).await?["detail"],
             "API key not found."
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn auth_cache_serves_repeats_but_never_wrong_prefix_tokens() -> Result<(), Box<dyn Error>>
+    {
+        let router = ingest_router(test_ingest_state()?);
+
+        // First authenticated read pays bcrypt and populates the auth cache.
+        let first = router
+            .clone()
+            .oneshot(read_request(READ_KEY, "/api/v1/incidents")?)
+            .await?;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        // Repeat auth with the same token must keep working (cache hit path).
+        let second = router
+            .clone()
+            .oneshot(read_request(READ_KEY, "/api/v1/incidents")?)
+            .await?;
+        assert_eq!(second.status(), StatusCode::OK);
+
+        // A different token sharing the cached key's prefix must never be
+        // served from the cache entry.
+        let wrong = router
+            .oneshot(read_request("sk_live_read_wrong", "/api/v1/incidents")?)
+            .await?;
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(json_body(wrong).await?["code"], "invalid_api_key");
 
         Ok(())
     }

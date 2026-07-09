@@ -34,8 +34,8 @@ pub use annotations::{
     AnnotationSubjectType, subject_types as annotation_subject_types,
 };
 pub use api_keys::{
-    API_KEY_PREFIX_LEN, ApiKeyInsert, ApiKeyRecord, BOOTSTRAP_PROJECT_ID, BOOTSTRAP_TENANT_ID,
-    VerifiedApiKey,
+    API_KEY_PREFIX_LEN, ApiKeyInsert, ApiKeyRecord, ApiKeyVerifyCandidate, BOOTSTRAP_PROJECT_ID,
+    BOOTSTRAP_TENANT_ID, VerifiedApiKey, verify_key_candidates,
 };
 pub use canary_core::metrics::MetricsSnapshot;
 pub use claims::{
@@ -568,6 +568,15 @@ impl Store {
     /// Verify a raw bearer token against active bcrypt-hashed API-key rows.
     pub fn verify_api_key(&self, raw_key: &str) -> Result<Option<VerifiedApiKey>> {
         api_keys::verify_key(&self.connection, raw_key)
+    }
+
+    /// Fetch active same-prefix key candidates for out-of-lock verification.
+    ///
+    /// SQL only — no bcrypt. Callers hold the store lock just for this fetch,
+    /// drop the guard, then run [`verify_key_candidates`] on the result so the
+    /// CPU-bound bcrypt loop never serializes the single writer.
+    pub fn api_key_verify_candidates(&self, raw_key: &str) -> Result<Vec<ApiKeyVerifyCandidate>> {
+        api_keys::active_candidates(&self.connection, &api_keys::key_prefix(raw_key))
     }
 
     /// Return whether a raw bearer token has any active row with the same prefix.
@@ -3875,6 +3884,42 @@ mod tests {
         assert_eq!(verified.id, "KEY-valid");
         assert_eq!(verified.name, "key KEY-valid");
         assert_eq!(verified.scope, "ingest-only");
+        Ok(())
+    }
+
+    #[test]
+    fn verify_key_candidates_matches_after_guard_drop()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        insert_api_key(
+            &mut store,
+            "KEY-split",
+            "sk_live_split_secret",
+            "admin",
+            None,
+        )?;
+
+        let candidates = store.api_key_verify_candidates("sk_live_split_secret")?;
+        drop(store);
+
+        let Some(verified) = verify_key_candidates("sk_live_split_secret", candidates) else {
+            return Err("candidates should verify without store access".into());
+        };
+        assert_eq!(verified.id, "KEY-split");
+
+        let store = migrated_store()?;
+        let wrong = store.api_key_verify_candidates("sk_live_split_secret")?;
+        assert!(verify_key_candidates("sk_live_split_wrong!", wrong).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn verify_key_candidates_rejects_unknown_prefix_with_empty_candidates()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let store = migrated_store()?;
+        let candidates = store.api_key_verify_candidates("sk_live_nothing_here")?;
+        assert!(candidates.is_empty());
+        assert!(verify_key_candidates("sk_live_nothing_here", candidates).is_none());
         Ok(())
     }
 
