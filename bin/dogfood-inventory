@@ -164,12 +164,6 @@ jq -e '
 ' "$MANIFEST" >/dev/null || die "invalid dogfood registry shape: $MANIFEST"
 
 jq '.services' "$MANIFEST" >"$REGISTRY_JSON"
-DONE_BACKLOG_ITEMS="$(
-  find "$ROOT/backlog.d/_done" -maxdepth 1 -type f -name '[0-9][0-9][0-9]-*.md' 2>/dev/null \
-    | sed -E 's#.*/([0-9][0-9][0-9])-.*#\1#' \
-    | jq -R . \
-    | jq -s .
-)"
 
 fixture_for_scope() {
   local scope="$1" item
@@ -348,7 +342,6 @@ jq -s \
   --arg requested "$REQUESTED" \
   --argjson now_epoch "$NOW_EPOCH" \
   --argjson max_evidence_age_hours "$MAX_EVIDENCE_AGE_HOURS" \
-  --argjson done_backlog_items "$DONE_BACKLOG_ITEMS" \
   --arg window "$WINDOW" '
   def checked_epoch($value): try ($value | fromdateiso8601) catch null;
   def receipt_epoch($receipt):
@@ -370,11 +363,6 @@ jq -s \
   def evidence_age_hours($receipt; $svc):
     (if $receipt != null then receipt_epoch($receipt) else checked_epoch($svc.last_checked_at) end) as $checked
     | if $checked == null then null else (($now_epoch - $checked) / 3600 | floor) end;
-  def completed_ticket_reference($svc):
-    ($svc.next_action // "") as $next
-    | any($done_backlog_items[]; . as $done |
-        ($next | test("(#0*" + $done + "\\b)|(ticket\\s+0*" + $done + "\\b)|(backlog items?\\b[^.\\n;]*\\b0*" + $done + "\\b)"; "i"))
-      );
   def receipt_covers($receipt):
     $receipt != null
     and (stale_receipt($receipt) | not)
@@ -431,7 +419,6 @@ jq -s \
           integration_receipt: $receipt,
           receipt_seen: ($receipt != null),
           receipt_stale: (if $receipt != null then stale_receipt($receipt) else null end),
-          completed_ticket_next_action: completed_ticket_reference($svc),
           deployment_seen: ($deploy != null),
           local_link_seen: ($local != null),
           reasons: []
@@ -524,7 +511,6 @@ jq -s \
       + ([.surfaces[] | select((.reasons // []) | index("unregistered_integration_receipt")) | {kind:"unregistered_integration_receipt", service:.service, repo_path:.repo_path}])
       + ([.requested_services[] as $wanted | select([.registry[].service] | index($wanted) | not) | {kind:"missing_requested_registry_entry", service:$wanted}])
       + ([.surfaces[] | select(.registry_state != "ignored" and .evidence_stale) | {kind:(if .evidence_source == "integration_receipt" then "stale_integration_receipt" else "stale_registry_evidence" end), service:.service, platform:.platform, platform_project:.platform_project, source:.evidence_source, last_checked_at:.last_checked_at, evidence_age_hours:.evidence_age_hours}])
-      + ([.surfaces[] | select(.completed_ticket_next_action) | {kind:"completed_ticket_next_action", service:.service, next_action:.next_action}])
     )
   | .summary = {
       covered: ([.surfaces[] | select(.coverage == "covered")] | length),

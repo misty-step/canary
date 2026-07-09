@@ -1351,7 +1351,6 @@ pub fn dogfood_value_receipt(input: &DogfoodValueInput<'_>) -> Value {
             "evidence_stale": bool_field(&surface, "evidence_stale"),
             "receipt_seen": surface.get("receipt_seen").cloned().unwrap_or(Value::Null),
             "receipt_stale": surface.get("receipt_stale").cloned().unwrap_or(Value::Null),
-            "completed_ticket_next_action": bool_field(&surface, "completed_ticket_next_action"),
             "reasons": surface.get("reasons").cloned().unwrap_or_else(|| json!([]))
         },
         "registry": {
@@ -1417,7 +1416,6 @@ pub fn dogfood_value_summary(value: &Value) -> Value {
         .iter()
         .filter(|surface| {
             bool_field(surface, "evidence_stale")
-                || bool_field(surface, "completed_ticket_next_action")
                 || surface
                     .get("receipt_stale")
                     .and_then(Value::as_bool)

@@ -389,13 +389,12 @@ BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "2" "invalid registry exits non-zero"
 assert_contains "$BODY" "invalid dogfood registry shape" "invalid registry explains schema failure"
 
-echo "Test 6: dogfood-inventory strict fails stale evidence and singular completed-ticket next actions"
+echo "Test 6: dogfood-inventory strict fails stale evidence"
 OUTPUT=$(run_failure "$DOGFOOD_INVENTORY" --manifest "$STALE_MANIFEST" --vercel-projects "example-team=$VERCEL_EMPTY" --vercel-projects "example-admin=$VERCEL_EMPTY" --fly-apps "$FLY_APPS" --local-root "$LOCAL_ROOT" --requested stale --now 2026-06-14T00:00:00Z --max-evidence-age-hours 24 --strict)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "stale registry evidence exits non-zero"
 assert_contains "$BODY" "stale_registry_evidence" "strict output names stale evidence"
-assert_contains "$BODY" "completed_ticket_next_action" "strict output names completed-ticket next action"
 
 echo "Test 7: dogfood-inventory supports no-fixture collector path"
 STUB_BIN="$TMPDIR_TEST/bin"
