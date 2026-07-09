@@ -85,10 +85,11 @@ pub(crate) fn require_scope(
         BearerToken::Missing => return Err(Box::new(missing_authorization_problem(None))),
     };
     let now_ms = current_unix_millis();
+    let fail_identity = auth_fail_identity(headers, state.auth_fail_identity());
     let key = match state.auth_cache().get(token, now_ms) {
         Some(cached) => cached,
         None => {
-            let auth_fail_identity = reject_limited_unknown_prefix(state, headers, token)?;
+            reject_limited_unknown_prefix(state, &fail_identity, token)?;
 
             // Fetch candidates under a short store lock, then run the
             // CPU-bound bcrypt loop AFTER dropping the guard: verification
@@ -105,7 +106,7 @@ pub(crate) fn require_scope(
                     .map_err(|_| Box::new(internal_problem()))?
             };
             let Some(key) = canary_store::verify_key_candidates(token, candidates) else {
-                account_auth_fail_identity(state, &auth_fail_identity)?;
+                account_auth_fail_identity(state, &fail_identity)?;
                 return Err(Box::new(invalid_api_key_problem(None)));
             };
             state
@@ -116,8 +117,7 @@ pub(crate) fn require_scope(
     };
 
     let Some(scope) = ApiKeyScope::parse(&key.scope) else {
-        let identity = auth_fail_identity(headers, state.auth_fail_identity());
-        account_auth_fail_identity(state, &identity)?;
+        account_auth_fail_identity(state, &fail_identity)?;
         return Err(Box::new(invalid_api_key_problem(None)));
     };
     if scope == ApiKeyScope::Admin
@@ -180,17 +180,16 @@ pub(crate) fn responder_service_binding_problem() -> ProblemDetails {
 
 fn reject_limited_unknown_prefix(
     state: &IngestState,
-    headers: &HeaderMap,
+    identity: &str,
     token: &str,
-) -> Result<String, Box<ProblemDetails>> {
-    let identity = auth_fail_identity(headers, state.auth_fail_identity());
+) -> Result<(), Box<ProblemDetails>> {
     let mut limiter = state
         .rate_limiter()
         .lock()
         .map_err(|_| Box::new(internal_problem()))?;
 
-    let retry_after_seconds = match limiter.peek(RateLimitKind::AuthFail, &identity) {
-        RateLimitDecision::Allowed => return Ok(identity),
+    let retry_after_seconds = match limiter.peek(RateLimitKind::AuthFail, identity) {
+        RateLimitDecision::Allowed => return Ok(()),
         RateLimitDecision::Limited {
             retry_after_seconds,
         } => retry_after_seconds,
@@ -204,7 +203,7 @@ fn reject_limited_unknown_prefix(
         .active_api_key_prefix_exists(token)
         .map_err(|_| Box::new(internal_problem()))?
     {
-        Ok(identity)
+        Ok(())
     } else {
         Err(Box::new(rate_limited_problem(retry_after_seconds)))
     }

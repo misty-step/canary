@@ -87,10 +87,20 @@ impl AuthCache {
     /// Called by the revoke route so revocation takes effect on the next
     /// request instead of waiting out the TTL.
     pub(crate) fn invalidate_key_id(&self, key_id: &str) {
-        if let Ok(mut entries) = self.entries.lock() {
-            self.revocation_epoch.fetch_add(1, Ordering::AcqRel);
-            entries.retain(|_, entry| entry.key.id != key_id);
-        }
+        // Revocation must never fail open. `get`/`insert` may fail closed on a
+        // poisoned mutex (worst case: a full reverify), but a swallowed purge
+        // would leave a revoked key servable for the rest of the TTL. The
+        // critical sections only mutate the HashMap, which a panic cannot
+        // corrupt structurally — recover the map and heal the poison.
+        let mut entries = match self.entries.lock() {
+            Ok(entries) => entries,
+            Err(poisoned) => {
+                self.entries.clear_poison();
+                poisoned.into_inner()
+            }
+        };
+        self.revocation_epoch.fetch_add(1, Ordering::AcqRel);
+        entries.retain(|_, entry| entry.key.id != key_id);
     }
 }
 
@@ -133,6 +143,30 @@ mod tests {
         let cache = AuthCache::default();
         cache.insert("sk_live_token", verified("KEY-a"), 0, cache.epoch());
         assert!(cache.get("sk_live_other", 1).is_none());
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used, clippy::panic)]
+    fn invalidate_purges_and_heals_after_mutex_poisoning() {
+        let cache = std::sync::Arc::new(AuthCache::default());
+        cache.insert("sk_live_token", verified("KEY-a"), 0, cache.epoch());
+
+        // Poison the entries mutex: panic on a thread holding the guard.
+        let poisoner = std::sync::Arc::clone(&cache);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.entries.lock().unwrap();
+            panic!("poison the auth cache mutex");
+        })
+        .join();
+
+        // Revocation must still purge — and heal the cache for later use.
+        cache.invalidate_key_id("KEY-a");
+        cache.insert("sk_live_second", verified("KEY-b"), 0, cache.epoch());
+        assert!(cache.get("sk_live_token", 1).is_none());
+        assert_eq!(
+            cache.get("sk_live_second", 1).map(|key| key.id),
+            Some("KEY-b".to_owned())
+        );
     }
 
     #[test]
