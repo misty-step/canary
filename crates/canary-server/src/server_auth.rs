@@ -37,6 +37,11 @@ pub(crate) fn require_read_scope(
     headers: &HeaderMap,
 ) -> Result<VerifiedApiKey, Box<ProblemDetails>> {
     let key = require_scope(state, headers, Permission::Read)?;
+    if ApiKeyScope::parse(&key.scope) == Some(ApiKeyScope::ResponderWrite)
+        && key.service.as_deref().is_none()
+    {
+        return Err(Box::new(responder_service_binding_problem()));
+    }
     enforce_rate_limit(state, RateLimitKind::Query, &key.id)?;
     Ok(key)
 }

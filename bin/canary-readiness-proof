@@ -1,0 +1,361 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+ENDPOINT="${CANARY_ENDPOINT:-}"
+API_KEY="${CANARY_API_KEY:-${CANARY_READ_API_KEY:-}}"
+CANARY_BIN="${CANARY_READINESS_CANARY_BIN:-$ROOT/bin/canary}"
+DOGFOOD_INVENTORY_BIN="${CANARY_READINESS_DOGFOOD_INVENTORY_BIN:-$ROOT/bin/dogfood-inventory}"
+VALIDATE_BIN="${CANARY_READINESS_VALIDATE_BIN:-$ROOT/bin/validate}"
+STATIC_MANIFEST="${CANARY_READINESS_STATIC_MANIFEST:-$ROOT/priv/mcp/canary-cli-tools.json}"
+RECEIPT="${CANARY_READINESS_RECEIPT:-canary-readiness-receipt.json}"
+MCP_PROBE_TOOL="${CANARY_READINESS_MCP_TOOL:-canary_summary}"
+MCP_TIMEOUT_SECONDS="${CANARY_READINESS_MCP_TIMEOUT_SECONDS:-10}"
+RUN_VALIDATE=1
+JSON_OUTPUT=0
+
+usage() {
+  cat <<'EOF'
+Usage: bin/canary-readiness-proof [--endpoint <url>] [--api-key <key>] [--receipt <path>] [--mcp-tool <name>] [--skip-validate] [--json] [-h|--help]
+
+One discoverable, repeatable proof that a cold agent can inspect, operate, and
+hand off evidence for this Canary instance without re-deriving the runbook
+from scattered docs.
+
+Runs, in order:
+  1. Credential discovery      - CANARY_ENDPOINT / CANARY_API_KEY (or
+                                  CANARY_READ_API_KEY), reported present/absent
+                                  only, never the values.
+  2. `bin/canary doctor --json`            - live health/coverage diagnostic.
+  3. `bin/canary mcp-manifest --json`      - generated MCP tool surface,
+                                  cross-checked against the checked-in static
+                                  snapshot for drift.
+  4. `bin/canary mcp-server` stdio smoke   - initialize, tools/list, and one
+                                  tools/call against a read-only tool
+                                  (default: canary_summary).
+  5. `bin/dogfood-inventory --json`        - integration/coverage discovery
+                                  smoke.
+  6. `bin/validate --fast`                 - repo gate (skip with
+                                  --skip-validate for composability/CI).
+
+Missing credentials or an unconfigured dogfood registry are reported as
+concrete blocked fields with a replacement command, and the proof still exits
+0 - that is the documented, expected state for a not-yet-configured instance.
+The proof exits nonzero only on unexpected defects: a stale generated MCP
+manifest, a broken MCP tool call, an unreadable dogfood registry error, or a
+failing repo gate.
+
+A redacted JSON receipt is written to --receipt (default:
+./canary-readiness-receipt.json) and, with --json, also printed to stdout.
+EOF
+}
+
+fail() {
+  printf 'canary-readiness-proof: %s\n' "$1" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+now_utc() {
+  date -u '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+while (($#)); do
+  case "$1" in
+    --endpoint)
+      (($# >= 2)) || { usage >&2; exit 1; }
+      ENDPOINT="$2"
+      shift 2
+      ;;
+    --api-key)
+      (($# >= 2)) || { usage >&2; exit 1; }
+      API_KEY="$2"
+      shift 2
+      ;;
+    --receipt)
+      (($# >= 2)) || { usage >&2; exit 1; }
+      RECEIPT="$2"
+      shift 2
+      ;;
+    --mcp-tool)
+      (($# >= 2)) || { usage >&2; exit 1; }
+      MCP_PROBE_TOOL="$2"
+      shift 2
+      ;;
+    --skip-validate)
+      RUN_VALIDATE=0
+      shift
+      ;;
+    --json)
+      JSON_OUTPUT=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+require_command jq
+require_command date
+
+[[ -x "$CANARY_BIN" || -f "$CANARY_BIN" ]] || fail "missing canary CLI entrypoint: $CANARY_BIN"
+[[ -x "$DOGFOOD_INVENTORY_BIN" || -f "$DOGFOOD_INVENTORY_BIN" ]] || fail "missing dogfood-inventory entrypoint: $DOGFOOD_INVENTORY_BIN"
+
+STARTED_AT="$(now_utc)"
+UNEXPECTED_FAILURE=0
+BLOCKED_FIELDS_FILE="$(mktemp)"
+MCP_REQUEST_FILE="$(mktemp)"
+MCP_RESPONSE_FILE="$(mktemp)"
+trap 'rm -f "$BLOCKED_FIELDS_FILE" "$MCP_REQUEST_FILE" "$MCP_RESPONSE_FILE"' EXIT
+: > "$BLOCKED_FIELDS_FILE"
+
+add_blocked_field() {
+  local field="$1" reason="$2" replacement="$3"
+  jq -cn --arg field "$field" --arg reason "$reason" --arg replacement "$replacement" \
+    '{field: $field, reason: $reason, replacement_command: $replacement}' \
+    >> "$BLOCKED_FIELDS_FILE"
+}
+
+# --- Step 1: credential discovery -------------------------------------------
+
+endpoint_present=false
+api_key_present=false
+[[ -n "$ENDPOINT" ]] && endpoint_present=true
+[[ -n "$API_KEY" ]] && api_key_present=true
+
+if [[ "$endpoint_present" == false ]]; then
+  add_blocked_field "endpoint" "CANARY_ENDPOINT is not set and --endpoint was not passed" \
+    "set CANARY_ENDPOINT or pass --endpoint <url>"
+fi
+if [[ "$api_key_present" == false ]]; then
+  add_blocked_field "read_api_key" "no CANARY_API_KEY or CANARY_READ_API_KEY is set" \
+    "set CANARY_API_KEY (or CANARY_READ_API_KEY) or pass --api-key <key>"
+fi
+
+canary_cmd() {
+  local endpoint_args=()
+  [[ -n "$ENDPOINT" ]] && endpoint_args+=(--endpoint "$ENDPOINT")
+  [[ -n "$API_KEY" ]] && endpoint_args+=(--api-key "$API_KEY")
+  "$CANARY_BIN" "${endpoint_args[@]}" "$@"
+}
+
+# --- Step 2: doctor ----------------------------------------------------------
+
+set +e
+doctor_output="$(canary_cmd doctor --json 2>&1)"
+doctor_exit=$?
+set -e
+
+if ((doctor_exit == 0)) && jq -e . >/dev/null 2>&1 <<<"$doctor_output"; then
+  doctor_status="ok"
+  doctor_verdict="$(jq -c '.response.verdict // null' <<<"$doctor_output")"
+else
+  doctor_status="blocked"
+  doctor_verdict=null
+  if [[ "$endpoint_present" == true && "$api_key_present" == true ]]; then
+    # Credentials were supplied but doctor still failed: an unexpected defect,
+    # not a documented blocked state.
+    UNEXPECTED_FAILURE=1
+    printf 'canary-readiness-proof: doctor failed with credentials present: %s\n' "$doctor_output" >&2
+  fi
+fi
+
+# --- Step 3: mcp-manifest + static snapshot parity ---------------------------
+
+manifest_output="$("$CANARY_BIN" mcp-manifest --json)"
+manifest_tool_count="$(jq '.tools | length' <<<"$manifest_output")"
+manifest_tool_names="$(jq -c '[.tools[].name] | sort' <<<"$manifest_output")"
+
+manifest_stale=false
+if [[ -f "$STATIC_MANIFEST" ]]; then
+  static_tool_names="$(jq -c '[.tools[].name] | sort' "$STATIC_MANIFEST")"
+  if [[ "$manifest_tool_names" != "$static_tool_names" ]]; then
+    manifest_stale=true
+    UNEXPECTED_FAILURE=1
+    printf 'canary-readiness-proof: generated MCP manifest tool names differ from checked-in %s\n' "$STATIC_MANIFEST" >&2
+  fi
+else
+  static_tool_names=null
+fi
+
+# --- Step 4: MCP wrapper stdio smoke -----------------------------------------
+
+{
+  jq -nc '{jsonrpc: "2.0", id: 1, method: "initialize", params: {protocolVersion: "2025-11-25", capabilities: {}, clientInfo: {name: "canary-readiness-proof", version: "1"}}}'
+  jq -nc '{jsonrpc: "2.0", method: "notifications/initialized"}'
+  jq -nc '{jsonrpc: "2.0", id: 2, method: "tools/list"}'
+  jq -nc --arg tool "$MCP_PROBE_TOOL" '{jsonrpc: "2.0", id: 3, method: "tools/call", params: {name: $tool, arguments: {}}}'
+} > "$MCP_REQUEST_FILE"
+
+set +e
+timeout "$MCP_TIMEOUT_SECONDS" "$CANARY_BIN" mcp-server < "$MCP_REQUEST_FILE" > "$MCP_RESPONSE_FILE" 2>/dev/null
+mcp_exit=$?
+set -e
+
+mcp_tools_listed=0
+mcp_probe_status="error"
+mcp_probe_message=""
+
+if ((mcp_exit == 0)) && [[ -s "$MCP_RESPONSE_FILE" ]]; then
+  mcp_tools_listed="$(jq -r 'select(.id == 2) | .result.tools | length' "$MCP_RESPONSE_FILE" 2>/dev/null | head -1)"
+  [[ -n "$mcp_tools_listed" ]] || mcp_tools_listed=0
+
+  call_is_error="$(jq -r 'select(.id == 3) | .result.isError' "$MCP_RESPONSE_FILE" 2>/dev/null | head -1)"
+  mcp_probe_message="$(jq -r 'select(.id == 3) | .result.content[0].text // ""' "$MCP_RESPONSE_FILE" 2>/dev/null | head -1)"
+
+  if [[ "$call_is_error" == "false" || "$call_is_error" == "null" ]]; then
+    mcp_probe_status="ok"
+  elif [[ "$call_is_error" == "true" && "$mcp_probe_message" == *"missing Canary endpoint"* ]]; then
+    mcp_probe_status="blocked"
+  else
+    mcp_probe_status="error"
+    UNEXPECTED_FAILURE=1
+    printf 'canary-readiness-proof: MCP tool call to %s returned an unexpected error: %s\n' "$MCP_PROBE_TOOL" "$mcp_probe_message" >&2
+  fi
+else
+  UNEXPECTED_FAILURE=1
+  printf 'canary-readiness-proof: mcp-server stdio session failed (exit %s)\n' "$mcp_exit" >&2
+fi
+
+if [[ "$mcp_tools_listed" != "$manifest_tool_count" ]]; then
+  manifest_stale=true
+  UNEXPECTED_FAILURE=1
+  printf 'canary-readiness-proof: MCP tools/list count (%s) does not match mcp-manifest tool count (%s)\n' "$mcp_tools_listed" "$manifest_tool_count" >&2
+fi
+
+# --- Step 5: integration/status discovery smoke ------------------------------
+
+set +e
+discovery_output="$("$DOGFOOD_INVENTORY_BIN" --json 2>&1)"
+discovery_exit=$?
+set -e
+
+if ((discovery_exit == 0)) && jq -e . >/dev/null 2>&1 <<<"$discovery_output"; then
+  discovery_status="ok"
+  discovery_summary="$(jq -c '.summary // null' <<<"$discovery_output")"
+elif ((discovery_exit == 2)); then
+  discovery_status="blocked"
+  discovery_summary=null
+  add_blocked_field "dogfood_registry" "$discovery_output" \
+    "configure .canary/dogfood/owned_services.json (see priv/dogfood/owned_services.example.json) or set CANARY_DOGFOOD_MANIFEST"
+else
+  discovery_status="error"
+  discovery_summary=null
+  UNEXPECTED_FAILURE=1
+  printf 'canary-readiness-proof: dogfood-inventory discovery smoke failed unexpectedly (exit %s): %s\n' "$discovery_exit" "$discovery_output" >&2
+fi
+
+# --- Step 6: repo gate --------------------------------------------------------
+
+if ((RUN_VALIDATE == 1)); then
+  set +e
+  validate_output="$("$VALIDATE_BIN" --fast 2>&1)"
+  validate_exit=$?
+  set -e
+  if ((validate_exit == 0)); then
+    validate_status="ok"
+  else
+    validate_status="failed"
+    UNEXPECTED_FAILURE=1
+    printf 'canary-readiness-proof: bin/validate --fast failed:\n%s\n' "$validate_output" >&2
+  fi
+else
+  validate_status="skipped"
+fi
+
+# --- Receipt -------------------------------------------------------------------
+
+FINISHED_AT="$(now_utc)"
+blocked_fields_json="$(jq -s '.' "$BLOCKED_FIELDS_FILE")"
+
+if [[ -z "${doctor_verdict:-}" ]]; then
+  doctor_verdict=null
+fi
+
+overall_status="ok"
+if ((UNEXPECTED_FAILURE == 1)); then
+  overall_status="error"
+elif [[ "$(jq 'length' <<<"$blocked_fields_json")" != "0" ]]; then
+  overall_status="blocked"
+fi
+
+receipt="$(jq -n \
+  --argjson schema_version 1 \
+  --arg status "$overall_status" \
+  --arg started_at "$STARTED_AT" \
+  --arg finished_at "$FINISHED_AT" \
+  --argjson endpoint_present "$endpoint_present" \
+  --argjson api_key_present "$api_key_present" \
+  --arg doctor_status "$doctor_status" \
+  --argjson doctor_verdict "$doctor_verdict" \
+  --argjson manifest_tool_count "$manifest_tool_count" \
+  --argjson manifest_stale "$manifest_stale" \
+  --argjson mcp_tools_listed "$mcp_tools_listed" \
+  --arg mcp_probe_tool "$MCP_PROBE_TOOL" \
+  --arg mcp_probe_status "$mcp_probe_status" \
+  --arg discovery_status "$discovery_status" \
+  --argjson discovery_summary "$discovery_summary" \
+  --arg validate_status "$validate_status" \
+  --argjson blocked_fields "$blocked_fields_json" \
+  '{
+    schema_version: $schema_version,
+    status: $status,
+    started_at: $started_at,
+    finished_at: $finished_at,
+    credentials: {
+      endpoint_present: $endpoint_present,
+      api_key_present: $api_key_present
+    },
+    doctor: {
+      status: $doctor_status,
+      verdict: $doctor_verdict
+    },
+    mcp: {
+      manifest_tool_count: $manifest_tool_count,
+      manifest_stale: $manifest_stale,
+      tools_list_count: $mcp_tools_listed,
+      probe_tool: $mcp_probe_tool,
+      probe_status: $mcp_probe_status
+    },
+    discovery: {
+      status: $discovery_status,
+      summary: $discovery_summary
+    },
+    validate: {
+      status: $validate_status
+    },
+    blocked_fields: $blocked_fields
+  }')"
+
+printf '%s\n' "$receipt" > "$RECEIPT"
+
+if ((JSON_OUTPUT == 1)); then
+  jq -c . <<<"$receipt"
+else
+  printf 'Canary cold-agent readiness proof: %s\n' "$overall_status"
+  printf 'receipt: %s\n' "$RECEIPT"
+  printf 'doctor: %s\n' "$doctor_status"
+  printf 'mcp manifest tools: %s (stale: %s)\n' "$manifest_tool_count" "$manifest_stale"
+  printf 'mcp probe (%s): %s\n' "$MCP_PROBE_TOOL" "$mcp_probe_status"
+  printf 'discovery: %s\n' "$discovery_status"
+  printf 'validate: %s\n' "$validate_status"
+  if [[ "$(jq 'length' <<<"$blocked_fields_json")" != "0" ]]; then
+    printf 'blocked fields:\n'
+    jq -r '.[] | "  - \(.field): \(.reason) -> \(.replacement_command)"' <<<"$blocked_fields_json"
+  fi
+fi
+
+if ((UNEXPECTED_FAILURE == 1)); then
+  exit 1
+fi
+exit 0

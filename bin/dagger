@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SELF_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
 TRANSPORT="${CANARY_DAGGER_DOCKER_TRANSPORT:-auto}"
+CANARY_DAGGER_CACHE_SCOPE="${CANARY_DAGGER_CACHE_SCOPE:-$(cd "$ROOT" && pwd -P)}"
+export CANARY_DAGGER_CACHE_SCOPE
 
 . "$ROOT/bin/lib/docker_probe.sh"
 

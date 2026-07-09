@@ -43,13 +43,15 @@ bin/canary summary --window 24h
 bin/canary services --state down --json
 bin/canary errors chrondle --window 24h
 bin/canary incidents list --open
+bin/canary incidents get INC-example --json
 bin/canary incidents escalate INC-example --reason "iteration guard exhausted" --owner bitterblossom/canary-triage --purpose triage_escalation --idempotency-key run-1:INC-example:escalate
 bin/canary incidents deescalate INC-example --owner operator@example.com --reason "false positive"
 bin/canary timeline --service chrondle --window 7d --limit 20
-bin/canary claims list --subject-type target --subject-id TGT-chrondle --json
-bin/canary claims claim --subject-type target --subject-id TGT-chrondle --owner codex --purpose "verify fix" --json
-bin/canary annotations list --subject-type target --subject-id TGT-chrondle --json
-bin/canary annotations create --subject-type target --subject-id TGT-chrondle --agent codex --action fix-verified --metadata pr=https://github.com/example/repo/pull/1 --json
+bin/canary claims list --subject-type incident --subject-id INC-example --json
+bin/canary claims claim --subject-type incident --subject-id INC-example --owner codex --purpose "verify fix" --json
+bin/canary annotations list --subject-type incident --subject-id INC-example --json
+bin/canary annotations create --subject-type incident --subject-id INC-example --agent codex --action fix-verified --metadata pr=https://github.com/example/repo/pull/1 --json
+bin/canary claims release CLM-example --owner codex --json
 bin/canary targets
 bin/canary monitors
 bin/canary dogfood audit --strict
@@ -75,6 +77,21 @@ Every command supports `--json`. JSON output is wrapped in a stable envelope:
 ```
 
 Text output is deliberately compact for agent transcripts.
+
+For the incident responder loop, start with `incidents list`, drill into
+`incidents get <id>`, then use the generic `claims` and `annotations` commands
+with `--subject-type incident --subject-id <id>`. Claim, annotation, transition,
+and release writes are replayable from the incident detail timeline and the
+service timeline.
+
+Incident detail reads are the responder context boundary. A service-bound
+`responder-write` key may read `incidents get <id>` only for its bound service;
+cross-service and unbound responder reads fail with `insufficient_scope`. The
+JSON response includes `context_envelope.schema =
+canary.responder_context.incident.v1`, redacts sensitive-looking annotation
+metadata and claim evidence, and records a durable `responder.context_read`
+audit event for non-admin reads. See
+[`docs/responder-context-safety.md`](responder-context-safety.md).
 
 `dogfood audit --strict --json` still prints the JSON report before exiting
 nonzero when coverage gaps remain, so agents can inspect the failure details.
@@ -204,6 +221,32 @@ If the GitHub CLI or auth is unavailable, the verdict still returns the
 replacement command plus the receipt artifact convention
 `canary-witness-<run_id>`.
 
+## Cold-Agent Readiness Proof
+
+A cold agent dropped into this repo with only credentials (or only a repo
+checkout) should not have to re-derive which of the commands above prove the
+CLI, MCP, and coverage surfaces actually work. `bin/canary-readiness-proof`
+is the one discoverable entrypoint that runs them in sequence and writes a
+redacted receipt:
+
+```bash
+bin/canary-readiness-proof --json
+```
+
+It runs `bin/canary doctor --json`, `bin/canary mcp-manifest --json` (checked
+against the checked-in `priv/mcp/canary-cli-tools.json` snapshot for drift), a
+`bin/canary mcp-server` stdio smoke (`initialize` → `tools/list` → one
+`tools/call` against a read-only tool), `bin/dogfood-inventory --json`, and
+`bin/validate --fast`. Missing `CANARY_ENDPOINT`/`CANARY_API_KEY` or an
+unconfigured dogfood registry are reported as concrete `blocked_fields` with a
+replacement command — the proof still exits `0`, because that is the expected
+state for a not-yet-configured instance. It exits nonzero only on a real
+defect: a stale generated MCP manifest, a broken MCP tool call, an unreadable
+dogfood registry, or a failing `bin/validate --fast`. See
+`bin/canary-readiness-proof --help` for flags, and
+`test/bin/canary_readiness_proof_test.sh` for the fixture coverage gating this
+script in CI.
+
 ## Integration Agent
 
 `integrate` is the agent-native setup loop for deployed applications. It is
@@ -290,9 +333,9 @@ with `input_schema`. The checked-in snapshot at `priv/mcp/canary-cli-tools.json`
 is gated against `tool_manifest()` so it cannot drift from the runtime list.
 
 The manifest covers the drill-down surfaces an agent needs after
-`canary_doctor`: summary, services, errors, incidents, timeline, targets,
-monitors, dogfood audit, dogfood value receipts, witness, DR status, event
-capture, remediation claims, annotations, and integration
+`canary_doctor`: summary, services, errors, incident list and incident detail,
+timeline, targets, monitors, dogfood audit, dogfood value receipts, witness, DR
+status, event capture, remediation claims, annotations, and integration
 discovery/status/plan/patch/enroll. The MCP server implements those tools
 directly through the CLI-backed adapter; it does not define separate route
 semantics.

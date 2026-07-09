@@ -4,7 +4,7 @@
 //! truncation, grouping, classification, and the single call into
 //! `canary-store`.
 
-use std::{borrow::Cow, collections::BTreeMap, sync::LazyLock};
+use std::collections::BTreeMap;
 
 use canary_core::{
     ids::{ErrorId, EventId},
@@ -12,12 +12,12 @@ use canary_core::{
         classification::classify,
         grouping::{GroupingInput, compute},
     },
+    redaction::{scrub_string, scrub_value},
 };
 use canary_store::{
     BOOTSTRAP_PROJECT_ID, BOOTSTRAP_TENANT_ID, ErrorIngest, ErrorIngestCommit, ErrorIngestIds,
     ErrorIngestPayload, Store, StoreError,
 };
-use regex::Regex;
 use serde_json::{Map, Value};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -26,44 +26,6 @@ const MAX_FINGERPRINT_ELEMENTS: usize = 5;
 const MAX_FINGERPRINT_ELEMENT_LEN: usize = 256;
 const MAX_MESSAGE_LEN: usize = 4_096;
 const MAX_STACK_TRACE_LEN: usize = 32_768;
-const REDACTED: &str = "[REDACTED]";
-
-static REDACTION_RULES: LazyLock<std::result::Result<Vec<(Regex, &'static str)>, regex::Error>> =
-    LazyLock::new(|| {
-        Ok(vec![
-            (
-                Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")?,
-                "Bearer [REDACTED]",
-            ),
-            (
-                Regex::new(r"\bsk_(?:live|test)_[A-Za-z0-9_=-]+")?,
-                "[CANARY_API_KEY]",
-            ),
-            (
-                Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")?,
-                "[EMAIL]",
-            ),
-            (
-                Regex::new(
-                    r#"(?i)\b(password|secret|token|api[_-]?key)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'&,;]+)"#,
-                )?,
-                "$1=[REDACTED]",
-            ),
-        ])
-    });
-
-fn scrub_string(value: &str) -> String {
-    let Ok(rules) = REDACTION_RULES.as_ref() else {
-        return REDACTED.to_owned();
-    };
-    let mut scrubbed = Cow::Borrowed(value);
-    for (pattern, replacement) in rules {
-        if pattern.is_match(&scrubbed) {
-            scrubbed = Cow::Owned(pattern.replace_all(&scrubbed, *replacement).into_owned());
-        }
-    }
-    scrubbed.into_owned()
-}
 
 /// Result type returned by the ingest boundary.
 pub type Result<T> = std::result::Result<T, IngestError>;
@@ -363,44 +325,6 @@ fn context_json(attrs: &Map<String, Value>) -> Option<String> {
     }
 }
 
-fn scrub_value(value: &Value) -> Value {
-    match value {
-        Value::String(value) => Value::String(scrub_string(value)),
-        Value::Array(values) => Value::Array(values.iter().map(scrub_value).collect()),
-        Value::Object(object) => Value::Object(
-            object
-                .iter()
-                .map(|(key, value)| {
-                    let value = if sensitive_key(key) {
-                        Value::String(REDACTED.to_owned())
-                    } else {
-                        scrub_value(value)
-                    };
-                    (key.clone(), value)
-                })
-                .collect(),
-        ),
-        value => value.clone(),
-    }
-}
-
-fn sensitive_key(key: &str) -> bool {
-    matches!(
-        key.to_ascii_lowercase().replace(['-', ' '], "_").as_str(),
-        "authorization"
-            | "cookie"
-            | "set_cookie"
-            | "password"
-            | "passwd"
-            | "secret"
-            | "token"
-            | "api_key"
-            | "apikey"
-            | "access_token"
-            | "refresh_token"
-    )
-}
-
 fn fingerprint_json(fingerprint: Option<&[String]>) -> Option<String> {
     fingerprint.and_then(|fingerprint| serde_json::to_string(fingerprint).ok())
 }
@@ -414,6 +338,7 @@ mod tests {
     use std::str::FromStr;
 
     use canary_core::ids::{ErrorId, EventId};
+    use canary_core::redaction::REDACTED;
     use canary_store::{BOOTSTRAP_PROJECT_ID, BOOTSTRAP_TENANT_ID, Store};
     use serde_json::json;
 

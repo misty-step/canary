@@ -21,6 +21,7 @@ use crate::scope::owner_clause;
 
 const MAX_INCIDENT_SIGNALS: usize = 25;
 const MAX_INCIDENT_ANNOTATIONS: usize = 20;
+const MAX_INCIDENT_CLAIMS: usize = 20;
 const MAX_INCIDENT_TIMELINE_EVENTS: usize = 5;
 
 /// Optional filters for service error queries.
@@ -983,7 +984,7 @@ fn incident_detail_for_owner(
             project_id,
             "incident",
             incident_id,
-            MAX_INCIDENT_ANNOTATIONS,
+            MAX_INCIDENT_CLAIMS,
         )?
     } else {
         Vec::new()

@@ -113,6 +113,23 @@ pub fn report_error(error_class: &str, message: &str) {
     spawn_send(endpoint, key, "/api/v1/errors", body);
 }
 
+/// Like `report_error`, but sends synchronously on the CALLING thread — for the
+/// panic hook, where an uncaught panic can exit the process before a detached
+/// `spawn_send` thread finishes. Same env-gating and swallow-everything contract.
+pub fn report_error_blocking(error_class: &str, message: &str) {
+    let Some((endpoint, key)) = config() else { return };
+    let environment = std::env::var("CANARY_ENVIRONMENT")
+        .unwrap_or_else(|_| "production".to_owned());
+    let body = serde_json::json!({
+        "service": service(),
+        "error_class": error_class,
+        "message": message.chars().take(4096).collect::<String>(),
+        "severity": "error",
+        "environment": environment,
+    });
+    send_once(&endpoint, &key, "/api/v1/errors", &body);
+}
+
 /// Heartbeat: one at startup, then the background loop drives it.
 pub fn check_in() {
     let Some((endpoint, key)) = config() else { return };
@@ -137,25 +154,30 @@ pub fn start_health_loop() {
         });
 }
 
+/// The actual send: short-timeout agent, POST once with one retry, all failures
+/// swallowed. Shared by the off-thread `spawn_send` and the inline
+/// `report_error_blocking`.
+fn send_once(endpoint: &str, key: &str, path: &str, body: &serde_json::Value) {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(SEND_TIMEOUT))
+        .build()
+        .into();
+    let url = format!("{endpoint}{path}");
+    let auth = format!("Bearer {key}");
+    for _ in 0..2 {
+        // one retry, then give up silently
+        if agent.post(&url).header("Authorization", &auth).send_json(body).is_ok() {
+            break;
+        }
+    }
+}
+
 fn spawn_send(endpoint: String, key: String, path: &'static str, body: serde_json::Value) {
+    // Detached, best-effort: bound in-flight sends in a real reporter (a shared
+    // client + a semaphore) so an ERROR burst can't spawn threads without limit.
     let _ = std::thread::Builder::new()
         .name("canary-report".into())
-        .spawn(move || {
-            let agent: ureq::Agent = ureq::Agent::config_builder()
-                .timeout_global(Some(SEND_TIMEOUT))
-                .build()
-                .into();
-            let url = format!("{endpoint}{path}");
-            let auth = format!("Bearer {key}");
-            for _ in 0..2 { // one retry, then give up silently
-                let ok = agent
-                    .post(&url)
-                    .header("Authorization", &auth)
-                    .send_json(&body)
-                    .is_ok();
-                if ok { break }
-            }
-        });
+        .spawn(move || send_once(&endpoint, &key, path, &body));
 }
 ```
 
@@ -283,17 +305,27 @@ pub fn install_panic_hook() {
 > is **cancelled when the runtime drops during process teardown**, so an uncaught
 > panic's report never leaves the box. The panic hook must send **synchronously**
 > — its own `std::thread` + a bounded current-thread runtime (or a blocking HTTP
-> client like `ureq`) — and complete before returning to the default hook. A
-> `std::thread`/`ureq` reporter (the module at the top of this doc) is already
-> blocking, so `report_error` + `flush()` is fine there; only async/`tokio`
-> reporters need the dedicated `report_error_blocking`. Prove it with a test that
-> triggers the hook with **no ambient tokio runtime** and asserts the POST lands.
+> client like `ureq`) — and complete before returning to the default hook. This
+> is why the module above splits `report_error` (detached `spawn_send`, for hot
+> paths) from `report_error_blocking` (inline `send_once`): **even the `ureq`
+> module's `report_error` detaches its send**, so it can be lost if the process
+> is already unwinding. The panic hook must call `report_error_blocking`. Prove
+> it with a test that triggers the hook with **no ambient tokio runtime** and
+> asserts the POST lands.
 
 For Axum, also add `tower_http::catch_panic::CatchPanicLayer::new(...)` so a
 panicking handler **reports and returns 500** instead of silently killing the
 worker task. (For a *caught* handler panic the process survives, so a
 fire-and-forget send has time to land; the blocking requirement above is for the
 *uncaught* panic that ends the process.)
+
+> **GOTCHA — double-reported panics (found in review, 2026-07-07):** `CatchPanicLayer`
+> emits its OWN `tracing::error!` at target `tower_http::catch_panic`, and your
+> `install_panic_hook` *also* fires on the same unwind — so one caught panic
+> lands **twice** (`<app>.panic` and `<app>.tower_http::catch_panic`). The panic
+> hook already reports every panic authoritatively, so add `tower_http::catch_panic`
+> to the `CanaryLayer` denied-target prefixes (§1) — but keep other `tower_http`
+> targets like `trace::on_failure`, which are legitimate 5xx signals.
 
 ### 3. Continuous health in *every* standing-service bootstrap
 
@@ -340,10 +372,13 @@ CANARY_ENDPOINT=https://canary-obs.fly.dev \
 CANARY_API_KEY=<ingest-key-from-secret-store> \
   cargo run --release -- <a normal invocation>   # or boot the service
 
-# read back — the monitor state and/or error must appear:
+# read back with a read-scoped key ($CANARY_READ_API_KEY — inspection only, not
+# used by the reporter). Errors surface as ERROR GROUPS + correlated incidents,
+# NOT a flat `.errors` array:
 curl -fsS -H "Authorization: Bearer $CANARY_READ_API_KEY" \
   "https://canary-obs.fly.dev/api/v1/report?window=1h" \
-  | jq '.monitors[] | select(.service=="<service>"), .errors'
+  | jq '.monitors[]     | select(.service=="<service>"),
+        .error_groups[]? | select(.service=="<service>")'
 ```
 
 The app is integrated only when the readback shows the monitor's

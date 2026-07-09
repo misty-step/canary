@@ -133,14 +133,63 @@ pub struct WorkerReadyzCheck {
     pub consecutive_failures: u64,
     /// Last non-secret failure class observed by the worker loop.
     pub last_error_class: Option<String>,
-    /// Work items due at the last observed lifecycle pass.
+    /// How to interpret `due_count`/`oldest_due_age_ms` for this worker.
+    pub pressure_shape: WorkerPressureShape,
+    /// Meaning of this count depends on `pressure_shape`: for `queue` workers, items
+    /// currently due and waiting; for `sweep_result` workers, items processed in the
+    /// last completed pass (not a live backlog — do not alert on its magnitude alone).
     pub due_count: u64,
     /// Work items still in flight at the last observed lifecycle pass.
     pub in_flight_count: u64,
-    /// Milliseconds by which the oldest due work item is overdue, when known.
+    /// Milliseconds by which the oldest due work item is overdue, when known. Only
+    /// meaningful for `queue`-shaped workers; `sweep_result` workers never populate this.
     pub oldest_due_age_ms: Option<u64>,
+    /// Identifying metadata for the oldest due work item, when the worker can expose it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_due_item: Option<WorkerDueItem>,
     /// Whether the last observed pass saw backoff, circuit-open, or interruption pressure.
     pub backoff_or_circuit_open: bool,
+}
+
+/// How a worker's `due_count`/`oldest_due_age_ms` fields should be read.
+///
+/// Queue-backed workers (webhook delivery, target probe, monitor overdue) track a
+/// live backlog: `due_count` is items waiting right now, and staleness of the oldest
+/// item is a real pressure signal. Sweep-based workers (retention prune, TLS expiry
+/// scan) have no queue — they delete or scan everything past a cutoff in one pass —
+/// so `due_count` is only a report of the last completed pass's volume. Treating a
+/// sweep worker's `due_count` as a live backlog, or its cadence gap as staleness
+/// before its own `stale_after` threshold, produces a false pressure reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerPressureShape {
+    /// `due_count` is a live queue depth; `oldest_due_age_ms` is real overdue time.
+    Queue,
+    /// `due_count` is the last completed pass's processed-row count, not a backlog.
+    SweepResult,
+}
+
+/// Readiness-safe metadata for one due background-worker subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerDueItem {
+    /// Durable subject type, such as monitor.
+    pub subject_type: String,
+    /// Durable subject id.
+    pub subject_id: String,
+    /// Human-readable subject name.
+    pub name: String,
+    /// Owning service name.
+    pub service: String,
+    /// Expected cadence in milliseconds, when applicable.
+    pub expected_every_ms: Option<u64>,
+    /// Grace period in milliseconds, when applicable.
+    pub grace_ms: Option<u64>,
+    /// Last observed timestamp for the subject, when applicable.
+    pub last_observed_at: Option<String>,
+    /// Current due deadline timestamp, when applicable.
+    pub deadline_at: Option<String>,
+    /// Milliseconds since the subject became due, when known.
+    pub age_ms: Option<u64>,
 }
 
 /// Background worker lifecycle state.
@@ -294,9 +343,11 @@ mod tests {
                     failure_count: 0,
                     consecutive_failures: 0,
                     last_error_class: None,
+                    pressure_shape: WorkerPressureShape::Queue,
                     due_count: 0,
                     in_flight_count: 0,
                     oldest_due_age_ms: None,
+                    oldest_due_item: None,
                     backoff_or_circuit_open: false,
                 },
                 WorkerReadyzCheck {
@@ -308,9 +359,11 @@ mod tests {
                     failure_count: 2,
                     consecutive_failures: 2,
                     last_error_class: Some("panic".to_owned()),
+                    pressure_shape: WorkerPressureShape::Queue,
                     due_count: 0,
                     in_flight_count: 0,
                     oldest_due_age_ms: None,
+                    oldest_due_item: None,
                     backoff_or_circuit_open: false,
                 },
             ],
@@ -342,9 +395,11 @@ mod tests {
                     failure_count: 3,
                     consecutive_failures: 3,
                     last_error_class: Some("runtime_error".to_owned()),
+                    pressure_shape: WorkerPressureShape::Queue,
                     due_count: 12,
                     in_flight_count: 0,
                     oldest_due_age_ms: Some(90_000),
+                    oldest_due_item: None,
                     backoff_or_circuit_open: true,
                 }],
             );
@@ -369,9 +424,21 @@ mod tests {
                 failure_count: 0,
                 consecutive_failures: 0,
                 last_error_class: None,
+                pressure_shape: WorkerPressureShape::Queue,
                 due_count: 1,
                 in_flight_count: 0,
                 oldest_due_age_ms: Some(690_853),
+                oldest_due_item: Some(WorkerDueItem {
+                    subject_type: "monitor".to_owned(),
+                    subject_id: "MON-powder".to_owned(),
+                    name: "powder".to_owned(),
+                    service: "powder".to_owned(),
+                    expected_every_ms: Some(300_000),
+                    grace_ms: Some(60_000),
+                    last_observed_at: Some("2026-06-12T19:54:29Z".to_owned()),
+                    deadline_at: Some("2026-06-12T20:00:00Z".to_owned()),
+                    age_ms: Some(690_853),
+                }),
                 backoff_or_circuit_open: false,
             }],
         );
@@ -384,6 +451,20 @@ mod tests {
         assert_eq!(body["checks"]["workers"][0]["health"], "pressured");
         assert_eq!(body["checks"]["workers"][0]["due_count"], 1);
         assert_eq!(body["checks"]["workers"][0]["oldest_due_age_ms"], 690_853);
+        assert_eq!(
+            body["checks"]["workers"][0]["oldest_due_item"],
+            json!({
+                "subject_type": "monitor",
+                "subject_id": "MON-powder",
+                "name": "powder",
+                "service": "powder",
+                "expected_every_ms": 300000,
+                "grace_ms": 60000,
+                "last_observed_at": "2026-06-12T19:54:29Z",
+                "deadline_at": "2026-06-12T20:00:00Z",
+                "age_ms": 690853
+            })
+        );
     }
 
     #[test]
@@ -420,10 +501,30 @@ mod tests {
                 "failure_count",
                 "consecutive_failures",
                 "last_error_class",
+                "pressure_shape",
                 "due_count",
                 "in_flight_count",
                 "oldest_due_age_ms",
                 "backoff_or_circuit_open"
+            ])
+        );
+        assert_eq!(
+            document["components"]["schemas"]["WorkerReadyzCheck"]["properties"]["oldest_due_item"]
+                ["anyOf"][0]["$ref"],
+            "#/components/schemas/WorkerDueItem"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["WorkerDueItem"]["required"],
+            json!([
+                "subject_type",
+                "subject_id",
+                "name",
+                "service",
+                "expected_every_ms",
+                "grace_ms",
+                "last_observed_at",
+                "deadline_at",
+                "age_ms"
             ])
         );
     }

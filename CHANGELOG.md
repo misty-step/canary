@@ -1,3 +1,61 @@
+## Version reset: v1.15.0 → v0.15.0 (2026-07-08)
+
+The fleet moved to pre-stable 0.x semantics (Powder landmark-016/017): versions below 1.0.0 use Cargo-style bumps (breaking→minor, feat/fix→patch) and never cross 1.0.0 automatically; promotion to 1.0.0 is a deliberate manual tag. v0.15.0 is the same commit as v1.15.0. Earlier 1.x/2.x entries below record real history under the old numbering; their tags and GitHub releases were retired.
+
+# [1.15.0](https://github.com/misty-step/canary/compare/v1.14.0...v1.15.0) (2026-07-08)
+
+
+### Bug Fixes
+
+* **ci:** release with the workflow token instead of the expired PAT ([#244](https://github.com/misty-step/canary/issues/244)) ([fc1c8ca](https://github.com/misty-step/canary/commit/fc1c8ca3282f90c18b94dfbd3d7cb2b8d980b2b1))
+* **health:** scope witness self-heal to its own signals, not global plane ([#241](https://github.com/misty-step/canary/issues/241)) ([56e4a13](https://github.com/misty-step/canary/commit/56e4a134ddc43034f7b9d52c6d97fee021f7c8f4)), closes [#228](https://github.com/misty-step/canary/issues/228)
+* **ops:** stop leaking CANARY_API_KEY into doctor container argv ([#240](https://github.com/misty-step/canary/issues/240)) ([e8ddab7](https://github.com/misty-step/canary/commit/e8ddab7a7bd9404f8516cc6bd8bf742181749066))
+* **readiness:** expose overdue monitor details ([#234](https://github.com/misty-step/canary/issues/234)) ([9ae2558](https://github.com/misty-step/canary/commit/9ae25580f8f24c344d0b721496f6a8f26cbfaebe))
+* **readiness:** make retention_prune due_count self-describing over the wire ([#239](https://github.com/misty-step/canary/issues/239)) ([4ed851b](https://github.com/misty-step/canary/commit/4ed851b6455c2bc07423ae97208764160a6443a7))
+* **site:** scaffold DESIGN.md to site/, fix mobile nav crowding and gallery crop ([3b3cd4f](https://github.com/misty-step/canary/commit/3b3cd4fb0e30b32d76aa392f2dc8c0625e0a136a))
+
+
+### Features
+
+* **site:** add public marketing site from the aesthetic site-kit ([#238](https://github.com/misty-step/canary/issues/238)) ([a8c8695](https://github.com/misty-step/canary/commit/a8c869597676b416a2dc8fe713d33465572988ce))
+* **site:** lock canary fleet marketing site ([#242](https://github.com/misty-step/canary/issues/242)) ([17e4880](https://github.com/misty-step/canary/commit/17e48803825a22bdc1a167afc24439f7c814683e))
+
+# [1.14.0](https://github.com/misty-step/canary/compare/v1.13.0...v1.14.0) (2026-07-04)
+
+
+### Features
+
+* **agent-ops:** add cold-agent readiness proof entrypoint ([#050](https://github.com/misty-step/canary/issues/050)) ([#233](https://github.com/misty-step/canary/issues/233)) ([fb551ed](https://github.com/misty-step/canary/commit/fb551edb9b99347ff6ce75eff50575a087ac0971)), closes [#052](https://github.com/misty-step/canary/issues/052)
+
+# [1.13.0](https://github.com/misty-step/canary/compare/v1.12.0...v1.13.0) (2026-07-04)
+
+
+### Features
+
+* **responders:** gate incident context reads ([#232](https://github.com/misty-step/canary/issues/232)) ([7dba106](https://github.com/misty-step/canary/commit/7dba10609e2432a8c763ea57f3a2a5b743e92afa))
+* **sdk:** make @canary-obs/sdk publish-ready and add npm publish pipeline ([#231](https://github.com/misty-step/canary/issues/231)) ([f8d929b](https://github.com/misty-step/canary/commit/f8d929b2ede595f098728ec46c5364e9d0c088db))
+
+# [1.12.0](https://github.com/misty-step/canary/compare/v1.11.3...v1.12.0) (2026-07-04)
+
+
+### Features
+
+* **agent-loop:** close incident writeback loop ([#230](https://github.com/misty-step/canary/issues/230)) ([5f8863b](https://github.com/misty-step/canary/commit/5f8863bbe69b30511c2399e1bae9f5afe44c951a))
+
+## [1.11.3](https://github.com/misty-step/canary/compare/v1.11.2...v1.11.3) (2026-07-04)
+
+
+### Bug Fixes
+
+* **ci:** isolate Dagger Rust target cache by checkout ([#229](https://github.com/misty-step/canary/issues/229)) ([4ce9a24](https://github.com/misty-step/canary/commit/4ce9a24795ceb8689c97d392bd297379d415eaf7))
+
+## [1.11.2](https://github.com/misty-step/canary/compare/v1.11.1...v1.11.2) (2026-07-03)
+
+
+### Bug Fixes
+
+* **ui:** add Canary bird favicon ([8d53a81](https://github.com/misty-step/canary/commit/8d53a813527ad63b7da057b70808a028bf7dcb1c))
+
 ## [1.11.1](https://github.com/misty-step/canary/compare/v1.11.0...v1.11.1) (2026-07-03)
 
 

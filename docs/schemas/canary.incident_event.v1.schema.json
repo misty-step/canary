@@ -83,6 +83,7 @@
         },
         "severity": {
           "type": "string",
+          "description": "The originating signal's own reported severity. This is NOT the incident's severity -- Canary never propagates a signal's severity onto the incident it correlates into. A signal reported here as 'low' or 'info' can still open or update an incident whose own severity (see the 'incident' object) is 'medium' or 'high'.",
           "enum": [
             "info",
             "low",
@@ -124,7 +125,7 @@
       "additionalProperties": false
     },
     "incident": {
-      "description": "Backward-compatible incident detail object retained for existing webhook consumers."
+      "description": "Backward-compatible incident detail object retained for existing webhook consumers. Its `severity` field is computed as a floor over currently-active correlated signals (3+ active signals => 'high', otherwise 'medium') and never reflects any single signal's own reported severity -- there is no 'low' incident severity tier. See the OpenAPI `Incident` schema (priv/openapi/openapi.json) and README's Webhook Events table for the authoritative contract."
     },
     "timestamp": {
       "type": "string",

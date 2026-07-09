@@ -22,20 +22,29 @@ targets, monitors, webhooks, query readback, and dogfood registry evidence.
 
 ## Step 1: Install
 
-The SDK is not yet published to npm (tracked in #051). Until publication,
-install from source:
-
 ```bash
-# From the Canary repo, build the SDK:
-cd clients/typescript && npm install && npm run build
-
-# In your app, link it via file: (adjust the relative path):
-npm install file:../path/to/canary/clients/typescript
+npm install @canary-obs/sdk
 ```
 
-`bin/canary integrate patch` adds `"@canary-obs/sdk": "^0.1.0"` to your
-`package.json` dependencies; replace that version specifier with the `file:`
-path above before running `npm install`, or the install will 404.
+> **Not resolving yet?** `.github/workflows/sdk-publish.yml` builds, tests,
+> and publishes this package with npm provenance on every `sdk-v*` tag, but
+> the first publish is held pending an operator step (creating the
+> `@canary-obs` npm org and adding its publish token — see
+> `docs/compatibility-policy.md`). Until that first release lands, build and
+> link from source instead:
+>
+> ```bash
+> # From the Canary repo, build the SDK:
+> cd clients/typescript && npm install && npm run build
+>
+> # In your app, link it via file: (adjust the relative path):
+> npm install file:../path/to/canary/clients/typescript
+> ```
+
+`bin/canary integrate patch` adds `"@canary-obs/sdk": "^1.0.0"` to your
+`package.json` dependencies. Until the first tagged release publishes (see the
+callout above), replace that version specifier with the `file:` path instead,
+or the install will 404.
 
 ## Step 2: Add env vars
 

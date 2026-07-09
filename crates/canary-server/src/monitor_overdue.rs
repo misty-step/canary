@@ -15,6 +15,7 @@ use std::{
 };
 
 use canary_core::health::state_machine::HealthState;
+use canary_http::public::WorkerDueItem;
 use canary_store::{MonitorOverdueCandidate, Store};
 use canary_workers::health::{
     HealthPlanError, MonitorMode, MonitorOverdueSnapshot, ObservationContext, plan_monitor_overdue,
@@ -107,6 +108,8 @@ pub struct MonitorOverdueLifecycleReport {
     pub loaded: usize,
     /// Age in milliseconds of the oldest loaded overdue deadline.
     pub oldest_due_age_ms: Option<u64>,
+    /// Identifying metadata for the oldest loaded overdue deadline.
+    pub oldest_due_item: Option<WorkerDueItem>,
     /// Candidates that produced no transition.
     pub noop: usize,
     /// Candidates that committed an overdue transition.
@@ -150,6 +153,7 @@ impl MonitorOverdueLifecycle {
         let mut report = MonitorOverdueLifecycleReport {
             loaded: candidates.len(),
             oldest_due_age_ms: oldest_monitor_due_age_ms(now_millis, &candidates),
+            oldest_due_item: oldest_monitor_due_item(now_millis, &candidates),
             ..MonitorOverdueLifecycleReport::default()
         };
 
@@ -408,6 +412,7 @@ fn run_lifecycle_worker(
                         due_count: report.loaded as u64,
                         in_flight_count: 0,
                         oldest_due_age_ms: report.oldest_due_age_ms,
+                        oldest_due_item: report.oldest_due_item,
                         backoff_or_circuit_open: report.failed > 0
                             || report.event_fanout_failed > 0
                             || report.interrupted,
@@ -452,17 +457,43 @@ fn oldest_monitor_due_age_ms(
 ) -> Option<u64> {
     candidates
         .iter()
-        .filter_map(|candidate| candidate.deadline_at.as_deref())
-        .filter_map(|deadline| OffsetDateTime::parse(deadline, &Rfc3339).ok())
-        .map(|deadline| {
-            let deadline_millis = deadline
-                .unix_timestamp()
-                .saturating_mul(1_000)
-                .saturating_add(i64::from(deadline.millisecond()));
-            now_millis.saturating_sub(deadline_millis)
-        })
+        .filter_map(|candidate| monitor_due_age_ms(now_millis, candidate.deadline_at.as_deref()))
         .map(|age| age.max(0) as u64)
         .max()
+}
+
+fn oldest_monitor_due_item(
+    now_millis: i64,
+    candidates: &[MonitorOverdueCandidate],
+) -> Option<WorkerDueItem> {
+    candidates
+        .iter()
+        .filter_map(|candidate| {
+            let age_ms =
+                monitor_due_age_ms(now_millis, candidate.deadline_at.as_deref())?.max(0) as u64;
+            Some((age_ms, candidate))
+        })
+        .max_by_key(|(age_ms, _)| *age_ms)
+        .map(|(age_ms, candidate)| WorkerDueItem {
+            subject_type: "monitor".to_owned(),
+            subject_id: candidate.id.clone(),
+            name: candidate.name.clone(),
+            service: candidate.service.clone(),
+            expected_every_ms: u64::try_from(candidate.expected_every_ms).ok(),
+            grace_ms: u64::try_from(candidate.grace_ms).ok(),
+            last_observed_at: candidate.last_check_in_at.clone(),
+            deadline_at: candidate.deadline_at.clone(),
+            age_ms: Some(age_ms),
+        })
+}
+
+fn monitor_due_age_ms(now_millis: i64, deadline_at: Option<&str>) -> Option<i64> {
+    let deadline = OffsetDateTime::parse(deadline_at?, &Rfc3339).ok()?;
+    let deadline_millis = deadline
+        .unix_timestamp()
+        .saturating_mul(1_000)
+        .saturating_add(i64::from(deadline.millisecond()));
+    Some(now_millis.saturating_sub(deadline_millis))
 }
 
 fn monitor_mode(value: &str) -> Option<MonitorMode> {
@@ -560,6 +591,7 @@ mod tests {
             MonitorOverdueLifecycleReport {
                 loaded: 1,
                 oldest_due_age_ms: Some(0),
+                oldest_due_item: overdue_item("MON-overdue", "Overdue worker"),
                 noop: 0,
                 transitioned: 1,
                 failed: 0,
@@ -573,6 +605,7 @@ mod tests {
             MonitorOverdueLifecycleReport {
                 loaded: 1,
                 oldest_due_age_ms: Some(0),
+                oldest_due_item: overdue_item("MON-overdue", "Overdue worker"),
                 noop: 1,
                 transitioned: 0,
                 failed: 0,
@@ -684,6 +717,7 @@ mod tests {
             MonitorOverdueLifecycleReport {
                 loaded: 2,
                 oldest_due_age_ms: Some(0),
+                oldest_due_item: overdue_item("MON-overdue-b", "Overdue worker MON-overdue-b"),
                 noop: 0,
                 transitioned: 1,
                 failed: 0,
@@ -792,5 +826,19 @@ mod tests {
             transition: None,
         })?;
         Ok(())
+    }
+
+    fn overdue_item(id: &str, name: &str) -> Option<WorkerDueItem> {
+        Some(WorkerDueItem {
+            subject_type: "monitor".to_owned(),
+            subject_id: id.to_owned(),
+            name: name.to_owned(),
+            service: "worker".to_owned(),
+            expected_every_ms: Some(60_000),
+            grace_ms: Some(5_000),
+            last_observed_at: Some("2026-05-28T20:00:00Z".to_owned()),
+            deadline_at: Some("2026-05-28T20:00:05Z".to_owned()),
+            age_ms: Some(0),
+        })
     }
 }

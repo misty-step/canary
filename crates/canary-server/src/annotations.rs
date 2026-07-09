@@ -286,6 +286,7 @@ fn create_annotation_request(
         }
         let annotation = match store.create_annotation(AnnotationInsert {
             id: canary_core::ids::AnnotationId::generate().into_string(),
+            event_id: canary_core::ids::EventId::generate().into_string(),
             tenant_id: tenant_id.clone(),
             project_id: project_id.clone(),
             service: service.clone(),

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Canary - Agent-first observability</title>
+    <meta
+      name="description"
+      content="Agent-first observability for the Misty Step fleet."
+    />
+    <script>
+      try {
+        var m = localStorage.getItem('ae-mode');
+        if (m === 'dark' || m === 'light') {
+          document.documentElement.classList.add(m);
+          document.documentElement.style.colorScheme = m;
+        }
+      } catch (e) {}
+    </script>
+    <link rel="stylesheet" href="aesthetic.css" />
+    <link rel="stylesheet" href="marketing.css" />
+  </head>
+  <body>
+    <svg aria-hidden="true" width="0" height="0" style="position: absolute">
+      <symbol id="i-bird" viewBox="0 0 24 24">
+        <path d="M16 7h.01" />
+        <path d="M3.4 18H12a8 8 0 0 0 8-8V7a4 4 0 0 0-7.28-2.3L2 20" />
+        <path d="m20 7 2 .5-2 .5" />
+        <path d="M10 18v3" />
+        <path d="M14 17.75V21" />
+        <path d="M7 18a6 6 0 0 0 3.84-10.61" />
+      </symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v2" />
+        <path d="M12 20v2" />
+        <path d="m4.93 4.93 1.41 1.41" />
+        <path d="m17.66 17.66 1.41 1.41" />
+        <path d="M2 12h2" />
+        <path d="M20 12h2" />
+        <path d="m6.34 17.66-1.41 1.41" />
+        <path d="m19.07 4.93-1.41 1.41" />
+      </symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24">
+        <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+      </symbol>
+    </svg>
+
+    <div class="ae-screen ae-wide msk-shell">
+      <div class="msk-bg" aria-hidden="true"></div>
+      <header class="ae-bar msk-bar">
+        <a class="ae-logo msk-logo" href="./" aria-label="Canary home">
+          <span class="ae-app-mark" aria-hidden="true">
+            <svg class="ae-icon" data-lucide="bird">
+              <use href="#i-bird" />
+            </svg>
+          </span>
+          <span class="ae-name">Canary</span>
+        </a>
+        <nav class="ae-chrome msk-nav" aria-label="Site">
+          <a href="features.html">features</a>
+          <a href="get-started.html">get started</a>
+          <a href="changelog.html">changelog</a>
+          <a href="https://github.com/misty-step/canary">github</a>
+        </nav>
+      </header>
+
+      <main class="ae-stage msk-hero-stage" id="content">
+        <section class="msk-hero-panel" aria-labelledby="hero-title">
+          <h1 id="hero-title">Agent-first observability.</h1>
+          <a class="ae-button" href="get-started.html">Get started</a>
+        </section>
+      </main>
+
+      <footer class="ae-bar msk-footer">
+        <button class="ae-mode" aria-label="toggle color mode">
+          <svg class="ae-icon ae-sun"><use href="#i-sun" /></svg>
+          <svg class="ae-icon ae-moon"><use href="#i-moon" /></svg>
+        </button>
+        <span class="ae-chrome msk-project-links">
+          <span>a <a href="https://mistystep.io">Misty Step</a> project</span>
+          <a
+            class="msk-github-icon"
+            href="https://github.com/misty-step/canary"
+            aria-label="Canary on GitHub"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path
+                d="M8 0C3.58 0 0 3.67 0 8.2c0 3.62 2.29 6.69 5.47 7.77.4.08.55-.18.55-.39v-1.52c-2.23.5-2.7-.98-2.7-.98-.36-.95-.89-1.2-.89-1.2-.73-.51.06-.5.06-.5.8.06 1.23.85 1.23.85.72 1.26 1.88.9 2.34.68.07-.53.28-.9.5-1.1-1.78-.21-3.64-.91-3.64-4.05 0-.9.31-1.63.82-2.2-.08-.21-.36-1.05.08-2.18 0 0 .68-.22 2.2.84A7.47 7.47 0 0 1 8 3.95c.68 0 1.36.09 1.99.27 1.52-1.06 2.2-.84 2.2-.84.44 1.13.16 1.97.08 2.18.51.57.82 1.3.82 2.2 0 3.15-1.87 3.84-3.65 4.04.29.26.54.76.54 1.53v2.25c0 .21.15.47.55.39A8.18 8.18 0 0 0 16 8.2C16 3.67 12.42 0 8 0Z"
+              />
+            </svg>
+          </a>
+        </span>
+      </footer>
+    </div>
+
+    <script src="mode.js"></script>
+    <script src="theme.js"></script>
+  </body>
+</html>

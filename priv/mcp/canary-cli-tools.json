@@ -74,7 +74,7 @@
       "name": "canary_services"
     },
     {
-      "description": "Inspect active incidents from `bin/canary incidents`; use this after doctor reports an open Canary incident.",
+      "description": "List active incidents from `bin/canary incidents`; use this after doctor reports an open Canary incident.",
       "input_schema": {
         "properties": {
           "open": {
@@ -85,6 +85,21 @@
         "type": "object"
       },
       "name": "canary_incidents"
+    },
+    {
+      "description": "Read one redacted incident context envelope by id, including bounded signals, annotations, remediation claims, recent timeline events, and responder read-audit metadata.",
+      "input_schema": {
+        "properties": {
+          "incident_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "incident_id"
+        ],
+        "type": "object"
+      },
+      "name": "canary_incident_get"
     },
     {
       "description": "Inspect timeline events globally or for one service.",

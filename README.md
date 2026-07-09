@@ -23,12 +23,15 @@ coordination philosophy live in
 ```bash
 git clone https://github.com/misty-step/canary && cd canary
 cp .env.example .env
+set -a; . ./.env; set +a
 ./bin/bootstrap    # installs deps for the core service and SDK packages
 cargo run -p canary-server
 ```
 
 No Docker is required for local development outside the Dagger gate. The repo
 includes the Rust service workspace and the TypeScript SDK package.
+For a Docker-only self-hosted first boot, use
+[`docs/self-host-docker.md`](docs/self-host-docker.md).
 
 ### First run: capturing the bootstrap API key
 
@@ -36,6 +39,7 @@ On first boot, Canary seeds a one-time bootstrap admin key and prints it to
 **stderr**. Capture it immediately — it is not shown again:
 
 ```bash
+set -a; . ./.env; set +a
 cargo run -p canary-server 2>&1 | grep "Bootstrap API key:"
 ```
 
@@ -43,6 +47,16 @@ Store the key as an environment variable for API calls:
 
 ```bash
 export CANARY_ADMIN_KEY="sk_live_..."
+```
+
+Immediately run the agent-facing doctor against the new instance. Treat
+non-clean doctor output as a failed production setup until the reported field
+is fixed or explicitly waived:
+
+```bash
+CANARY_ENDPOINT="http://localhost:4000" \
+CANARY_API_KEY="$CANARY_ADMIN_KEY" \
+bin/canary doctor --json
 ```
 
 All authenticated endpoints require a scoped API key. The bootstrap key has
@@ -57,9 +71,15 @@ curl -fsS -X POST http://localhost:4000/api/v1/keys \
 
 See [`docs/api-key-rotation.md`](docs/api-key-rotation.md) for the full scope
 matrix and rotation procedure.
+Responder incident context uses a redacted envelope, service-bound
+`responder-write` read authority, and durable read-audit events; see
+[`docs/responder-context-safety.md`](docs/responder-context-safety.md).
 
-For Fly deployment (including key recovery if the first boot log was missed),
-see [`docs/self-host-fly.md`](docs/self-host-fly.md).
+For non-Fly Docker deployment, including Compose, local volume persistence,
+doctor, and an ingest/query smoke, see
+[`docs/self-host-docker.md`](docs/self-host-docker.md). For Fly deployment,
+including Tigris backups and key recovery if the first boot log was missed, see
+[`docs/self-host-fly.md`](docs/self-host-fly.md).
 
 Canary has no human dashboard by design — agents are the UI. Operators who
 need to look at current state use the query API directly (`GET
@@ -239,6 +259,18 @@ authority. Claim and annotation writeback tools require `responder-write`
 authority, or admin for break-glass operator use. The server returns MCP
 `inputSchema` fields at the wire boundary while the checked CLI manifest remains gated in
 `priv/mcp/canary-cli-tools.json`.
+
+### Cold-Agent Readiness Proof
+
+```bash
+bin/canary-readiness-proof --json
+```
+
+One discoverable entrypoint proving a cold agent can inspect and operate this
+instance: `doctor`, `mcp-manifest`/`mcp-server`, dogfood discovery, and
+`bin/validate --fast`, ending in a redacted receipt. Missing credentials or an
+unconfigured dogfood registry report as concrete blocked fields rather than
+failing the proof; see `docs/agent-inspection-cli.md#cold-agent-readiness-proof`.
 
 ## API
 
@@ -556,6 +588,15 @@ curl -X POST $CANARY_ENDPOINT/api/v1/keys \
 All webhooks are HMAC-SHA256 signed. Secret returned on subscription creation.
 `POST /api/v1/webhooks/:id/test` sends a non-business `canary.ping` payload and does not write to the timeline.
 
+**Incident severity floor:** an incident's own `severity` is only ever `medium`
+or `high` -- there is no `low` incident severity tier. It is computed from the
+count of currently-active correlated signals (3 or more active signals =>
+`high`, otherwise `medium`) and never inherits an originating signal's own
+reported severity. A lone signal reported with severity `low` (see the
+`incident.opened`/`incident.updated` payload's `signal.severity` field) still
+opens or updates an incident at severity `medium`. See the OpenAPI `Incident`
+schema (`priv/openapi/openapi.json`) for the authoritative contract.
+
 ### Webhook Consumer Contract
 
 - Deliveries are at-least-once. Deduplicate on `X-Delivery-Id`.
@@ -572,9 +613,14 @@ All webhooks are HMAC-SHA256 signed. Secret returned on subscription creation.
 
 ## Deployment
 
-Deploy to Fly.io with SQLite persistence and a Fly Tigris-backed Litestream
-restore path. A full cold-operator runbook lives in
-[docs/self-host-fly.md](docs/self-host-fly.md).
+Deploy with either a generic Docker host or Fly.io. The Fly path uses SQLite
+persistence and a Fly Tigris-backed Litestream restore path; the Docker path
+uses the same image with a local volume and no Fly-specific variables.
+
+- Generic Docker or Compose:
+  [docs/self-host-docker.md](docs/self-host-docker.md)
+- Fly.io:
+  [docs/self-host-fly.md](docs/self-host-fly.md)
 
 ```bash
 export CANARY_FLY_APP="<your-fly-app>"

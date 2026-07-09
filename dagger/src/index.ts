@@ -15,6 +15,7 @@ import {
   check,
   argument,
 } from "@dagger.io/dagger"
+import { createHash } from "node:crypto"
 
 const NODE_IMAGE =
   "node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94"
@@ -95,6 +96,20 @@ async function lockfileDigest(
   return source.file(path).digest({ excludeMetadata: true })
 }
 
+async function sourceTreeDigest(source: Directory): Promise<string> {
+  return source.digest()
+}
+
+async function rustTargetCacheDigest(source: Directory): Promise<string> {
+  const scope = process.env.CANARY_DAGGER_CACHE_SCOPE?.trim()
+
+  if (scope) {
+    return `${DIGEST_PREFIX}${createHash("sha256").update(scope).digest("hex")}`
+  }
+
+  return sourceTreeDigest(source)
+}
+
 async function nodeContainer(
   source: Directory,
   workdir: string,
@@ -120,6 +135,7 @@ async function nodeContainer(
 
 async function rustContainer(source: Directory): Promise<Container> {
   const digest = await lockfileDigest(source, "Cargo.lock")
+  const targetDigest = await rustTargetCacheDigest(source)
   const platformKey = await cachePlatformKey()
   const imageKey = imageIdentity(RUST_IMAGE)
   const registryCache = dag.cacheVolume(
@@ -129,7 +145,7 @@ async function rustContainer(source: Directory): Promise<Container> {
     cacheVolumeName("canary-rust-git", platformKey, imageKey, digest),
   )
   const targetCache = dag.cacheVolume(
-    cacheVolumeName("canary-rust-target", platformKey, imageKey, digest),
+    cacheVolumeName("canary-rust-target", platformKey, imageKey, targetDigest),
   )
 
   return dag
@@ -191,9 +207,13 @@ export class Ci {
       .withExec(["bash", "test/bin/dogfood_inventory_test.sh"])
       .withExec(["bash", "test/bin/canary_witness_test.sh"])
       .withExec(["bash", "test/bin/canary_write_path_rehearsal_test.sh"])
+      .withExec(["bash", "test/bin/canary_readiness_proof_test.sh"])
+      .withExec(["bash", "test/bin/canary_doctor_entrypoint_test.sh"])
       .withExec(["bash", "-n", "bin/canary"])
       .withExec(["bash", "-n", "bin/canary-witness"])
       .withExec(["bash", "-n", "bin/canary-write-path-rehearsal"])
+      .withExec(["bash", "-n", "bin/canary-readiness-proof"])
+      .withExec(["bash", "-n", "bin/canary-doctor-entrypoint.sh"])
       .withExec(["bash", "bin/check-aesthetic-currency"])
   }
 
@@ -446,6 +466,17 @@ prefix="dagger-alert-plane-$(date -u +%Y%m%d%H%M%S)-$$"
 monitor="canary-alert-plane-$prefix"
 observed_at="$(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
 
+# Seed the witness's own monitor (matches docs/canary-witness.md's
+# production monitor configuration) before impairing an unrelated
+# monitor below, so the witness's own self-heal check-in below has
+# somewhere to land instead of 404ing against an unknown monitor.
+curl --fail --silent --show-error \
+  -X POST "$CANARY_ENDPOINT/api/v1/monitors" \
+  -H "Authorization: Bearer $CANARY_API_KEY" \
+  -H "Content-Type: application/json" \
+  --data '{"name":"canary-watchman","service":"canary","mode":"ttl","expected_every_ms":600000,"grace_ms":120000}' \
+  >/tmp/canary-alert-plane-watchman-monitor.json
+
 monitor_payload="$(
   jq -cn \
     --arg name "$monitor" \
@@ -490,11 +521,14 @@ for attempt in $(seq 1 30); do
     and .response.worker_readiness.status == "ready"
     and .response.worker_readiness.pressured_workers >= 1
     and .response.alert_plane.status == "impaired"
-    and (.response.alert_plane.reasons | index("monitor_overdue pressured") != null)
+    and any(.response.alert_plane.reasons[]?; startswith("monitor_overdue pressured"))
     and any(.response.alert_plane.workers[]?;
       .name == "monitor_overdue"
       and .health == "pressured"
-      and ((.oldest_due_age_ms // 0) > 120000))
+      and ((.oldest_due_age_ms // 0) > 120000)
+      and .oldest_due_item.subject_type == "monitor"
+      and (.oldest_due_item.subject_id | startswith("MON-"))
+      and (.oldest_due_item.name | startswith("canary-alert-plane-")))
     and any(.response.verdict.blocking_signals[]?;
       startswith("alert-plane impaired:"))
   ' /tmp/canary-alert-plane-doctor.json >/dev/null; then
@@ -508,12 +542,18 @@ for attempt in $(seq 1 30); do
       --json >/tmp/canary-alert-plane-witness.out
     witness_status=$?
     set -e
-    test "$witness_status" != "0"
+    # The synthetic monitor created above is out of this witness's own
+    # scope (it isn't the witness's own canary-watchman monitor), the same
+    # shape as an unrelated service's overdue monitor blocking the witness
+    # in production (canary-920). The witness must still report healthy
+    # and still send its own check-in -- see docs/canary-witness.md.
+    test "$witness_status" == "0"
     jq -e '
-      .status == "degraded"
+      .status == "healthy"
       and .alert_plane.status == "impaired"
-      and (.alert_plane.reasons | index("monitor_overdue pressured") != null)
-      and .check_in.skipped == true
+      and any(.alert_plane.reasons[]?; startswith("monitor_overdue pressured"))
+      and .check_in.skipped == false
+      and .self_heal_check_in == true
     ' /tmp/canary-alert-plane-witness.json >/dev/null
     jq '{
       route_ready: .response.reachability.readyz.response.status,
