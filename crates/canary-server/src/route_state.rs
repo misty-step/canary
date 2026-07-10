@@ -5,11 +5,23 @@
 //! post-commit effects, health fanout, target control, webhook transport,
 //! rate-limit state, auth-failure identity, and private target policy.
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 use canary_ingest::{IngestConfig, IngestEffect};
 use canary_store::{ReadPool, Store};
 use canary_workers::webhooks::{TransportResult, WebhookRequest};
+use parking_lot::MutexGuard;
+
+/// Shared single-writer store handle.
+///
+/// Backed by `parking_lot::Mutex`, which never poisons. A panic in a request
+/// handler while holding this guard still unwinds and drops the guard
+/// normally, so the next lock acquisition succeeds instead of every
+/// subsequent authenticated request failing closed (canary-930: "request
+/// path must not poison the writer mutex"). `RateLimiter` and other
+/// process-local state below keep `std::sync::Mutex`; only the writer store
+/// carries this footgun.
+pub(crate) type SharedStore = Arc<parking_lot::Mutex<Store>>;
 
 use crate::auth_cache::AuthCache;
 use crate::{
@@ -42,7 +54,7 @@ impl EventSink for WebhookEnqueueEffectSink {
 /// Shared state needed by authenticated ingest routes.
 #[derive(Clone)]
 pub struct IngestState {
-    store: Arc<Mutex<Store>>,
+    store: SharedStore,
     config: IngestConfig,
     effect_sink: Arc<dyn IngestEffectSink>,
     health_fanout: HealthEventFanout,
@@ -88,7 +100,7 @@ impl IngestState {
         config: IngestConfig,
         scheduler: Arc<dyn WebhookScheduler>,
     ) -> Self {
-        let store = Arc::new(Mutex::new(store));
+        let store = Arc::new(parking_lot::Mutex::new(store));
         let webhook_sink = Arc::new(WebhookEnqueueEffectSink::new(
             store.clone(),
             scheduler,
@@ -115,12 +127,16 @@ impl IngestState {
         config: IngestConfig,
         effect_sink: Arc<dyn IngestEffectSink>,
     ) -> Self {
-        Self::new_with_shared_effect_sink(Arc::new(Mutex::new(store)), config, effect_sink)
+        Self::new_with_shared_effect_sink(
+            Arc::new(parking_lot::Mutex::new(store)),
+            config,
+            effect_sink,
+        )
     }
 
     /// Build ingest state from a shared single-writer store and explicit effect sink.
     pub fn new_with_shared_effect_sink(
-        store: Arc<Mutex<Store>>,
+        store: SharedStore,
         config: IngestConfig,
         effect_sink: Arc<dyn IngestEffectSink>,
     ) -> Self {
@@ -141,7 +157,7 @@ impl IngestState {
 
     /// Build ingest state from shared store plus explicit ingest and event sinks.
     pub fn new_with_shared_sinks(
-        store: Arc<Mutex<Store>>,
+        store: SharedStore,
         config: IngestConfig,
         effect_sink: Arc<dyn IngestEffectSink>,
         event_sink: Arc<dyn EventSink>,
@@ -163,7 +179,7 @@ impl IngestState {
 
     /// Build ingest state from shared store plus explicit ingest and health fanout sinks.
     pub fn new_with_shared_fanout(
-        store: Arc<Mutex<Store>>,
+        store: SharedStore,
         config: IngestConfig,
         effect_sink: Arc<dyn IngestEffectSink>,
         health_fanout: HealthEventFanout,
@@ -215,14 +231,18 @@ impl IngestState {
         self
     }
 
+    /// Acquire the writer store lock.
+    ///
+    /// `parking_lot::Mutex` never poisons, so this is now infallible; the
+    /// `Result` return type is kept so the ~80 call sites across route
+    /// modules do not need to change. A panicking handler still unwinds
+    /// through this guard cleanly (canary-930).
     pub(crate) fn lock_store(&self) -> Result<MutexGuard<'_, Store>, String> {
-        self.store
-            .lock()
-            .map_err(|_| "store lock poisoned".to_owned())
+        Ok(self.store.lock())
     }
 
     #[cfg(test)]
-    pub(crate) fn shared_store(&self) -> Arc<Mutex<Store>> {
+    pub(crate) fn shared_store(&self) -> SharedStore {
         self.store.clone()
     }
 

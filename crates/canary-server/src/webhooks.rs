@@ -6,8 +6,8 @@ use std::{
 
 use canary_ingest::IngestEffect;
 use canary_store::{
-    BOOTSTRAP_PROJECT_ID, BOOTSTRAP_TENANT_ID, Store, WebhookDeliveryInsert,
-    WebhookDeliveryJobInsert, WebhookSubscription,
+    BOOTSTRAP_PROJECT_ID, BOOTSTRAP_TENANT_ID, WebhookDeliveryInsert, WebhookDeliveryJobInsert,
+    WebhookSubscription,
 };
 use canary_workers::webhooks::{
     TransportResult, WebhookEndpoint, WebhookEnqueueDecision, WebhookJob, WebhookRequest,
@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use crate::{
     IngestEffectSink,
     egress::{ValidatedHttpDestination, validate_public_http_destination},
+    route_state::SharedStore,
     server_time::current_rfc3339,
 };
 
@@ -29,12 +30,12 @@ pub trait WebhookScheduler: Send + Sync + 'static {
 
 /// Store-backed scheduler for webhook delivery jobs.
 pub struct StoreWebhookScheduler {
-    store: Arc<Mutex<Store>>,
+    store: SharedStore,
 }
 
 impl StoreWebhookScheduler {
     /// Build a scheduler backed by the shared single-writer store.
-    pub fn new(store: Arc<Mutex<Store>>) -> Self {
+    pub fn new(store: SharedStore) -> Self {
         Self { store }
     }
 }
@@ -42,10 +43,7 @@ impl StoreWebhookScheduler {
 impl WebhookScheduler for StoreWebhookScheduler {
     fn schedule(&self, job: &WebhookJob) -> Result<(), String> {
         let now = current_rfc3339();
-        let mut store = self
-            .store
-            .lock()
-            .map_err(|_| "store lock poisoned".to_owned())?;
+        let mut store = self.store.lock();
         store
             .insert_webhook_delivery_job(WebhookDeliveryJobInsert {
                 args: job_args(job),
@@ -229,7 +227,7 @@ impl WebhookTransport for HttpWebhookTransport {
 
 /// Effect sink that turns ingest webhook effects into ledger rows and jobs.
 pub struct WebhookEnqueueEffectSink {
-    store: Arc<Mutex<Store>>,
+    store: SharedStore,
     scheduler: Arc<dyn WebhookScheduler>,
     cooldown: Arc<dyn WebhookCooldown>,
 }
@@ -237,7 +235,7 @@ pub struct WebhookEnqueueEffectSink {
 impl WebhookEnqueueEffectSink {
     /// Build a webhook enqueue sink from explicit runtime boundaries.
     pub fn new(
-        store: Arc<Mutex<Store>>,
+        store: SharedStore,
         scheduler: Arc<dyn WebhookScheduler>,
         cooldown: Arc<dyn WebhookCooldown>,
     ) -> Self {
@@ -279,10 +277,7 @@ impl WebhookEnqueueEffectSink {
         let authority = WebhookEventAuthority::from_payload(&payload);
         let now = current_rfc3339();
         let subscriptions = {
-            let store = self
-                .store
-                .lock()
-                .map_err(|_| "store lock poisoned".to_owned())?;
+            let store = self.store.lock();
             store
                 .active_webhook_subscriptions_for_event_scoped(
                     event,
@@ -332,10 +327,7 @@ impl WebhookEnqueueEffectSink {
         authority: &WebhookEventAuthority,
         now: &str,
     ) -> Result<(), String> {
-        let mut store = self
-            .store
-            .lock()
-            .map_err(|_| "store lock poisoned".to_owned())?;
+        let mut store = self.store.lock();
         store
             .create_pending_webhook_delivery(delivery_insert(delivery, authority, now))
             .map_err(|error| error.to_string())
@@ -348,10 +340,7 @@ impl WebhookEnqueueEffectSink {
         reason: &str,
         now: &str,
     ) -> Result<(), String> {
-        let mut store = self
-            .store
-            .lock()
-            .map_err(|_| "store lock poisoned".to_owned())?;
+        let mut store = self.store.lock();
         store
             .create_suppressed_webhook_delivery(delivery_insert(delivery, authority, now), reason)
             .map_err(|error| error.to_string())
@@ -361,10 +350,7 @@ impl WebhookEnqueueEffectSink {
         let Some(delivery_id) = job.delivery_id.as_deref() else {
             return Ok(());
         };
-        let mut store = self
-            .store
-            .lock()
-            .map_err(|_| "store lock poisoned".to_owned())?;
+        let mut store = self.store.lock();
         store
             .mark_webhook_delivery_discarded(delivery_id, reason, now)
             .map_err(|error| error.to_string())

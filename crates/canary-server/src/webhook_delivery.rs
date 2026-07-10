@@ -15,7 +15,7 @@ use std::{
     time::{Duration as StdDuration, Instant},
 };
 
-use canary_store::{Store, WebhookDeliveryJobCompletion, WebhookDeliveryJobRow};
+use canary_store::{WebhookDeliveryJobCompletion, WebhookDeliveryJobRow};
 use canary_workers::webhooks::{
     CircuitDecision, CircuitEffect, DeliveryExecution, DeliveryLedgerAction, DeliveryOutcome,
     MAX_ATTEMPTS, WebhookJob, WebhookLookup, try_execute_delivery,
@@ -25,6 +25,7 @@ use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     WorkerHealthHandle, WorkerName, WorkerPressureSnapshot,
+    route_state::SharedStore,
     server_time::{current_rfc3339, current_unix_millis},
     webhooks::{
         WebhookEventAuthority, WebhookTransport, delivery_insert, endpoint_from_subscription,
@@ -146,7 +147,7 @@ impl WebhookCircuit for NoopWebhookCircuit {
 
 /// Runtime adapter for executing one scheduled webhook delivery job.
 pub struct WebhookDeliveryRuntime {
-    store: Arc<Mutex<Store>>,
+    store: SharedStore,
     transport: Arc<dyn WebhookTransport>,
     circuit: Arc<dyn WebhookCircuit>,
 }
@@ -154,7 +155,7 @@ pub struct WebhookDeliveryRuntime {
 impl WebhookDeliveryRuntime {
     /// Build a delivery runtime from explicit side-effect boundaries.
     pub fn new(
-        store: Arc<Mutex<Store>>,
+        store: SharedStore,
         transport: Arc<dyn WebhookTransport>,
         circuit: Arc<dyn WebhookCircuit>,
     ) -> Self {
@@ -166,10 +167,7 @@ impl WebhookDeliveryRuntime {
     }
 
     /// Build a delivery runtime with a closed no-op circuit.
-    pub fn new_without_circuit(
-        store: Arc<Mutex<Store>>,
-        transport: Arc<dyn WebhookTransport>,
-    ) -> Self {
+    pub fn new_without_circuit(store: SharedStore, transport: Arc<dyn WebhookTransport>) -> Self {
         Self::new(store, transport, Arc::new(NoopWebhookCircuit))
     }
 
@@ -198,10 +196,7 @@ impl WebhookDeliveryRuntime {
     }
 
     fn lookup_webhook(&self, job: &WebhookJob) -> Result<WebhookLookup, String> {
-        let store = self
-            .store
-            .lock()
-            .map_err(|_| "store lock poisoned".to_owned())?;
+        let store = self.store.lock();
         let subscription = store
             .webhook_subscription(&job.webhook_id)
             .map_err(|error| error.to_string())?;
@@ -219,10 +214,7 @@ impl WebhookDeliveryRuntime {
         authority: &WebhookEventAuthority,
     ) -> Result<(), String> {
         let now = current_rfc3339();
-        let mut store = self
-            .store
-            .lock()
-            .map_err(|_| "store lock poisoned".to_owned())?;
+        let mut store = self.store.lock();
 
         match action {
             DeliveryLedgerAction::CreatePending(delivery) => store
@@ -260,7 +252,7 @@ impl WebhookDeliveryRuntime {
 
 /// Sequential scheduled-job drain for webhook delivery jobs.
 pub struct WebhookDeliveryDrain {
-    store: Arc<Mutex<Store>>,
+    store: SharedStore,
     runtime: WebhookDeliveryRuntime,
     max_jobs: u32,
 }
@@ -380,7 +372,7 @@ impl Drop for WebhookDeliveryDrainWorker {
 
 impl WebhookDeliveryDrain {
     /// Build a drain with an explicit maximum number of jobs per pass.
-    pub fn new(store: Arc<Mutex<Store>>, runtime: WebhookDeliveryRuntime, max_jobs: u32) -> Self {
+    pub fn new(store: SharedStore, runtime: WebhookDeliveryRuntime, max_jobs: u32) -> Self {
         Self {
             store,
             runtime,
@@ -394,10 +386,7 @@ impl WebhookDeliveryDrain {
         let stale_before = subtract_seconds(now, WEBHOOK_EXECUTION_LEASE_SECONDS)?;
 
         let jobs = {
-            let mut store = self
-                .store
-                .lock()
-                .map_err(|_| "store lock poisoned".to_owned())?;
+            let mut store = self.store.lock();
             let recovery = store
                 .recover_stale_webhook_delivery_jobs(now, &stale_before, self.max_jobs)
                 .map_err(|error| error.to_string())?;
@@ -490,10 +479,7 @@ impl WebhookDeliveryDrain {
         job: &WebhookDeliveryJobRow,
         completion: WebhookDeliveryJobCompletion,
     ) -> Result<(), String> {
-        let mut store = self
-            .store
-            .lock()
-            .map_err(|_| "store lock poisoned".to_owned())?;
+        let mut store = self.store.lock();
         let applied = store
             .complete_webhook_delivery_job(job, completion)
             .map_err(|error| error.to_string())?;
@@ -707,6 +693,7 @@ mod tests {
     use canary_workers::webhooks::{TransportResult, WebhookRequest};
 
     use super::*;
+    use canary_store::Store;
 
     struct NoopTransport;
 
@@ -747,7 +734,7 @@ mod tests {
 
     #[test]
     fn worker_records_lifecycle_failures() -> Result<(), Box<dyn std::error::Error>> {
-        let store = Arc::new(Mutex::new(Store::open_in_memory()?));
+        let store = Arc::new(parking_lot::Mutex::new(Store::open_in_memory()?));
         let runtime =
             WebhookDeliveryRuntime::new_without_circuit(store.clone(), Arc::new(NoopTransport));
         let drain = WebhookDeliveryDrain::new(store, runtime, 1);

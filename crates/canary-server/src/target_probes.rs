@@ -19,8 +19,9 @@ use std::{
     time::{Duration as StdDuration, Instant},
 };
 
+use crate::route_state::SharedStore;
 use canary_core::health::state_machine::{Counters, HealthState, Thresholds};
-use canary_store::{ActiveTargetProbeSchedule, Store, TargetProbeSnapshot};
+use canary_store::{ActiveTargetProbeSchedule, TargetProbeSnapshot};
 use canary_workers::health::{
     ObservationContext, TargetProbeObservation, TargetSnapshot, plan_target_probe,
 };
@@ -142,7 +143,7 @@ pub struct ProbeRequest {
 
 /// Runtime boundary for executing target probes.
 pub struct TargetProbeRuntime {
-    store: Arc<Mutex<Store>>,
+    store: SharedStore,
     health_fanout: HealthEventFanout,
     transport: Arc<dyn ProbeTransport>,
     options: TargetProbeOptions,
@@ -152,7 +153,7 @@ pub struct TargetProbeRuntime {
 impl TargetProbeRuntime {
     /// Build a target probe runtime from explicit side-effect boundaries.
     pub fn new(
-        store: Arc<Mutex<Store>>,
+        store: SharedStore,
         health_fanout: HealthEventFanout,
         transport: Arc<dyn ProbeTransport>,
         options: TargetProbeOptions,
@@ -281,7 +282,7 @@ pub enum TargetProbeLifecycleCommand {
 
 /// Bounded lifecycle adapter for active HTTP target probes.
 pub struct TargetProbeLifecycle {
-    store: Arc<Mutex<Store>>,
+    store: SharedStore,
     runtime: Arc<TargetProbeRuntime>,
     schedules: BTreeMap<String, ScheduledTarget>,
     in_flight: BTreeSet<String>,
@@ -298,7 +299,7 @@ type TargetProbeCompletion = (
 
 impl TargetProbeLifecycle {
     /// Build a lifecycle adapter from the shared store and probe runtime.
-    pub fn new(store: Arc<Mutex<Store>>, runtime: TargetProbeRuntime) -> Self {
+    pub fn new(store: SharedStore, runtime: TargetProbeRuntime) -> Self {
         let (completion_sender, completion_receiver) = mpsc::channel();
         Self {
             store,
@@ -437,10 +438,7 @@ impl TargetProbeLifecycle {
     }
 
     fn load_active_schedules(&self) -> Result<Vec<ActiveTargetProbeSchedule>, String> {
-        let store = self
-            .store
-            .lock()
-            .map_err(|_| "store lock poisoned".to_owned())?;
+        let store = self.store.lock();
         store
             .active_target_probe_schedules()
             .map_err(|error| error.to_string())
@@ -718,7 +716,7 @@ pub fn validate_target_probe_interval_ms(interval_ms: i64) -> Result<(), String>
 
 /// Execute and persist exactly one target probe.
 pub fn run_target_probe_once(
-    store: &Arc<Mutex<Store>>,
+    store: &SharedStore,
     health_fanout: &HealthEventFanout,
     transport: &dyn ProbeTransport,
     target_id: &str,
@@ -741,7 +739,7 @@ struct TargetProbeRun {
 }
 
 fn run_target_probe_once_with_history(
-    store: &Arc<Mutex<Store>>,
+    store: &SharedStore,
     health_fanout: &HealthEventFanout,
     transport: &dyn ProbeTransport,
     target_id: &str,
@@ -767,9 +765,7 @@ fn run_target_probe_once_with_history(
     let response_state = plan.commit.state.clone();
     let response_tls_expires_at = plan.commit.check.tls_expires_at.clone();
     let commit = {
-        let mut store = store
-            .lock()
-            .map_err(|_| TargetProbeRuntimeError::StoreLock)?;
+        let mut store = store.lock();
         store.commit_target_probe(plan.commit)?
     };
     let mut event_fanout = EventFanoutReport::default();
@@ -1032,12 +1028,10 @@ fn certificate_not_after_rfc3339(certificate: &CertificateDer<'_>) -> Option<Str
 }
 
 fn load_target_snapshot(
-    store: &Arc<Mutex<Store>>,
+    store: &SharedStore,
     target_id: &str,
 ) -> Result<TargetProbeSnapshot, TargetProbeRuntimeError> {
-    let mut store = store
-        .lock()
-        .map_err(|_| TargetProbeRuntimeError::StoreLock)?;
+    let mut store = store.lock();
     store
         .target_probe_snapshot_by_id(target_id)?
         .ok_or(TargetProbeRuntimeError::TargetNotFound)
@@ -1379,6 +1373,7 @@ mod tests {
     use crate::EventSink;
 
     use super::*;
+    use canary_store::Store;
 
     type TlsTestServer = std::thread::JoinHandle<Result<(), String>>;
 
@@ -1587,12 +1582,12 @@ mod tests {
     }
 
     struct DeactivatingTransport {
-        store: Arc<Mutex<Store>>,
+        store: SharedStore,
         calls: AtomicUsize,
     }
 
     impl DeactivatingTransport {
-        fn new(store: Arc<Mutex<Store>>) -> Self {
+        fn new(store: SharedStore) -> Self {
             Self {
                 store,
                 calls: AtomicUsize::new(0),
@@ -1603,10 +1598,7 @@ mod tests {
     impl ProbeTransport for DeactivatingTransport {
         fn probe(&self, _request: ProbeRequest) -> Result<ProbeHttpResponse, ProbeTransportError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let mut store = self
-                .store
-                .lock()
-                .map_err(|_| ProbeTransportError::Connection("store lock poisoned".to_owned()))?;
+            let mut store = self.store.lock();
             store
                 .update_target_active("TGT-api", false)
                 .map_err(|error| ProbeTransportError::Connection(error.to_string()))?;
@@ -1720,7 +1712,7 @@ mod tests {
         assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
         assert_eq!(outcome.result, "connection_error");
         assert_eq!(outcome.state, "degraded");
-        let store = store.lock().map_err(|_| "store lock poisoned")?;
+        let store = store.lock();
         assert_eq!(store.error_count()?, 0);
         assert_eq!(
             store.webhook_deliveries(Default::default())?.len(),
@@ -1781,10 +1773,7 @@ mod tests {
         assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
         assert_eq!(outcome.result, "connection_error");
         assert_eq!(outcome.state, "degraded");
-        let checks = store
-            .lock()
-            .map_err(|_| "store lock poisoned")?
-            .target_checks("TGT-api", "24h")?;
+        let checks = store.lock().target_checks("TGT-api", "24h")?;
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].result, "connection_error");
         assert_eq!(
@@ -1873,7 +1862,7 @@ mod tests {
     fn successful_probe_commits_state_and_enqueues_transition() -> Result<(), Box<dyn Error>> {
         let store = seeded_store("http://127.0.0.1/health", "unknown")?;
         {
-            let mut store = store.lock().map_err(|_| "store lock poisoned")?;
+            let mut store = store.lock();
             store.insert_webhook_subscription(WebhookSubscriptionInsert {
                 id: "WHK-health".to_owned(),
                 tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
@@ -1951,7 +1940,7 @@ mod tests {
     fn lifecycle_loads_active_targets_and_runs_due_probes() -> Result<(), Box<dyn Error>> {
         let store = seeded_store("http://127.0.0.1/health", "unknown")?;
         {
-            let mut store = store.lock().map_err(|_| "store lock poisoned")?;
+            let mut store = store.lock();
             store.insert_target(TargetInsert {
                 id: "TGT-inactive".to_owned(),
                 url: "http://127.0.0.1/inactive".to_owned(),
@@ -2015,7 +2004,7 @@ mod tests {
     fn lifecycle_isolates_fast_due_probe_from_slow_due_probe() -> Result<(), Box<dyn Error>> {
         let store = seeded_store("http://127.0.0.1/slow", "unknown")?;
         {
-            let mut store = store.lock().map_err(|_| "store lock poisoned")?;
+            let mut store = store.lock();
             store.insert_target(TargetInsert {
                 id: "TGT-worker".to_owned(),
                 url: "http://127.0.0.1/fast".to_owned(),
@@ -2062,7 +2051,7 @@ mod tests {
         let started = Instant::now();
         loop {
             let worker = {
-                let store = store.lock().map_err(|_| "store lock poisoned")?;
+                let store = store.lock();
                 store
                     .health_targets()?
                     .into_iter()
@@ -2107,7 +2096,7 @@ mod tests {
     fn lifecycle_caps_concurrent_due_probe_fanout() -> Result<(), Box<dyn Error>> {
         let store = seeded_store("http://127.0.0.1/target-api", "unknown")?;
         {
-            let mut store = store.lock().map_err(|_| "store lock poisoned")?;
+            let mut store = store.lock();
             for index in 0..9 {
                 store.insert_target(TargetInsert {
                     id: format!("TGT-concurrent-{index:02}"),
@@ -2273,7 +2262,7 @@ mod tests {
         let started = Instant::now();
         loop {
             let target = {
-                let store = store_for_assert.lock().map_err(|_| "store lock poisoned")?;
+                let store = store_for_assert.lock();
                 store
                     .health_targets()?
                     .into_iter()
@@ -2363,7 +2352,7 @@ mod tests {
         assert_eq!(lifecycle.run_due(1_000)?.launched, 1);
         slow_started_rx.recv_timeout(StdDuration::from_secs(1))?;
         {
-            let mut store = lifecycle.store.lock().map_err(|_| "store lock poisoned")?;
+            let mut store = lifecycle.store.lock();
             store.update_target_active("TGT-api", false)?;
         }
         lifecycle.apply_control_command(
@@ -2554,7 +2543,7 @@ mod tests {
 
     #[test]
     fn worker_records_lifecycle_failures() -> Result<(), Box<dyn Error>> {
-        let store = Arc::new(Mutex::new(Store::open_in_memory()?));
+        let store = Arc::new(parking_lot::Mutex::new(Store::open_in_memory()?));
         let sink = Arc::new(RecordingSink::default());
         let runtime = TargetProbeRuntime::new(
             store.clone(),
@@ -2679,7 +2668,7 @@ mod tests {
         }
     }
 
-    fn seeded_store(url: &str, state: &str) -> Result<Arc<Mutex<Store>>, Box<dyn Error>> {
+    fn seeded_store(url: &str, state: &str) -> Result<SharedStore, Box<dyn Error>> {
         seeded_store_with_headers(url, state, None)
     }
 
@@ -2687,7 +2676,7 @@ mod tests {
         url: &str,
         state: &str,
         headers: Option<String>,
-    ) -> Result<Arc<Mutex<Store>>, Box<dyn Error>> {
+    ) -> Result<SharedStore, Box<dyn Error>> {
         seeded_store_with_target_options(url, state, "GET".to_owned(), headers)
     }
 
@@ -2695,7 +2684,7 @@ mod tests {
         url: &str,
         state: &str,
         method: String,
-    ) -> Result<Arc<Mutex<Store>>, Box<dyn Error>> {
+    ) -> Result<SharedStore, Box<dyn Error>> {
         seeded_store_with_target_options(url, state, method, None)
     }
 
@@ -2704,7 +2693,7 @@ mod tests {
         state: &str,
         method: String,
         headers: Option<String>,
-    ) -> Result<Arc<Mutex<Store>>, Box<dyn Error>> {
+    ) -> Result<SharedStore, Box<dyn Error>> {
         let mut store = Store::open_in_memory()?;
         store.migrate()?;
         store.insert_target(TargetInsert {
@@ -2741,7 +2730,7 @@ mod tests {
             now: "2026-05-28T20:00:00Z".to_owned(),
             transition: None,
         })?;
-        Ok(Arc::new(Mutex::new(store)))
+        Ok(Arc::new(parking_lot::Mutex::new(store)))
     }
 
     fn tls_test_certificate()

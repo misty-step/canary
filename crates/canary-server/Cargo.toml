@@ -14,6 +14,7 @@ canary-core = { path = "../canary-core" }
 canary-http = { path = "../canary-http" }
 canary-store = { path = "../canary-store" }
 canary-workers = { path = "../canary-workers" }
+parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 rustls = "0.23"
 serde = { version = "1.0", features = ["derive"] }
@@ -22,7 +23,7 @@ sha2 = "0.10"
 thiserror = "2.0"
 time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread", "signal"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["catch-panic", "cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
 x509-parser = "0.18"
