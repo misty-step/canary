@@ -153,6 +153,10 @@ struct TimelineArgs {
     window: String,
     #[arg(long, default_value_t = 20)]
     limit: u16,
+    #[arg(long)]
+    cursor: Option<String>,
+    #[arg(long)]
+    after: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -613,6 +617,14 @@ fn run_http_command(
                     if let Some(service) = args.service {
                         path.push_str("&service=");
                         path.push_str(&encode(&service));
+                    }
+                    if let Some(cursor) = args.cursor {
+                        path.push_str("&cursor=");
+                        path.push_str(&encode(&cursor));
+                    }
+                    if let Some(after) = args.after {
+                        path.push_str("&after=");
+                        path.push_str(&encode(&after));
                     }
                     let response = client.get_auth_json(&path)?;
                     render(

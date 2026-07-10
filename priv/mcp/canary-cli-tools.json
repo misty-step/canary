@@ -102,9 +102,15 @@
       "name": "canary_incident_get"
     },
     {
-      "description": "Inspect timeline events globally or for one service.",
+      "description": "Inspect timeline events globally or for one service. Pass `cursor` (the prior response's `cursor` field) to page forward through crash-recovery replay; `after` takes precedence over `cursor` when both are supplied.",
       "input_schema": {
         "properties": {
+          "after": {
+            "type": "string"
+          },
+          "cursor": {
+            "type": "string"
+          },
           "limit": {
             "maximum": 100,
             "minimum": 1,

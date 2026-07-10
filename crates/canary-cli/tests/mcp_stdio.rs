@@ -1,6 +1,7 @@
 //! Stdio MCP smoke tests for the Canary CLI adapter.
 
 use std::{
+    collections::BTreeSet,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
@@ -174,6 +175,137 @@ fn cli_incidents_get_reads_incident_detail() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
+fn cli_timeline_two_page_cursor_walk_returns_ordered_events_without_gap_or_duplicate()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = FixtureServer::spawn(vec![
+        FixtureResponse::ok(timeline_page_body(
+            &["EVT-4", "EVT-3"],
+            Some("opaque-cursor-2"),
+        )),
+        FixtureResponse::ok(timeline_page_body(&["EVT-2", "EVT-1"], None)),
+    ])?;
+
+    let first = run_cli_json(&server, ["timeline", "--limit", "2"])?;
+    assert_eq!(
+        event_ids(&first["response"]),
+        vec!["EVT-4".to_owned(), "EVT-3".to_owned()]
+    );
+    let cursor = first["response"]["cursor"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("first page did not return a next-page cursor"))?
+        .to_owned();
+    assert_eq!(cursor, "opaque-cursor-2");
+
+    let second = run_cli_json(&server, ["timeline", "--limit", "2", "--cursor", &cursor])?;
+    assert_eq!(
+        event_ids(&second["response"]),
+        vec!["EVT-2".to_owned(), "EVT-1".to_owned()]
+    );
+    assert!(second["response"]["cursor"].is_null());
+
+    let mut walked = event_ids(&first["response"]);
+    walked.extend(event_ids(&second["response"]));
+    let unique: BTreeSet<_> = walked.iter().collect();
+    assert_eq!(
+        unique.len(),
+        walked.len(),
+        "cursor walk produced a duplicate"
+    );
+    assert_eq!(
+        walked,
+        vec!["EVT-4", "EVT-3", "EVT-2", "EVT-1"],
+        "cursor walk produced a gap or reorder"
+    );
+
+    let requests = server.join()?;
+    assert_eq!(requests.len(), 2);
+    assert!(!requests[0].path.contains("cursor="));
+    assert!(requests[1].path.contains("cursor=opaque-cursor-2"));
+
+    Ok(())
+}
+
+#[test]
+fn cli_timeline_forwards_after_and_cursor_together() -> Result<(), Box<dyn std::error::Error>> {
+    let server = FixtureServer::spawn(vec![FixtureResponse::ok(timeline_page_body(
+        &["EVT-1"],
+        None,
+    ))])?;
+
+    let response = run_cli_json(
+        &server,
+        ["timeline", "--after", "EVT-9", "--cursor", "legacy-cursor"],
+    )?;
+    assert_eq!(response["command"], json!("timeline"));
+
+    let requests = server.join()?;
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].path.contains("after=EVT-9"));
+    assert!(requests[0].path.contains("cursor=legacy-cursor"));
+
+    Ok(())
+}
+
+#[test]
+fn mcp_stdio_timeline_tool_forwards_after_and_cursor() -> Result<(), Box<dyn std::error::Error>> {
+    let server = FixtureServer::spawn(vec![FixtureResponse::ok(timeline_page_body(
+        &["EVT-1"],
+        None,
+    ))])?;
+    let repo_root = repo_root()?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_canary"))
+        .args(["--endpoint", server.endpoint(), "mcp-server"])
+        .current_dir(&repo_root)
+        .env("CANARY_READ_KEY", "mcp-key")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| std::io::Error::other("child stdin unavailable"))?;
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "canary_timeline",
+                "arguments": {"after": "EVT-9", "cursor": "legacy-cursor"}
+            }
+        })
+    )?;
+    drop(stdin);
+
+    let output = child.wait_with_output()?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let responses = String::from_utf8(output.stdout)?
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        responses[0]["result"]["structuredContent"]["command"],
+        json!("canary_timeline")
+    );
+
+    let requests = server.join()?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].authorization.as_deref(), Some("Bearer mcp-key"));
+    assert!(requests[0].path.contains("after=EVT-9"));
+    assert!(requests[0].path.contains("cursor=legacy-cursor"));
+
+    Ok(())
+}
+
+#[test]
 fn mcp_stdio_exercises_incident_loop_tools() -> Result<(), Box<dyn std::error::Error>> {
     let server = FixtureServer::spawn(vec![
         FixtureResponse::ok(incident_detail_body()),
@@ -342,6 +474,46 @@ fn mcp_stdio_exercises_incident_loop_tools() -> Result<(), Box<dyn std::error::E
     assert!(requests[2].body.contains("\"action\":\"fix-verified\""));
 
     Ok(())
+}
+
+fn run_cli_json<const N: usize>(
+    server: &FixtureServer,
+    args: [&str; N],
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let output = Command::new(env!("CARGO_BIN_EXE_canary"))
+        .args(["--endpoint", server.endpoint(), "--api-key", "read-key"])
+        .arg("--json")
+        .args(args)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+fn event_ids(timeline_response: &Value) -> Vec<String> {
+    timeline_response["events"]
+        .as_array()
+        .map(|events| {
+            events
+                .iter()
+                .filter_map(|event| event["id"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn timeline_page_body(ids: &[&str], cursor: Option<&str>) -> Value {
+    json!({
+        "service": Value::Null,
+        "window": "24h",
+        "summary": format!("Returned {} timeline events in the last 24h.", ids.len()),
+        "returned_count": ids.len(),
+        "events": ids.iter().map(|id| json!({"id": id, "event": "error.ingested"})).collect::<Vec<_>>(),
+        "cursor": cursor,
+    })
 }
 
 fn repo_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
