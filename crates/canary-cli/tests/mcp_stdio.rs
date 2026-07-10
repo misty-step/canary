@@ -175,6 +175,180 @@ fn cli_incidents_get_reads_incident_detail() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
+fn cli_errors_get_reads_error_detail_matching_http_route_body()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = FixtureServer::spawn(vec![FixtureResponse::ok(error_detail_body())])?;
+    let response = run_cli_json(&server, ["errors", "get", "ERR-loop"])?;
+
+    assert_eq!(response["command"], json!("errors get"));
+    assert_eq!(response["response"], error_detail_body());
+
+    let requests = server.join()?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/v1/errors/ERR-loop");
+    assert_eq!(
+        requests[0].authorization.as_deref(),
+        Some("Bearer read-key")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn cli_webhook_deliveries_get_reads_delivery_matching_http_route_body()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = FixtureServer::spawn(vec![FixtureResponse::ok(webhook_delivery_body())])?;
+    let response = run_cli_json(&server, ["webhook-deliveries", "get", "WHK-delivery-1"])?;
+
+    assert_eq!(response["command"], json!("webhook-deliveries get"));
+    assert_eq!(response["response"], webhook_delivery_body());
+
+    let requests = server.join()?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(
+        requests[0].path,
+        "/api/v1/webhook-deliveries/WHK-delivery-1"
+    );
+    assert_eq!(
+        requests[0].authorization.as_deref(),
+        Some("Bearer read-key")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn mcp_stdio_error_get_tool_reads_error_detail_with_read_only_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = FixtureServer::spawn(vec![FixtureResponse::ok(error_detail_body())])?;
+    let repo_root = repo_root()?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_canary"))
+        .args(["--endpoint", server.endpoint(), "mcp-server"])
+        .current_dir(&repo_root)
+        .env("CANARY_READ_KEY", "mcp-read-key")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| std::io::Error::other("child stdin unavailable"))?;
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "canary_error_get",
+                "arguments": {"error_id": "ERR-loop"}
+            }
+        })
+    )?;
+    drop(stdin);
+
+    let output = child.wait_with_output()?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let responses = String::from_utf8(output.stdout)?
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        responses[0]["result"]["structuredContent"]["command"],
+        json!("canary_error_get")
+    );
+    assert_eq!(
+        responses[0]["result"]["structuredContent"]["response"],
+        error_detail_body()
+    );
+
+    let requests = server.join()?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/api/v1/errors/ERR-loop");
+    assert_eq!(
+        requests[0].authorization.as_deref(),
+        Some("Bearer mcp-read-key")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn mcp_stdio_webhook_delivery_get_tool_reads_delivery_with_read_only_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = FixtureServer::spawn(vec![FixtureResponse::ok(webhook_delivery_body())])?;
+    let repo_root = repo_root()?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_canary"))
+        .args(["--endpoint", server.endpoint(), "mcp-server"])
+        .current_dir(&repo_root)
+        .env("CANARY_READ_KEY", "mcp-read-key")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| std::io::Error::other("child stdin unavailable"))?;
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "canary_webhook_delivery_get",
+                "arguments": {"delivery_id": "WHK-delivery-1"}
+            }
+        })
+    )?;
+    drop(stdin);
+
+    let output = child.wait_with_output()?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let responses = String::from_utf8(output.stdout)?
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        responses[0]["result"]["structuredContent"]["command"],
+        json!("canary_webhook_delivery_get")
+    );
+    assert_eq!(
+        responses[0]["result"]["structuredContent"]["response"],
+        webhook_delivery_body()
+    );
+
+    let requests = server.join()?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].path,
+        "/api/v1/webhook-deliveries/WHK-delivery-1"
+    );
+    assert_eq!(
+        requests[0].authorization.as_deref(),
+        Some("Bearer mcp-read-key")
+    );
+
+    Ok(())
+}
+
+#[test]
 fn cli_timeline_two_page_cursor_walk_returns_ordered_events_without_gap_or_duplicate()
 -> Result<(), Box<dyn std::error::Error>> {
     let server = FixtureServer::spawn(vec![
@@ -712,6 +886,46 @@ fn incident_detail_body() -> Value {
         "annotations_truncated": false,
         "claims": [],
         "recent_timeline_events": []
+    })
+}
+
+fn error_detail_body() -> Value {
+    json!({
+        "summary": "error ERR-loop: api NullPointerException",
+        "id": "ERR-loop",
+        "service": "api",
+        "error_class": "NullPointerException",
+        "message": "boom",
+        "message_template": null,
+        "stack_trace": "at fn()\nat main()",
+        "context": null,
+        "severity": "error",
+        "environment": "production",
+        "group_hash": "GRP-abc",
+        "created_at": "2026-06-14T02:07:53Z",
+        "group": null,
+        "incident_ids": ["INC-loop"]
+    })
+}
+
+fn webhook_delivery_body() -> Value {
+    json!({
+        "delivery_id": "WHK-delivery-1",
+        "webhook_id": "WHK-sub-1",
+        "tenant_id": "TENANT-bootstrap",
+        "project_id": "PROJECT-bootstrap",
+        "service": "api",
+        "event": "incident.opened",
+        "status": "delivered",
+        "attempt_count": 2,
+        "reason": null,
+        "first_attempt_at": "2026-06-14T02:07:00Z",
+        "last_attempt_at": "2026-06-14T02:07:05Z",
+        "delivered_at": "2026-06-14T02:07:05Z",
+        "discarded_at": null,
+        "completed_at": "2026-06-14T02:07:05Z",
+        "created_at": "2026-06-14T02:06:55Z",
+        "updated_at": "2026-06-14T02:07:05Z"
     })
 }
 

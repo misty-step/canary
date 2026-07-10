@@ -14,9 +14,10 @@ use canary_cli::{
     integration_plan, integration_status, json_envelope, mcp_tool_manifest, print_json,
     print_lines, resolve_endpoint_without_config, run_dogfood_inventory, summarize_annotations,
     summarize_claims, summarize_doctor, summarize_dogfood, summarize_dogfood_value,
-    summarize_event, summarize_incident_detail, summarize_incident_escalation, summarize_incidents,
-    summarize_integration, summarize_monitors, summarize_query, summarize_report,
-    summarize_services, summarize_targets, summarize_timeline, tool_manifest,
+    summarize_error_detail, summarize_event, summarize_incident_detail,
+    summarize_incident_escalation, summarize_incidents, summarize_integration, summarize_monitors,
+    summarize_query, summarize_report, summarize_services, summarize_targets, summarize_timeline,
+    summarize_webhook_delivery, tool_manifest,
 };
 use clap::{Args, Parser, Subcommand};
 use serde_json::{Value, json};
@@ -45,12 +46,14 @@ enum Commands {
     Summary(WindowArgs),
     /// List target and monitor service states.
     Services(ServicesArgs),
-    /// Inspect recent errors for one service.
-    Errors(ServiceWindowArgs),
+    /// List or read recent errors.
+    Errors(ErrorsArgs),
     /// List, read, escalate, or deescalate incidents.
     Incidents(IncidentsArgs),
     /// Inspect timeline events.
     Timeline(TimelineArgs),
+    /// Read webhook delivery diagnostics.
+    WebhookDeliveries(WebhookDeliveriesArgs),
     /// List configured HTTP targets.
     Targets,
     /// List configured non-HTTP monitors.
@@ -92,6 +95,42 @@ struct ServiceWindowArgs {
     service: String,
     #[arg(long, default_value = "24h")]
     window: String,
+}
+
+#[derive(Debug, Args)]
+struct ErrorsArgs {
+    #[command(subcommand)]
+    command: ErrorsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ErrorsCommand {
+    /// List recent error groups for one service.
+    List(ServiceWindowArgs),
+    /// Read one raw error by id, including stack trace and decoded context.
+    Get(ErrorGetArgs),
+}
+
+#[derive(Debug, Args)]
+struct ErrorGetArgs {
+    error_id: String,
+}
+
+#[derive(Debug, Args)]
+struct WebhookDeliveriesArgs {
+    #[command(subcommand)]
+    command: WebhookDeliveriesCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum WebhookDeliveriesCommand {
+    /// Read one webhook delivery by stable delivery id.
+    Get(WebhookDeliveryGetArgs),
+}
+
+#[derive(Debug, Args)]
+struct WebhookDeliveryGetArgs {
+    delivery_id: String,
 }
 
 #[derive(Debug, Args)]
@@ -597,16 +636,46 @@ fn run_http_command(
                         summarize_services(value, state.as_deref())
                     })
                 }
-                Commands::Errors(args) => {
-                    let window = Window::parse(&args.window)?;
-                    let path = format!(
-                        "/api/v1/query?service={}&window={}",
-                        encode(&args.service),
-                        window.as_str()
-                    );
-                    let response = client.get_auth_json(&path)?;
-                    render("errors", client.endpoint(), response, mode, summarize_query)
-                }
+                Commands::Errors(args) => match args.command {
+                    ErrorsCommand::List(list_args) => {
+                        let window = Window::parse(&list_args.window)?;
+                        let path = format!(
+                            "/api/v1/query?service={}&window={}",
+                            encode(&list_args.service),
+                            window.as_str()
+                        );
+                        let response = client.get_auth_json(&path)?;
+                        render("errors", client.endpoint(), response, mode, summarize_query)
+                    }
+                    ErrorsCommand::Get(get_args) => {
+                        let response = client.get_auth_json(&format!(
+                            "/api/v1/errors/{}",
+                            encode(&get_args.error_id)
+                        ))?;
+                        render(
+                            "errors get",
+                            client.endpoint(),
+                            response,
+                            mode,
+                            summarize_error_detail,
+                        )
+                    }
+                },
+                Commands::WebhookDeliveries(args) => match args.command {
+                    WebhookDeliveriesCommand::Get(get_args) => {
+                        let response = client.get_auth_json(&format!(
+                            "/api/v1/webhook-deliveries/{}",
+                            encode(&get_args.delivery_id)
+                        ))?;
+                        render(
+                            "webhook-deliveries get",
+                            client.endpoint(),
+                            response,
+                            mode,
+                            summarize_webhook_delivery,
+                        )
+                    }
+                },
                 Commands::Timeline(args) => {
                     let window = Window::parse(&args.window)?;
                     let mut path = format!(

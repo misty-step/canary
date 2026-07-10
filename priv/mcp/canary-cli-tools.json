@@ -135,6 +135,36 @@
       "name": "canary_timeline"
     },
     {
+      "description": "Read one raw error by id, including stack trace and decoded context. Only fall through here from `canary_incident_get` when signals are truncated or raw stack traces are needed.",
+      "input_schema": {
+        "properties": {
+          "error_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error_id"
+        ],
+        "type": "object"
+      },
+      "name": "canary_error_get"
+    },
+    {
+      "description": "Inspect one webhook delivery ledger row by stable delivery id for dispute or diagnostic replay; always replay `canary_timeline` afterward since webhooks are non-authoritative wake-up hints.",
+      "input_schema": {
+        "properties": {
+          "delivery_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "delivery_id"
+        ],
+        "type": "object"
+      },
+      "name": "canary_webhook_delivery_get"
+    },
+    {
       "description": "List configured HTTP uptime targets.",
       "input_schema": {
         "properties": {},
