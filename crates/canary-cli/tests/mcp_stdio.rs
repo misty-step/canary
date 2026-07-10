@@ -256,6 +256,7 @@ fn mcp_stdio_timeline_tool_forwards_after_and_cursor() -> Result<(), Box<dyn std
     let mut child = Command::new(env!("CARGO_BIN_EXE_canary"))
         .args(["--endpoint", server.endpoint(), "mcp-server"])
         .current_dir(&repo_root)
+        .env("CANARY_READ_KEY", "mcp-key")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -297,6 +298,7 @@ fn mcp_stdio_timeline_tool_forwards_after_and_cursor() -> Result<(), Box<dyn std
 
     let requests = server.join()?;
     assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].authorization.as_deref(), Some("Bearer mcp-key"));
     assert!(requests[0].path.contains("after=EVT-9"));
     assert!(requests[0].path.contains("cursor=legacy-cursor"));
 
