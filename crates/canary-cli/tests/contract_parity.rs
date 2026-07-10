@@ -3,11 +3,27 @@
 //! and an MCP tool, or an explicitly justified allowlist entry. Adding a
 //! route to `priv/openapi/openapi.json` without updating `parity_table()`
 //! below fails this test with the exact path that needs an entry.
+//!
+//! It also carries the emitted-command-grammar regression the PR #261 review
+//! required: doctor/integrate JSON payloads embed literal `canary ...`
+//! command strings as machine-executable remediation hints, and those drift
+//! silently when a CLI grammar changes underneath them (canary-932
+//! `errors <service>` -> `errors list <service>` broke six such sites). The
+//! tests below call the real payload-building functions and prove each
+//! embedded command both uses the expected grammar AND resolves as a live
+//! CLI subcommand, reusing `cli_subcommand_registered` so this can't drift
+//! back to a hardcoded string comparison.
 
-use std::{collections::BTreeSet, process::Command};
+mod support;
 
-use canary_cli::tool_manifest;
-use serde_json::Value;
+use std::{collections::BTreeSet, fs, process::Command};
+
+use canary_cli::{
+    ApiClient, Config, DEFAULT_ENDPOINT, IntegrationEnrollRequest, IntegrationInput,
+    integration_enroll, integration_patch, integration_plan, next_operator_action, tool_manifest,
+};
+use serde_json::{Value, json};
+use support::{FixtureResponse, FixtureServer};
 
 const OPENAPI_JSON: &str = include_str!("../../../priv/openapi/openapi.json");
 
@@ -269,4 +285,176 @@ fn cli_subcommand_registered(cli_path: &[&str]) -> Result<bool, Box<dyn std::err
         .args(&args)
         .output()?;
     Ok(output.status.success())
+}
+
+// --- Emitted-command-grammar regression -----------------------------------
+//
+// Each test below drives one real payload-building function with the
+// smallest input that reaches its embedded `canary ...` command string, then
+// proves that string both contains the expected grammar and resolves as a
+// live CLI subcommand.
+
+#[test]
+fn integration_plan_verify_command_uses_registered_cli_grammar()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = temp_project_dir("plan-verify")?;
+    fs::write(root.join("index.html"), "<h1>static</h1>")?;
+
+    let plan = integration_plan(&IntegrationInput {
+        target: root.clone(),
+        service: Some("qa-smoke".to_owned()),
+        production_url: Some("https://qa-smoke.example.com".to_owned()),
+        platform_project: None,
+        endpoint: DEFAULT_ENDPOINT.to_owned(),
+    })?;
+    let verify = plan["commands"]["verify"]
+        .as_str()
+        .ok_or("missing commands.verify")?;
+    assert_command_uses_registered_cli_grammar(verify, "canary errors list ", &["errors", "list"])?;
+
+    fs::remove_dir_all(&root)?;
+    Ok(())
+}
+
+#[test]
+fn integration_patch_next_steps_and_receipt_use_registered_cli_grammar()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = temp_project_dir("patch-next-steps")?;
+    fs::write(
+        root.join("package.json"),
+        r#"{"dependencies":{"next":"15.0.0"}}"#,
+    )?;
+
+    let patched = integration_patch(&IntegrationInput {
+        target: root.clone(),
+        service: Some("qa-smoke".to_owned()),
+        production_url: Some("https://qa-smoke.example.com".to_owned()),
+        platform_project: None,
+        endpoint: DEFAULT_ENDPOINT.to_owned(),
+    })?;
+
+    let next_steps = patched["next_steps"]
+        .as_array()
+        .ok_or("missing next_steps")?;
+    let deploy_step = next_steps
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|step| step.contains("canary errors"))
+        .ok_or("no next_steps entry mentions canary errors")?;
+    assert_command_uses_registered_cli_grammar(
+        deploy_step,
+        "canary errors list <service>",
+        &["errors", "list"],
+    )?;
+
+    // `integration_patch` also writes the on-disk `.canary/integration.json`
+    // receipt with its own independently-built verification_commands.
+    let receipt: Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".canary/integration.json"))?)?;
+    let verification_commands = receipt["verification_commands"]
+        .as_array()
+        .ok_or("missing verification_commands")?;
+    let errors_command = verification_commands
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|command| command.contains("canary errors"))
+        .ok_or("no verification_commands entry mentions canary errors")?;
+    assert_command_uses_registered_cli_grammar(
+        errors_command,
+        "canary errors list ",
+        &["errors", "list"],
+    )?;
+
+    fs::remove_dir_all(&root)?;
+    Ok(())
+}
+
+#[test]
+fn integration_enroll_receipt_verification_commands_use_registered_cli_grammar()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = FixtureServer::spawn(vec![FixtureResponse::created(json!({
+        "target": {"id": "TGT-qa-smoke"},
+        "api_key": {"id": "KEY-qa-smoke", "key": "sk_live_redacted_for_test"}
+    }))])?;
+    let root = temp_project_dir("enroll-receipt")?;
+    let client = ApiClient::new(Config::resolve(
+        Some(server.endpoint().to_owned()),
+        Some("admin-key".to_owned()),
+        None,
+    )?)?;
+
+    integration_enroll(
+        &client,
+        &IntegrationEnrollRequest {
+            service: "qa-smoke".to_owned(),
+            url: "https://qa-smoke.example.com/api/health".to_owned(),
+            environment: "production".to_owned(),
+            interval_ms: None,
+            redact: true,
+            receipt_root: Some(root.clone()),
+        },
+    )?;
+    let requests = server.join()?;
+    assert_eq!(requests.len(), 1);
+
+    let receipt: Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".canary/integration.json"))?)?;
+    let verification_commands = receipt["verification_commands"]
+        .as_array()
+        .ok_or("missing verification_commands")?;
+    let errors_command = verification_commands
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|command| command.contains("canary errors"))
+        .ok_or("no verification_commands entry mentions canary errors")?;
+    assert_command_uses_registered_cli_grammar(
+        errors_command,
+        "canary errors list ",
+        &["errors", "list"],
+    )?;
+
+    fs::remove_dir_all(&root)?;
+    Ok(())
+}
+
+#[test]
+fn doctor_next_operator_action_error_hint_uses_registered_cli_grammar()
+-> Result<(), Box<dyn std::error::Error>> {
+    let witness = json!({"status": "observed", "state": "up"});
+    let hint = next_operator_action("degraded", &witness, 0, 0, 3, 0, None);
+    assert_command_uses_registered_cli_grammar(
+        &hint,
+        "canary errors list canary --window 1h --json",
+        &["errors", "list"],
+    )
+}
+
+/// Assert one emitted command string both contains the expected grammar and
+/// resolves as a live CLI subcommand -- the latter check is what makes this
+/// structurally resistant to renaming the subcommand out from under a
+/// hardcoded string comparison.
+fn assert_command_uses_registered_cli_grammar(
+    text: &str,
+    needle: &str,
+    cli_path: &[&str],
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert!(
+        text.contains(needle),
+        "expected {text:?} to contain {needle:?}"
+    );
+    assert!(
+        cli_subcommand_registered(cli_path)?,
+        "canary {} is not a registered CLI subcommand",
+        cli_path.join(" ")
+    );
+    Ok(())
+}
+
+fn temp_project_dir(name: &str) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("canary-cli-contract-parity-{name}-{nonce}"));
+    fs::create_dir_all(&root)?;
+    Ok(root)
 }

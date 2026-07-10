@@ -76,7 +76,7 @@ Default endpoint is prod `https://canary-obs.fly.dev` — **override it or you Q
 export CANARY_ENDPOINT=http://localhost:4000 CANARY_ADMIN_KEY=$KEY
 ./target/debug/canary summary --window 1h    # or ./bin/canary (rebuilds)
 ./target/debug/canary doctor
-./target/debug/canary errors qa-smoke --json
+./target/debug/canary errors list qa-smoke --json
 ```
 
 ## Workers / webhook delivery QA (async side effects)

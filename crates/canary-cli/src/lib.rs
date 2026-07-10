@@ -1102,7 +1102,7 @@ pub fn integration_plan(input: &IntegrationInput) -> Result<Value> {
         "commands": {
             "patch": format!("bin/canary integrate patch {} --service {} --endpoint {}", shell_arg(&target.display().to_string()), shell_arg(service), shell_arg(&input.endpoint)),
             "enroll": health_url.map(|url| format!("bin/canary integrate enroll --service {} --url {}", shell_arg(service), shell_arg(&url))),
-            "verify": format!("bin/canary errors {} --window 1h", shell_arg(service))
+            "verify": format!("bin/canary errors list {} --window 1h", shell_arg(service))
         }
     }))
 }
@@ -1156,7 +1156,7 @@ pub fn integration_patch(input: &IntegrationInput) -> Result<Value> {
         "next_steps": [
             "Review the patch before deploying.",
             "Set Canary env names in the deployment platform without committing secret values.",
-            "Deploy, then run canary integrate enroll and canary errors <service> --window 1h."
+            "Deploy, then run canary integrate enroll and canary errors list <service> --window 1h."
         ]
     }))
 }
@@ -2107,7 +2107,7 @@ fn integration_receipt_value(
         ],
         "verification_commands": [
             format!("bin/canary integrate status {} --service {} --json", shell_arg(&input.target.display().to_string()), shell_arg(service)),
-            format!("bin/canary errors {} --window 1h --json", shell_arg(service))
+            format!("bin/canary errors list {} --window 1h --json", shell_arg(service))
         ],
         "last_verified_at": now_unix_timestamp_string()
     })
@@ -2140,7 +2140,7 @@ fn enrollment_receipt_value(
         ],
         "verification_commands": [
             format!("bin/canary integrate status . --service {} --json", shell_arg(&request.service)),
-            format!("bin/canary errors {} --window 1h --json", shell_arg(&request.service))
+            format!("bin/canary errors list {} --window 1h --json", shell_arg(&request.service))
         ],
         "last_verified_at": now_unix_timestamp_string()
     })
@@ -3192,7 +3192,12 @@ fn doctor_verdict(
     })
 }
 
-fn next_operator_action(
+/// Compute the deterministic operator remediation hint for one doctor
+/// verdict. Exposed (not just crate-private) so contract-parity tests can
+/// prove the CLI commands embedded in this hint are live-registered, the
+/// same way `integration_plan`/`integration_patch`'s embedded commands are
+/// checked.
+pub fn next_operator_action(
     overall: &str,
     witness: &Value,
     failing_workers: u64,
@@ -3217,7 +3222,7 @@ fn next_operator_action(
         return "Inspect alert-plane worker pressure and drain the named backlog before rerunning `bin/canary doctor --json`.".to_owned();
     }
     if canary_error_total > 0 {
-        return "Run `bin/canary errors canary --window 1h --json`, fix the newest error class, and rerun `bin/canary doctor --json`.".to_owned();
+        return "Run `bin/canary errors list canary --window 1h --json`, fix the newest error class, and rerun `bin/canary doctor --json`.".to_owned();
     }
     if dogfood_gap_count > 0 {
         return "No runtime blocker; run `bin/canary dogfood audit --strict --json` and close the reported coverage gaps.".to_owned();
