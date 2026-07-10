@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rusqlite::Connection;
 
 /// Current Rust schema version.
-pub const SCHEMA_VERSION: u32 = 2026070200;
+pub const SCHEMA_VERSION: u32 = 2026071000;
 
 pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
@@ -17,6 +17,7 @@ pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     add_incident_escalation_columns(&transaction)?;
     scope_monitor_name_index(&transaction)?;
     scope_incident_open_service_index(&transaction)?;
+    scope_oban_jobs_claim_index(&transaction)?;
     validate_schema_columns(&transaction)?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     transaction.commit()?;
@@ -199,6 +200,20 @@ fn scope_monitor_name_index(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS monitors_owner_name_index
          ON monitors(tenant_id, project_id, name)",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Lead the oban_jobs claim index with `worker` so `claim_due_webhook_delivery_jobs`
+/// (which always filters `worker = ?1` first) does not scan every row matching
+/// state alone. Existing installs carry the old `state`-led index; drop it so it
+/// does not silently shadow the new one.
+fn scope_oban_jobs_claim_index(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute("DROP INDEX IF EXISTS oban_jobs_state_queue_index", [])?;
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS oban_jobs_worker_state_queue_index
+         ON oban_jobs(worker, state, queue, priority, scheduled_at, id)",
         [],
     )?;
     Ok(())
@@ -604,8 +619,8 @@ CREATE TABLE IF NOT EXISTS oban_jobs (
   discarded_at TEXT
 );
 
-CREATE INDEX IF NOT EXISTS oban_jobs_state_queue_index
-ON oban_jobs(state, queue, priority, scheduled_at, id);
+CREATE INDEX IF NOT EXISTS oban_jobs_worker_state_queue_index
+ON oban_jobs(worker, state, queue, priority, scheduled_at, id);
 
 CREATE TABLE IF NOT EXISTS incidents (
   id TEXT PRIMARY KEY,
@@ -839,6 +854,9 @@ CREATE TABLE IF NOT EXISTS monitor_state (
   last_transition_at TEXT,
   sequence INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE INDEX IF NOT EXISTS monitor_state_deadline_at_index
+ON monitor_state(deadline_at);
 
 CREATE TABLE IF NOT EXISTS monitor_check_ins (
   id TEXT PRIMARY KEY,

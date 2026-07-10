@@ -15,6 +15,10 @@ pub enum RetentionPruneTable {
     ServiceEvents,
     /// Target check rows, keyed by `checked_at`.
     TargetChecks,
+    /// Terminal (`completed`/`discarded`) webhook-delivery job rows, keyed by
+    /// their terminal timestamp. Non-terminal rows (`available`, `scheduled`,
+    /// `executing`) are never matched, so claimed work is never pruned.
+    ObanJobsTerminal,
 }
 
 /// Cutoff timestamps for one retention prune pass.
@@ -78,12 +82,12 @@ pub(crate) fn prune_batch(
     connection: &Connection,
     batch: RetentionPruneBatch,
 ) -> Result<RetentionPruneBatchReport> {
-    let (table, column) = table_spec(batch.table);
+    let (table, predicate) = table_predicate(batch.table);
     let sql = format!(
         "DELETE FROM {table}
          WHERE rowid IN (
              SELECT rowid FROM {table}
-             WHERE {column} < ?1
+             WHERE {predicate}
              LIMIT ?2
          )"
     );
@@ -115,10 +119,18 @@ fn prune_table(connection: &Connection, table: RetentionPruneTable, cutoff: &str
     Ok(total)
 }
 
-fn table_spec(table: RetentionPruneTable) -> (&'static str, &'static str) {
+/// Table name and cutoff predicate (bound to `?1`) for one bounded delete batch.
+fn table_predicate(table: RetentionPruneTable) -> (&'static str, &'static str) {
     match table {
-        RetentionPruneTable::Errors => ("errors", "created_at"),
-        RetentionPruneTable::ServiceEvents => ("service_events", "created_at"),
-        RetentionPruneTable::TargetChecks => ("target_checks", "checked_at"),
+        RetentionPruneTable::Errors => ("errors", "created_at < ?1"),
+        RetentionPruneTable::ServiceEvents => ("service_events", "created_at < ?1"),
+        RetentionPruneTable::TargetChecks => ("target_checks", "checked_at < ?1"),
+        // Only terminal states are eligible. `available`/`scheduled`/`executing`
+        // rows never match this predicate regardless of cutoff.
+        RetentionPruneTable::ObanJobsTerminal => (
+            "oban_jobs",
+            "((state = 'completed' AND completed_at < ?1)
+              OR (state = 'discarded' AND discarded_at < ?1))",
+        ),
     }
 }

@@ -518,9 +518,13 @@ impl Store {
         )
     }
 
-    /// Return monitor state rows that have deadlines eligible for overdue evaluation.
-    pub fn monitor_overdue_candidates(&self) -> Result<Vec<MonitorOverdueCandidate>> {
-        health::monitor_overdue_candidates(&self.connection)
+    /// Return monitor state rows whose deadline has already passed `now`.
+    ///
+    /// Excludes monitors that are actively checking in on time (deadline in the
+    /// future) so the 1s-tick worker does not load and plan every monitor with a
+    /// persisted deadline on every pass.
+    pub fn monitor_overdue_candidates(&self, now: &str) -> Result<Vec<MonitorOverdueCandidate>> {
+        health::monitor_overdue_candidates(&self.connection, now)
     }
 
     /// Return active HTTPS targets with their latest persisted TLS expiry.
@@ -2714,6 +2718,33 @@ mod tests {
     }
 
     #[test]
+    fn claim_due_webhook_delivery_jobs_query_uses_worker_led_index() -> Result<()> {
+        let store = migrated_store()?;
+
+        let mut statement = store.connection.prepare(
+            "EXPLAIN QUERY PLAN
+             SELECT id, scheduled_at
+             FROM oban_jobs
+             WHERE worker = 'Canary.Workers.WebhookDelivery'
+               AND queue = 'webhooks'
+               AND state IN ('available', 'scheduled')
+               AND scheduled_at <= '2026-05-28T20:00:01Z'
+             ORDER BY priority ASC, scheduled_at ASC, id ASC
+             LIMIT 10",
+        )?;
+        let details = statement
+            .query_map([], |row| row.get::<_, String>(3))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let plan_text = details.join(" | ");
+
+        assert!(
+            plan_text.contains("oban_jobs_worker_state_queue_index"),
+            "expected oban_jobs_worker_state_queue_index in query plan, got: {plan_text}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn webhook_delivery_jobs_claim_due_rows_once_and_increment_attempt() -> Result<()> {
         let mut store = migrated_store()?;
         let due_job = store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
@@ -4593,6 +4624,163 @@ mod tests {
         assert_eq!(row_count(&store.connection, "errors")?, 0);
 
         Ok(())
+    }
+
+    #[test]
+    fn prune_retention_batch_oban_jobs_terminal_deletes_old_completed_and_discarded_only()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+
+        // Old terminal rows: eligible for pruning.
+        let old_completed =
+            complete_test_webhook_job(&mut store, "DLV-old-completed", "2026-04-01T00:00:00Z")?;
+        let old_discarded =
+            discard_test_webhook_job(&mut store, "DLV-old-discarded", "2026-04-01T00:00:00Z")?;
+
+        // Fresh terminal row: newer than cutoff, must survive.
+        let fresh_completed =
+            complete_test_webhook_job(&mut store, "DLV-fresh-completed", "2026-05-28T00:00:00Z")?;
+
+        // Non-terminal rows at any age: must never be pruned (footgun: "Webhook
+        // delivery jobs" — claimed work is never destroyed).
+        let available = store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+            args: json!({"delivery_id": "DLV-available"}),
+            scheduled_at: "2026-04-01T00:00:00Z".to_owned(),
+            now: "2026-04-01T00:00:00Z".to_owned(),
+            max_attempts: 5,
+        })?;
+        let scheduled = store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+            args: json!({"delivery_id": "DLV-scheduled"}),
+            scheduled_at: "2026-06-01T00:00:00Z".to_owned(),
+            now: "2026-04-01T00:00:00Z".to_owned(),
+            max_attempts: 5,
+        })?;
+        let executing_source = store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+            args: json!({"delivery_id": "DLV-executing"}),
+            scheduled_at: "2026-04-01T00:00:00Z".to_owned(),
+            now: "2026-04-01T00:00:00Z".to_owned(),
+            max_attempts: 5,
+        })?;
+        let executing = store
+            .claim_due_webhook_delivery_jobs("2026-04-01T00:00:01Z", 10)?
+            .into_iter()
+            .find(|job| job.id == executing_source)
+            .ok_or("executing job not claimed")?
+            .id;
+
+        let report = store.prune_retention_batch(RetentionPruneBatch {
+            table: RetentionPruneTable::ObanJobsTerminal,
+            cutoff: "2026-05-01T00:00:00Z".to_owned(),
+        })?;
+
+        assert_eq!(
+            report,
+            RetentionPruneBatchReport {
+                deleted: 2,
+                complete: true,
+            }
+        );
+        assert!(store.webhook_delivery_job(old_completed)?.is_none());
+        assert!(store.webhook_delivery_job(old_discarded)?.is_none());
+        assert!(store.webhook_delivery_job(fresh_completed)?.is_some());
+        assert!(store.webhook_delivery_job(available)?.is_some());
+        assert!(store.webhook_delivery_job(scheduled)?.is_some());
+        assert!(store.webhook_delivery_job(executing)?.is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn prune_retention_batch_oban_jobs_terminal_deletes_only_one_bounded_batch()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+
+        for index in 0..1005 {
+            store.connection.execute(
+                "INSERT INTO oban_jobs (state, queue, worker, args, completed_at, inserted_at, scheduled_at)
+                 VALUES ('completed', 'webhooks', 'Canary.Workers.WebhookDelivery', '{}', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z')",
+                params![],
+            )?;
+            let _ = index;
+        }
+
+        let first = store.prune_retention_batch(RetentionPruneBatch {
+            table: RetentionPruneTable::ObanJobsTerminal,
+            cutoff: "2026-05-01T00:00:00Z".to_owned(),
+        })?;
+        assert_eq!(
+            first,
+            RetentionPruneBatchReport {
+                deleted: 1000,
+                complete: false,
+            }
+        );
+        assert_eq!(row_count(&store.connection, "oban_jobs")?, 5);
+
+        let second = store.prune_retention_batch(RetentionPruneBatch {
+            table: RetentionPruneTable::ObanJobsTerminal,
+            cutoff: "2026-05-01T00:00:00Z".to_owned(),
+        })?;
+        assert_eq!(
+            second,
+            RetentionPruneBatchReport {
+                deleted: 5,
+                complete: true,
+            }
+        );
+        assert_eq!(row_count(&store.connection, "oban_jobs")?, 0);
+
+        Ok(())
+    }
+
+    fn complete_test_webhook_job(
+        store: &mut Store,
+        delivery_id: &str,
+        completed_at: &str,
+    ) -> std::result::Result<i64, Box<dyn std::error::Error>> {
+        let job = store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+            args: json!({"delivery_id": delivery_id}),
+            scheduled_at: completed_at.to_owned(),
+            now: completed_at.to_owned(),
+            max_attempts: 5,
+        })?;
+        let claimed = store.claim_due_webhook_delivery_jobs(completed_at, 10)?;
+        let claimed_job = claimed
+            .into_iter()
+            .find(|row| row.id == job)
+            .ok_or("job not claimed")?;
+        store.complete_webhook_delivery_job(
+            &claimed_job,
+            WebhookDeliveryJobCompletion::Complete {
+                now: completed_at.to_owned(),
+            },
+        )?;
+        Ok(job)
+    }
+
+    fn discard_test_webhook_job(
+        store: &mut Store,
+        delivery_id: &str,
+        discarded_at: &str,
+    ) -> std::result::Result<i64, Box<dyn std::error::Error>> {
+        let job = store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+            args: json!({"delivery_id": delivery_id}),
+            scheduled_at: discarded_at.to_owned(),
+            now: discarded_at.to_owned(),
+            max_attempts: 1,
+        })?;
+        let claimed = store.claim_due_webhook_delivery_jobs(discarded_at, 10)?;
+        let claimed_job = claimed
+            .into_iter()
+            .find(|row| row.id == job)
+            .ok_or("job not claimed")?;
+        store.complete_webhook_delivery_job(
+            &claimed_job,
+            WebhookDeliveryJobCompletion::Discard {
+                now: discarded_at.to_owned(),
+            },
+        )?;
+        Ok(job)
     }
 
     #[test]
@@ -6548,7 +6736,7 @@ mod tests {
             )?;
         }
 
-        let candidates = store.monitor_overdue_candidates()?;
+        let candidates = store.monitor_overdue_candidates("2026-05-28T20:01:00Z")?;
 
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].id, "MON-a");
@@ -6557,6 +6745,81 @@ mod tests {
         assert_eq!(
             candidates[0].deadline_at.as_deref(),
             Some("2026-05-28T20:00:05Z")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn monitor_overdue_candidates_exclude_deadlines_not_yet_due() -> Result<()> {
+        let mut store = migrated_store()?;
+
+        for index in 0..100 {
+            let id = format!("MON-ontime-{index}");
+            store.insert_monitor(MonitorInsert {
+                id: id.clone(),
+                name: id.clone(),
+                service: "worker".to_owned(),
+                mode: "schedule".to_owned(),
+                expected_every_ms: 60_000,
+                grace_ms: 5_000,
+                created_at: "2026-05-28T19:00:00Z".to_owned(),
+            })?;
+            store.connection.execute(
+                "INSERT INTO monitor_state (monitor_id, state, last_check_in_status, deadline_at)
+                 VALUES (?1, 'up', 'alive', '2026-05-28T21:00:00Z')",
+                params![id],
+            )?;
+        }
+
+        for index in 0..3 {
+            let id = format!("MON-overdue-{index}");
+            store.insert_monitor(MonitorInsert {
+                id: id.clone(),
+                name: id.clone(),
+                service: "worker".to_owned(),
+                mode: "schedule".to_owned(),
+                expected_every_ms: 60_000,
+                grace_ms: 5_000,
+                created_at: "2026-05-28T19:00:00Z".to_owned(),
+            })?;
+            store.connection.execute(
+                "INSERT INTO monitor_state (monitor_id, state, last_check_in_status, deadline_at)
+                 VALUES (?1, 'up', 'alive', '2026-05-28T19:59:00Z')",
+                params![id],
+            )?;
+        }
+
+        let candidates = store.monitor_overdue_candidates("2026-05-28T20:00:00Z")?;
+
+        assert_eq!(candidates.len(), 3);
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.id.starts_with("MON-overdue-"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn monitor_overdue_candidates_query_uses_deadline_at_index() -> Result<()> {
+        let store = migrated_store()?;
+
+        let plan = store.connection.prepare(
+            "EXPLAIN QUERY PLAN
+             SELECT m.id FROM monitors m
+             JOIN monitor_state s ON s.monitor_id = m.id
+             WHERE s.deadline_at IS NOT NULL AND s.deadline_at < '2026-05-28T20:00:00Z'
+             ORDER BY m.id",
+        )?;
+        let mut statement = plan;
+        let details = statement
+            .query_map([], |row| row.get::<_, String>(3))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let plan_text = details.join(" | ");
+
+        assert!(
+            plan_text.contains("monitor_state_deadline_at_index"),
+            "expected monitor_state_deadline_at_index in query plan, got: {plan_text}"
         );
         Ok(())
     }
