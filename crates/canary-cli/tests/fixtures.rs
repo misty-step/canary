@@ -1,9 +1,10 @@
 //! Fixture-backed parser tests for the Canary CLI.
 
 use canary_cli::{
-    dogfood_strict_failure_count, summarize_doctor, summarize_dogfood, summarize_incident_detail,
-    summarize_incidents, summarize_monitors, summarize_query, summarize_report, summarize_targets,
-    summarize_timeline, tool_manifest,
+    dogfood_strict_failure_count, summarize_doctor, summarize_dogfood, summarize_error_detail,
+    summarize_incident_detail, summarize_incidents, summarize_monitors, summarize_query,
+    summarize_report, summarize_targets, summarize_timeline, summarize_webhook_delivery,
+    tool_manifest,
 };
 use serde_json::{Value, json};
 
@@ -90,6 +91,62 @@ fn parses_timeline_fixture() -> Result<(), Box<dyn std::error::Error>> {
     let lines = summarize_timeline(&value);
     assert!(lines.iter().any(|line| line == "events: 2"));
     Ok(())
+}
+
+#[test]
+fn summarizes_error_detail_with_stack_trace() {
+    let value = json!({
+        "summary": "error ERR-loop: api NullPointerException",
+        "id": "ERR-loop",
+        "service": "api",
+        "error_class": "NullPointerException",
+        "message": "boom",
+        "message_template": null,
+        "stack_trace": "at fn()\nat main()",
+        "context": null,
+        "severity": "error",
+        "environment": "production",
+        "group_hash": "GRP-abc",
+        "created_at": "2026-06-14T02:07:53Z",
+        "group": null,
+        "incident_ids": ["INC-loop"]
+    });
+
+    let lines = summarize_error_detail(&value);
+    assert!(lines.iter().any(|line| line == "id: ERR-loop"));
+    assert!(lines.iter().any(|line| line == "stack_trace: present"));
+    assert!(lines.iter().any(|line| line == "incident_ids: 1"));
+}
+
+#[test]
+fn summarizes_webhook_delivery() {
+    let value = json!({
+        "delivery_id": "WHK-delivery-1",
+        "webhook_id": "WHK-sub-1",
+        "tenant_id": "TENANT-bootstrap",
+        "project_id": "PROJECT-bootstrap",
+        "service": "api",
+        "event": "incident.opened",
+        "status": "delivered",
+        "attempt_count": 2,
+        "reason": null,
+        "first_attempt_at": "2026-06-14T02:07:00Z",
+        "last_attempt_at": "2026-06-14T02:07:05Z",
+        "delivered_at": "2026-06-14T02:07:05Z",
+        "discarded_at": null,
+        "completed_at": "2026-06-14T02:07:05Z",
+        "created_at": "2026-06-14T02:06:55Z",
+        "updated_at": "2026-06-14T02:07:05Z"
+    });
+
+    let lines = summarize_webhook_delivery(&value);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "delivery_id: WHK-delivery-1")
+    );
+    assert!(lines.iter().any(|line| line == "status: delivered"));
+    assert!(lines.iter().any(|line| line == "attempt_count: 2"));
 }
 
 #[test]
@@ -373,6 +430,8 @@ fn mcp_manifest_exposes_operator_drilldowns() {
         "canary_dogfood_value",
         "canary_witness",
         "canary_dr_status",
+        "canary_error_get",
+        "canary_webhook_delivery_get",
     ] {
         assert!(names.contains(name), "missing {name}");
     }

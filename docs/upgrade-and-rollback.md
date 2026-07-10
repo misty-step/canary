@@ -35,7 +35,7 @@ scripts — the design is intentionally simpler than a clustered system.
    Also check for `service=canary` errors in the post-deploy window:
 
    ```bash
-   bin/canary errors canary --window 1h
+   bin/canary errors list canary --window 1h
    ```
 
 ## Schema Migrations

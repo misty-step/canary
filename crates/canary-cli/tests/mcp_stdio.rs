@@ -1,16 +1,16 @@
 //! Stdio MCP smoke tests for the Canary CLI adapter.
 
+mod support;
+
 use std::{
     collections::BTreeSet,
-    io::{Read, Write},
-    net::{TcpListener, TcpStream},
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    thread,
-    time::{Duration, Instant},
 };
 
 use serde_json::{Value, json};
+use support::{FixtureResponse, FixtureServer};
 
 #[test]
 fn mcp_stdio_lists_and_calls_cli_backed_tools() -> Result<(), Box<dyn std::error::Error>> {
@@ -169,6 +169,180 @@ fn cli_incidents_get_reads_incident_detail() -> Result<(), Box<dyn std::error::E
     assert_eq!(
         requests[0].authorization.as_deref(),
         Some("Bearer read-key")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn cli_errors_get_reads_error_detail_matching_http_route_body()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = FixtureServer::spawn(vec![FixtureResponse::ok(error_detail_body())])?;
+    let response = run_cli_json(&server, ["errors", "get", "ERR-loop"])?;
+
+    assert_eq!(response["command"], json!("errors get"));
+    assert_eq!(response["response"], error_detail_body());
+
+    let requests = server.join()?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/v1/errors/ERR-loop");
+    assert_eq!(
+        requests[0].authorization.as_deref(),
+        Some("Bearer read-key")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn cli_webhook_deliveries_get_reads_delivery_matching_http_route_body()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = FixtureServer::spawn(vec![FixtureResponse::ok(webhook_delivery_body())])?;
+    let response = run_cli_json(&server, ["webhook-deliveries", "get", "WHK-delivery-1"])?;
+
+    assert_eq!(response["command"], json!("webhook-deliveries get"));
+    assert_eq!(response["response"], webhook_delivery_body());
+
+    let requests = server.join()?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(
+        requests[0].path,
+        "/api/v1/webhook-deliveries/WHK-delivery-1"
+    );
+    assert_eq!(
+        requests[0].authorization.as_deref(),
+        Some("Bearer read-key")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn mcp_stdio_error_get_tool_reads_error_detail_with_read_only_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = FixtureServer::spawn(vec![FixtureResponse::ok(error_detail_body())])?;
+    let repo_root = repo_root()?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_canary"))
+        .args(["--endpoint", server.endpoint(), "mcp-server"])
+        .current_dir(&repo_root)
+        .env("CANARY_READ_KEY", "mcp-read-key")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| std::io::Error::other("child stdin unavailable"))?;
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "canary_error_get",
+                "arguments": {"error_id": "ERR-loop"}
+            }
+        })
+    )?;
+    drop(stdin);
+
+    let output = child.wait_with_output()?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let responses = String::from_utf8(output.stdout)?
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        responses[0]["result"]["structuredContent"]["command"],
+        json!("canary_error_get")
+    );
+    assert_eq!(
+        responses[0]["result"]["structuredContent"]["response"],
+        error_detail_body()
+    );
+
+    let requests = server.join()?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/api/v1/errors/ERR-loop");
+    assert_eq!(
+        requests[0].authorization.as_deref(),
+        Some("Bearer mcp-read-key")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn mcp_stdio_webhook_delivery_get_tool_reads_delivery_with_read_only_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = FixtureServer::spawn(vec![FixtureResponse::ok(webhook_delivery_body())])?;
+    let repo_root = repo_root()?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_canary"))
+        .args(["--endpoint", server.endpoint(), "mcp-server"])
+        .current_dir(&repo_root)
+        .env("CANARY_READ_KEY", "mcp-read-key")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| std::io::Error::other("child stdin unavailable"))?;
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "canary_webhook_delivery_get",
+                "arguments": {"delivery_id": "WHK-delivery-1"}
+            }
+        })
+    )?;
+    drop(stdin);
+
+    let output = child.wait_with_output()?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let responses = String::from_utf8(output.stdout)?
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        responses[0]["result"]["structuredContent"]["command"],
+        json!("canary_webhook_delivery_get")
+    );
+    assert_eq!(
+        responses[0]["result"]["structuredContent"]["response"],
+        webhook_delivery_body()
+    );
+
+    let requests = server.join()?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].path,
+        "/api/v1/webhook-deliveries/WHK-delivery-1"
+    );
+    assert_eq!(
+        requests[0].authorization.as_deref(),
+        Some("Bearer mcp-read-key")
     );
 
     Ok(())
@@ -524,175 +698,6 @@ fn repo_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
         .ok_or_else(|| std::io::Error::other("repo root not found").into())
 }
 
-#[derive(Debug)]
-struct FixtureServer {
-    endpoint: String,
-    handle: thread::JoinHandle<Result<Vec<RecordedRequest>, String>>,
-}
-
-impl FixtureServer {
-    fn spawn(responses: Vec<FixtureResponse>) -> Result<Self, Box<dyn std::error::Error>> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        listener.set_nonblocking(true)?;
-        let endpoint = format!("http://{}", listener.local_addr()?);
-        let handle = thread::spawn(move || serve_fixture(listener, responses));
-        Ok(Self { endpoint, handle })
-    }
-
-    fn endpoint(&self) -> &str {
-        &self.endpoint
-    }
-
-    fn join(self) -> Result<Vec<RecordedRequest>, Box<dyn std::error::Error>> {
-        let result = self
-            .handle
-            .join()
-            .map_err(|_| std::io::Error::other("fixture server thread failed"))?;
-        result.map_err(|message| std::io::Error::other(message).into())
-    }
-}
-
-#[derive(Debug, Clone)]
-struct FixtureResponse {
-    status: u16,
-    body: Value,
-}
-
-impl FixtureResponse {
-    fn ok(body: Value) -> Self {
-        Self { status: 200, body }
-    }
-
-    fn created(body: Value) -> Self {
-        Self { status: 201, body }
-    }
-}
-
-#[derive(Debug)]
-struct RecordedRequest {
-    method: String,
-    path: String,
-    authorization: Option<String>,
-    body: String,
-}
-
-fn serve_fixture(
-    listener: TcpListener,
-    responses: Vec<FixtureResponse>,
-) -> Result<Vec<RecordedRequest>, String> {
-    let mut requests = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    for response in responses {
-        loop {
-            match listener.accept() {
-                Ok((mut stream, _addr)) => {
-                    let request = read_request(&mut stream).map_err(|error| error.to_string())?;
-                    write_response(&mut stream, response).map_err(|error| error.to_string())?;
-                    requests.push(request);
-                    break;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if Instant::now() > deadline {
-                        return Err(format!(
-                            "timed out waiting for request {}",
-                            requests.len() + 1
-                        ));
-                    }
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) => return Err(error.to_string()),
-            }
-        }
-    }
-    Ok(requests)
-}
-
-fn read_request(stream: &mut TcpStream) -> std::io::Result<RecordedRequest> {
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    let mut bytes = Vec::new();
-    let mut header_end = None;
-    let mut content_length = 0;
-    loop {
-        let mut buffer = [0_u8; 1024];
-        let count = stream.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&buffer[..count]);
-        if header_end.is_none()
-            && let Some(position) = find_header_end(&bytes)
-        {
-            content_length = parse_content_length(&bytes[..position]);
-            header_end = Some(position);
-        }
-        if let Some(position) = header_end
-            && bytes.len() >= position + 4 + content_length
-        {
-            break;
-        }
-    }
-
-    let text = String::from_utf8_lossy(&bytes).to_string();
-    let mut lines = text.split("\r\n");
-    let request_line = lines.next().unwrap_or_default();
-    let mut request_parts = request_line.split_whitespace();
-    let method = request_parts.next().unwrap_or_default().to_owned();
-    let path = request_parts.next().unwrap_or_default().to_owned();
-    let authorization = text
-        .split("\r\n")
-        .find_map(|line| {
-            line.strip_prefix("authorization: ")
-                .or_else(|| line.strip_prefix("Authorization: "))
-        })
-        .map(str::to_owned);
-    let body = header_end
-        .and_then(|position| bytes.get(position + 4..))
-        .map(|body| String::from_utf8_lossy(body).to_string())
-        .unwrap_or_default();
-
-    Ok(RecordedRequest {
-        method,
-        path,
-        authorization,
-        body,
-    })
-}
-
-fn write_response(stream: &mut TcpStream, response: FixtureResponse) -> std::io::Result<()> {
-    let body = response.body.to_string();
-    let reason = match response.status {
-        200 => "OK",
-        201 => "Created",
-        _ => "OK",
-    };
-    write!(
-        stream,
-        "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-        response.status,
-        reason,
-        body.len(),
-        body
-    )
-}
-
-fn find_header_end(bytes: &[u8]) -> Option<usize> {
-    bytes.windows(4).position(|window| window == b"\r\n\r\n")
-}
-
-fn parse_content_length(headers: &[u8]) -> usize {
-    String::from_utf8_lossy(headers)
-        .split("\r\n")
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            if name.eq_ignore_ascii_case("content-length") {
-                value.trim().parse::<usize>().ok()
-            } else {
-                None
-            }
-        })
-        .unwrap_or(0)
-}
-
 fn incident_detail_body() -> Value {
     json!({
         "summary": "incident INC-loop: api incident",
@@ -712,6 +717,46 @@ fn incident_detail_body() -> Value {
         "annotations_truncated": false,
         "claims": [],
         "recent_timeline_events": []
+    })
+}
+
+fn error_detail_body() -> Value {
+    json!({
+        "summary": "error ERR-loop: api NullPointerException",
+        "id": "ERR-loop",
+        "service": "api",
+        "error_class": "NullPointerException",
+        "message": "boom",
+        "message_template": null,
+        "stack_trace": "at fn()\nat main()",
+        "context": null,
+        "severity": "error",
+        "environment": "production",
+        "group_hash": "GRP-abc",
+        "created_at": "2026-06-14T02:07:53Z",
+        "group": null,
+        "incident_ids": ["INC-loop"]
+    })
+}
+
+fn webhook_delivery_body() -> Value {
+    json!({
+        "delivery_id": "WHK-delivery-1",
+        "webhook_id": "WHK-sub-1",
+        "tenant_id": "TENANT-bootstrap",
+        "project_id": "PROJECT-bootstrap",
+        "service": "api",
+        "event": "incident.opened",
+        "status": "delivered",
+        "attempt_count": 2,
+        "reason": null,
+        "first_attempt_at": "2026-06-14T02:07:00Z",
+        "last_attempt_at": "2026-06-14T02:07:05Z",
+        "delivered_at": "2026-06-14T02:07:05Z",
+        "discarded_at": null,
+        "completed_at": "2026-06-14T02:07:05Z",
+        "created_at": "2026-06-14T02:06:55Z",
+        "updated_at": "2026-06-14T02:07:05Z"
     })
 }
 

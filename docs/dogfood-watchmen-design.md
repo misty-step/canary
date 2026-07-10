@@ -102,7 +102,7 @@ The user-facing shape should be:
 ```bash
 canary summary --window 24h
 canary services --state unhealthy --json
-canary errors chrondle --window 24h
+canary errors list chrondle --window 24h
 canary incidents --open
 canary dogfood audit --strict
 canary integrate plan --scope misty-step --project vanity

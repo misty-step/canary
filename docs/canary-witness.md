@@ -116,7 +116,7 @@ Agents should start with:
 
 ```bash
 bin/canary doctor
-bin/canary errors canary --window 1h
+bin/canary errors list canary --window 1h
 ```
 
 `doctor` reports the external witness next to the self-target/readback view. If

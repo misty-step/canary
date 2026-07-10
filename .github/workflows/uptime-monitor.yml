@@ -129,7 +129,7 @@ jobs:
           1. Check the uploaded \`canary-witness-receipt.json\` artifact.
           2. Check Fly.io machine status: \`flyctl status --app $CANARY_FLY_APP\`
           3. Check logs: \`flyctl logs --app $CANARY_FLY_APP\`
-          4. Check recent self-errors: \`bin/canary errors canary --window 1h\`
+          4. Check recent self-errors: \`bin/canary errors list canary --window 1h\`
           5. If DB corruption is suspected, see \`docs/backup-restore-dr.md\`.
 
           This issue will auto-close when the witness detects recovery.

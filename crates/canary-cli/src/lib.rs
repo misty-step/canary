@@ -673,6 +673,43 @@ pub fn summarize_timeline(value: &Value) -> Vec<String> {
     ]
 }
 
+/// Summarize one raw error detail response.
+pub fn summarize_error_detail(value: &Value) -> Vec<String> {
+    vec![
+        format!("summary: {}", string_field(value, "summary")),
+        format!("id: {}", string_field(value, "id")),
+        format!("service: {}", string_field(value, "service")),
+        format!("error_class: {}", string_field(value, "error_class")),
+        format!("severity: {}", string_field(value, "severity")),
+        format!("group_hash: {}", string_field(value, "group_hash")),
+        format!(
+            "stack_trace: {}",
+            if value.get("stack_trace").is_some_and(Value::is_string) {
+                "present"
+            } else {
+                "none"
+            }
+        ),
+        format!("incident_ids: {}", array_len(value, "incident_ids")),
+    ]
+}
+
+/// Summarize one webhook delivery ledger row.
+pub fn summarize_webhook_delivery(value: &Value) -> Vec<String> {
+    vec![
+        format!("delivery_id: {}", string_field(value, "delivery_id")),
+        format!("webhook_id: {}", string_field(value, "webhook_id")),
+        format!("event: {}", string_field(value, "event")),
+        format!("status: {}", string_field(value, "status")),
+        format!("attempt_count: {}", number_field(value, "attempt_count")),
+        format!("reason: {}", nullable_string_field(value, "reason")),
+        format!(
+            "last_attempt_at: {}",
+            nullable_string_field(value, "last_attempt_at")
+        ),
+    ]
+}
+
 /// Summarize targets.
 pub fn summarize_targets(value: &Value) -> Vec<String> {
     summarize_collection(value, "targets")
@@ -1065,7 +1102,7 @@ pub fn integration_plan(input: &IntegrationInput) -> Result<Value> {
         "commands": {
             "patch": format!("bin/canary integrate patch {} --service {} --endpoint {}", shell_arg(&target.display().to_string()), shell_arg(service), shell_arg(&input.endpoint)),
             "enroll": health_url.map(|url| format!("bin/canary integrate enroll --service {} --url {}", shell_arg(service), shell_arg(&url))),
-            "verify": format!("bin/canary errors {} --window 1h", shell_arg(service))
+            "verify": format!("bin/canary errors list {} --window 1h", shell_arg(service))
         }
     }))
 }
@@ -1119,7 +1156,7 @@ pub fn integration_patch(input: &IntegrationInput) -> Result<Value> {
         "next_steps": [
             "Review the patch before deploying.",
             "Set Canary env names in the deployment platform without committing secret values.",
-            "Deploy, then run canary integrate enroll and canary errors <service> --window 1h."
+            "Deploy, then run canary integrate enroll and canary errors list <service> --window 1h."
         ]
     }))
 }
@@ -2070,7 +2107,7 @@ fn integration_receipt_value(
         ],
         "verification_commands": [
             format!("bin/canary integrate status {} --service {} --json", shell_arg(&input.target.display().to_string()), shell_arg(service)),
-            format!("bin/canary errors {} --window 1h --json", shell_arg(service))
+            format!("bin/canary errors list {} --window 1h --json", shell_arg(service))
         ],
         "last_verified_at": now_unix_timestamp_string()
     })
@@ -2103,7 +2140,7 @@ fn enrollment_receipt_value(
         ],
         "verification_commands": [
             format!("bin/canary integrate status . --service {} --json", shell_arg(&request.service)),
-            format!("bin/canary errors {} --window 1h --json", shell_arg(&request.service))
+            format!("bin/canary errors list {} --window 1h --json", shell_arg(&request.service))
         ],
         "last_verified_at": now_unix_timestamp_string()
     })
@@ -3155,7 +3192,12 @@ fn doctor_verdict(
     })
 }
 
-fn next_operator_action(
+/// Compute the deterministic operator remediation hint for one doctor
+/// verdict. Exposed (not just crate-private) so contract-parity tests can
+/// prove the CLI commands embedded in this hint are live-registered, the
+/// same way `integration_plan`/`integration_patch`'s embedded commands are
+/// checked.
+pub fn next_operator_action(
     overall: &str,
     witness: &Value,
     failing_workers: u64,
@@ -3180,7 +3222,7 @@ fn next_operator_action(
         return "Inspect alert-plane worker pressure and drain the named backlog before rerunning `bin/canary doctor --json`.".to_owned();
     }
     if canary_error_total > 0 {
-        return "Run `bin/canary errors canary --window 1h --json`, fix the newest error class, and rerun `bin/canary doctor --json`.".to_owned();
+        return "Run `bin/canary errors list canary --window 1h --json`, fix the newest error class, and rerun `bin/canary doctor --json`.".to_owned();
     }
     if dogfood_gap_count > 0 {
         return "No runtime blocker; run `bin/canary dogfood audit --strict --json` and close the reported coverage gaps.".to_owned();
@@ -4490,6 +4532,30 @@ impl McpToolContext {
                     response,
                 ))
             }
+            "canary_error_get" => {
+                let client = self.read_client()?;
+                let error_id = required_string(arguments, "error_id")?;
+                let response =
+                    client.get_auth_json(&format!("/api/v1/errors/{}", encode(&error_id)))?;
+                Ok(json_envelope(
+                    "canary_error_get",
+                    client.endpoint(),
+                    response,
+                ))
+            }
+            "canary_webhook_delivery_get" => {
+                let client = self.read_client()?;
+                let delivery_id = required_string(arguments, "delivery_id")?;
+                let response = client.get_auth_json(&format!(
+                    "/api/v1/webhook-deliveries/{}",
+                    encode(&delivery_id)
+                ))?;
+                Ok(json_envelope(
+                    "canary_webhook_delivery_get",
+                    client.endpoint(),
+                    response,
+                ))
+            }
             "canary_targets" => {
                 let client = self.read_client()?;
                 let response = client.get_auth_json("/api/v1/targets")?;
@@ -4940,6 +5006,16 @@ pub fn tool_manifest() -> Vec<ToolSpec> {
             name: "canary_timeline",
             description: "Inspect timeline events globally or for one service. Pass `cursor` (the prior response's `cursor` field) to page forward through crash-recovery replay; `after` takes precedence over `cursor` when both are supplied.",
             input_schema: json!({"type":"object","properties":{"service":{"type":"string"},"window":{"type":"string","enum":["1h","6h","24h","7d","30d"]},"limit":{"type":"integer","minimum":1,"maximum":100},"cursor":{"type":"string"},"after":{"type":"string"}}}),
+        },
+        ToolSpec {
+            name: "canary_error_get",
+            description: "Read one raw error by id, including stack trace and decoded context. Only fall through here from `canary_incident_get` when signals are truncated or raw stack traces are needed.",
+            input_schema: json!({"type":"object","required":["error_id"],"properties":{"error_id":{"type":"string"}}}),
+        },
+        ToolSpec {
+            name: "canary_webhook_delivery_get",
+            description: "Inspect one webhook delivery ledger row by stable delivery id for dispute or diagnostic replay; always replay `canary_timeline` afterward since webhooks are non-authoritative wake-up hints.",
+            input_schema: json!({"type":"object","required":["delivery_id"],"properties":{"delivery_id":{"type":"string"}}}),
         },
         ToolSpec {
             name: "canary_targets",
