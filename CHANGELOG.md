@@ -1,3 +1,19 @@
+# [0.16.0](https://github.com/misty-step/canary/compare/v0.15.6...v0.16.0) (2026-07-10)
+
+
+* feat(cli)!: error + delivery drill-downs and an OpenAPI contract-parity guard (#261) ([9636cfa](https://github.com/misty-step/canary/commit/9636cfa699d3d9e4d56029b924aaaf078b7a99c5)), closes [#261](https://github.com/misty-step/canary/issues/261) [#261](https://github.com/misty-step/canary/issues/261)
+
+
+### BREAKING CHANGES
+
+* `canary errors <service>` is now `canary errors list
+<service>`; scripts and agent prompts invoking the old bare form must
+add the `list` subcommand.
+
+Agent: builder
+Agent-Surface: Claude Code
+Agent-Task: canary-932 children 3+4 (post-review fixes)
+
 ## [0.15.6](https://github.com/misty-step/canary/compare/v0.15.5...v0.15.6) (2026-07-10)
 
 
