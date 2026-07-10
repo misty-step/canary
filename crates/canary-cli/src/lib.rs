@@ -4475,6 +4475,14 @@ impl McpToolContext {
                     path.push_str("&service=");
                     path.push_str(&encode(&service));
                 }
+                if let Some(cursor) = optional_string(arguments, "cursor")? {
+                    path.push_str("&cursor=");
+                    path.push_str(&encode(&cursor));
+                }
+                if let Some(after) = optional_string(arguments, "after")? {
+                    path.push_str("&after=");
+                    path.push_str(&encode(&after));
+                }
                 let response = client.get_auth_json(&path)?;
                 Ok(json_envelope(
                     "canary_timeline",
@@ -4930,8 +4938,8 @@ pub fn tool_manifest() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "canary_timeline",
-            description: "Inspect timeline events globally or for one service.",
-            input_schema: json!({"type":"object","properties":{"service":{"type":"string"},"window":{"type":"string","enum":["1h","6h","24h","7d","30d"]},"limit":{"type":"integer","minimum":1,"maximum":100}}}),
+            description: "Inspect timeline events globally or for one service. Pass `cursor` (the prior response's `cursor` field) to page forward through crash-recovery replay; `after` takes precedence over `cursor` when both are supplied.",
+            input_schema: json!({"type":"object","properties":{"service":{"type":"string"},"window":{"type":"string","enum":["1h","6h","24h","7d","30d"]},"limit":{"type":"integer","minimum":1,"maximum":100},"cursor":{"type":"string"},"after":{"type":"string"}}}),
         },
         ToolSpec {
             name: "canary_targets",

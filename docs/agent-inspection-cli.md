@@ -47,6 +47,7 @@ bin/canary incidents get INC-example --json
 bin/canary incidents escalate INC-example --reason "iteration guard exhausted" --owner bitterblossom/canary-triage --purpose triage_escalation --idempotency-key run-1:INC-example:escalate
 bin/canary incidents deescalate INC-example --owner operator@example.com --reason "false positive"
 bin/canary timeline --service chrondle --window 7d --limit 20
+bin/canary timeline --service chrondle --window 7d --limit 20 --cursor <cursor-from-prior-response>  # page forward; --after takes precedence over --cursor if both are given
 bin/canary claims list --subject-type incident --subject-id INC-example --json
 bin/canary claims claim --subject-type incident --subject-id INC-example --owner codex --purpose "verify fix" --json
 bin/canary annotations list --subject-type incident --subject-id INC-example --json
