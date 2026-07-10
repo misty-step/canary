@@ -276,7 +276,7 @@ mod tests {
     use canary_http::{
         public::{
             APPLICATION_JSON, CANARY_VERSION, DependencyStatus, OPENAPI_JSON, WorkerHealthStatus,
-            WorkerLifecycleState, WorkerPressureShape, WorkerReadyzCheck,
+            WorkerLifecycleState, WorkerPressureShape, WorkerReadyzCheck, stamp_openapi_version,
         },
         request::MAX_JSON_BODY_BYTES,
     };
@@ -1621,14 +1621,9 @@ mod tests {
 
         // The served document matches the checked-in contract byte-for-byte
         // except for `info.version`, which is stamped to CANARY_VERSION at
-        // build time (see crates/canary-http/build.rs). The checked-in
-        // `0.0.0-dev` placeholder is a fixed-length substring, so a plain
-        // substitution round-trips exactly.
-        let expected = OPENAPI_JSON.replacen(
-            "\"version\": \"0.0.0-dev\"",
-            &format!("\"version\": \"{CANARY_VERSION}\""),
-            1,
-        );
+        // build time via the same substitution the router uses (see
+        // crates/canary-http/build.rs and stamp_openapi_version).
+        let expected = stamp_openapi_version(OPENAPI_JSON, CANARY_VERSION)?;
         assert_eq!(body.as_ref(), expected.as_bytes());
 
         Ok(())

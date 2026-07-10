@@ -4,7 +4,7 @@
 //! router framework. The Axum handlers are thin adapters over these response
 //! builders.
 
-use std::sync::LazyLock;
+use std::{fmt, sync::LazyLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -22,11 +22,49 @@ const OPENAPI_VERSION_PLACEHOLDER: &str = "\"version\": \"0.0.0-dev\"";
 /// `git describe` output; `0.0.0-dev` for builds outside that pipeline).
 pub const CANARY_VERSION: &str = env!("CANARY_VERSION");
 
+/// [`stamp_openapi_version`] failed because `doc` does not contain the
+/// expected `info.version` placeholder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenApiVersionStampError {
+    placeholder: &'static str,
+}
+
+impl fmt::Display for OpenApiVersionStampError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "checked-in openapi.json is missing the expected info.version placeholder {:?}; \
+             version stamping cannot run",
+            self.placeholder
+        )
+    }
+}
+
+impl std::error::Error for OpenApiVersionStampError {}
+
+/// Replace `info.version` in `doc` with `version`, substituting the checked-in
+/// placeholder exactly once. Errors when the placeholder is absent (for
+/// example, a reformatted `openapi.json`) instead of silently serving the
+/// un-stamped document — `canary-server`'s `CanaryServer::boot` calls this at
+/// startup so a broken placeholder match fails the process before it ever
+/// serves traffic, rather than silently serving a stale version forever.
+pub fn stamp_openapi_version(doc: &str, version: &str) -> Result<String, OpenApiVersionStampError> {
+    if !doc.contains(OPENAPI_VERSION_PLACEHOLDER) {
+        return Err(OpenApiVersionStampError {
+            placeholder: OPENAPI_VERSION_PLACEHOLDER,
+        });
+    }
+    let stamped = format!("\"version\": \"{version}\"");
+    Ok(doc.replacen(OPENAPI_VERSION_PLACEHOLDER, &stamped, 1))
+}
+
 /// [`OPENAPI_JSON`] with `info.version` replaced by [`CANARY_VERSION`],
-/// computed once on first access.
+/// computed once on first access. `CanaryServer::boot` validates the
+/// substitution succeeds before the server accepts traffic, so the fallback
+/// to the un-stamped document here is unreachable in a correctly booted
+/// process; it exists only so this static can never itself panic.
 static OPENAPI_JSON_STAMPED: LazyLock<String> = LazyLock::new(|| {
-    let stamped = format!("\"version\": \"{CANARY_VERSION}\"");
-    OPENAPI_JSON.replacen(OPENAPI_VERSION_PLACEHOLDER, &stamped, 1)
+    stamp_openapi_version(OPENAPI_JSON, CANARY_VERSION).unwrap_or_else(|_| OPENAPI_JSON.to_owned())
 });
 
 /// JSON content type for these public endpoints.
@@ -489,17 +527,44 @@ mod tests {
     }
 
     #[test]
-    fn openapi_response_stamps_canary_version_and_changes_nothing_else() {
-        let response = openapi_response();
+    fn stamp_openapi_version_replaces_only_the_version_field()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A version distinct from the checked-in placeholder: proves the
+        // substitution actually fires, rather than the placeholder and the
+        // stamped value coincidentally matching (as they do for the real
+        // CANARY_VERSION fallback in every environment that runs `cargo
+        // test` without CANARY_VERSION set).
+        let stamped = stamp_openapi_version(OPENAPI_JSON, "v9.9.9-test")?;
 
-        let mut served: Value = serde_json::from_str(response.body).unwrap_or(Value::Null);
+        let mut served: Value = serde_json::from_str(&stamped).unwrap_or(Value::Null);
         let mut checked_in: Value = serde_json::from_str(OPENAPI_JSON).unwrap_or(Value::Null);
 
-        assert_eq!(served["info"]["version"], CANARY_VERSION);
+        assert_eq!(served["info"]["version"], "v9.9.9-test");
+        assert_ne!(served["info"]["version"], checked_in["info"]["version"]);
 
         served["info"]["version"] = Value::Null;
         checked_in["info"]["version"] = Value::Null;
         assert_eq!(served, checked_in);
+
+        Ok(())
+    }
+
+    #[test]
+    fn stamp_openapi_version_fails_loudly_without_the_placeholder() {
+        let result = stamp_openapi_version("{\"info\": {\"version\": \"1.2.3\"}}", "v9.9.9-test");
+
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert!(error.to_string().contains("0.0.0-dev"));
+        }
+    }
+
+    #[test]
+    fn openapi_response_reflects_the_compiled_canary_version() {
+        let response = openapi_response();
+        let served: Value = serde_json::from_str(response.body).unwrap_or(Value::Null);
+
+        assert_eq!(served["info"]["version"], CANARY_VERSION);
     }
 
     #[test]
