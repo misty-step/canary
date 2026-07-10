@@ -1,3 +1,10 @@
+## [0.15.6](https://github.com/misty-step/canary/compare/v0.15.5...v0.15.6) (2026-07-10)
+
+
+### Features
+
+* **cli:** incident detail + timeline cursor parity across CLI and MCP ([#260](https://github.com/misty-step/canary/issues/260)) ([8f4ab6f](https://github.com/misty-step/canary/commit/8f4ab6fa09cbb79dd58f4806be2545c1ad5bad6e))
+
 ## [0.15.5](https://github.com/misty-step/canary/compare/v0.15.4...v0.15.5) (2026-07-10)
 
 
