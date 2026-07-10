@@ -147,7 +147,7 @@ impl MonitorOverdueLifecycle {
         now_millis: i64,
         should_stop: impl Fn() -> bool,
     ) -> Result<MonitorOverdueLifecycleReport, String> {
-        let candidates = self.load_candidates()?;
+        let candidates = self.load_candidates(&now)?;
         let mut report = MonitorOverdueLifecycleReport {
             loaded: candidates.len(),
             oldest_due_age_ms: oldest_monitor_due_age_ms(now_millis, &candidates),
@@ -176,10 +176,10 @@ impl MonitorOverdueLifecycle {
         Ok(report)
     }
 
-    fn load_candidates(&self) -> Result<Vec<MonitorOverdueCandidate>, String> {
+    fn load_candidates(&self, now: &str) -> Result<Vec<MonitorOverdueCandidate>, String> {
         let store = self.store.lock();
         store
-            .monitor_overdue_candidates()
+            .monitor_overdue_candidates(now)
             .map_err(|error| error.to_string())
     }
 }

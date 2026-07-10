@@ -24,7 +24,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const LEGACY_FIXTURE: &str = "tests/fixtures/legacy_schema.db";
 const POPULATED_LEGACY_FIXTURE: &str = "tests/fixtures/legacy_read_models.db";
-const RUST_SCHEMA_VERSION: u32 = 2026070200;
+const RUST_SCHEMA_VERSION: u32 = 2026071000;
 
 const LEGACY_MIGRATIONS: &[&str] = &[
     "20260314000001",
@@ -616,7 +616,7 @@ fn rust_health_read_models_read_populated_legacy_rows() -> Result<(), Box<dyn Er
     assert_eq!(monitor_snapshot.grace_ms, 5_000);
     assert_eq!(monitor_snapshot.state, "degraded");
 
-    let overdue = store.monitor_overdue_candidates()?;
+    let overdue = store.monitor_overdue_candidates("2026-06-01T00:00:00Z")?;
     assert_eq!(overdue.len(), 1);
     assert_eq!(overdue[0].id, "MON-readmodel-cron");
     assert_eq!(overdue[0].last_check_in_status.as_deref(), Some("alive"));

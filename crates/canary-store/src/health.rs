@@ -1705,6 +1705,7 @@ fn monitor_check_in_snapshot_by_name_where(
 
 pub(crate) fn monitor_overdue_candidates(
     connection: &rusqlite::Connection,
+    now: &str,
 ) -> Result<Vec<MonitorOverdueCandidate>> {
     let mut statement = connection.prepare(
         "SELECT
@@ -1713,11 +1714,11 @@ pub(crate) fn monitor_overdue_candidates(
             s.first_missed_at
          FROM monitors m
          JOIN monitor_state s ON s.monitor_id = m.id
-         WHERE s.deadline_at IS NOT NULL
+         WHERE s.deadline_at IS NOT NULL AND s.deadline_at < ?1
          ORDER BY m.id",
     )?;
     let candidates = statement
-        .query_map([], |row| {
+        .query_map([now], |row| {
             Ok(MonitorOverdueCandidate {
                 id: row.get(0)?,
                 name: row.get(1)?,

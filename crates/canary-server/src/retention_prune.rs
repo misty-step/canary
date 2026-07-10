@@ -48,6 +48,8 @@ pub struct RetentionPruneLifecycleReport {
     pub service_events_deleted: u64,
     /// Deleted target-check rows.
     pub target_checks_deleted: u64,
+    /// Deleted terminal (`completed`/`discarded`) webhook-delivery job rows.
+    pub oban_jobs_deleted: u64,
     /// Store delete statements executed.
     pub batches: u64,
     /// True when shutdown interrupted the pass after a completed batch.
@@ -96,7 +98,7 @@ impl RetentionPruneLifecycle {
         }
         report.interrupted = self.prune_table(
             RetentionPruneTable::ServiceEvents,
-            plan.error_cutoff,
+            plan.error_cutoff.clone(),
             |deleted| report.service_events_deleted += deleted,
             &mut report.batches,
             &should_stop,
@@ -108,6 +110,21 @@ impl RetentionPruneLifecycle {
             RetentionPruneTable::TargetChecks,
             plan.check_cutoff,
             |deleted| report.target_checks_deleted += deleted,
+            &mut report.batches,
+            &should_stop,
+        )?;
+        if report.interrupted {
+            return Ok(report);
+        }
+        // Terminal webhook-delivery job rows share the error/service-event
+        // cutoff; only `completed`/`discarded` states ever match (see
+        // canary-store::retention::RetentionPruneTable::ObanJobsTerminal), so
+        // claimed (`executing`) or pending (`available`/`scheduled`) work is
+        // never pruned. Footgun: "Webhook delivery jobs" in AGENTS.md.
+        report.interrupted = self.prune_table(
+            RetentionPruneTable::ObanJobsTerminal,
+            plan.error_cutoff,
+            |deleted| report.oban_jobs_deleted += deleted,
             &mut report.batches,
             &should_stop,
         )?;
@@ -325,7 +342,8 @@ fn run_lifecycle_worker(
                     WorkerPressureSnapshot {
                         due_count: report.errors_deleted
                             + report.service_events_deleted
-                            + report.target_checks_deleted,
+                            + report.target_checks_deleted
+                            + report.oban_jobs_deleted,
                         in_flight_count: 0,
                         oldest_due_age_ms: None,
                         oldest_due_item: None,
@@ -360,7 +378,10 @@ mod tests {
         ids::{ErrorId, EventId},
         ingest::classification::{Category, Classification, Component, Persistence},
     };
-    use canary_store::{ErrorIngest, ErrorIngestIds, ErrorIngestPayload};
+    use canary_store::{
+        ErrorIngest, ErrorIngestIds, ErrorIngestPayload, WebhookDeliveryJobCompletion,
+        WebhookDeliveryJobInsert,
+    };
     use time::format_description::well_known::Rfc3339;
 
     use super::*;
@@ -389,10 +410,59 @@ mod tests {
                 errors_deleted: 1005,
                 service_events_deleted: 1005,
                 target_checks_deleted: 0,
-                batches: 5,
+                oban_jobs_deleted: 0,
+                batches: 6,
                 interrupted: false,
             }
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_prunes_terminal_oban_jobs_and_keeps_live_work() -> Result<(), Box<dyn Error>> {
+        let mut store = Store::open_in_memory()?;
+        store.migrate()?;
+
+        // Old terminal job: must be pruned.
+        let old_completed = store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+            args: serde_json::json!({"delivery_id": "DLV-old-completed"}),
+            scheduled_at: "2026-04-01T00:00:00Z".to_owned(),
+            now: "2026-04-01T00:00:00Z".to_owned(),
+            max_attempts: 5,
+        })?;
+        let claimed_old = store.claim_due_webhook_delivery_jobs("2026-04-01T00:00:01Z", 10)?;
+        store.complete_webhook_delivery_job(
+            &claimed_old[0],
+            WebhookDeliveryJobCompletion::Complete {
+                now: "2026-04-01T00:00:02Z".to_owned(),
+            },
+        )?;
+
+        // Live, unclaimed job: must survive regardless of age (footgun:
+        // "Webhook delivery jobs" — claimed work is never destroyed).
+        let live_available = store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
+            args: serde_json::json!({"delivery_id": "DLV-live"}),
+            scheduled_at: "2026-04-01T00:00:00Z".to_owned(),
+            now: "2026-04-01T00:00:00Z".to_owned(),
+            max_attempts: 5,
+        })?;
+
+        let lifecycle = RetentionPruneLifecycle::new(
+            Arc::new(parking_lot::Mutex::new(store)),
+            RetentionPolicy {
+                error_retention_days: 30,
+                check_retention_days: 7,
+            },
+        );
+        let report = lifecycle.run_due(OffsetDateTime::parse("2026-05-29T12:00:00Z", &Rfc3339)?)?;
+
+        assert_eq!(report.oban_jobs_deleted, 1);
+        assert!(!report.interrupted);
+
+        let store = lifecycle.store.lock();
+        assert!(store.webhook_delivery_job(old_completed)?.is_none());
+        assert!(store.webhook_delivery_job(live_available)?.is_some());
 
         Ok(())
     }
@@ -422,6 +492,7 @@ mod tests {
                 errors_deleted: 1000,
                 service_events_deleted: 0,
                 target_checks_deleted: 0,
+                oban_jobs_deleted: 0,
                 batches: 1,
                 interrupted: true,
             }
