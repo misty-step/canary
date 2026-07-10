@@ -1,0 +1,88 @@
+name: Canary 951 native amd64 image proof
+
+on:
+  push:
+    branches:
+      - ops/canary-951-native-image
+
+permissions:
+  contents: read
+
+jobs:
+  image-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out workflow control plane
+        uses: actions/checkout@v4
+
+      - name: Check out pinned Canary source
+        uses: actions/checkout@v4
+        with:
+          ref: b3a6decf4dce5aeae622633e311326d80cf1a5ab
+          path: source
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker-loadable linux amd64 archive
+        uses: docker/build-push-action@v6
+        with:
+          context: source
+          file: ${{ github.workspace }}/.github/canary-m0/Dockerfile
+          platforms: linux/amd64
+          tags: canary:m0-b3a6decf
+          outputs: type=docker,dest=/tmp/canary-b3a6decf-linux-amd64.docker.tar
+          provenance: false
+          no-cache: true
+
+      - name: Prove archive, immutable image ID, architecture, and health
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p proof
+          archive=/tmp/canary-b3a6decf-linux-amd64.docker.tar
+          archive_sha="$(sha256sum "$archive" | awk '{print $1}')"
+          docker image rm canary:m0-b3a6decf >/dev/null 2>&1 || true
+          docker load --input "$archive" >/dev/null
+          image_id="$(docker image inspect canary:m0-b3a6decf --format '{{.Id}}')"
+          architecture="$(docker image inspect "$image_id" --format '{{.Architecture}}')"
+          os="$(docker image inspect "$image_id" --format '{{.Os}}')"
+          test "$architecture" = amd64
+          test "$os" = linux
+          case "$image_id" in sha256:*) ;; *) exit 1;; esac
+          docker volume create canary-m0-proof >/dev/null
+          docker run --detach --name canary-m0-proof \
+            --publish 127.0.0.1:14000:4000 \
+            --volume canary-m0-proof:/data \
+            --env CANARY_DB_PATH=/data/canary.db \
+            --env CANARY_REQUIRE_LITESTREAM=0 \
+            --env CANARY_DISCLOSE_BOOTSTRAP_KEY=false \
+            "$image_id" >/dev/null
+          trap 'docker rm --force canary-m0-proof >/dev/null 2>&1 || true; docker volume rm canary-m0-proof >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:14000/healthz >/dev/null && \
+               curl -fsS http://127.0.0.1:14000/readyz >/dev/null; then
+              break
+            fi
+            test "$attempt" -lt 30
+            sleep 2
+          done
+          cp "$archive" proof/
+          printf '%s  %s\n' "$archive_sha" "canary-b3a6decf-linux-amd64.docker.tar" > proof/SHA256SUMS
+          jq -n \
+            --arg source_commit b3a6decf4dce5aeae622633e311326d80cf1a5ab \
+            --arg archive_sha256 "$archive_sha" \
+            --arg image_id "$image_id" \
+            --arg architecture "$architecture" \
+            --arg os "$os" \
+            '{source_commit:$source_commit,archive_sha256:$archive_sha256,image_id:$image_id,architecture:$architecture,os:$os,healthz:200,readyz:200}' \
+            > proof/receipt.json
+
+      - name: Upload immutable proof bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-b3a6decf-linux-amd64
+          path: proof/
+          if-no-files-found: error
+          retention-days: 7
