@@ -1,6 +1,6 @@
 # Canary — Agent Router
 
-Self-hosted observability substrate for AI agents (not humans). Rust + SQLite + Litestream → Fly Tigris. Fly app **`canary-obs`**. v1: single region, single org, one Docker image, one SQLite file. Read `VISION.md` for the product north star before changing product scope, responder boundaries, or agent-facing surfaces. Load-bearing footguns are inlined below (this file is now the single canonical harness doc — `CLAUDE.md` is a symlink to it).
+Self-hosted observability substrate for AI agents (not humans). Rust + SQLite + Litestream → S3-compatible object storage. Misty Step production runs on a dedicated DigitalOcean host at **`https://canary.mistystep.io`** under `canary.service`; the Docker container is **`canary`** and the durable host mount is **`/var/lib/canary`**. v1: single region, one Docker image, one SQLite file. Read `VISION.md` for the product north star before changing product scope, responder boundaries, or agent-facing surfaces. Load-bearing footguns are inlined below (this file is now the single canonical harness doc — `CLAUDE.md` is a symlink to it).
 
 ## Stack & boundaries
 
@@ -53,7 +53,8 @@ Prefer these over re-deriving from the code base.
 | `./bin/validate --strict` | → `dagger call strict` (full gate + advisories + optional `.codex/agents/*.toml` validation when present) | `.githooks/pre-push` |
 | `./bin/validate --advisories` | live advisory scan only | manual run |
 | `dagger call strict --source=../candidate` | Hosted CI in `pull_request_target` immutable control plane (trusted base checkout at `.ci/trusted/`, candidate at `.ci/candidate/`) | `.github/workflows/ci.yml` |
-| `flyctl deploy --app canary-obs --remote-only` | Auto on green master | `.github/workflows/deploy.yml` |
+| `bin/dr-status --host "$CANARY_SSH_HOST"` | Production Litestream status through the host/container boundary | manual pre-deploy and incident check |
+| `bin/dr-restore-check --host "$CANARY_SSH_HOST"` | Non-destructive restore into container tmpfs | manual pre-deploy and DR drill |
 
 **Package gates inside strict:**
 - Rust workspace: format, check, clippy (`-D warnings`), tests.
@@ -99,17 +100,31 @@ Canary reports its own errors through the Rust runtime direct-ingest path, no HT
 ## Deploy (operational crib)
 
 ```bash
-flyctl deploy --app canary-obs --remote-only       # happy path
-flyctl storage create --app canary-obs --name canary-obs-backups --yes  # Tigris bootstrap
-bin/dr-status                                       # read-only Litestream preflight
-bin/dr-restore-check                                # non-destructive restore drill
+export CANARY_ENDPOINT=https://canary.mistystep.io
+export CANARY_SSH_HOST=<operator-ssh-target>
+ssh "$CANARY_SSH_HOST" sudo systemctl is-active canary.service
+ssh "$CANARY_SSH_HOST" sudo docker inspect canary --format '{{.Image}} {{.State.Status}}'
+bin/dr-status
+bin/dr-restore-check
+curl -fsS "$CANARY_ENDPOINT/healthz"
+curl -fsS "$CANARY_ENDPOINT/readyz"
 ```
 
-**Nuclear reset (human-gated, do NOT automate).** The platform-agnostic invariant, in order: **stop the writer process** (SQLite must release its WAL/SHM handles) → **remove `canary.db`, `canary.db-wal`, `canary.db-shm`** from a context that has the volume mounted but is NOT running Canary against it → **restart the app** so `bin/entrypoint.sh` restores from the Litestream replica onto the empty path. On Fly this is the maintenance-machine sequence in `docs/backup-restore-dr.md` (validated 2026-04-16); on a Docker/DO host it is stop container → delete files via a throwaway container or host shell → start. Never use an in-place `flyctl ssh console … rm` — SSH requires a running machine, and a running machine holds the WAL handles (2026-07-09 groom ruling; supersedes an earlier scriptable-flyctl variant that circulated in CLAUDE.md).
+There is no provider auto-deploy workflow. Production promotion is an explicit
+immutable-image update on the dedicated host, followed by the live proof above;
+see `docs/upgrade-and-rollback.md`.
 
-Note: the whole fleet (this instance included) is migrating Fly → DigitalOcean. Treat the flyctl crib above as the legacy path; new deploy/DR investment targets the substrate-agnostic Docker path (`docs/self-host-docker.md`, `docker-compose.yml`, env-driven `litestream.yml`).
+**Nuclear reset (human-gated, do NOT automate).** The invariant, in order:
+**stop `canary.service`** (SQLite must release its WAL/SHM handles) → verify no
+`canary` container remains → restore or remove `canary.db*` only while the
+writer is stopped and the durable `/var/lib/canary` mount is verified → restart
+the service so `bin/entrypoint.sh` restores from the Litestream replica. Never
+delete `/data/canary.db*` through `docker exec` against the running container.
+See `docs/backup-restore-dr.md`.
 
-Bootstrap API key logged once on first boot — grep `"Bootstrap API key:"` in Fly logs. Cannot be re-shown.
+Bootstrap API key logged once on first boot — inspect `sudo docker logs canary`
+on the host. If missed, use the supported `canary-server mint-key` path from
+`docs/self-host-docker.md`; the original cannot be re-shown.
 
 ## Footguns
 

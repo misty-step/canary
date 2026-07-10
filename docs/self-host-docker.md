@@ -1,11 +1,8 @@
 # Self-Host Canary With Docker
 
-This is the Fly-independent path for a fresh Canary instance. It uses the same
-checked-in Docker image as production, a local Docker volume for SQLite, and no
-Fly account, Fly app name, Tigris bucket, or Fly-specific environment variables.
-
-Use the Fly runbook only when you are deploying to Fly:
-[`docs/self-host-fly.md`](self-host-fly.md).
+This is the provider-independent path for a fresh Canary instance. It uses the
+same checked-in Docker image as production, a local Docker volume for SQLite,
+and no cloud-provider account or provider-specific environment variables.
 
 ## Prerequisites
 
@@ -148,10 +145,10 @@ contract:
 - `CANARY_REQUIRE_LITESTREAM=1` to fail closed when backup configuration is
   incomplete
 
-The checked-in `litestream.yml` is currently pinned to the Fly Tigris endpoint
-for the Fly production runbook. For MinIO, plain AWS S3, or another
-S3-compatible endpoint, mount an endpoint-specific Litestream config at
-`/etc/litestream.yml` and pass the same credential variables to the container.
+The checked-in `litestream.yml` reads its endpoint and region from
+`LITESTREAM_ENDPOINT` and `LITESTREAM_REGION`. For DigitalOcean Spaces, MinIO,
+plain AWS S3, or another S3-compatible endpoint, set those variables and mount
+the desired Litestream config at `/etc/litestream.yml`.
 
 Plain AWS S3 example config:
 

@@ -12,7 +12,8 @@ Existing tools (Sentry, Uptime Robot) are designed around humans staring at dash
 - **Agent-first responses** with natural-language summaries and bounded payloads
 - **Timelines and incidents** — deterministic correlation without an LLM in the loop
 - **Generic webhooks** — consumers define their own behavior
-- **Self-hosted** on Fly.io with SQLite + Litestream + Fly Tigris backup
+- **Self-hosted** as one Docker container with SQLite + Litestream backup to
+  S3-compatible object storage
 
 Read the product direction in [`VISION.md`](VISION.md). The agent UX laws and
 coordination philosophy live in
@@ -75,11 +76,12 @@ Responder incident context uses a redacted envelope, service-bound
 `responder-write` read authority, and durable read-audit events; see
 [`docs/responder-context-safety.md`](docs/responder-context-safety.md).
 
-For non-Fly Docker deployment, including Compose, local volume persistence,
-doctor, and an ingest/query smoke, see
-[`docs/self-host-docker.md`](docs/self-host-docker.md). For Fly deployment,
-including Tigris backups and key recovery if the first boot log was missed, see
-[`docs/self-host-fly.md`](docs/self-host-fly.md).
+For Docker deployment, including Compose, local volume persistence, doctor,
+and an ingest/query smoke, see
+[`docs/self-host-docker.md`](docs/self-host-docker.md). The Misty Step production
+instance runs on a dedicated DigitalOcean host; its operator path is documented
+in [`docs/upgrade-and-rollback.md`](docs/upgrade-and-rollback.md) and
+[`docs/backup-restore-dr.md`](docs/backup-restore-dr.md).
 
 Canary has no human dashboard by design — agents are the UI. Operators who
 need to look at current state use the query API directly (`GET
@@ -245,7 +247,7 @@ entrypoint. See [docs/ci-control-plane.md](docs/ci-control-plane.md).
 Canary's MCP surface is the CLI contract served over stdio:
 
 ```bash
-CANARY_ENDPOINT="https://<your-fly-app>.fly.dev" \
+CANARY_ENDPOINT="https://canary.example.com" \
 CANARY_READ_API_KEY=... \
 CANARY_RESPONDER_KEY=... \
 bin/canary mcp-server
@@ -281,7 +283,7 @@ canonical agent replay guide in `info.x-agent-guide`.
 Set the instance endpoint before running API examples:
 
 ```bash
-export CANARY_ENDPOINT="https://<your-fly-app>.fly.dev"
+export CANARY_ENDPOINT="https://canary.example.com"
 ```
 
 All other endpoints require a scoped API key:
@@ -461,7 +463,7 @@ snippets for reporting errors and verifying the service in Canary.
 curl -X POST $CANARY_ENDPOINT/api/v1/service-onboarding \
   -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"service": "my-api", "url": "https://my-api.fly.dev/health", "environment": "production"}'
+  -d '{"service": "my-api", "url": "https://api.example.com/health", "environment": "production"}'
 ```
 
 The response includes:
@@ -524,7 +526,7 @@ Crash or exception telemetry still belongs on `POST /api/v1/errors`.
 curl -X POST $CANARY_ENDPOINT/api/v1/targets \
   -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name": "my-api", "service": "my-api", "url": "https://my-api.fly.dev/health", "interval_ms": 60000}'
+  -d '{"name": "my-api", "service": "my-api", "url": "https://api.example.com/health", "interval_ms": 60000}'
 
 # List / pause / resume / delete
 curl $CANARY_ENDPOINT/api/v1/targets -H "Authorization: Bearer $CANARY_ADMIN_KEY"
@@ -613,40 +615,42 @@ schema (`priv/openapi/openapi.json`) for the authoritative contract.
 
 ## Deployment
 
-Deploy with either a generic Docker host or Fly.io. The Fly path uses SQLite
-persistence and a Fly Tigris-backed Litestream restore path; the Docker path
-uses the same image with a local volume and no Fly-specific variables.
+Deploy the same Docker image on a generic host. The smallest Compose path uses
+a local volume. The Misty Step production instance uses a dedicated
+DigitalOcean host, a mounted block volume, `canary.service`, container `canary`,
+Caddy ingress, and Litestream replication to DigitalOcean Spaces.
 
-- Generic Docker or Compose:
-  [docs/self-host-docker.md](docs/self-host-docker.md)
-- Fly.io:
-  [docs/self-host-fly.md](docs/self-host-fly.md)
+- Generic Docker or Compose: [docs/self-host-docker.md](docs/self-host-docker.md)
+- Misty Step production operations:
+  [docs/upgrade-and-rollback.md](docs/upgrade-and-rollback.md)
+  and [docs/backup-restore-dr.md](docs/backup-restore-dr.md)
 
 ```bash
-export CANARY_FLY_APP="<your-fly-app>"
-export CANARY_ENDPOINT="https://${CANARY_FLY_APP}.fly.dev"
-mkdir -p .canary/dogfood
-cp priv/dogfood/owned_services.example.json .canary/dogfood/owned_services.json
-flyctl deploy --app "$CANARY_FLY_APP" --remote-only
+export CANARY_ENDPOINT="https://canary.mistystep.io"
+export CANARY_SSH_HOST="<operator-ssh-target>"
+ssh "$CANARY_SSH_HOST" sudo systemctl is-active canary.service
+ssh "$CANARY_SSH_HOST" sudo docker inspect canary \
+  --format '{{.Image}} {{.State.Status}}'
+curl -fsS "$CANARY_ENDPOINT/healthz"
+curl -fsS "$CANARY_ENDPOINT/readyz"
 ```
 
-The checked-in `fly.toml` uses a placeholder app name. Always pass
-`--app "$CANARY_FLY_APP"` so a fork or clean-room checkout cannot deploy to the
-Misty Step instance by accident.
-
-On first boot, capture the one-time bootstrap admin key from Fly logs and store
-it in the operator's secret manager:
+There is no provider auto-deploy workflow. Production promotion is an explicit
+immutable-image update on the dedicated host after `./bin/validate --strict`
+passes. On first boot, capture the one-time bootstrap admin key from container
+logs and store it in the operator's secret manager:
 
 ```bash
-flyctl logs --app "$CANARY_FLY_APP" --no-tail | grep -E 'Bootstrap API key:'
+ssh "$CANARY_SSH_HOST" \
+  "sudo docker logs canary 2>&1 | grep -E 'Bootstrap API key:'"
 ```
 
 If the first boot log was missed, mint a replacement admin key without data
 loss. This prints a raw admin key once:
 
 ```bash
-flyctl ssh console --app "$CANARY_FLY_APP" \
-  -C '/app/bin/canary-server mint-key --scope admin --name operator-recovery'
+ssh "$CANARY_SSH_HOST" sudo docker exec canary \
+  /app/bin/canary-server mint-key --scope admin --name operator-recovery
 ```
 
 After the key is stored, prove the new instance with the same smoke commands an
@@ -661,27 +665,25 @@ curl -fsS "$CANARY_ENDPOINT/api/v1/report?window=1h" \
 bin/canary-write-path-rehearsal \
   --endpoint "$CANARY_ENDPOINT" \
   --api-key "$CANARY_ADMIN_KEY" \
-  --app "$CANARY_FLY_APP" \
+  --host "$CANARY_SSH_HOST" \
   --json
 ```
 
 DR verification and restore procedures live in [docs/backup-restore-dr.md](docs/backup-restore-dr.md).
 Use `bin/dr-status` for a read-only Litestream preflight and
-`bin/dr-restore-check` for a non-destructive restore drill against the running
-Fly app.
-On a fresh Fly app, enable the same path with
-`flyctl storage create --app "$CANARY_FLY_APP" --name "$CANARY_FLY_APP-backups" --yes`, then
-re-run the two verification commands. See the DR runbook for the latest live
-verification status.
+`bin/dr-restore-check` for a non-destructive restore drill inside the running
+container. Both require `CANARY_SSH_HOST` or `--host` and use the production
+container's mounted Litestream configuration.
 
-See `fly.toml`, `Dockerfile`, `litestream.yml`, and `bin/entrypoint.sh`.
+See `Dockerfile`, `litestream.yml`, and `bin/entrypoint.sh`.
 
 ## Tech Stack
 
 - **Rust** — Typed service core, Axum HTTP runtime, deterministic workers, and compile-time guardrails
 - **SQLite** — WAL mode with one explicit writer boundary in `canary-store`
 - **Reqwest** — HTTP target probes and outbound webhook delivery
-- **Litestream + Fly Tigris** — Continuous SQLite replication to Fly-managed object storage
+- **Litestream + S3-compatible storage** — Continuous SQLite replication;
+  Misty Step production uses DigitalOcean Spaces
 
 ## License
 

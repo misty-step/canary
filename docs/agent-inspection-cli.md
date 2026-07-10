@@ -21,7 +21,7 @@ Config JSON:
 
 ```json
 {
-  "endpoint": "https://<your-fly-app>.fly.dev",
+  "endpoint": "https://canary.example.com",
   "admin_api_key": "sk_live_...",
   "read_api_key": "sk_live_...",
   "responder_api_key": "sk_live_..."
@@ -197,7 +197,7 @@ dr: litestream ok, restore_receipt_missing: no architecture DR receipt found, fa
 ```
 
 The `dr` line is data, not a request-path dependency. It runs the operator
-`bin/dr-status --app "$CANARY_FLY_APP"` check when available and points to the latest
+`bin/dr-status --host "$CANARY_SSH_HOST"` check when available and points to the latest
 checked-in restore-specific receipt when one exists. Production startup can be
 made fail-closed on backup configuration with `CANARY_REQUIRE_LITESTREAM=1`.
 
@@ -290,12 +290,10 @@ capture. Use platform-level drains only as a supplement for logs/errors the app
 cannot reach directly; drains do not replace typed SDK context and still need
 Canary target/query readback before coverage is claimed.
 
-For Vercel projects, pair `integrate status/plan` with `vercel env ls
-production --cwd <repo> --format=json` and `vercel env ls preview --cwd <repo>
---format=json` to audit env-name presence without exposing values. For Fly apps,
-pair it with `flyctl status` and the app's public health URL. Agents should not
-write platform secrets unless the value arrives through stdin or an approved
-secret-manager handoff.
+For managed projects, pair `integrate status/plan` with the provider's redacted
+environment-name inventory and the app's canonical health URL. Agents should
+not write platform secrets unless the value arrives through stdin or an
+approved secret-manager handoff.
 
 ## MCP Shape
 
@@ -308,7 +306,7 @@ the CLI:
   "command": "/path/to/canary",
   "args": ["mcp-server"],
   "env": {
-    "CANARY_ENDPOINT": "https://<your-fly-app>.fly.dev",
+    "CANARY_ENDPOINT": "https://canary.example.com",
     "CANARY_READ_API_KEY": "redacted",
     "CANARY_RESPONDER_KEY": "redacted"
   }

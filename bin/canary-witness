@@ -17,7 +17,7 @@ usage() {
   cat <<'EOF'
 Usage: bin/canary-witness [--endpoint <url>] [--read-api-key <key>] [--ingest-api-key <key>] [--monitor <name>] [--window <window>] [--receipt <path>] [--ttl-ms <millis>] [--require-check-in] [--json] [-h|--help]
 
-Check Canary from outside the Fly app and preserve a receipt even when Canary is
+Check Canary from outside the production host and preserve a receipt even when Canary is
 unreachable. The witness verifies:
 
 - GET /healthz returns {"status":"ok"}

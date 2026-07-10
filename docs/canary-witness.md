@@ -11,8 +11,8 @@ Canary monitors itself from two directions:
 
 The external witness is intentionally a shell script rather than a Rust service
 because the production substrate is GitHub Actions cron. Avoiding a scheduled
-Cargo build keeps the witness fast, portable, and independent of the Fly app it
-is checking.
+Cargo build keeps the witness fast, portable, and independent of the host it is
+checking.
 
 ## Checked Signals
 
@@ -73,7 +73,7 @@ so Canary uses that TTL for the next deadline on TTL-mode monitors.
 
 ## GitHub Schedule
 
-`.github/workflows/uptime-monitor.yml` runs the witness outside the Fly app. On
+`.github/workflows/uptime-monitor.yml` runs the witness outside the Canary host. On
 each run it uploads `canary-witness-receipt.json`. On failure it opens a GitHub
 issue labeled `canary-witness-failed`; on recovery it closes the issue. This
 notification path does not depend on Canary being reachable.
@@ -91,9 +91,8 @@ Required repository secrets:
   `canary-watchman` check-in.
 
 Forks can leave the witness workflow unconfigured. Upstream Misty Step runs the
-workflow against its production instance by default; forks run it only after
-setting the `CANARY_WITNESS_ENDPOINT` repository variable. See
-[`docs/self-host-fly.md`](self-host-fly.md#configure-fork-workflows).
+workflow against its production instance; forks run it only after setting the
+`CANARY_WITNESS_ENDPOINT` repository variable and the two witness secrets.
 
 Production monitor configuration:
 
@@ -138,6 +137,6 @@ false` before the alert plane is healthy. A pressured worker is still
 route-ready evidence; it is not healthy alert-plane evidence.
 
 `doctor` also prints a `dr:` line. That line reflects the operator
-`bin/dr-status --app "$CANARY_FLY_APP"` Litestream check when available and points to
+`bin/dr-status --host "$CANARY_SSH_HOST"` Litestream check when available and points to
 the latest checked-in restore-specific receipt when one exists; otherwise it
 reports `restore_receipt_missing` and the fallback runbook path.

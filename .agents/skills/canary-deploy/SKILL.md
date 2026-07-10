@@ -1,112 +1,105 @@
 ---
 name: canary-deploy
 description: |
-  Operate Canary's deploy and disaster-recovery runbook: verify Litestream
-  backup status before touching anything, deploy to the Fly app
-  (`canary-obs`), and run non-destructive restore drills. Canary is a
-  self-hosted Rust service on Fly with a single-writer SQLite DB replicated
-  to Tigris via Litestream. Use when: "deploy canary", "check canary
-  backups", "is canary backed up", "restore drill", "DR check", "canary
-  disaster recovery". Trigger: /canary-deploy.
+  Operate Canary's dedicated-host deployment and disaster-recovery runbook:
+  verify Litestream-to-S3 status, inspect the canary.service/container boundary,
+  and run non-destructive restore drills. Misty Step production runs at
+  canary.mistystep.io on a dedicated DigitalOcean host. Use when: "deploy
+  canary", "check canary backups", "is canary backed up", "restore drill",
+  "DR check", "canary disaster recovery". Trigger: /canary-deploy.
 argument-hint: "[status|deploy|restore-check|nuclear-reset]"
 ---
 
-<!--
-Generated via harness-kit's repo-local skill generation pattern
-(skills/harness-engineering/references/repo-local-skill-generation.md).
-Source repo: misty-step/canary @ c8e281b. Generated: 2026-07-01.
-Generator ref: harness-kit@cbe82137.
-Facts below are repo-derived at generation time, not invented. Re-verify
-commands against the live repo before trusting this if it has aged — a
-generated skill is a snapshot, not a live view.
--->
-
 # canary-deploy
 
-Deploy is auto-triggered on green `master` (`.github/workflows/deploy.yml`
-runs `flyctl deploy` after CI's `workflow_run` succeeds); the manual path
-exists for out-of-band redeploys. The load-bearing discipline here is DR
-verification, not the deploy command itself — `bin/dr-status` and
-`bin/dr-restore-check` are read-only/non-destructive checks that must both
-pass before any destructive recovery is even considered. Full narrative
-runbook: `docs/backup-restore-dr.md`.
+Misty Step production is one Docker container named `canary`, owned by
+`canary.service` on a dedicated DigitalOcean host. Caddy is the only public
+ingress and serves `https://canary.mistystep.io`; the SQLite volume is mounted
+on the host at `/var/lib/canary` and in the container at `/data`. Litestream
+runs inside the same container and replicates to DigitalOcean Spaces through
+the mounted `/etc/litestream.yml` configuration.
+
+There is no provider auto-deploy workflow. A release is promoted only through
+an explicit immutable-image update on the host after the strict gate and DR
+checks pass. Full runbooks: `docs/upgrade-and-rollback.md` and
+`docs/backup-restore-dr.md`.
 
 ## Surfaces
 
 | Changed area | Surface | Verification path |
 |---|---|---|
-| Deploy config (`fly.toml`, `Dockerfile`, `.github/workflows/deploy.yml`) | Fly app `canary-obs` | `flyctl deploy --app canary-obs --remote-only`, then `/healthz` + `/readyz` |
-| Backup/replication (`litestream.yml`, `bin/entrypoint.sh`, `bin/lib/dr.sh`) | Litestream → Fly Tigris | `bin/dr-status`, `bin/dr-restore-check` |
+| Runtime image (`Dockerfile`, `bin/entrypoint.sh`) | `canary.service` → container `canary` | host service/container identity, then `/healthz` + `/readyz` |
+| Backup/replication (`litestream.yml`, `bin/lib/dr.sh`) | Litestream → S3-compatible storage (Spaces in production) | `bin/dr-status`, `bin/dr-restore-check` |
+| Public ingress | Caddy → `127.0.0.1:8080` | `https://canary.mistystep.io/healthz` and `/readyz` |
 
 ## Commands
 
-Set the target app once (both DR scripts read `CANARY_FLY_APP`/`FLY_APP`;
-neither has a hardcoded default — see `bin/lib/dr.sh:dr_default_app`):
+Set the operator SSH target. It is intentionally not checked into the repo:
 
 ```sh
-export CANARY_FLY_APP=canary-obs
+export CANARY_ENDPOINT=https://canary.mistystep.io
+export CANARY_SSH_HOST=<operator-ssh-target>
 ```
 
-Read-only backup preflight (run this before anything else — exits non-zero
-if Litestream config is missing):
+Inspect the runtime without exposing environment values:
+
+```sh
+ssh "$CANARY_SSH_HOST" sudo systemctl is-active canary.service
+ssh "$CANARY_SSH_HOST" sudo docker inspect canary \
+  --format '{{.Image}} {{.State.Status}} {{.State.StartedAt}}'
+curl -fsS "$CANARY_ENDPOINT/healthz"
+curl -fsS "$CANARY_ENDPOINT/readyz"
+```
+
+Read-only backup preflight:
 
 ```sh
 bin/dr-status
-# equivalent: bin/dr-status --app canary-obs
+# equivalent: bin/dr-status --host "$CANARY_SSH_HOST" --container canary
 ```
 
-Non-destructive restore drill (restores the Tigris replica to a temp file on
-the running machine; never touches the live DB; needs outbound egress from
-the Fly machine):
+Non-destructive restore drill. This restores into container tmpfs and never
+overwrites the live database:
 
 ```sh
 bin/dr-restore-check
-# equivalent: bin/dr-restore-check --app canary-obs --db-path /data/canary.db
+# equivalent: bin/dr-restore-check --host "$CANARY_SSH_HOST" \
+#   --container canary --db-path /data/canary.db
 ```
 
-Manual deploy (normally automatic on green master via the `Deploy` workflow):
+Before a promotion, run:
 
 ```sh
-flyctl deploy --app canary-obs --remote-only
+./bin/validate --strict
+bin/dr-status
+bin/dr-restore-check
 ```
 
-Provision Tigris backups on a fresh app (one-time; `flyctl storage create`
-stages/deploys the `BUCKET_NAME`/`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`
-secrets Canary reads):
-
-```sh
-flyctl storage create --app canary-obs --name canary-obs-backups --yes
-flyctl secrets list --app canary-obs   # confirm secrets present, not "Staged"
-```
+Then follow the immutable-image install sequence in
+`docs/upgrade-and-rollback.md`. Re-run the runtime and public probes above and
+query recent Canary errors before accepting the promotion.
 
 ## Gotchas
 
-- **`bin/dr-status`/`bin/dr-restore-check` need `flyctl ssh console` access**
-  to the real Fly app — they are live production preflights, not local
-  fixtures. Both are safe to run against `canary-obs` at any time (read-only
-  / temp-file-only), but they are not sandboxed.
-- **Neither DR script has a hardcoded app default.** Forgetting
-  `CANARY_FLY_APP`/`--app` fails loud with "Missing Fly app" rather than
-  silently targeting the wrong instance — do not work around that by
-  guessing an app name.
-- **`bin/dr-restore-check` needs outbound egress** from the Fly machine to
-  reach Tigris; failure here means the replica cannot be trusted for
-  recovery, not just that the drill script is broken.
-- **`CANARY_REQUIRE_LITESTREAM=1`** makes `bin/entrypoint.sh` fail-closed on
-  boot if the DB is missing and Litestream can't restore it — relevant when
-  diagnosing a boot failure after a volume issue.
-- **Never skip straight to Destructive Recovery** (`docs/backup-restore-dr.md`,
-  stop-machine → mount elsewhere → delete `/data/canary.db*` → restart)
-  without both `bin/dr-status` and `bin/dr-restore-check` passing first — that
-  sequence is explicitly human-gated and must not be automated.
-- **`bin/dr.sh`'s quoting contract is single-sourced** — do not hand-write
-  the equivalent `flyctl ssh console` command; use the wrapper so quoting
-  changes stay in one place.
+- **Both DR scripts require operator SSH access.** They run only
+  `sudo docker exec` against the named container and never read or print its
+  environment.
+- **`CANARY_SSH_HOST` has no default.** Missing host configuration fails loud;
+  never guess an address from an old receipt.
+- **The production container name is `canary`.** Override `--container` only
+  for an explicitly different self-hosted install.
+- **`bin/dr-restore-check` needs outbound egress** from the container to the
+  configured object store. A failure means the replica is not proven usable.
+- **`CANARY_REQUIRE_LITESTREAM=1`** keeps production fail-closed when the
+  database is missing and restore configuration is incomplete.
+- **Never delete `/data/canary.db*` in the running container.** Stop
+  `canary.service`, verify the container is absent and `/var/lib/canary` is the
+  durable mount, then use the reviewed recovery procedure.
+- **No auto-deploy exists.** A green master build does not mutate production.
 
 ## Report
 
 Return: **verdict** (PASS / FAIL / UNVERIFIED) · exact command(s) run ·
-surface exercised (deploy / backup-status / restore-drill) · artifact
-inspected (dr-status output, restore-check output, `/healthz`+`/readyz`
-response) · what was NOT covered (e.g. "backup status only — no restore
-drill run").
+surface exercised (runtime / backup-status / restore-drill / public ingress) ·
+artifact inspected (service state, container image ID, DR output,
+`/healthz`+`/readyz`) · what was not covered.

@@ -7,7 +7,7 @@ ENDPOINT="${CANARY_ENDPOINT:-}"
 API_KEY="${CANARY_API_KEY:-}"
 WEBHOOK_URL="${CANARY_REHEARSAL_WEBHOOK_URL:-https://httpbingo.org/status/204}"
 TARGET_URL="${CANARY_REHEARSAL_TARGET_URL:-}"
-APP="${CANARY_FLY_APP:-${FLY_APP:-}}"
+HOST="${CANARY_SSH_HOST:-}"
 PREFIX=""
 JSON_OUTPUT=0
 RUN_DR_STATUS=1
@@ -34,7 +34,7 @@ WEBHOOK_RUN_URL=""
 
 usage() {
   cat <<'EOF'
-Usage: bin/canary-write-path-rehearsal [--endpoint <url>] [--api-key <key>] [--webhook-url <url>] [--target-url <url>] [--prefix <prefix>] [--app <fly-app>] [--poll-attempts <n>] [--poll-sleep <seconds>] [--no-dr-status] [--json] [-h|--help]
+Usage: bin/canary-write-path-rehearsal [--endpoint <url>] [--api-key <key>] [--webhook-url <url>] [--target-url <url>] [--prefix <prefix>] [--host <ssh-target>] [--poll-attempts <n>] [--poll-sleep <seconds>] [--no-dr-status] [--json] [-h|--help]
 
 Exercise Canary's live write paths with uniquely named disposable resources.
 
@@ -62,6 +62,17 @@ require_command() {
   fi
 
   fail "Missing required command: $command_name"
+}
+
+require_ssh_host() {
+  local host="$1"
+
+  [[ -n "$host" ]] || fail "Missing Canary SSH host. Set CANARY_SSH_HOST, pass --host, or pass --no-dr-status."
+  case "$host" in
+    -*|*[!A-Za-z0-9_.:@-]*)
+      fail "Invalid Canary SSH host. Use an SSH alias, host, IP, or user@host without options."
+      ;;
+  esac
 }
 
 urlencode() {
@@ -487,76 +498,52 @@ wait_for_webhook_delivery() {
 }
 
 collect_deploy_identity() {
-  local output status identity
+  local service_output service_status container_output container_status identity
+  local inspect_command
 
-  if ! command -v flyctl >/dev/null 2>&1; then
-    fail "Missing required command: flyctl"
-  fi
+  require_command ssh
 
   set +e
-  output="$(flyctl status --app "$APP" --json 2>&1)"
-  status=$?
+  service_output="$(ssh "$HOST" sudo systemctl is-active canary.service 2>&1)"
+  service_status=$?
   set -e
-
-  if ((status != 0)); then
-    record_shell_step "fly_status" "flyctl status --app $APP --json" "$status" "$output"
-    fail "fly status failed for $APP: $(sanitize_text "$output")"
+  record_shell_step "host_service_identity" \
+    "ssh $HOST sudo systemctl is-active canary.service" \
+    "$service_status" "$service_output"
+  if ((service_status != 0)) || [[ "$service_output" != "active" ]]; then
+    fail "canary.service is not active on $HOST: $(sanitize_text "$service_output")"
   fi
 
-  if ! identity="$(jq -c '
-    def image_ref:
-      if .image_ref == null then
-        null
-      else
-        {
-          registry: (.image_ref.registry // null),
-          repository: (.image_ref.repository // null),
-          tag: (.image_ref.tag // null),
-          digest: (.image_ref.digest // null),
-          commit: (.image_ref.labels.GH_SHA // null),
-          repo: (.image_ref.labels.GH_REPO // null),
-          event: (.image_ref.labels.GH_EVENT_NAME // null)
-        }
-      end;
-    def machine:
-      {
-        id: (.id // null),
-        name: (.name // null),
-        state: (.state // null),
-        region: (.region // null),
-        image: (.config.image // null),
-        image_ref: image_ref,
-        release_id: (.config.metadata.fly_release_id // null),
-        release_version: (.config.metadata.fly_release_version // null),
-        checks: ((.checks // []) | map({
-          name: (.name // null),
-          status: (.status // null),
-          updated_at: (.updated_at // null)
-        }))
-      };
-    {
-      app: (.Name // .name // null),
-      status: (.Status // .status // null),
-      hostname: (.Hostname // .hostname // null),
-      version: (.Version // .version // null),
-      machines: ((.Machines // .machines // []) | map(machine))
-    }
-  ' <<<"$output")"; then
-    fail "fly status did not return parseable deployment identity for $APP: $(sanitize_text "$output")"
+  inspect_command="sudo docker inspect canary --format '{\"container_id\":{{json .Id}},\"image_id\":{{json .Image}},\"name\":{{json .Name}},\"state\":{{json .State.Status}},\"started_at\":{{json .State.StartedAt}}}'"
+  set +e
+  container_output="$(ssh "$HOST" "$inspect_command" 2>&1)"
+  container_status=$?
+  set -e
+  record_shell_step "host_container_identity" \
+    "ssh $HOST sudo docker inspect canary <safe-identity-format>" \
+    "$container_status" "$container_output"
+  if ((container_status != 0)) || ! jq -e '
+    (.container_id // "") != ""
+    and (.image_id // "" | startswith("sha256:"))
+    and .name == "/canary"
+    and .state == "running"
+    and (.started_at // "") != ""
+  ' >/dev/null 2>&1 <<<"$container_output"; then
+    fail "container identity was incomplete or not running on $HOST: $(sanitize_text "$container_output")"
   fi
 
-  if ! jq -e '
-    (.machines | length) > 0
-    and all(.machines[]; (.id // "") != "")
-    and all(.machines[]; (.image_ref.tag // "") != "")
-    and all(.machines[]; (.image_ref.digest // "") != "")
-    and all(.machines[]; (.image_ref.commit // "") != "")
-  ' >/dev/null <<<"$identity"; then
-    fail "fly status for $APP did not include machine id, image tag, image digest, and commit label"
-  fi
-
+  identity="$(jq -cn \
+    --arg host "$HOST" \
+    --arg service_state "$service_output" \
+    --argjson container "$container_output" \
+    '{
+      provider: "digitalocean",
+      host: $host,
+      service: {name: "canary.service", state: $service_state},
+      container: $container
+    }')"
   DEPLOY_IDENTITY="$identity"
-  record_json_step "fly_deploy_identity" "$identity"
+  record_json_step "host_deploy_identity" "$identity"
 }
 
 while (($#)); do
@@ -586,9 +573,9 @@ while (($#)); do
       PREFIX="$2"
       shift 2
       ;;
-    --app)
+    --host)
       (($# >= 2)) || { usage >&2; exit 1; }
-      APP="$2"
+      HOST="$2"
       shift 2
       ;;
     --poll-attempts)
@@ -626,8 +613,8 @@ require_command date
 
 [[ -n "$ENDPOINT" ]] || fail "Missing Canary endpoint. Set CANARY_ENDPOINT or pass --endpoint."
 [[ -n "$API_KEY" ]] || fail "Missing Canary API key. Set CANARY_API_KEY or pass --api-key."
-if ((RUN_DR_STATUS == 1)) && [[ -z "$APP" ]]; then
-  fail "Missing Fly app. Set CANARY_FLY_APP/FLY_APP, pass --app, or pass --no-dr-status."
+if ((RUN_DR_STATUS == 1)); then
+  require_ssh_host "$HOST"
 fi
 [[ "$POLL_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || fail "--poll-attempts must be a positive integer."
 [[ "$POLL_SLEEP" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail "--poll-sleep must be a non-negative number."
@@ -658,7 +645,7 @@ if ((RUN_DR_STATUS == 1)); then
   collect_deploy_identity
 else
   DEPLOY_IDENTITY="$(jq -cn '{status: "skipped", reason: "--no-dr-status"}')"
-  record_json_step "fly_deploy_identity" "$DEPLOY_IDENTITY"
+  record_json_step "host_deploy_identity" "$DEPLOY_IDENTITY"
 fi
 
 key_body="$(jq -cn --arg name "$KEY_NAME" '{name: $name, scope: "ingest-only"}')"
@@ -752,12 +739,12 @@ wait_for_webhook_delivery
 
 if ((RUN_DR_STATUS == 1)); then
   set +e
-  dr_output="$(NO_COLOR=1 "$ROOT/bin/dr-status" --app "$APP" 2>&1)"
+  dr_output="$(NO_COLOR=1 "$ROOT/bin/dr-status" --host "$HOST" 2>&1)"
   dr_status=$?
   set -e
-  record_shell_step "dr_status" "NO_COLOR=1 bin/dr-status --app $APP" "$dr_status" "$dr_output"
+  record_shell_step "dr_status" "NO_COLOR=1 bin/dr-status --host $HOST" "$dr_status" "$dr_output"
   if ((dr_status != 0)); then
-    fail "dr-status failed for $APP: $(sanitize_text "$dr_output")"
+    fail "dr-status failed for $HOST: $(sanitize_text "$dr_output")"
   fi
 fi
 
@@ -799,10 +786,10 @@ resources_json="$(jq -cn \
     immutable_webhook_delivery_id: $delivery_id
 	  }')"
 receipt="$(jq -n \
-  --argjson schema_version 1 \
+  --argjson schema_version 2 \
   --arg status "ok" \
   --arg endpoint "${ENDPOINT%/}" \
-  --arg app "$APP" \
+  --arg host "$HOST" \
   --arg prefix "$PREFIX" \
   --arg started_at "$RUN_STARTED_AT" \
   --arg finished_at "$finished_at" \
@@ -815,7 +802,7 @@ receipt="$(jq -n \
     schema_version: $schema_version,
     status: $status,
     endpoint: $endpoint,
-    fly_app: $app,
+    host: $host,
     prefix: $prefix,
 	    started_at: $started_at,
 	    finished_at: $finished_at,

@@ -13,11 +13,12 @@ Manual rotation is the supported path for now.
 
 - An existing `admin` key with permission to create and revoke keys
 - `CANARY_ENDPOINT` set to the operator's Canary instance, for example
-  `https://<your-fly-app>.fly.dev`
+  `https://canary.mistystep.io`
 - A confirmed inventory of the services or operators using the key you want to rotate
 
-If the original bootstrap admin key was missed, recover a replacement with the
-no-data-loss path in [docs/self-host-fly.md](self-host-fly.md#deploy-and-capture-the-first-admin-key).
+If the original bootstrap admin key was missed, recover a replacement through
+the running container with the no-data-loss path in
+[docs/self-host-docker.md](self-host-docker.md#capture-the-bootstrap-admin-key).
 
 ## Rotate An Ingest Key
 

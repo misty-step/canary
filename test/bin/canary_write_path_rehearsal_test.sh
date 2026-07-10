@@ -16,7 +16,9 @@ setup_stubs() {
   export PATH="$TMPDIR_TEST/bin:$ORIGINAL_PATH"
   export CURL_LOG="$TMPDIR_TEST/curl.log"
   export CURL_STATE="$TMPDIR_TEST/state"
+  export SSH_LOG="$TMPDIR_TEST/ssh.log"
   : > "$CURL_LOG"
+  : > "$SSH_LOG"
 
   cat > "$TMPDIR_TEST/bin/curl" <<'STUB'
 #!/usr/bin/env bash
@@ -242,49 +244,32 @@ esac
 STUB
   chmod +x "$TMPDIR_TEST/bin/curl"
 
-  cat > "$TMPDIR_TEST/bin/flyctl" <<'STUB'
+  cat > "$TMPDIR_TEST/bin/ssh" <<'STUB'
 #!/usr/bin/env bash
-if [[ "${1:-}" == "status" ]]; then
+printf '%s\n' "$*" >> "${SSH_LOG:?}"
+if [[ "$*" == *"systemctl is-active canary.service"* ]]; then
+  printf 'active\n'
+  exit 0
+fi
+if [[ "$*" == *"docker inspect canary"* ]]; then
   jq -cn '{
-    Name: "canary-test",
-    Status: "deployed",
-    Hostname: "canary-test.fly.dev",
-    Version: 77,
-    Machines: [{
-      id: "machine-test",
-      name: "test-machine",
-      state: "started",
-      region: "iad",
-      image_ref: {
-        registry: "registry.fly.io",
-        repository: "canary-test",
-        tag: "deployment-test",
-        digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        labels: {
-          GH_SHA: "8066373b55108f662bf08158dfd74c25561a9fd4",
-          GH_REPO: "misty-step/canary",
-          GH_EVENT_NAME: "workflow_run"
-        }
-      },
-      config: {
-        image: "registry.fly.io/canary-test:deployment-test",
-        metadata: {
-          fly_release_id: "rel_test",
-          fly_release_version: "77"
-        }
-      },
-      checks: [{
-        name: "servicecheck-00-http-4000",
-        status: "passing",
-        updated_at: "2026-06-12T20:00:00Z"
-      }]
-    }]
+    container_id: "0123456789abcdef",
+    image_id: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    name: "/canary",
+    state: "running",
+    started_at: "2026-07-10T20:00:00Z"
   }'
   exit 0
 fi
-printf 'replica /data/canary.db ok\n'
+if [[ "$*" == *"docker exec -i canary sh -eu"* ]]; then
+  cat >/dev/null
+  printf 'replica /data/canary.db ok\n'
+  exit 0
+fi
+printf 'unexpected ssh invocation: %s\n' "$*" >&2
+exit 1
 STUB
-  chmod +x "$TMPDIR_TEST/bin/flyctl"
+  chmod +x "$TMPDIR_TEST/bin/ssh"
 }
 
 run_and_capture() {
@@ -396,26 +381,31 @@ echo "Test 3: missing curl fails clearly"
 NO_CURL_PATH="$TMPDIR_TEST/no-curl-path"
 rm -rf "$NO_CURL_PATH"
 mkdir -p "$NO_CURL_PATH"
-OUTPUT=$(run_failure env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin PATH="$NO_CURL_PATH" "$BASH_BIN" "$SCRIPT" --app canary-test --json)
+OUTPUT=$(run_failure env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin PATH="$NO_CURL_PATH" "$BASH_BIN" "$SCRIPT" --host canary-host --json)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "missing curl exits non-zero"
 assert_contains "$BODY" "Missing required command: curl" "missing curl names dependency"
 
-echo "Test 4: missing Fly app fails clearly when DR status is enabled"
+echo "Test 4: missing host fails clearly when DR status is enabled"
 setup_stubs
 OUTPUT=$(run_failure env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin "$SCRIPT" --prefix test --webhook-url https://example.com/hook --no-dr-status --json)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
-assert_exit_code "$STATUS" "0" "no-dr-status allows missing app"
+assert_exit_code "$STATUS" "0" "no-dr-status allows missing host"
 OUTPUT=$(run_failure env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin "$SCRIPT" --prefix test --webhook-url https://example.com/hook --json)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
-assert_exit_code "$STATUS" "1" "missing app exits non-zero"
-assert_contains "$BODY" "Missing Fly app" "missing app names configuration"
+assert_exit_code "$STATUS" "1" "missing host exits non-zero"
+assert_contains "$BODY" "Missing Canary SSH host" "missing host names configuration"
+OUTPUT=$(run_failure env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin "$SCRIPT" --prefix test --webhook-url https://example.com/hook --host '-oProxyCommand=bad' --json)
+STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
+BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
+assert_exit_code "$STATUS" "1" "unsafe host exits non-zero"
+assert_contains "$BODY" "Invalid Canary SSH host" "unsafe host names configuration"
 
 echo "Test 5: stubbed rehearsal emits sanitized JSON receipt"
 setup_stubs
-OUTPUT=$(env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin EXPECT_TARGET_URL=http://127.0.0.1:4000/healthz "$SCRIPT" --prefix test --webhook-url https://example.com/hook --target-url http://127.0.0.1:4000/healthz --app canary-test --json)
+OUTPUT=$(env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin EXPECT_TARGET_URL=http://127.0.0.1:4000/healthz "$SCRIPT" --prefix test --webhook-url https://example.com/hook --target-url http://127.0.0.1:4000/healthz --host canary-host --json)
 assert_jq "$OUTPUT" '.status == "ok"' "receipt status ok"
 assert_jq "$OUTPUT" '.resources.cleaned_target_id == "TGT-test"' "records target id"
 assert_jq "$OUTPUT" '[.steps[] | select(.name == "target_create")][0].response.url == "http://127.0.0.1:4000/healthz"' "uses custom target URL"
@@ -425,9 +415,11 @@ assert_jq "$OUTPUT" '[.steps[] | select(.name == "dr_status" and .status == 0)] 
 assert_jq "$OUTPUT" '[.steps[] | select(.name == "post_cleanup_targets")][0].response.targets == []' "post-cleanup targets empty"
 assert_jq "$OUTPUT" '[.steps[] | select(.name == "post_cleanup_monitors")][0].response.monitors == []' "post-cleanup monitors empty"
 assert_jq "$OUTPUT" '[.steps[] | select(.name == "post_cleanup_webhooks")][0].response.webhooks == []' "post-cleanup webhooks empty"
-assert_jq "$OUTPUT" '.deploy_identity.machines[0].id == "machine-test"' "records Fly machine id"
-assert_jq "$OUTPUT" '.deploy_identity.machines[0].image_ref.digest == "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"' "records Fly image digest"
-assert_jq "$OUTPUT" '.deploy_identity.machines[0].image_ref.commit == "8066373b55108f662bf08158dfd74c25561a9fd4"' "records Fly image commit"
+assert_jq "$OUTPUT" '.host == "canary-host"' "records host target"
+assert_jq "$OUTPUT" '.deploy_identity.provider == "digitalocean"' "records production provider"
+assert_jq "$OUTPUT" '.deploy_identity.service == {name:"canary.service",state:"active"}' "records service identity"
+assert_jq "$OUTPUT" '.deploy_identity.container.image_id == "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"' "records immutable container image id"
+assert_jq "$OUTPUT" '.deploy_identity.container.state == "running"' "records running container state"
 assert_jq "$OUTPUT" '[.steps[] | select(.name == "ingest_key_cannot_read_targets" and .status == 403)] | length == 1' "proves ingest key cannot read admin target list"
 assert_jq "$OUTPUT" '[.steps[] | select(.name == "revoked_ingest_key_rejects_check_in" and .status == 401)] | length == 1' "proves revoked ingest key rejects check-in"
 RAW_TEST_KEY="sk_""live_TEST"
@@ -448,7 +440,7 @@ assert_file_contains "$CURL_LOG" "POST /api/v1/keys/KEY-test/revoke" "revokes ke
 
 echo "Test 6: non-delivered webhook rows fail and clean up"
 setup_stubs
-OUTPUT=$(run_failure env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin CURL_DELIVERY_STATUS=pending "$SCRIPT" --prefix test --webhook-url https://example.com/hook --app canary-test --poll-attempts 1 --poll-sleep 0 --json)
+OUTPUT=$(run_failure env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin CURL_DELIVERY_STATUS=pending "$SCRIPT" --prefix test --webhook-url https://example.com/hook --host canary-host --poll-attempts 1 --poll-sleep 0 --json)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "pending webhook delivery exits non-zero"
@@ -460,7 +452,7 @@ assert_file_contains "$CURL_LOG" "POST /api/v1/keys/KEY-test/revoke" "pending fa
 
 echo "Test 7: unexpected credential-bearing mutation status redacts and cleans up"
 setup_stubs
-OUTPUT=$(run_failure env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin CURL_KEY_CREATE_STATUS=500 "$SCRIPT" --prefix test --webhook-url https://example.com/hook --app canary-test --json)
+OUTPUT=$(run_failure env CANARY_ENDPOINT=http://canary.test CANARY_API_KEY=admin CURL_KEY_CREATE_STATUS=500 "$SCRIPT" --prefix test --webhook-url https://example.com/hook --host canary-host --json)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "unexpected key-create status exits non-zero"

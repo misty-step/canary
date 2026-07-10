@@ -65,7 +65,7 @@ image, one SQLite database, one deployment target, and a small set of explicit
 operator scripts. Complexity has to earn its way in.
 
 **A cold-self-hostable product.** The product must not require the Misty Step
-`canary-obs` instance, Phaedrus dogfood data, personal paths, or private
+production instance, Phaedrus dogfood data, personal paths, or private
 operating lore. Instance configuration belongs outside product code.
 
 **Dual first-class interfaces.** Canary carries one first-class human
@@ -141,7 +141,7 @@ Canary's serving model is intentional, not incidental:
    foundation — not an organic drift.
 
 A new reader should be able to answer "self-hosted, managed-later, or SaaS?"
-from this section alone, without reading `fly.toml` or the code.
+from this section alone, without reading provider configuration or the code.
 
 ## Competitive Position
 

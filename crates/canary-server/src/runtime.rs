@@ -41,9 +41,9 @@ use crate::{
 };
 
 /// Bounded wait for the writer lock before `/readyz` falls back to the last
-/// known-good verdict instead of queueing. Well under Fly's 5s health-check
-/// timeout (`fly.toml`), so a busy writer can never itself starve this probe
-/// into a restart-spiral timeout (canary-930).
+/// known-good verdict instead of queueing. Well under the production ingress
+/// health-check timeout, so a busy writer cannot itself starve this probe into
+/// a restart spiral (canary-930).
 const READINESS_LOCK_WAIT: StdDuration = StdDuration::from_millis(200);
 
 /// Consecutive lock-wait timeouts tolerated before a queued writer is

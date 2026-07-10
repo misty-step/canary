@@ -14,23 +14,18 @@ consumer repo; keep service-specific code changes in that repo.
 
 ## Inputs
 
-- `CANARY_ENDPOINT`: `https://canary-obs.fly.dev` for Misty Step.
+- `CANARY_ENDPOINT`: `https://canary.mistystep.io` for Misty Step.
 - A read/admin operator key for inspection and enrollment. Do not print it.
 - The service name agents should query, for example `powder`.
 - One production health URL when the app exposes HTTP health.
 - One check-in monitor name when the app has a worker, scheduler, CLI, or
   process heartbeat.
 
-For private Fly 6PN targets such as `http://<app>.internal:<port>/healthz`, the
-Canary hub must be configured to allow private target probes:
-
-```bash
-flyctl secrets set --app canary-obs ALLOW_PRIVATE_TARGETS=true
-```
-
-That setting belongs on the Canary hub, not in the consumer repo. It keeps the
-default self-host posture conservative while allowing an operator-controlled
-Factory fleet to use Fly private networking.
+Prefer canonical HTTPS health URLs. Private target probes require an explicit
+route from the dedicated Canary host plus `ALLOW_PRIVATE_TARGETS=true` in the
+host's reviewed runtime environment. That setting belongs on the Canary host,
+not in a consumer repo; changing it must preserve the host environment hash and
+restart `canary.service` through the production runbook.
 
 ## Path
 
@@ -43,11 +38,11 @@ Factory fleet to use Fly private networking.
   --json
 ```
 
-2. Verify the health URL from the Canary hub when the URL is private.
+2. Verify the health URL from the Canary host when the URL is private.
 
 ```bash
-flyctl ssh console --app canary-obs \
-  --command 'curl -fsS http://<app>.internal:<port>/healthz'
+ssh "$CANARY_SSH_HOST" sudo docker exec canary \
+  curl -fsS https://<private-health-host>/healthz
 ```
 
 Public URLs can be verified with a normal `curl -fsS <url>`.

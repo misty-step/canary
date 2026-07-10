@@ -42,7 +42,8 @@ is not part of the server runtime.
 ## Persistence
 
 Production uses one SQLite file at `/data/canary.db` with WAL mode. Litestream
-replicates the file to Fly Tigris. Recovery is restore-based, not failover.
+replicates the file to S3-compatible object storage. Recovery is restore-based,
+not failover.
 
 All writes go through `canary_store::Store`. The production server shares one
 writable store behind a process-local lock so SQLite's single-writer constraint
@@ -111,8 +112,10 @@ due webhook job
 module and covers the Rust workspace, TypeScript SDK, operator scripts,
 production image smoke, secrets scanning, and advisory checks in strict mode.
 
-The upstream Misty Step production deployment uses Fly app `canary-obs`.
-Self-hosted operators must pass their own `--app "$CANARY_FLY_APP"`; the
-checked-in Fly config uses a placeholder app name. The Dockerfile builds the
-Rust `canary-server` binary and `bin/entrypoint.sh` wraps Litestream restore
-and replication before executing it.
+The Misty Step production deployment uses a dedicated DigitalOcean host. The
+`canary.service` systemd unit owns exactly one Docker container named `canary`,
+binds its durable volume at `/var/lib/canary`, and exposes the process only
+through Caddy at `https://canary.mistystep.io`. The Dockerfile builds the Rust
+`canary-server` binary and `bin/entrypoint.sh` wraps Litestream restore and
+replication before executing it. Generic operators can use the same image and
+storage contract through `docs/self-host-docker.md`.

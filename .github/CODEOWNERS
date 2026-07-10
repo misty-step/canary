@@ -13,9 +13,8 @@
 /.github/CODEOWNERS                  @phrazzld
 /docs/governance.md                  @phrazzld
 
-# CI and deployment control plane — treat as protected infrastructure.
+# CI and release control plane — treat as protected infrastructure.
 /.github/workflows/                  @phrazzld
 /dagger.json                         @phrazzld
 /dagger/                             @phrazzld
-/fly.toml                            @phrazzld
 /Dockerfile                          @phrazzld

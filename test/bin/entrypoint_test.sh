@@ -154,7 +154,7 @@ assert_not_contains "$OUTPUT" "NOT configured" \
   "does not warn about unconfigured replication"
 
 # --- Test 3: All vars set → no warnings ---
-echo "Test 3: All Fly Tigris vars set"
+echo "Test 3: All Litestream S3 vars set"
 reset_env
 setup_stubs
 export BUCKET_NAME="my-bucket"

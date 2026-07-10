@@ -4,15 +4,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/bin/lib/dr.sh"
 
-APP="$(dr_default_app)"
+HOST="$(dr_default_host)"
+CONTAINER="$(dr_default_container)"
 DB_PATH="$(dr_default_db_path)"
 
 usage() {
   cat <<'EOF'
-Usage: bin/dr-restore-check [--app <fly-app>] [--db-path <path>] [-h|--help]
+Usage: bin/dr-restore-check [--host <ssh-target>] [--container <name>] [--db-path <path>] [-h|--help]
 
-Run a non-destructive restore drill on the remote Fly app by restoring the
-replica to a temporary file and listing the recovered database.
+Run a non-destructive restore drill inside the remote Canary container by
+restoring the replica to a temporary file and listing the recovered database.
 
 This restores the replica to a temporary file and never overwrites the live database.
 EOF
@@ -20,12 +21,20 @@ EOF
 
 while (($#)); do
   case "$1" in
-    --app)
+    --host)
       if (($# < 2)); then
         usage >&2
         exit 1
       fi
-      APP="$2"
+      HOST="$2"
+      shift 2
+      ;;
+    --container)
+      if (($# < 2)); then
+        usage >&2
+        exit 1
+      fi
+      CONTAINER="$2"
       shift 2
       ;;
     --db-path)
@@ -47,7 +56,9 @@ while (($#)); do
   esac
 done
 
-APP="$(dr_require_app "$APP")"
-dr_require_command flyctl
+HOST="$(dr_require_host "$HOST")"
+CONTAINER="$(dr_require_container "$CONTAINER")"
+DB_PATH="$(dr_require_db_path "$DB_PATH")"
+dr_require_command ssh
 
-dr_fly_ssh "$APP" "$(dr_restore_remote_command "$DB_PATH")"
+dr_container_ssh "$HOST" "$CONTAINER" "$(dr_restore_remote_command "$DB_PATH")"

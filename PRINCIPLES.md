@@ -28,7 +28,7 @@ No GitHub integration. No Slack integration. No Discord integration. No PagerDut
 v1 limitations are documented, not hidden:
 
 - Single region — health checks reflect connectivity from deployment region only
-- No HA — Fly machine restart = brief monitoring gap
+- No HA — host or container restart = brief monitoring gap
 - Restore-based DR — Litestream backup, not automatic failover
 - At-least-once webhooks — use `X-Delivery-Id` to deduplicate
 
