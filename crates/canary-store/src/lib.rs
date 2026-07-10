@@ -4641,6 +4641,23 @@ mod tests {
         let fresh_completed =
             complete_test_webhook_job(&mut store, "DLV-fresh-completed", "2026-05-28T00:00:00Z")?;
 
+        // Legacy Elixir-era `cancelled` rows: the Rust write path never
+        // produces this state, so seed it raw exactly as a pre-cutover DB
+        // would carry it. Old cancelled rows are terminal and must prune;
+        // fresh ones must survive (PR #257 review MAJOR).
+        store.connection.execute(
+            "INSERT INTO oban_jobs (state, queue, worker, args, cancelled_at, inserted_at, scheduled_at)
+             VALUES ('cancelled', 'webhooks', 'Canary.Workers.WebhookDelivery', '{}', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z')",
+            params![],
+        )?;
+        let old_cancelled = store.connection.last_insert_rowid();
+        store.connection.execute(
+            "INSERT INTO oban_jobs (state, queue, worker, args, cancelled_at, inserted_at, scheduled_at)
+             VALUES ('cancelled', 'webhooks', 'Canary.Workers.WebhookDelivery', '{}', '2026-05-28T00:00:00Z', '2026-05-28T00:00:00Z', '2026-05-28T00:00:00Z')",
+            params![],
+        )?;
+        let fresh_cancelled = store.connection.last_insert_rowid();
+
         // Non-terminal rows at any age: must never be pruned (footgun: "Webhook
         // delivery jobs" — claimed work is never destroyed).
         let available = store.insert_webhook_delivery_job(WebhookDeliveryJobInsert {
@@ -4676,7 +4693,7 @@ mod tests {
         assert_eq!(
             report,
             RetentionPruneBatchReport {
-                deleted: 2,
+                deleted: 3,
                 complete: true,
             }
         );
@@ -4686,6 +4703,20 @@ mod tests {
         assert!(store.webhook_delivery_job(available)?.is_some());
         assert!(store.webhook_delivery_job(scheduled)?.is_some());
         assert!(store.webhook_delivery_job(executing)?.is_some());
+
+        let count_row = |id: i64| -> std::result::Result<i64, Box<dyn std::error::Error>> {
+            Ok(store.connection.query_row(
+                "SELECT COUNT(*) FROM oban_jobs WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )?)
+        };
+        assert_eq!(count_row(old_cancelled)?, 0, "old cancelled row must prune");
+        assert_eq!(
+            count_row(fresh_cancelled)?,
+            1,
+            "fresh cancelled row must survive the cutoff"
+        );
 
         Ok(())
     }

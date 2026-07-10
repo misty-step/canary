@@ -126,11 +126,15 @@ fn table_predicate(table: RetentionPruneTable) -> (&'static str, &'static str) {
         RetentionPruneTable::ServiceEvents => ("service_events", "created_at < ?1"),
         RetentionPruneTable::TargetChecks => ("target_checks", "checked_at < ?1"),
         // Only terminal states are eligible. `available`/`scheduled`/`executing`
-        // rows never match this predicate regardless of cutoff.
+        // rows never match this predicate regardless of cutoff. `cancelled` is
+        // a legacy Elixir-era state the Rust write path never produces, but
+        // pre-cutover rows may carry it; it is terminal and prunes like the
+        // others.
         RetentionPruneTable::ObanJobsTerminal => (
             "oban_jobs",
             "((state = 'completed' AND completed_at < ?1)
-              OR (state = 'discarded' AND discarded_at < ?1))",
+              OR (state = 'discarded' AND discarded_at < ?1)
+              OR (state = 'cancelled' AND cancelled_at < ?1))",
         ),
     }
 }
