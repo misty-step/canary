@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Canary API",
-    "version": "0.1.0",
+    "version": "0.0.0-dev",
     "description": "Machine-consumable contract for the Canary observability API. Canary exposes deterministic, bounded responses for error ingestion, health checks, incidents, timelines, operator management, and webhook delivery visibility.",
     "x-agent-guide": {
       "summary": "Register webhooks as wake-up hints, then treat the timeline as the durable source of truth for correctness.",

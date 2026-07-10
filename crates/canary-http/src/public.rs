@@ -4,10 +4,30 @@
 //! router framework. The Axum handlers are thin adapters over these response
 //! builders.
 
+use std::sync::LazyLock;
+
 use serde::{Deserialize, Serialize};
 
-/// The OpenAPI document served by `GET /api/v1/openapi.json`.
+/// The OpenAPI document served by `GET /api/v1/openapi.json`, as checked in.
+/// `info.version` here is the `0.0.0-dev` placeholder; the served response
+/// stamps it with [`CANARY_VERSION`] (see [`openapi_response`]).
 pub const OPENAPI_JSON: &str = include_str!("../../../priv/openapi/openapi.json");
+
+/// Placeholder `info.version` field in the checked-in [`OPENAPI_JSON`]
+/// document, substituted with [`CANARY_VERSION`] at serve time.
+const OPENAPI_VERSION_PLACEHOLDER: &str = "\"version\": \"0.0.0-dev\"";
+
+/// The version this build was compiled with, stamped by `build.rs` from the
+/// `CANARY_VERSION` environment variable (the deploy pipeline's
+/// `git describe` output; `0.0.0-dev` for builds outside that pipeline).
+pub const CANARY_VERSION: &str = env!("CANARY_VERSION");
+
+/// [`OPENAPI_JSON`] with `info.version` replaced by [`CANARY_VERSION`],
+/// computed once on first access.
+static OPENAPI_JSON_STAMPED: LazyLock<String> = LazyLock::new(|| {
+    let stamped = format!("\"version\": \"{CANARY_VERSION}\"");
+    OPENAPI_JSON.replacen(OPENAPI_VERSION_PLACEHOLDER, &stamped, 1)
+});
 
 /// JSON content type for these public endpoints.
 pub const APPLICATION_JSON: &str = "application/json; charset=utf-8";
@@ -265,12 +285,13 @@ pub fn readyz_response(
     }
 }
 
-/// Build the `GET /api/v1/openapi.json` response.
-pub const fn openapi_response() -> PublicResponse<&'static str> {
+/// Build the `GET /api/v1/openapi.json` response, with `info.version`
+/// stamped to [`CANARY_VERSION`].
+pub fn openapi_response() -> PublicResponse<&'static str> {
     PublicResponse {
         status: 200,
         content_type: APPLICATION_JSON,
-        body: OPENAPI_JSON,
+        body: OPENAPI_JSON_STAMPED.as_str(),
     }
 }
 
@@ -468,6 +489,20 @@ mod tests {
     }
 
     #[test]
+    fn openapi_response_stamps_canary_version_and_changes_nothing_else() {
+        let response = openapi_response();
+
+        let mut served: Value = serde_json::from_str(response.body).unwrap_or(Value::Null);
+        let mut checked_in: Value = serde_json::from_str(OPENAPI_JSON).unwrap_or(Value::Null);
+
+        assert_eq!(served["info"]["version"], CANARY_VERSION);
+
+        served["info"]["version"] = Value::Null;
+        checked_in["info"]["version"] = Value::Null;
+        assert_eq!(served, checked_in);
+    }
+
+    #[test]
     fn openapi_response_serves_the_checked_in_contract_unchanged() {
         let response = openapi_response();
         let document: Value = serde_json::from_str(response.body).unwrap_or(Value::Null);
@@ -482,6 +517,7 @@ mod tests {
             document["paths"]["/api/v1/openapi.json"]["get"]["security"],
             json!([])
         );
+        assert_eq!(document["info"]["version"], CANARY_VERSION);
         assert_eq!(
             document["components"]["schemas"]["ReadyzResponse"]["required"],
             json!(["status", "checks"])
