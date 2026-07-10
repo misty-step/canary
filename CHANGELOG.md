@@ -1,3 +1,10 @@
+## [0.15.3](https://github.com/misty-step/canary/compare/v0.15.2...v0.15.3) (2026-07-10)
+
+
+### Bug Fixes
+
+* **server:** isolate /readyz and contain request-path panics ([#256](https://github.com/misty-step/canary/issues/256)) ([4ca5edf](https://github.com/misty-step/canary/commit/4ca5edf04736b0259f3da2714c6504078529a633))
+
 ## [0.15.2](https://github.com/misty-step/canary/compare/v0.15.1...v0.15.2) (2026-07-09)
 
 
