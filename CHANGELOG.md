@@ -1,3 +1,10 @@
+## [0.16.1](https://github.com/misty-step/canary/compare/v0.16.0...v0.16.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* **release:** version truth — stamped artifacts, honest npm claim, changelog reconciliation ([#262](https://github.com/misty-step/canary/issues/262)) ([573c68d](https://github.com/misty-step/canary/commit/573c68d4c50db9d6d68ca057ef293cc02b2c2cc8)), closes [#231](https://github.com/misty-step/canary/issues/231)
+
 # [0.16.0](https://github.com/misty-step/canary/compare/v0.15.6...v0.16.0) (2026-07-10)
 
 
