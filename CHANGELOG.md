@@ -1,3 +1,10 @@
+## [0.15.5](https://github.com/misty-step/canary/compare/v0.15.4...v0.15.5) (2026-07-10)
+
+
+### Bug Fixes
+
+* **store:** prune legacy cancelled oban_jobs rows too ([#259](https://github.com/misty-step/canary/issues/259)) ([957e797](https://github.com/misty-step/canary/commit/957e79756db9b6b844942553d2d172abd745b079)), closes [#257](https://github.com/misty-step/canary/issues/257) [#257](https://github.com/misty-step/canary/issues/257)
+
 ## [0.15.4](https://github.com/misty-step/canary/compare/v0.15.3...v0.15.4) (2026-07-10)
 
 
