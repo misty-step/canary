@@ -275,8 +275,8 @@ mod tests {
     };
     use canary_http::{
         public::{
-            APPLICATION_JSON, DependencyStatus, OPENAPI_JSON, WorkerHealthStatus,
-            WorkerLifecycleState, WorkerPressureShape, WorkerReadyzCheck,
+            APPLICATION_JSON, CANARY_VERSION, DependencyStatus, OPENAPI_JSON, WorkerHealthStatus,
+            WorkerLifecycleState, WorkerPressureShape, WorkerReadyzCheck, stamp_openapi_version,
         },
         request::MAX_JSON_BODY_BYTES,
     };
@@ -1606,7 +1606,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn openapi_serves_the_checked_in_document_unchanged() -> Result<(), Box<dyn Error>> {
+    async fn openapi_serves_the_checked_in_document_with_stamped_version()
+    -> Result<(), Box<dyn Error>> {
         let response = public_router(PublicReadiness::ready())
             .oneshot(Request::get("/api/v1/openapi.json").body(Body::empty())?)
             .await?;
@@ -1617,7 +1618,13 @@ mod tests {
             content_type,
             Some(HeaderValue::from_static(APPLICATION_JSON))
         );
-        assert_eq!(body.as_ref(), OPENAPI_JSON.as_bytes());
+
+        // The served document matches the checked-in contract byte-for-byte
+        // except for `info.version`, which is stamped to CANARY_VERSION at
+        // build time via the same substitution the router uses (see
+        // crates/canary-http/build.rs and stamp_openapi_version).
+        let expected = stamp_openapi_version(OPENAPI_JSON, CANARY_VERSION)?;
+        assert_eq!(body.as_ref(), expected.as_bytes());
 
         Ok(())
     }

@@ -58,7 +58,7 @@ Agent-Task: canary-932 children 3+4 (post-review fixes)
 
 ## Version reset: v1.15.0 → v0.15.0 (2026-07-08)
 
-The fleet moved to pre-stable 0.x semantics (Powder landmark-016/017): versions below 1.0.0 use Cargo-style bumps (breaking→minor, feat/fix→patch) and never cross 1.0.0 automatically; promotion to 1.0.0 is a deliberate manual tag. v0.15.0 is the same commit as v1.15.0. Earlier 1.x/2.x entries below record real history under the old numbering; their tags and GitHub releases were retired.
+The fleet moved to pre-stable 0.x semantics (Powder landmark-016/017): versions below 1.0.0 use Cargo-style bumps (breaking→minor, feat/fix→patch) and never cross 1.0.0 automatically; promotion to 1.0.0 is a deliberate manual tag. v0.15.0 is the same commit as v1.15.0. Earlier 1.x/2.x entries below record real history under the old numbering; their tags and GitHub releases were retired, so every `compare/vX.Y.Z...vX.Y.Z` link in those entries 404s today (verified 2026-07-10) — the commit and issue/PR links beside them still resolve and are the reliable way to find that history. These entries are left as originally generated, not rewritten.
 
 # [1.15.0](https://github.com/misty-step/canary/compare/v1.14.0...v1.15.0) (2026-07-08)
 

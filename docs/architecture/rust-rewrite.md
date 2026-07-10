@@ -788,7 +788,7 @@ the Rust server accepts production traffic:
     `healthz_adapts_the_public_contract`,
     `readyz_returns_ready_when_all_dependencies_are_ok`,
     `readyz_returns_503_when_any_dependency_fails`,
-    `openapi_serves_the_checked_in_document_unchanged`,
+    `openapi_serves_the_checked_in_document_with_stamped_version`,
     `public_router_does_not_mount_private_routes`,
     `annotations_create_list_paginate_and_emit_webhook_effect`, and
     `legacy_annotation_routes_and_errors_follow_phoenix_contract` lock the

@@ -6,8 +6,20 @@ webhooks.
 
 ## Install
 
+Not yet published to npm — the `@canary-obs` org and an npm publish token are
+operator setup steps that haven't happened yet
+([`sdk-publish.yml`](../../.github/workflows/sdk-publish.yml) is ready and
+gated on the `NPM_TOKEN` secret; see
+[`docs/compatibility-policy.md`](https://github.com/misty-step/canary/blob/master/docs/compatibility-policy.md)
+for the publish plan). Until then, build and link from source:
+
 ```bash
-npm install @canary-obs/sdk
+# From the Canary repo, build the SDK:
+git clone https://github.com/misty-step/canary.git
+cd canary/clients/typescript && npm install && npm run build
+
+# In your app, link it via file: (adjust the relative path):
+npm install file:../path/to/canary/clients/typescript
 ```
 
 ## Usage

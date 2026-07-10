@@ -19,7 +19,7 @@ use std::{
 };
 
 use axum::Router;
-use canary_http::public::DependencyStatus;
+use canary_http::public::{CANARY_VERSION, DependencyStatus, OPENAPI_JSON, stamp_openapi_version};
 use canary_ingest::{IngestConfig, IngestEffect};
 use canary_store::{IncidentCorrelation, ReadPool, Store};
 use canary_workers::retention::RetentionPolicy;
@@ -129,6 +129,14 @@ pub struct CanaryServer {
 impl CanaryServer {
     /// Open storage, run migrations, wire HTTP routes, and start webhook draining.
     pub fn boot(config: ServerConfig) -> Result<Self, ServerBootError> {
+        // Fail before ever accepting a connection if the checked-in OpenAPI
+        // contract can't be stamped with this build's version (for example,
+        // a reformatted priv/openapi/openapi.json that moved the info.version
+        // placeholder) — the alternative is silently serving a stale version
+        // forever from a process that otherwise looks healthy.
+        stamp_openapi_version(OPENAPI_JSON, CANARY_VERSION)
+            .map_err(ServerBootError::OpenApiContract)?;
+
         if config.webhook_drain_max_jobs == 0 {
             return Err(ServerBootError::InvalidConfig(
                 "webhook drain max jobs must be greater than zero".to_owned(),
@@ -356,6 +364,9 @@ pub enum ServerBootError {
     RetentionPruneWorker(String),
     /// TLS-expiry scan lifecycle worker failed to start.
     TlsExpiryScanWorker(String),
+    /// The checked-in OpenAPI contract can't be stamped with the compiled
+    /// version (see `canary_http::public::stamp_openapi_version`).
+    OpenApiContract(canary_http::public::OpenApiVersionStampError),
 }
 
 impl fmt::Display for ServerBootError {
@@ -369,6 +380,7 @@ impl fmt::Display for ServerBootError {
             Self::MonitorOverdueWorker(error) => formatter.write_str(error),
             Self::RetentionPruneWorker(error) => formatter.write_str(error),
             Self::TlsExpiryScanWorker(error) => formatter.write_str(error),
+            Self::OpenApiContract(error) => write!(formatter, "openapi contract error: {error}"),
         }
     }
 }

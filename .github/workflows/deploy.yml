@@ -18,8 +18,22 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          fetch-tags: true
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1
-      - run: flyctl deploy --app "$FLY_APP" --remote-only
+      - name: Resolve deployed version
+        id: version
+        run: |
+          # The release commit (which carries the next tag) lands on a
+          # separate, later push with [skip ci] — see .github/workflows/release.yml
+          # — so this checkout is never exactly on a tag. `git describe`
+          # reports the nearest ancestor tag plus how far ahead we are, which
+          # is the truthful answer to "what is this build, relative to the
+          # last cut release".
+          version="$(git describe --tags --always --dirty 2>/dev/null || echo 0.0.0-dev)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - run: flyctl deploy --app "$FLY_APP" --remote-only --build-arg "CANARY_VERSION=${VERSION}"
         env:
           FLY_APP: ${{ vars.CANARY_FLY_APP }}
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}

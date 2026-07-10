@@ -1,0 +1,20 @@
+# Keep the flyctl/Docker build context to what the Dockerfile actually COPYs
+# (Cargo.toml, Cargo.lock, crates/, priv/, litestream.yml, bin/). Without this
+# file the full-history deploy checkout (fetch-depth: 0, needed for git
+# describe version stamping) ships the entire .git to the remote builder on
+# every deploy, growing unbounded.
+.git
+.github
+.githooks
+.ci
+.claude
+.agents
+.codex
+docs
+site
+test
+dagger
+clients
+target
+canary.db*
+*.md
