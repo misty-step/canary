@@ -3759,23 +3759,22 @@ fn run_dr_status(repo_root: &Path) -> Value {
             "reason": "bin/dr-status not found"
         });
     }
-    let Some(app) = env::var("CANARY_FLY_APP")
+    let Some(host) = env::var("CANARY_SSH_HOST")
         .ok()
-        .or_else(|| env::var("FLY_APP").ok())
         .filter(|value| !value.trim().is_empty())
     else {
         return json!({
             "ok": false,
-            "reason": "CANARY_FLY_APP/FLY_APP not configured",
-            "command": "NO_COLOR=1 bin/dr-status --app <fly-app>"
+            "reason": "CANARY_SSH_HOST not configured",
+            "command": "NO_COLOR=1 bin/dr-status --host <ssh-target>"
         });
     };
-    let command_display = format!("NO_COLOR=1 bin/dr-status --app {app}");
+    let command_display = format!("NO_COLOR=1 bin/dr-status --host {host}");
     match Command::new(&program)
         .current_dir(repo_root)
         .env("NO_COLOR", "1")
-        .arg("--app")
-        .arg(&app)
+        .arg("--host")
+        .arg(&host)
         .output()
     {
         Ok(output) => json!({
@@ -5465,12 +5464,12 @@ mod tests {
         fs::write(&config_path, r#"{"api_key":"sk_test"}"#)?;
 
         let config = Config::resolve(
-            Some("https://example-canary.fly.dev/".to_owned()),
+            Some("https://canary.example.com/".to_owned()),
             None,
             Some(config_path),
         )?;
 
-        assert_eq!(config.endpoint, "https://example-canary.fly.dev");
+        assert_eq!(config.endpoint, "https://canary.example.com");
         fs::remove_dir_all(root)?;
         Ok(())
     }

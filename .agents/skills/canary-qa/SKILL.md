@@ -70,7 +70,8 @@ Check: `201` with an `ERR-` id, the error surfaces in query/report, the determin
 
 ## CLI QA
 
-Default endpoint is prod `https://canary-obs.fly.dev` — **override it or you QA production.**
+Always set `CANARY_ENDPOINT` explicitly. Misty Step production is
+`https://canary.mistystep.io`; local QA should use `http://localhost:4000`.
 
 ```sh
 export CANARY_ENDPOINT=http://localhost:4000 CANARY_ADMIN_KEY=$KEY

@@ -1,211 +1,151 @@
-# Backup, Restore, and DR
+# Backup Verification and Disaster Recovery
 
-This runbook covers Litestream backup verification and manual recovery for a
-Fly-hosted Canary app.
+This is the production runbook for the dedicated DigitalOcean Canary host.
+Canary runs as one container named `canary`, owned by `canary.service`. The
+durable block volume is mounted at `/var/lib/canary` on the host and `/data` in
+the container. Litestream runs inside that same container and replicates the
+SQLite database to DigitalOcean Spaces through `/etc/litestream.yml`.
 
-Set the target instance before running commands:
+Generic Docker operators can use the same container-level checks with their own
+SSH target, container name, and S3-compatible Litestream configuration.
 
-```bash
-export CANARY_FLY_APP="<your-fly-app>"
-export CANARY_ENDPOINT="https://${CANARY_FLY_APP}.fly.dev"
-```
-
-## Historical Production Evidence
-
-Initial live inspection on `2026-04-16` found that `canary-obs` was not
-actively backing up:
-
-- `flyctl secrets list --app canary-obs` showed no `BUCKET_NAME`,
-  `AWS_ACCESS_KEY_ID`, or `AWS_SECRET_ACCESS_KEY` secrets
-- the same remote Litestream preflight later wrapped by `bin/dr-status` failed
-  with `bucket required for s3 replica`
-
-Later on `2026-04-16`, Fly Tigris was provisioned with
-`flyctl storage create --app canary-obs --name canary-obs-backups --yes`, the
-matching image was deployed, and live verification succeeded:
-
-- `bin/dr-status` reported `/data/canary.db` as `ok`
-- `bin/dr-restore-check` materialized a temporary `10M` restore file on the
-  running machine
-
-Treat the commands below as the ongoing source of truth before any destructive
-recovery work.
-
-The shell tests in this repo verify wrapper command composition and
-restore-on-missing-DB behavior. They do not replace a live Fly/Litestream
-verification run against the operator's own app.
-
-## Enable Fly Tigris Backups
-
-Provision a Fly-managed Tigris bucket for the app:
+## Operator Inputs
 
 ```bash
-flyctl storage create \
-  --app "$CANARY_FLY_APP" \
-  --name "${CANARY_FLY_APP}-backups" \
-  --yes
+export CANARY_ENDPOINT=https://canary.mistystep.io
+export CANARY_SSH_HOST=<operator-ssh-target>
+export CANARY_CONTAINER=canary
+# Required only for authenticated post-recovery API proof:
+export CANARY_ADMIN_KEY=<securely-resolved-admin-key>
 ```
 
-`flyctl storage create` provisions the bucket and stages or deploys the app
-secrets for Fly's Tigris object storage. Canary only depends on
-`BUCKET_NAME`, `AWS_ACCESS_KEY_ID`, and `AWS_SECRET_ACCESS_KEY`; the Tigris
-endpoint and `auto` region are intentionally pinned in `litestream.yml` so the
-backup contract stays Fly-specific and small.
+The SSH target is intentionally not stored in the repository. Do not infer it
+from an old receipt. None of the commands below reads or prints the root-owned
+container environment.
 
-Confirm the secrets are present:
+## Routine Backup Status
+
+Verify the runtime identity and public process first:
 
 ```bash
-flyctl secrets list --app "$CANARY_FLY_APP"
+ssh "$CANARY_SSH_HOST" sudo systemctl is-active canary.service
+ssh "$CANARY_SSH_HOST" sudo docker inspect "$CANARY_CONTAINER" \
+  --format '{{.Image}} {{.State.Status}} {{.State.StartedAt}}'
+curl -fsS "$CANARY_ENDPOINT/healthz"
+curl -fsS "$CANARY_ENDPOINT/readyz"
 ```
 
-If Fly reports them as `Staged`, deploy the current release with the new
-secrets without rebuilding:
+Then run the repo-owned Litestream status wrapper:
 
 ```bash
-flyctl secrets deploy --app "$CANARY_FLY_APP"
+bin/dr-status
+# equivalent:
+bin/dr-status --host "$CANARY_SSH_HOST" --container "$CANARY_CONTAINER"
 ```
 
-`bin/dr-status` is still the authoritative verification step because it checks
-the running container's effective Litestream configuration.
-
-## Read-Only Backup Verification
-
-Check Litestream replication status on the running machine:
-
-```bash
-bin/dr-status --app "$CANARY_FLY_APP"
-```
-
-The wrapper owns the exact `flyctl ssh console` contract through
-[`bin/lib/dr.sh`](../bin/lib/dr.sh), so quoting changes stay single-source in
-code instead of being hand-copied into the runbook.
-
-When backup configuration is missing, this command fails non-zero. That is the
-expected signal to fix Fly Tigris configuration before doing any DR work.
-
-Production startup can be made fail-closed on missing Litestream guarantees by
-setting:
-
-```bash
-CANARY_REQUIRE_LITESTREAM=1
-```
-
-With this enabled, `bin/entrypoint.sh` exits before launching Canary when the
-database is missing and Litestream credentials/configuration are not available
-to restore it. `/readyz` stays a fast request-path check over local process
-state; backup guarantees are surfaced through startup policy and
-`bin/canary doctor` rather than by shelling out from readiness requests.
+`bin/dr-status` sends a fixed script over SSH stdin and runs
+`litestream status -config /etc/litestream.yml` inside the running container.
+It is read-only. A public HTTP 200 does not replace this check.
 
 ## Non-Destructive Restore Drill
 
-Restore the Tigris replica to a temporary file on the running machine without
-touching the live database:
+Restore the current replica into container tmpfs and require a non-empty file:
 
 ```bash
-bin/dr-restore-check --app "$CANARY_FLY_APP"
+bin/dr-restore-check
+# equivalent:
+bin/dr-restore-check \
+  --host "$CANARY_SSH_HOST" \
+  --container "$CANARY_CONTAINER" \
+  --db-path /data/canary.db
 ```
 
-The wrapper builds the remote restore command through
-[`bin/lib/dr.sh`](../bin/lib/dr.sh) so the shell quoting contract only lives in
-one place.
+The wrapper never overwrites `/data/canary.db`; its temporary artifact is
+deleted on exit. This proves restore reachability and materialization. The
+production migration additionally proved a full-integrity restore and matching
+application-table content before the host became authoritative.
 
-Treat this as the required proof that a replica can be materialized before any
-destructive recovery on `/data/canary.db`. `bin/dr-restore-check --db-path ...`
-passes the path as a positional argument to the remote shell so Fly does not
-misparse it as a command prefix. The drill now fails unless Litestream leaves a
-non-empty restored database artifact.
+Run both wrappers before every production image promotion and after changes to
+the object-store, Litestream, volume, or host runtime.
 
-## Destructive Recovery
+## Configuration Contract
 
-Use this only after `bin/dr-status` and `bin/dr-restore-check` succeed.
+Production starts fail-closed with `CANARY_REQUIRE_LITESTREAM=1`. The
+root-owned `/etc/canary/canary.env` supplies:
 
-1. Capture the current Fly machine ID, volume ID, image, and region from Fly's JSON output.
-2. Stop the real app machine so SQLite releases its WAL file handles and the
-   volume can be mounted elsewhere safely.
-3. Start a temporary maintenance machine with the same image, no traffic, and
-   the stopped `/data` volume attached.
-4. Delete the local DB files from that maintenance machine and verify they are
-   actually gone.
-5. Destroy the maintenance machine so the volume is detached again.
-6. Start the real app machine so `bin/entrypoint.sh` restores from Litestream
-   before Canary starts.
+- `CANARY_DB_PATH=/data/canary.db`
+- `BUCKET_NAME`
+- `CANARY_REPLICA_PATH`
+- `LITESTREAM_ENDPOINT`
+- `LITESTREAM_REGION`
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+
+Never print that file. The systemd unit verifies its recorded SHA-256 before
+starting the container. `/etc/canary/image.env` pins the runtime by immutable
+Docker image ID, and the host preflight rejects a missing or wrong volume
+mount.
+
+## Human-Gated Recovery
+
+Destructive recovery is never automatic. It is allowed only after
+`bin/dr-status` and `bin/dr-restore-check` pass and an operator has recorded the
+current image ID, volume identity, database hash/count ledger, and rollback
+point.
+
+The load-bearing order is:
+
+1. Stop the single writer.
+2. Prove no `canary` container remains and `/var/lib/canary` is the expected
+   mounted volume.
+3. Restore to a staged file, never over the live database.
+4. Run SQLite integrity, foreign-key, schema, and application-count checks on
+   the staged file.
+5. Preserve the incumbent `canary.db*` files as the rollback set.
+6. Atomically install the verified staged database while the writer remains
+   stopped.
+7. Start `canary.service`; prove public health, readiness, authenticated API
+   reads, target/webhook state, and fresh Litestream status.
+
+The first two stop gates are:
 
 ```bash
-set -euo pipefail
+ssh "$CANARY_SSH_HOST" sudo systemctl stop canary.service
+ssh "$CANARY_SSH_HOST" sudo systemctl is-active canary.service
+# expected: inactive (the command itself exits non-zero)
 
-MACHINE_JSON=$(flyctl machines list --app "$CANARY_FLY_APP" --json | jq -ce 'map(select(.config.env.FLY_PROCESS_GROUP == "app")) | .[0]')
-MACHINE_ID=$(printf '%s' "$MACHINE_JSON" | jq -er '.id')
-VOLUME_ID=$(printf '%s' "$MACHINE_JSON" | jq -er '.config.mounts[0].volume')
-IMAGE=$(printf '%s' "$MACHINE_JSON" | jq -er '.config.image')
-REGION=$(printf '%s' "$MACHINE_JSON" | jq -er '.region')
-MAINT_NAME="cdrm_$(date +%s | tail -c 7)"
+ssh "$CANARY_SSH_HOST" sudo docker ps --filter name='^/canary$' \
+  --format '{{.ID}}'
+# expected: no output
 
-printf 'Recovering Fly machine: %s (volume %s)\n' "$MACHINE_ID" "$VOLUME_ID"
-
-flyctl machines stop "$MACHINE_ID" --app "$CANARY_FLY_APP"
-
-flyctl machine run --app "$CANARY_FLY_APP" --region "$REGION" --detach \
-  --skip-dns-registration --restart no --name "$MAINT_NAME" \
-  --entrypoint sleep --volume "$VOLUME_ID":/data "$IMAGE" infinity
-
-MAINT_ID=
-for _ in $(seq 1 30); do
-  MAINT_ID=$(flyctl machines list --app "$CANARY_FLY_APP" --json | jq -er --arg name "$MAINT_NAME" '.[] | select(.name == $name) | .id' 2>/dev/null || true)
-  [ -n "$MAINT_ID" ] && break
-  sleep 2
-done
-test -n "$MAINT_ID"
-
-cleanup_maint() {
-  flyctl machine destroy "$MAINT_ID" --app "$CANARY_FLY_APP" --force
-}
-trap cleanup_maint EXIT
-
-flyctl machine wait "$MAINT_ID" --app "$CANARY_FLY_APP" --state started
-flyctl machine exec "$MAINT_ID" "sh -eu -c 'rm -f /data/canary.db /data/canary.db-wal /data/canary.db-shm && for path in /data/canary.db /data/canary.db-wal /data/canary.db-shm; do [ ! -e \"$path\" ] || { echo \"$path still present\" >&2; exit 1; }; done'" --app "$CANARY_FLY_APP"
-
-flyctl machine destroy "$MAINT_ID" --app "$CANARY_FLY_APP" --force
-trap - EXIT
-
-flyctl machines start "$MACHINE_ID" --app "$CANARY_FLY_APP"
+ssh "$CANARY_SSH_HOST" sudo findmnt --target /var/lib/canary \
+  --output SOURCE,FSTYPE,TARGET --noheadings
+# expected: the dedicated ext4 volume mounted at /var/lib/canary
 ```
 
-Why the stop/maintenance/start sequence exists:
+Stop if any expectation differs. Do not use `docker exec rm` against the live
+container: SQLite WAL/SHM handles remain open and the operation is not a valid
+restore.
 
-- stopping the machine releases SQLite's WAL file handles
-- the temporary maintenance machine keeps the volume writable without running
-  Canary against that volume
-- the final start is what re-runs `bin/entrypoint.sh` with the database paths
-  missing, which triggers the Litestream restore path
+The repository deliberately does not ship a one-command destructive restore.
+The staged-file installation must be reviewed against the current database
+schema and exact host image before execution; this prevents a stale runbook
+from replacing production data merely because a storage command succeeded.
 
-This maintenance-machine flow was validated on `2026-04-16` against a
-disposable forked volume using the same image and `flyctl machine run` /
-`flyctl machine exec` sequence above.
+## Post-Recovery Oracle
 
-## Post-Recovery Checks
-
-Re-run the backup checks after the machine comes back:
-
-```bash
-bin/dr-status --app "$CANARY_FLY_APP"
-bin/dr-restore-check --app "$CANARY_FLY_APP"
-```
-
-Check recent logs for the restore message:
-
-```bash
-flyctl logs --app "$CANARY_FLY_APP" --no-tail | rg "Restoring database from Litestream"
-```
-
-Treat this as a failed recovery and stop immediately if it appears:
-
-```bash
-flyctl logs --app "$CANARY_FLY_APP" --no-tail | rg "did not materialize /data/canary.db"
-```
-
-Then verify the service itself:
+After `sudo systemctl start canary.service`, require all of the following:
 
 ```bash
 curl -fsS "$CANARY_ENDPOINT/healthz"
 curl -fsS "$CANARY_ENDPOINT/readyz"
+curl -fsS -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
+  "$CANARY_ENDPOINT/api/v1/report?window=1h" | jq '.status'
+bin/dr-status
+bin/dr-restore-check
+bin/canary errors list canary --window 1h
 ```
+
+Also compare the expected target, monitor, webhook, incident, and application
+table counts from the pre-recovery ledger. HTTP health alone is not data-plane
+recovery evidence.

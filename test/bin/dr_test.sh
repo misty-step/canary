@@ -5,20 +5,23 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DR_STATUS="$ROOT/bin/dr-status"
 DR_RESTORE_CHECK="$ROOT/bin/dr-restore-check"
 BASH_BIN="$(command -v bash)"
-MISSING_FLYCTL_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 ORIGINAL_PATH="$PATH"
 PASS=0
 FAIL=0
 TMPDIR_TEST=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_TEST"' EXIT
+MISSING_SSH_PATH="$TMPDIR_TEST/no-ssh"
+mkdir -p "$MISSING_SSH_PATH"
+ln -s "$(command -v dirname)" "$MISSING_SSH_PATH/dirname"
 
 setup_stubs() {
   rm -rf "$TMPDIR_TEST/bin"
   mkdir -p "$TMPDIR_TEST/bin"
   export PATH="$TMPDIR_TEST/bin:$ORIGINAL_PATH"
-  export FLYCTL_LOG="$TMPDIR_TEST/flyctl.log"
+  export SSH_LOG="$TMPDIR_TEST/ssh.log"
+  export SSH_STDIN_LOG="$TMPDIR_TEST/ssh.stdin.log"
 
-  cat > "$TMPDIR_TEST/bin/flyctl" <<'STUB'
+  cat > "$TMPDIR_TEST/bin/ssh" <<'STUB'
 #!/usr/bin/env bash
 {
   printf 'argc=%s\n' "$#"
@@ -27,10 +30,11 @@ setup_stubs() {
     printf 'arg%s=%s\n' "$i" "$arg"
     i=$((i + 1))
   done
-} > "${FLYCTL_LOG:?}"
-exit "${FLYCTL_STUB_EXIT:-0}"
+} > "${SSH_LOG:?}"
+cat > "${SSH_STDIN_LOG:?}"
+exit "${SSH_STUB_EXIT:-0}"
 STUB
-  chmod +x "$TMPDIR_TEST/bin/flyctl"
+  chmod +x "$TMPDIR_TEST/bin/ssh"
 }
 
 run_and_capture() {
@@ -75,20 +79,6 @@ assert_file_contains() {
   fi
 }
 
-assert_file_matches() {
-  local path="$1" pattern="$2" test_name="$3"
-  if grep -Eq "$pattern" "$path"; then
-    echo "  PASS: $test_name"
-    PASS=$((PASS + 1))
-  else
-    echo "  FAIL: $test_name"
-    echo "    Expected $path to match regex: $pattern"
-    echo "    Got:"
-    sed 's/^/      /' "$path"
-    FAIL=$((FAIL + 1))
-  fi
-}
-
 assert_exit_code() {
   local actual="$1" expected="$2" test_name="$3"
   if [ "$actual" = "$expected" ]; then
@@ -119,31 +109,35 @@ echo "Test 1: dr-status help"
 OUTPUT=$(run_and_capture "$DR_STATUS" --help)
 assert_contains "$OUTPUT" "Usage: bin/dr-status" "shows dr-status usage"
 
-echo "Test 2: dr-status requires an explicit app"
+echo "Test 2: dr-status requires an explicit host"
 OUTPUT=$(run_failure "$DR_STATUS")
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
-assert_exit_code "$STATUS" "1" "status wrapper exits non-zero without app"
-assert_contains "$BODY" "Missing Fly app: pass --app or set CANARY_FLY_APP/FLY_APP" "status wrapper names app configuration"
+assert_exit_code "$STATUS" "1" "status wrapper exits non-zero without host"
+assert_contains "$BODY" "Missing Canary SSH host: pass --host or set CANARY_SSH_HOST" "status wrapper names host configuration"
 
-echo "Test 3: dr-status honors CANARY_FLY_APP env default"
+echo "Test 3: dr-status honors CANARY_SSH_HOST and default container"
 setup_stubs
-CANARY_FLY_APP=canary-env run_and_capture "$DR_STATUS" >/dev/null
-assert_file_matches "$FLYCTL_LOG" '^arg[0-9]+=ssh$' "invokes flyctl ssh"
-assert_file_matches "$FLYCTL_LOG" '^arg[0-9]+=canary-env$' "uses configured app"
-assert_file_matches "$FLYCTL_LOG" \
-  "^arg[0-9]+=sh -eu -c 'litestream status -config /etc/litestream\\.yml'\$" \
-  "uses remote litestream status command"
+CANARY_SSH_HOST=canary-host run_and_capture "$DR_STATUS" >/dev/null
+assert_file_contains "$SSH_LOG" "arg1=canary-host" "uses configured SSH host"
+assert_file_contains "$SSH_LOG" "arg2=sudo" "uses host privilege boundary"
+assert_file_contains "$SSH_LOG" "arg3=docker" "uses Docker runtime"
+assert_file_contains "$SSH_LOG" "arg4=exec" "executes inside running container"
+assert_file_contains "$SSH_LOG" "arg6=canary" "uses canonical container name"
+assert_file_contains "$SSH_STDIN_LOG" "litestream status -config /etc/litestream.yml" "runs Litestream status in the container"
 
-echo "Test 4: dr-status honors FLY_APP env default"
+echo "Test 4: dr-status accepts host and container overrides"
 setup_stubs
-FLY_APP=canary-env run_and_capture "$DR_STATUS" >/dev/null
-assert_file_matches "$FLYCTL_LOG" '^arg[0-9]+=canary-env$' "status wrapper uses env app default"
+run_and_capture "$DR_STATUS" --host canary-staging --container canary-staging >/dev/null
+assert_file_contains "$SSH_LOG" "arg1=canary-staging" "uses overridden host"
+assert_file_contains "$SSH_LOG" "arg6=canary-staging" "uses overridden container"
 
-echo "Test 5: dr-status accepts --app override"
-setup_stubs
-run_and_capture "$DR_STATUS" --app canary-staging >/dev/null
-assert_file_matches "$FLYCTL_LOG" '^arg[0-9]+=canary-staging$' "uses overridden app"
+echo "Test 5: dr-status rejects unsafe container names"
+OUTPUT=$(run_failure "$DR_STATUS" --host canary-host --container 'canary;id')
+STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
+BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
+assert_exit_code "$STATUS" "1" "status wrapper rejects unsafe container"
+assert_contains "$BODY" "Invalid Canary container name" "status wrapper names unsafe container"
 
 echo "Test 6: dr-status rejects unknown arguments"
 OUTPUT=$(run_failure "$DR_STATUS" --bogus)
@@ -152,122 +146,88 @@ BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "status wrapper exits non-zero on unknown argument"
 assert_contains "$BODY" "Usage: bin/dr-status" "status wrapper prints usage on unknown argument"
 
-echo "Test 7: dr-status rejects --app without a value"
-OUTPUT=$(run_failure "$DR_STATUS" --app)
+echo "Test 6b: dr-status rejects SSH option injection"
+OUTPUT=$(run_failure "$DR_STATUS" --host '-oProxyCommand=bad')
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
-assert_exit_code "$STATUS" "1" "status wrapper exits non-zero on missing app value"
-assert_contains "$BODY" "Usage: bin/dr-status" "status wrapper prints usage on missing app value"
+assert_exit_code "$STATUS" "1" "status wrapper rejects SSH option host"
+assert_contains "$BODY" "Invalid Canary SSH host" "status wrapper names unsafe host"
 
-echo "Test 8: dr-status fails cleanly when flyctl is unavailable"
-OUTPUT=$(PATH="$MISSING_FLYCTL_PATH" run_failure "$BASH_BIN" "$DR_STATUS" --app canary-staging)
+echo "Test 7: dr-status fails cleanly when ssh is unavailable"
+OUTPUT=$(PATH="$MISSING_SSH_PATH" run_failure "$BASH_BIN" "$DR_STATUS" --host canary-host)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
-assert_exit_code "$STATUS" "1" "status wrapper exits non-zero when flyctl is missing"
-assert_contains "$BODY" "Missing required command: flyctl" "status wrapper names the missing dependency"
+assert_exit_code "$STATUS" "1" "status wrapper exits non-zero when ssh is missing"
+assert_contains "$BODY" "Missing required command: ssh" "status wrapper names the missing dependency"
 
-echo "Test 9: dr-status propagates flyctl failures"
+echo "Test 8: dr-status propagates ssh failures"
 setup_stubs
-export FLYCTL_STUB_EXIT=23
+export SSH_STUB_EXIT=23
 set +e
-"$DR_STATUS" --app canary-staging >/dev/null 2>&1
+"$DR_STATUS" --host canary-host >/dev/null 2>&1
 STATUS=$?
 set -e
-unset FLYCTL_STUB_EXIT
-assert_equals "$STATUS" "23" "propagates flyctl exit status"
+unset SSH_STUB_EXIT
+assert_equals "$STATUS" "23" "propagates ssh exit status"
 
-echo "Test 10: dr-restore-check help"
+echo "Test 9: dr-restore-check help"
 OUTPUT=$(run_and_capture "$DR_RESTORE_CHECK" --help)
 assert_contains "$OUTPUT" "Usage: bin/dr-restore-check" "shows dr-restore-check usage"
 
-echo "Test 11: dr-restore-check requires an explicit app"
+echo "Test 10: dr-restore-check requires an explicit host"
 OUTPUT=$(run_failure "$DR_RESTORE_CHECK")
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
-assert_exit_code "$STATUS" "1" "restore check exits non-zero without app"
-assert_contains "$BODY" "Missing Fly app: pass --app or set CANARY_FLY_APP/FLY_APP" "restore check names app configuration"
+assert_exit_code "$STATUS" "1" "restore check exits non-zero without host"
+assert_contains "$BODY" "Missing Canary SSH host: pass --host or set CANARY_SSH_HOST" "restore check names host configuration"
 
-echo "Test 12: dr-restore-check uses configured app and db path"
+echo "Test 11: dr-restore-check uses configured host, container, and DB path"
 setup_stubs
-CANARY_FLY_APP=canary-env run_and_capture "$DR_RESTORE_CHECK" >/dev/null
-assert_file_matches "$FLYCTL_LOG" '^arg[0-9]+=canary-env$' "restore check uses configured app"
-assert_file_contains "$FLYCTL_LOG" "restore_path=\$(mktemp /tmp/canary-restore.XXXXXX);" \
-  "restore check creates a temporary restore path"
-assert_file_contains "$FLYCTL_LOG" \
-  "litestream restore -if-replica-exists -o \"\$restore_path\" -config /etc/litestream.yml \"\$1\"" \
-  "restore check restores the default database path"
-assert_file_contains "$FLYCTL_LOG" \
-  "if [ ! -s \"\$restore_path\" ]; then echo \"Litestream restore did not materialize a non-empty file at \$restore_path\" >&2; exit 1; fi;" \
-  "restore check requires a non-empty restore artifact"
-assert_file_matches "$FLYCTL_LOG" \
-  "^arg[0-9]+=.* sh /data/canary\\.db\$" \
-  "restore check targets the default database path"
+CANARY_SSH_HOST=canary-host run_and_capture "$DR_RESTORE_CHECK" >/dev/null
+assert_file_contains "$SSH_LOG" "arg1=canary-host" "restore check uses configured host"
+assert_file_contains "$SSH_LOG" "arg6=canary" "restore check uses canonical container"
+assert_file_contains "$SSH_STDIN_LOG" 'restore_path=$(mktemp /tmp/canary-restore.XXXXXX)' "restore check creates a temporary restore path"
+assert_file_contains "$SSH_STDIN_LOG" 'db_path=/data/canary.db' "restore check targets the canonical database path"
+assert_file_contains "$SSH_STDIN_LOG" 'litestream restore -if-replica-exists -o "$restore_path" -config /etc/litestream.yml "$db_path"' "restore check restores through mounted Litestream configuration"
+assert_file_contains "$SSH_STDIN_LOG" 'if [ ! -s "$restore_path" ]' "restore check requires a non-empty restore artifact"
 
-echo "Test 13: dr-restore-check uses the remote DB default even when local CANARY_DB_PATH is set"
+echo "Test 12: dr-restore-check accepts safe overrides"
 setup_stubs
-FLY_APP=canary-env CANARY_DB_PATH=/data/env.db run_and_capture "$DR_RESTORE_CHECK" >/dev/null
-assert_file_matches "$FLYCTL_LOG" '^arg[0-9]+=canary-env$' "restore check uses env app default"
-assert_file_matches "$FLYCTL_LOG" "^arg[0-9]+=.* sh /data/canary\\.db\$" "restore check ignores local db env default"
+run_and_capture "$DR_RESTORE_CHECK" --host canary-staging --container canary-staging --db-path /data/restore.db >/dev/null
+assert_file_contains "$SSH_LOG" "arg1=canary-staging" "restore check uses overridden host"
+assert_file_contains "$SSH_LOG" "arg6=canary-staging" "restore check uses overridden container"
+assert_file_contains "$SSH_STDIN_LOG" "db_path=/data/restore.db" "restore check uses overridden db path"
 
-echo "Test 14: dr-restore-check accepts overrides"
-setup_stubs
-run_and_capture "$DR_RESTORE_CHECK" --app canary-staging --db-path /data/restore.db >/dev/null
-assert_file_matches "$FLYCTL_LOG" '^arg[0-9]+=canary-staging$' "restore check uses overridden app"
-assert_file_matches "$FLYCTL_LOG" \
-  "^arg[0-9]+=.* sh /data/restore\\.db\$" \
-  "restore check uses overridden db path"
+echo "Test 13: dr-restore-check rejects unsafe DB paths"
+OUTPUT=$(run_failure "$DR_RESTORE_CHECK" --host canary-host --db-path '/data/restore copy.db')
+STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
+BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
+assert_exit_code "$STATUS" "1" "restore check rejects unsafe DB path"
+assert_contains "$BODY" "Invalid Canary database path" "restore check names unsafe DB path"
 
-echo "Test 15: dr-restore-check rejects unknown arguments"
+echo "Test 14: dr-restore-check rejects unknown arguments"
 OUTPUT=$(run_failure "$DR_RESTORE_CHECK" --bogus)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
 assert_exit_code "$STATUS" "1" "restore check exits non-zero on unknown argument"
 assert_contains "$BODY" "Usage: bin/dr-restore-check" "restore check prints usage on unknown argument"
 
-echo "Test 16: dr-restore-check safely quotes apostrophes in db paths"
-setup_stubs
-run_and_capture "$DR_RESTORE_CHECK" --app canary-staging --db-path "/data/o'brien.db" >/dev/null
-assert_file_matches "$FLYCTL_LOG" \
-  "^arg[0-9]+=.* sh /data/o\\\\'brien\\.db\$" \
-  "restore check shell-quotes db paths"
-
-echo "Test 17: dr-restore-check safely quotes spaces in db paths"
-setup_stubs
-run_and_capture "$DR_RESTORE_CHECK" --app canary-staging --db-path "/data/restore copy.db" >/dev/null
-assert_file_matches "$FLYCTL_LOG" \
-  '^arg[0-9]+=.* sh /data/restore\\ copy\.db$' \
-  "restore check shell-quotes paths with spaces"
-
-echo "Test 18: dr-restore-check rejects --db-path without a value"
-OUTPUT=$(run_failure "$DR_RESTORE_CHECK" --db-path)
+echo "Test 15: dr-restore-check fails cleanly when ssh is unavailable"
+OUTPUT=$(PATH="$MISSING_SSH_PATH" run_failure "$BASH_BIN" "$DR_RESTORE_CHECK" --host canary-host)
 STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
 BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
-assert_exit_code "$STATUS" "1" "restore check exits non-zero on missing db path"
-assert_contains "$BODY" "Usage: bin/dr-restore-check" "restore check prints usage on missing db path"
+assert_exit_code "$STATUS" "1" "restore check exits non-zero when ssh is missing"
+assert_contains "$BODY" "Missing required command: ssh" "restore check names the missing dependency"
 
-echo "Test 19: dr-restore-check rejects --app without a value"
-OUTPUT=$(run_failure "$DR_RESTORE_CHECK" --app)
-STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
-BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
-assert_exit_code "$STATUS" "1" "restore check exits non-zero on missing app value"
-assert_contains "$BODY" "Usage: bin/dr-restore-check" "restore check prints usage on missing app value"
-
-echo "Test 20: dr-restore-check fails cleanly when flyctl is unavailable"
-OUTPUT=$(PATH="$MISSING_FLYCTL_PATH" run_failure "$BASH_BIN" "$DR_RESTORE_CHECK" --app canary-staging)
-STATUS=$(printf '%s' "$OUTPUT" | head -n 1)
-BODY=$(printf '%s' "$OUTPUT" | tail -n +2)
-assert_exit_code "$STATUS" "1" "restore check exits non-zero when flyctl is missing"
-assert_contains "$BODY" "Missing required command: flyctl" "restore check names the missing dependency"
-
-echo "Test 21: dr-restore-check propagates flyctl failures"
+echo "Test 16: dr-restore-check propagates ssh failures"
 setup_stubs
-export FLYCTL_STUB_EXIT=29
+export SSH_STUB_EXIT=29
 set +e
-"$DR_RESTORE_CHECK" --app canary-staging >/dev/null 2>&1
+"$DR_RESTORE_CHECK" --host canary-host >/dev/null 2>&1
 STATUS=$?
 set -e
-unset FLYCTL_STUB_EXIT
-assert_equals "$STATUS" "29" "restore check propagates flyctl exit status"
+unset SSH_STUB_EXIT
+assert_equals "$STATUS" "29" "restore check propagates ssh exit status"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

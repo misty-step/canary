@@ -14,7 +14,7 @@ else
   [ -z "${AWS_SECRET_ACCESS_KEY:-}" ] && MISSING="$MISSING AWS_SECRET_ACCESS_KEY"
 
   if [ -n "$MISSING" ]; then
-    echo "WARNING: Fly Tigris bucket set but missing required variables:$MISSING" >&2
+    echo "WARNING: Litestream bucket set but missing required variables:$MISSING" >&2
   else
     LITESTREAM_READY=1
   fi

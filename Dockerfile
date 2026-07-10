@@ -1,9 +1,8 @@
 FROM rust:1.94.0-bookworm@sha256:365468470075493dc4583f47387001854321c5a8583ea9604b297e67f01c5a4f AS build
 
-# Deploy passes the CI runner's `git describe` output (a real tag, or a real
-# tag plus the commits/sha ahead of it — see .github/workflows/deploy.yml).
-# Builds outside that pipeline (this default, dagger's image smoke test)
-# report the honest, recognizable "0.0.0-dev" dev version.
+# Release builds pass `git describe` output (a real tag, or a real tag plus
+# the commits/sha ahead of it). Local and gate builds use the honest,
+# recognizable "0.0.0-dev" default.
 ARG CANARY_VERSION=0.0.0-dev
 ENV CANARY_VERSION=${CANARY_VERSION}
 
