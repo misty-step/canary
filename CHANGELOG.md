@@ -1,3 +1,10 @@
+## [0.15.4](https://github.com/misty-step/canary/compare/v0.15.3...v0.15.4) (2026-07-10)
+
+
+### Bug Fixes
+
+* **store:** monitor_overdue due-filter + index; bound oban_jobs growth ([#257](https://github.com/misty-step/canary/issues/257)) ([7af7c70](https://github.com/misty-step/canary/commit/7af7c706a77f9936d2fbeb56e6fa6aa73654a053))
+
 ## [0.15.3](https://github.com/misty-step/canary/compare/v0.15.2...v0.15.3) (2026-07-10)
 
 
