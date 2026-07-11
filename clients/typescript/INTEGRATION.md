@@ -44,7 +44,7 @@ short timeout. A minimal hand-written equivalent is:
 const endpoint = process.env.CANARY_ENDPOINT ?? "https://your-canary.example";
 const apiKey = process.env.CANARY_API_KEY ?? "";
 
-export async function onRequestError(error: unknown, request: { pathname?: string }) {
+export async function onRequestError(error: unknown, request: { path?: string; method?: string }) {
   if (!endpoint || !apiKey) return;
   const normalized = error instanceof Error
     ? { error_class: error.name || "Error", message: error.message, stack_trace: error.stack }
@@ -57,7 +57,7 @@ export async function onRequestError(error: unknown, request: { pathname?: strin
       service: "my-app",
       environment: process.env.NODE_ENV ?? "production",
       ...normalized,
-      context: { pathname: request?.pathname },
+      context: { path: request?.path, method: request?.method },
       severity: "error",
     }),
     signal: typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(2000) : undefined,
