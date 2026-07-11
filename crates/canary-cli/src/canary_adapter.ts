@@ -46,16 +46,15 @@ export async function reportCanaryError(
   error: unknown,
   options: CanaryErrorOptions,
 ): Promise<void> {
-  if (!options.endpoint || !options.apiKey) return;
-  const normalized = error instanceof Error
-    ? { error_class: error.constructor?.name || "Error", message: error.message, stack_trace: error.stack }
-    : { error_class: "UnknownError", message: String(error), stack_trace: undefined };
-  const endpoint = options.endpoint.endsWith("/")
-    ? options.endpoint.slice(0, -1)
-    : options.endpoint;
-  let body: string;
   try {
-    body = JSON.stringify({
+    if (!options.endpoint || !options.apiKey) return;
+    const normalized = error instanceof Error
+      ? { error_class: error.constructor?.name || "Error", message: error.message, stack_trace: error.stack }
+      : { error_class: "UnknownError", message: String(error), stack_trace: undefined };
+    const endpoint = options.endpoint.endsWith("/")
+      ? options.endpoint.slice(0, -1)
+      : options.endpoint;
+    const body = JSON.stringify({
       service: options.service,
       environment: options.environment ?? "production",
       error_class: scrub(normalized.error_class) ?? "UnknownError",
@@ -64,13 +63,13 @@ export async function reportCanaryError(
       severity: "error",
       context: scrubContext(options.context),
     });
+    await fetch(`${endpoint}/api/v1/errors`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${options.apiKey}` },
+      body,
+      signal: typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(2000) : undefined,
+    });
   } catch {
     return;
   }
-  await fetch(`${endpoint}/api/v1/errors`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${options.apiKey}` },
-    body,
-    signal: typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(2000) : undefined,
-  }).catch(() => undefined);
 }

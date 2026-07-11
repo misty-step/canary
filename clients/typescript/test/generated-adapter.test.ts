@@ -51,4 +51,26 @@ describe("generated HTTP adapter", () => {
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(JSON.parse(String(init.body)).error_class).toBe("Error");
   });
+
+  it("does not throw when normalization or transport setup throws", async () => {
+    const throwingError = Object.create(Error.prototype) as Error;
+    Object.defineProperty(throwingError, "message", {
+      get() {
+        throw new Error("message unavailable");
+      },
+    });
+
+    await expect(reportCanaryError(throwingError, {
+      endpoint: "https://canary.example",
+      apiKey: "sk_live_test-key",
+      service: "generated-app",
+    })).resolves.toBeUndefined();
+
+    vi.stubGlobal("fetch", undefined);
+    await expect(reportCanaryError(new Error("safe"), {
+      endpoint: "https://canary.example",
+      apiKey: "sk_live_test-key",
+      service: "generated-app",
+    })).resolves.toBeUndefined();
+  });
 });
