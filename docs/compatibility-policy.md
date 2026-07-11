@@ -19,6 +19,7 @@ require explicit migration steps and are documented here.
   additive field.
 - Text output is terse and may change format; JSON output is the stable
   contract.
+- Integration command response payloads (`integrate discover`, `integrate plan`, and `integrate patch`) expose `response.schema_version: 2` inside the stable CLI envelope. Compared with v1, `signals.canary_sdk_dependency` is now `signals.legacy_canary_package_dependency` and the `sdk_dependency` action is now `legacy_package_dependency`; consumers must branch on the response version before reading these fields.
 - The MCP manifest (`bin/canary mcp-manifest`) is gated against the
   runtime tool list so it cannot drift from the CLI.
 

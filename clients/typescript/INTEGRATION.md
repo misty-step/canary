@@ -75,8 +75,22 @@ same direct HTTP shape with a constrained ingest-only key. Capture both normal
 errors and rejected promises:
 
 ```typescript
-window.addEventListener("error", () => reportBrowserError("BrowserError"));
-window.addEventListener("unhandledrejection", () => reportBrowserError("UnhandledRejection"));
+import { reportCanaryError } from "./canary";
+
+const reportBrowserError = (error: unknown, source: string) => reportCanaryError(error, {
+  endpoint: process.env.NEXT_PUBLIC_CANARY_ENDPOINT ?? "",
+  apiKey: process.env.NEXT_PUBLIC_CANARY_API_KEY ?? "",
+  service: process.env.NEXT_PUBLIC_CANARY_SERVICE ?? "my-app",
+  environment: process.env.NODE_ENV ?? "production",
+  context: { source },
+});
+
+window.addEventListener("error", (event) => {
+  void reportBrowserError(event.error ?? event.message, "browser.error");
+});
+window.addEventListener("unhandledrejection", (event) => {
+  void reportBrowserError(event.reason, "browser.unhandledrejection");
+});
 ```
 
 The generated `app/global-error.tsx` calls the local `canary.ts` adapter. Keep

@@ -14,6 +14,7 @@ describe("generated HTTP adapter", () => {
     const context: Record<string, unknown> = { shared, alias: shared };
     context.self = context;
     context.when = new Date("2026-07-11T00:00:00.000Z");
+    context.bigint = 123n;
 
     await reportCanaryError(new Error("failed for alice@example.com"), {
       endpoint: "https://canary.example/",
@@ -29,6 +30,7 @@ describe("generated HTTP adapter", () => {
     expect(payload.context.shared.email).toBe("[REDACTED_EMAIL]");
     expect(payload.context.alias.email).toBe("[REDACTED_EMAIL]");
     expect(payload.context.when).toBe("2026-07-11T00:00:00.000Z");
+    expect(payload.context.bigint).toBe("123");
     expect(payload.message).toBe("failed for [REDACTED_EMAIL]");
     expect(payload.stack_trace).not.toContain("alice@example.com");
     expect(init.signal).toBeInstanceOf(AbortSignal);
