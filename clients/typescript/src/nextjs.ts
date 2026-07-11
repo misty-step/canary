@@ -11,9 +11,8 @@ export interface RequestInfo {
 }
 
 /**
- * Next.js instrumentation hook. Export from `instrumentation.ts`:
- *
- *   export { onRequestError } from "@canary-obs/sdk/nextjs";
+ * Next.js instrumentation hook. Copy or adapt this source into your app's
+ * instrumentation.ts and send errors to Canary's HTTP API with a scoped key.
  */
 export async function onRequestError(
   error: unknown,

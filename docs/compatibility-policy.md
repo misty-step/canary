@@ -31,23 +31,20 @@ require explicit migration steps and are documented here.
 - Tool call results return the CLI JSON envelope as
   `structuredContent`; runtime failures return `isError: true`.
 
-## TypeScript SDK (`clients/typescript/`)
+## TypeScript source reference (`clients/typescript/`)
 
-- Publish pipeline: `.github/workflows/sdk-publish.yml` runs the same
-  typecheck/test/build gate as CI, then publishes with npm provenance
-  (`npm publish --provenance --access public`) on every `sdk-v*` tag.
-- The first publish is held pending an operator step: the `@canary-obs` scope
-  has no npm org yet (`npm view @canary-obs/sdk` 404s). Creating an
-  organization for public-only packages is free on npm; once it exists, mint
-  an automation token with publish rights and add it as the `NPM_TOKEN` repo
-  secret, then push an `sdk-v*` tag (or re-run the workflow via
-  `workflow_dispatch`) to fire the first release.
-- Until that first publish lands, install from source via `file:` linking
-  (see `clients/typescript/INTEGRATION.md`).
-- The package exports `@canary-obs/sdk` (main) and
-  `@canary-obs/sdk/nextjs` (Next.js integration); these entry points
-  are stable.
-- Breaking changes to public exports are versioned (semver bump).
+- This directory is private source for local TypeScript/Next.js adapters over
+  Canary's HTTP API. It is not a published package or a supported dependency.
+- No npm organization, registry token, publish tag, or package-install contract
+  exists for this source reference. The directory's `private: true` metadata is
+  intentional.
+- Breaking changes to the HTTP request/response contract are versioned in the
+  OpenAPI document. Local adapters should send errors to `/api/v1/errors`,
+  check-ins to `/api/v1/check-ins`, and events to `/api/v1/events` with scoped
+  API keys.
+- `bin/canary integrate` and MCP provide the supported enrollment, verification,
+  query, timeline, and incident workflows. Generated application adapters must
+  be reviewed for key scope, redaction, and timeout behavior.
 
 ## SQLite Schema Migrations
 

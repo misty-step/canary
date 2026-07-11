@@ -76,7 +76,7 @@ Prefer these over re-deriving from the code base.
 | **canary-066 Consolidation and archaeology deletion** (backlog, XL, P2) | Powder | Worker lifecycle QUINT unification (webhook_delivery is the divergent fifth), oban_jobs rename (gated on prod DB restamp), ValidationErrors relocation / canary-ingest fold, fixture WAL ignore. |
 | Recurring footgun surface | Footguns section below + Rust store/runtime/schema modules | Every remediation here must cite the footgun list and extend it when new failure modes appear. |
 | **canary-930 Request-path concurrency** (ready, P0) | Powder | bcrypt-under-store-lock root cause (live-reproduced), /readyz spiral, mutex poisoning, monitor_overdue scan, oban_jobs growth. Consolidates the slow-API/500 cards. |
-| **canary-931 Release pipeline restore** (ready, P0) | Powder | Releaser App secrets missing (releases hard-down), zero GitHub releases, version disagreement, npm SDK unpublished. |
+| **canary-931 Release pipeline restore** (ready, P0) | Powder | Releaser App secrets missing (releases hard-down), zero GitHub releases, version truth, and API/CLI/MCP integration contract. |
 | **canary-932 Coordination loop in anger** (ready, P0) | Powder | CLI/MCP read-half parity (incident get, timeline cursor, drill-downs, parity guard) + dogfood claims on real incidents. |
 | **canary-933 Gate proves live behavior** (ready, P1) | Powder | Latency floor, seeded-volume + concurrency rehearsal, post-deploy gate, Rust coverage ratchet, diff-scoped strict. Absorbs 914/972. |
 | **canary-934 De-Fly ops surface** (ready, P1) | Powder | DO Spaces backups, DR transport seam, pullable image, deploy/witness cutover, DR runbook rewrite. Coordinates with do-migration-104/105. |

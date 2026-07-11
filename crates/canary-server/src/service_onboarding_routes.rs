@@ -144,7 +144,7 @@ fn service_onboarding_response(
             "error_ingest_curl": error_ingest_curl(base_url, raw_key, request),
             "report_curl": report_curl(base_url),
             "service_query_curl": service_query_curl(base_url, &request.service),
-            "typescript_init": typescript_init_snippet(base_url, raw_key, request),
+            "typescript_init": typescript_fetch_snippet(base_url, raw_key, request),
         },
     })
 }
@@ -207,14 +207,40 @@ fn service_query_curl(base_url: &str, service: &str) -> String {
     )
 }
 
-fn typescript_init_snippet(
+fn typescript_fetch_snippet(
     base_url: &str,
     raw_key: &str,
     request: &ServiceOnboardingCreate,
 ) -> String {
+    let endpoint = serde_json::to_string(&format!("{base_url}/api/v1/errors"))
+        .unwrap_or_else(|_| "\"/api/v1/errors\"".to_owned());
+    let api_key = serde_json::to_string(raw_key).unwrap_or_else(|_| "\"\"".to_owned());
+    let service = serde_json::to_string(&request.service).unwrap_or_else(|_| "\"\"".to_owned());
+    let environment =
+        serde_json::to_string(&request.environment).unwrap_or_else(|_| "\"production\"".to_owned());
     format!(
-        "import {{ initCanary }} from \"@canary-obs/sdk\";\n\ninitCanary({{\n  endpoint: \"{base_url}\",\n  apiKey: \"{raw_key}\",\n  service: \"{}\",\n  environment: \"{}\"\n}});",
-        request.service, request.environment
+        concat!(
+            "const endpoint = {endpoint};\n",
+            "const apiKey = {api_key};\n\n",
+            "const scrub = (value: string | undefined) => value\n",
+            "  ?.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z][A-Z]+/gi, \"[REDACTED_EMAIL]\")\n",
+            "  .replace(/\\b(?:sk|pk)_(?:live|test)_[A-Za-z0-9_-]+\\b/g, \"[REDACTED_KEY]\");\n\n",
+            "export async function reportError(error: unknown): Promise<void> {{\n",
+            "  const normalized = error instanceof Error\n",
+            "    ? {{ error_class: error.name || \"Error\", message: error.message, stack_trace: error.stack }}\n",
+            "    : {{ error_class: \"UnknownError\", message: String(error), stack_trace: undefined }};\n",
+            "  await fetch(endpoint, {{\n",
+            "    method: \"POST\",\n",
+            "    headers: {{ \"Content-Type\": \"application/json\", Authorization: `Bearer ${{apiKey}}` }},\n",
+            "    body: JSON.stringify({{ service: {service}, environment: {environment}, severity: \"error\", ...normalized, message: scrub(normalized.message), stack_trace: scrub(normalized.stack_trace) }}),\n",
+            "    signal: typeof AbortSignal.timeout === \"function\" ? AbortSignal.timeout(2000) : undefined,\n",
+            "  }}).catch(() => undefined);\n",
+            "}}\n"
+        ),
+        endpoint = endpoint,
+        api_key = api_key,
+        service = service,
+        environment = environment
     )
 }
 
@@ -424,4 +450,29 @@ fn service_onboarding_conflict_problem(conflict: TargetConflict) -> ProblemDetai
     }
 
     validation_problem("Invalid service onboarding request.", errors)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typescript_fetch_snippet_escapes_user_literals() -> Result<(), serde_json::Error> {
+        let request = ServiceOnboardingCreate {
+            service: "bad\"; throw new Error(\"boom\") //".to_owned(),
+            url: "https://example.com/health".to_owned(),
+            environment: "staging\nquoted".to_owned(),
+            interval_ms: None,
+        };
+        let snippet =
+            typescript_fetch_snippet("https://canary.example", "sk_live_test-key", &request);
+        let expected_service = serde_json::to_string(&request.service)?;
+        let expected_environment = serde_json::to_string(&request.environment)?;
+        assert!(snippet.contains(&format!("service: {expected_service}")));
+        assert!(snippet.contains(&format!("environment: {expected_environment}")));
+        assert!(!snippet.contains("{service}"));
+        assert!(!snippet.contains("{environment}"));
+        assert!(snippet.contains("REDACTED_EMAIL"));
+        Ok(())
+    }
 }

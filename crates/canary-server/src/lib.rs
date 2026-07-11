@@ -3683,8 +3683,15 @@ mod tests {
         assert!(
             created["snippets"]["typescript_init"]
                 .as_str()
-                .ok_or("missing typescript snippet")?
-                .contains("service: \"billing api\"")
+                .ok_or("missing typescript fetch snippet")?
+                .contains("/api/v1/errors")
+        );
+        assert!(
+            created["snippets"]["typescript_init"]
+                .as_str()
+                .is_some_and(|snippet| {
+                    snippet.contains("REDACTED_EMAIL") && snippet.contains("AbortSignal.timeout")
+                })
         );
         let snippet_keys = created["snippets"]
             .as_object()

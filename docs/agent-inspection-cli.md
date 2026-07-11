@@ -264,16 +264,17 @@ deliberately split into reviewable phases:
   merges local discovery, `.canary/integration.json`, live targets, monitors,
   webhooks, `service` query readback, and dogfood registry evidence into one
   `coverage.status` verdict.
-- `plan <path-or-project> --json` emits an action list for SDK instrumentation,
+- `plan <path-or-project> --json` emits an action list for HTTP API instrumentation,
   health routes or static-site target enrollment, platform env names, receipt
   updates, Canary target enrollment, monitor/webhook follow-up, static-site
   no-code/low-code artifacts, non-HTTP monitor/check-in templates, and the
   commands the agent should run next.
-- `patch <path-or-project> --json` applies the safe Next.js code path: adds
-  `@canary-obs/sdk`, `instrumentation.ts`, `app/api/health/route.ts`, and
-  `app/global-error.tsx` only when files are absent or already Canary-owned, and
-  writes a planned `.canary/integration.json` with reviewable verification
-  commands.
+- `patch <path-or-project> --json` applies the safe Next.js code path: adds a
+  local `canary.ts` HTTP adapter, `instrumentation.ts`,
+  `app/api/health/route.ts`, and `app/global-error.tsx` only when files are
+  absent or already Canary-owned, and writes a planned
+  `.canary/integration.json` with reviewable verification commands. It never
+  edits `package.json` or adds a package dependency.
 - `enroll --service <name> --url <health-url> --project-root <path> --json`
   calls the admin API to create the health target and scoped ingest key, then
   updates `.canary/integration.json` to verified receipt state when
@@ -284,11 +285,10 @@ Factory fleet enrollment uses the same CLI surface plus live target and
 check-in readback. The 15-minute operator recipe is
 [`docs/factory-fleet-integration.md`](factory-fleet-integration.md).
 
-Use SDK instrumentation when the application code can ship a patch: it provides
-service names, environments, scrubbed context, and typed request/browser error
-capture. Use platform-level drains only as a supplement for logs/errors the app
-cannot reach directly; drains do not replace typed SDK context and still need
-Canary target/query readback before coverage is claimed.
+Generated adapters are reference code, not coverage proof. Keep server keys
+server-side, preserve redaction and timeout behavior, deploy, then run
+`integrate enroll` and `integrate status` so target/query readback and the
+receipt prove coverage.
 
 For managed projects, pair `integrate status/plan` with the provider's redacted
 environment-name inventory and the app's canonical health URL. Agents should
