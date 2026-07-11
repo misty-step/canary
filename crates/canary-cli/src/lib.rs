@@ -2768,58 +2768,7 @@ fn canary_adapter_path(root: &Path) -> PathBuf {
 }
 
 fn canary_adapter_source() -> &'static str {
-    r#"export interface CanaryErrorOptions {
-  endpoint: string;
-  apiKey: string;
-  service: string;
-  environment?: string;
-  context?: Record<string, unknown>;
-}
-
-function scrub(value: string | undefined): string | undefined {
-  return value
-    ?.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[REDACTED_EMAIL]")
-    .replace(/\b(?:sk|pk)_(?:live|test)_[A-Za-z0-9_-]+\b/g, "[REDACTED_KEY]");
-}
-
-function scrubContext(value: unknown): unknown {
-  if (typeof value === "string") return scrub(value);
-  if (Array.isArray(value)) return value.map(scrubContext);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, nested]) => [key, scrubContext(nested)]),
-    );
-  }
-  return value;
-}
-
-export async function reportCanaryError(
-  error: unknown,
-  options: CanaryErrorOptions,
-): Promise<void> {
-  if (!options.endpoint || !options.apiKey) return;
-  const normalized = error instanceof Error
-    ? { error_class: error.constructor.name || "Error", message: error.message, stack_trace: error.stack }
-    : { error_class: "UnknownError", message: String(error), stack_trace: undefined };
-  const endpoint = options.endpoint.endsWith("/")
-    ? options.endpoint.slice(0, -1)
-    : options.endpoint;
-  await fetch(`${endpoint}/api/v1/errors`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${options.apiKey}` },
-    body: JSON.stringify({
-      service: options.service,
-      environment: options.environment ?? "production",
-      error_class: scrub(normalized.error_class) ?? "UnknownError",
-      message: scrub(normalized.message) ?? "Unknown application error",
-      stack_trace: scrub(normalized.stack_trace),
-      severity: "error",
-      context: scrubContext(options.context),
-    }),
-    signal: typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(2000) : undefined,
-  }).catch(() => undefined);
-}
-"#
+    include_str!("canary_adapter.ts")
 }
 
 fn instrumentation_source(service: &str, endpoint: &str) -> String {
@@ -5890,6 +5839,9 @@ Vercel CLI completed
         assert!(adapter.contains("REDACTED_EMAIL"));
         assert!(adapter.contains("scrubContext"));
         assert!(adapter.contains("AbortSignal.timeout(2000)"));
+        assert!(adapter.contains("new WeakSet<object>()"));
+        assert!(adapter.contains("instanceof Date"));
+        assert!(adapter.contains("constructor?.name"));
         assert!(instrumentation.contains("from \"./canary\""));
         assert!(global_error.contains("from \"../canary\""));
         assert!(!global_error.contains("@canary-obs/sdk"));

@@ -1,0 +1,68 @@
+export interface CanaryErrorOptions {
+  endpoint: string;
+  apiKey: string;
+  service: string;
+  environment?: string;
+  context?: Record<string, unknown>;
+}
+
+function scrub(value: string | undefined): string | undefined {
+  return value
+    ?.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[REDACTED_EMAIL]")
+    .replace(/\b(?:sk|pk)_(?:live|test)_[A-Za-z0-9_-]+\b/g, "[REDACTED_KEY]");
+}
+
+function scrubContext(value: unknown, active = new WeakSet<object>()): unknown {
+  if (typeof value === "string") return scrub(value);
+  if (Array.isArray(value)) {
+    if (active.has(value)) return "[Circular]";
+    active.add(value);
+    try {
+      return value.map((item) => scrubContext(item, active));
+    } finally {
+      active.delete(value);
+    }
+  }
+  if (value && typeof value === "object") {
+    if (value instanceof Date) {
+      return Number.isNaN(value.getTime()) ? "[Invalid Date]" : value.toISOString();
+    }
+    if (active.has(value)) return "[Circular]";
+    active.add(value);
+    try {
+      return Object.fromEntries(
+        Object.entries(value).map(([key, nested]) => [key, scrubContext(nested, active)]),
+      );
+    } finally {
+      active.delete(value);
+    }
+  }
+  return value;
+}
+
+export async function reportCanaryError(
+  error: unknown,
+  options: CanaryErrorOptions,
+): Promise<void> {
+  if (!options.endpoint || !options.apiKey) return;
+  const normalized = error instanceof Error
+    ? { error_class: error.constructor?.name || "Error", message: error.message, stack_trace: error.stack }
+    : { error_class: "UnknownError", message: String(error), stack_trace: undefined };
+  const endpoint = options.endpoint.endsWith("/")
+    ? options.endpoint.slice(0, -1)
+    : options.endpoint;
+  await fetch(`${endpoint}/api/v1/errors`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${options.apiKey}` },
+    body: JSON.stringify({
+      service: options.service,
+      environment: options.environment ?? "production",
+      error_class: scrub(normalized.error_class) ?? "UnknownError",
+      message: scrub(normalized.message) ?? "Unknown application error",
+      stack_trace: scrub(normalized.stack_trace),
+      severity: "error",
+      context: scrubContext(options.context),
+    }),
+    signal: typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(2000) : undefined,
+  }).catch(() => undefined);
+}
