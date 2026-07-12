@@ -125,7 +125,7 @@ fn mcp_stdio_lists_and_calls_cli_backed_tools() -> Result<(), Box<dyn std::error
     );
     assert_eq!(
         responses[2]["result"]["structuredContent"]["response"]["schema_version"],
-        json!(1)
+        json!(2)
     );
     assert_eq!(responses[3]["id"], json!(4));
     assert_eq!(responses[3]["result"]["isError"], json!(true));

@@ -1,54 +1,41 @@
-# @canary-obs/sdk
+# TypeScript source reference
 
-Error reporting and check-in SDK for [Canary](https://github.com/misty-step/canary),
-a self-hosted production health ledger for errors, uptime, incidents, and
-webhooks.
+This directory is a **private, source-only reference** for TypeScript error,
+check-in, event, and Next.js instrumentation adapters over Canary's HTTP API.
+It is not a published package and is not an integration dependency.
 
-## Install
+Canary's supported integration contract is the HTTP API plus the `bin/canary`
+CLI and MCP surfaces. Use `bin/canary integrate plan` or
+`bin/canary integrate patch` to generate a local adapter for an application;
+review that code before deploying it. Keep server-only ingest keys in server
+environment variables. Browser code should use an application-owned relay or
+a constrained ingest-only key.
 
-Not yet published to npm — the `@canary-obs` org and an npm publish token are
-operator setup steps that haven't happened yet
-([`sdk-publish.yml`](../../.github/workflows/sdk-publish.yml) is ready and
-gated on the `NPM_TOKEN` secret; see
-[`docs/compatibility-policy.md`](https://github.com/misty-step/canary/blob/master/docs/compatibility-policy.md)
-for the publish plan). Until then, build and link from source:
+## Local development
+
+The package is retained so contributors can test the reference implementation:
 
 ```bash
-# From the Canary repo, build the SDK:
-git clone https://github.com/misty-step/canary.git
-cd canary/clients/typescript && npm install && npm run build
-
-# In your app, link it via file: (adjust the relative path):
-npm install file:../path/to/canary/clients/typescript
+npm ci
+npm run typecheck
+npm test
+npm run build
 ```
 
-## Usage
+`private: true` is intentional. No npm organization, registry token, publish
+tag, or package installation is part of Canary's product contract.
 
-```typescript
-import { initCanary, captureException } from "@canary-obs/sdk";
+## HTTP contract
 
-initCanary({
-  endpoint: "https://your-canary.example",
-  apiKey: process.env.CANARY_API_KEY!,
-  service: "my-app",
-  environment: process.env.NODE_ENV ?? "production",
-});
+A server-side error adapter posts JSON to `/api/v1/errors` with a scoped
+`Authorization: Bearer <ingest-key>` header. Non-HTTP runtimes report monitor
+state to `/api/v1/check-ins` and operational events to `/api/v1/events`. The
+CLI and MCP surfaces provide enrollment, verification, query, timeline, and
+incident workflows over the same service contract.
 
-try {
-  await riskyOperation();
-} catch (err) {
-  captureException(err, { severity: "error" });
-}
-```
-
-Next.js apps get a dedicated subpath (`@canary-obs/sdk/nextjs`) with
-`onRequestError`, error-boundary helpers, browser error observers, a
-Sentry-event bridge, and a health-check route helper.
-
-See [`INTEGRATION.md`](./INTEGRATION.md) for the full Next.js setup (server
-init, client-side error boundaries, non-HTTP monitor check-ins, Sentry
-dual-write migration) and the compatibility guarantees in
-[`docs/compatibility-policy.md`](https://github.com/misty-step/canary/blob/master/docs/compatibility-policy.md).
+See [`INTEGRATION.md`](./INTEGRATION.md) for a copyable API-first Next.js
+walkthrough and [`docs/compatibility-policy.md`](../../docs/compatibility-policy.md)
+for the stable surface policy.
 
 ## License
 

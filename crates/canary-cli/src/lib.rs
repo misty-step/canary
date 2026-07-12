@@ -27,6 +27,7 @@ const DEFAULT_INTEGRATION_ENDPOINT_ENV: &str = "CANARY_ENDPOINT";
 const DEFAULT_INTEGRATION_SERVER_KEY_ENV: &str = "CANARY_API_KEY";
 const DEFAULT_INTEGRATION_PUBLIC_ENDPOINT_ENV: &str = "NEXT_PUBLIC_CANARY_ENDPOINT";
 const DEFAULT_INTEGRATION_PUBLIC_KEY_ENV: &str = "NEXT_PUBLIC_CANARY_API_KEY";
+const INTEGRATION_CLI_SCHEMA_VERSION: u8 = 2;
 const DOGFOOD_VALUE_ERROR_GROUP_SUBJECT_LIMIT: usize = 3;
 
 /// Error returned by the CLI library.
@@ -922,7 +923,7 @@ pub fn integration_discover(input: &IntegrationInput) -> Result<Value> {
         .collect::<Vec<_>>();
 
     Ok(json!({
-        "schema_version": 1,
+        "schema_version": INTEGRATION_CLI_SCHEMA_VERSION,
         "target": target.display().to_string(),
         "path_exists": path_exists,
         "project_root": if path_exists { project_root.display().to_string() } else { "unresolved".to_owned() },
@@ -937,7 +938,7 @@ pub fn integration_discover(input: &IntegrationInput) -> Result<Value> {
         "integration_receipt": receipt,
         "signals": {
             "package_json": package_json.map(|path| path.display().to_string()),
-            "canary_sdk_dependency": package_has_dependency(package.as_ref(), "@canary-obs/sdk"),
+            "legacy_canary_package_dependency": package_has_dependency(package.as_ref(), "@canary-obs/sdk"),
             "sentry_dependency": package_has_dependency(package.as_ref(), "@sentry/nextjs")
                 || package_has_dependency(package.as_ref(), "@sentry/browser")
                 || package_has_dependency(package.as_ref(), "@sentry/react"),
@@ -979,10 +980,6 @@ pub fn integration_plan(input: &IntegrationInput) -> Result<Value> {
     let production_url = input.production_url.as_deref();
     let coverage_mode = coverage_mode(framework, discovery.get("health_routes"));
     let health_url = planned_health_url(production_url, coverage_mode);
-    let canary_dep = discovery
-        .pointer("/signals/canary_sdk_dependency")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let canary_code_paths = discovery
         .pointer("/signals/canary_code_paths")
         .and_then(Value::as_array)
@@ -1014,10 +1011,18 @@ pub fn integration_plan(input: &IntegrationInput) -> Result<Value> {
     let mut actions = Vec::new();
 
     actions.push(plan_action(
-        "sdk_dependency",
-        if canary_dep { "present" } else { "needed" },
-        "@canary-obs/sdk dependency",
-        "patch",
+        "legacy_package_dependency",
+        if discovery
+            .pointer("/signals/legacy_canary_package_dependency")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "manual"
+        } else {
+            "absent"
+        },
+        "Legacy package dependency detected; migrate imports to a local HTTP adapter before removing it",
+        "manual",
     ));
     actions.push(plan_action(
         "server_instrumentation",
@@ -1026,7 +1031,7 @@ pub fn integration_plan(input: &IntegrationInput) -> Result<Value> {
         } else {
             "needed"
         },
-        "Next.js instrumentation.ts initializes Canary and exports onRequestError",
+        "Next.js instrumentation.ts reports request errors to the Canary HTTP API",
         "patch",
     ));
     actions.push(plan_action(
@@ -1042,7 +1047,7 @@ pub fn integration_plan(input: &IntegrationInput) -> Result<Value> {
         } else {
             "needed"
         },
-        "Next.js global error capture sends browser-visible errors to Canary",
+        "Next.js global error capture reports browser-visible errors to the Canary HTTP API",
         "patch",
     ));
     actions.push(json!({
@@ -1089,7 +1094,7 @@ pub fn integration_plan(input: &IntegrationInput) -> Result<Value> {
     }));
 
     Ok(json!({
-        "schema_version": 1,
+        "schema_version": INTEGRATION_CLI_SCHEMA_VERSION,
         "target": target.display().to_string(),
         "service": service,
         "framework": framework,
@@ -1129,8 +1134,11 @@ pub fn integration_patch(input: &IntegrationInput) -> Result<Value> {
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     let mut changes = Vec::new();
+    changes.push(write_if_absent_or_canary(
+        &canary_adapter_path(&root),
+        canary_adapter_source(),
+    )?);
 
-    changes.push(update_package_dependency(&root)?);
     changes.push(write_if_absent_or_canary(
         &instrumentation_path(&root),
         &instrumentation_source(service, &input.endpoint),
@@ -1149,7 +1157,7 @@ pub fn integration_patch(input: &IntegrationInput) -> Result<Value> {
     )?);
 
     Ok(json!({
-        "schema_version": 1,
+        "schema_version": INTEGRATION_CLI_SCHEMA_VERSION,
         "project_root": root.display().to_string(),
         "service": service,
         "changes": changes,
@@ -1931,7 +1939,11 @@ fn static_site_artifacts(
         },
         "browser_capture_warning": "Only use a constrained ingest-only/public key in browser code; never expose admin, read, or server ingest keys.",
         "browser_capture_snippet": format!(
-            "<script type=\"module\">import {{ initCanary }} from 'https://esm.sh/@canary-obs/sdk'; import {{ installBrowserErrorObservers }} from 'https://esm.sh/@canary-obs/sdk/nextjs'; initCanary({{ endpoint: window.NEXT_PUBLIC_CANARY_ENDPOINT, apiKey: window.NEXT_PUBLIC_CANARY_API_KEY, service: '{}', environment: 'production' }}); installBrowserErrorObservers();</script>",
+            concat!(
+                "<script>(function () {{ const endpoint = window.NEXT_PUBLIC_CANARY_ENDPOINT; const apiKey = window.NEXT_PUBLIC_CANARY_API_KEY; if (!endpoint || !apiKey) return; const url = (endpoint.endsWith('/') ? endpoint.slice(0, -1) : endpoint) + '/api/v1/errors'; const report = (errorClass, source) => void fetch(url, {{ method: 'POST', headers: {{ 'Content-Type': 'application/json', Authorization: 'Bearer ' + apiKey }}, body: JSON.stringify({{ service: '{}', environment: 'production', error_class: errorClass, message: 'Browser error captured', severity: 'error', context: {{ source }} }}) }}).catch(() => undefined);",
+                " window.addEventListener('error', (event) => report('BrowserError', 'window.error'));",
+                " window.addEventListener('unhandledrejection', (event) => report('UnhandledRejection', 'window.unhandledrejection')); }})();</script>"
+            ),
             js_string_literal_body(service)
         )
     })
@@ -2166,10 +2178,6 @@ fn integration_coverage_verdict(
         .pointer("/signals/canary_present")
         .and_then(Value::as_bool)
         .unwrap_or(false)
-        || discovery
-            .pointer("/signals/canary_sdk_dependency")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
         || receipt_is_present(discovery.get("integration_receipt"));
     let target = live_collection_contains_service(targets, "targets", service);
     let monitor = live_collection_contains_service(monitors, "monitors", service);
@@ -2756,50 +2764,35 @@ fn health_route_path(root: &Path) -> PathBuf {
 fn global_error_path(root: &Path) -> PathBuf {
     root.join("app/global-error.tsx")
 }
+fn canary_adapter_path(root: &Path) -> PathBuf {
+    root.join("canary.ts")
+}
+
+fn canary_adapter_source() -> &'static str {
+    include_str!("canary_adapter.ts")
+}
 
 fn instrumentation_source(service: &str, endpoint: &str) -> String {
     let endpoint = ts_string_literal(endpoint);
     let service = ts_string_literal(service);
     format!(
-        "import {{ initCanary }} from \"@canary-obs/sdk\";\nexport {{ onRequestError }} from \"@canary-obs/sdk/nextjs\";\n\nexport function register() {{\n  initCanary({{\n    endpoint: process.env.{DEFAULT_INTEGRATION_ENDPOINT_ENV} ?? {endpoint},\n    apiKey: process.env.{DEFAULT_INTEGRATION_SERVER_KEY_ENV} ?? \"\",\n    service: {service},\n    environment: process.env.NODE_ENV ?? \"production\",\n    scrubPii: true,\n  }});\n}}\n"
+        "// Generated by canary integrate patch. Do not edit.\nimport {{ reportCanaryError }} from \"./canary\";\n\nconst endpoint = process.env.{DEFAULT_INTEGRATION_ENDPOINT_ENV} ?? {endpoint};\nconst apiKey = process.env.{DEFAULT_INTEGRATION_SERVER_KEY_ENV} ?? \"\";\nconst service = {service};\n\nexport async function onRequestError(error: unknown, request: unknown): Promise<void> {{\n  const requestInfo = request && typeof request === \"object\"\n    ? request as Record<string, unknown>\n    : undefined;\n  const context = requestInfo\n    ? {{\n        path: typeof requestInfo.path === \"string\" ? requestInfo.path : undefined,\n        method: typeof requestInfo.method === \"string\" ? requestInfo.method : undefined,\n      }}\n    : undefined;\n  await reportCanaryError(error, {{ endpoint, apiKey, service, environment: process.env.NODE_ENV ?? \"production\", context }});\n}}\n"
     )
 }
 
 fn health_route_source() -> &'static str {
-    "// Canary health route generated by canary integrate patch.\nexport function GET() {\n  return Response.json({ status: \"ok\" });\n}\n"
+    "// Generated by canary integrate patch. Do not edit.\nexport function GET() {\n  return Response.json({ status: \"ok\" });\n}\n"
 }
 
 fn global_error_source(service: &str) -> String {
     let service = ts_string_literal(service);
     format!(
-        "\"use client\";\n\nimport {{ useEffect }} from \"react\";\nimport {{ captureException, initCanary }} from \"@canary-obs/sdk\";\n\nexport default function GlobalError({{ error }}: {{ error: Error }}) {{\n  useEffect(() => {{\n    initCanary({{\n      endpoint: process.env.{DEFAULT_INTEGRATION_PUBLIC_ENDPOINT_ENV} ?? \"\",\n      apiKey: process.env.{DEFAULT_INTEGRATION_PUBLIC_KEY_ENV} ?? \"\",\n      service: process.env.NEXT_PUBLIC_CANARY_SERVICE ?? {service},\n      environment: process.env.NODE_ENV ?? \"production\",\n      scrubPii: true,\n    }});\n    void captureException(error);\n  }}, [error]);\n\n  return (\n    <html>\n      <body>Something went wrong.</body>\n    </html>\n  );\n}}\n"
+        "// Generated by canary integrate patch. Do not edit.\n\"use client\";\n\nimport {{ useEffect }} from \"react\";\nimport {{ reportCanaryError }} from \"../canary\";\n\nexport default function GlobalError({{ error }}: {{ error: Error }}) {{\n  useEffect(() => {{\n    void reportCanaryError(error, {{\n      endpoint: process.env.{DEFAULT_INTEGRATION_PUBLIC_ENDPOINT_ENV} ?? \"\",\n      apiKey: process.env.{DEFAULT_INTEGRATION_PUBLIC_KEY_ENV} ?? \"\",\n      service: process.env.NEXT_PUBLIC_CANARY_SERVICE ?? {service},\n      environment: process.env.NODE_ENV ?? \"production\"\n    }});\n  }}, [error]);\n\n  return (\n    <html>\n      <body>Something went wrong.</body>\n    </html>\n  );\n}}\n"
     )
 }
 
 fn ts_string_literal(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_owned())
-}
-
-fn update_package_dependency(root: &Path) -> Result<Value> {
-    let path = root.join("package.json");
-    let mut package = read_json_file(&path)?;
-    if package_has_dependency(Some(&package), "@canary-obs/sdk") {
-        return Ok(json!({"path": path.display().to_string(), "status": "unchanged"}));
-    }
-    let Some(object) = package.as_object_mut() else {
-        return Err(CliError::Message(
-            "package.json must be a JSON object".to_owned(),
-        ));
-    };
-    let deps = object.entry("dependencies").or_insert_with(|| json!({}));
-    let Some(deps) = deps.as_object_mut() else {
-        return Err(CliError::Message(
-            "package.json dependencies must be a JSON object".to_owned(),
-        ));
-    };
-    deps.insert("@canary-obs/sdk".to_owned(), json!("^1.0.0"));
-    write_json_file(&path, &package)?;
-    Ok(json!({"path": path.display().to_string(), "status": "updated"}))
 }
 
 fn write_json_file(path: &Path, value: &Value) -> Result<()> {
@@ -2822,8 +2815,8 @@ fn write_if_absent_or_canary(path: &Path, body: &str) -> Result<Value> {
             path: path.to_path_buf(),
             source,
         })?;
-        if !existing.contains("@canary-obs/sdk")
-            && !existing.to_ascii_lowercase().contains("canary")
+        if !existing.contains("// Generated by canary integrate patch.")
+            && !existing.contains("@canary-obs/sdk")
         {
             return Ok(json!({
                 "path": path.display().to_string(),
@@ -5541,6 +5534,7 @@ mod tests {
             endpoint: DEFAULT_ENDPOINT.to_owned(),
         })?;
         let rendered = serde_json::to_string(&discovery)?;
+        assert_eq!(discovery["schema_version"], INTEGRATION_CLI_SCHEMA_VERSION);
 
         assert_eq!(discovery["framework"], "nextjs");
         assert_eq!(discovery["platform"], "vercel");
@@ -5590,10 +5584,16 @@ mod tests {
         let actions = plan["actions"].as_array().ok_or("missing actions")?;
 
         assert_eq!(plan["can_patch"], true);
-        assert!(has_action(actions, "sdk_dependency", "needed"));
+        assert_eq!(plan["schema_version"], INTEGRATION_CLI_SCHEMA_VERSION);
         assert!(has_action(actions, "server_instrumentation", "needed"));
         assert!(has_action(actions, "health_route", "needed"));
         assert!(has_action(actions, "global_error_capture", "needed"));
+        assert!(has_action(actions, "legacy_package_dependency", "absent"));
+        assert!(
+            !actions
+                .iter()
+                .any(|action| action["kind"] == "sdk_dependency")
+        );
         assert!(has_action(actions, "env_names", "needed"));
         assert!(has_action(actions, "target_enrollment", "needed"));
         assert!(has_action(actions, "integration_receipt", "needed"));
@@ -5757,18 +5757,13 @@ Vercel CLI completed
             plan["static_site"]["target_url"],
             "https://trumpgoggles.com"
         );
-        assert!(
-            plan["static_site"]["browser_capture_snippet"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("NEXT_PUBLIC_CANARY_API_KEY")
-        );
-        assert!(
-            plan["static_site"]["browser_capture_snippet"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("@canary-obs/sdk/nextjs")
-        );
+        let browser_capture = plan["static_site"]["browser_capture_snippet"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(browser_capture.contains("/api/v1/errors"));
+        assert!(!browser_capture.contains("@canary-obs/sdk"));
+        assert!(!browser_capture.contains("esm.sh"));
+        assert!(browser_capture.contains("unhandledrejection"));
         assert!(
             plan["static_site"]["browser_capture_warning"]
                 .as_str()
@@ -5825,7 +5820,7 @@ Vercel CLI completed
         )?;
         fs::write(
             root.join("instrumentation.ts"),
-            "export function register() {}\n",
+            "import { initCanary } from '@canary-obs/sdk';\nexport { onRequestError } from '@canary-obs/sdk/nextjs';\n",
         )?;
 
         let patched = integration_patch(&IntegrationInput {
@@ -5837,22 +5832,32 @@ Vercel CLI completed
         })?;
         let changes = patched["changes"].as_array().ok_or("missing changes")?;
         let package = fs::read_to_string(root.join("package.json"))?;
+        let adapter = fs::read_to_string(root.join("canary.ts"))?;
         let instrumentation = fs::read_to_string(root.join("instrumentation.ts"))?;
-        let health = fs::read_to_string(root.join("app/api/health/route.ts"))?;
         let global_error = fs::read_to_string(root.join("app/global-error.tsx"))?;
         let receipt = read_json_file(&root.join(INTEGRATION_RECEIPT_PATH))?;
+        assert_eq!(patched["schema_version"], INTEGRATION_CLI_SCHEMA_VERSION);
+        assert_eq!(adapter, canary_adapter_source());
 
-        assert!(package.contains("@canary-obs/sdk"));
-        assert_eq!(instrumentation, "export function register() {}\n");
-        assert!(health.contains("status: \"ok\""));
-        assert!(
-            global_error.contains("service: process.env.NEXT_PUBLIC_CANARY_SERVICE ?? \"vanity\"")
-        );
+        assert!(!package.contains("@canary-obs/sdk"));
+        assert!(adapter.contains("reportCanaryError"));
+        assert!(adapter.contains("Generated by canary integrate patch"));
+        assert!(instrumentation.contains("requestInfo.path"));
+        assert!(instrumentation.contains("requestInfo.method"));
+        assert!(adapter.contains("REDACTED_EMAIL"));
+        assert!(adapter.contains("scrubContext"));
+        assert!(adapter.contains("AbortSignal.timeout(2000)"));
+        assert!(adapter.contains("new WeakSet<object>()"));
+        assert!(adapter.contains("instanceof Date"));
+        assert!(adapter.contains("constructor?.name"));
+        assert!(instrumentation.contains("from \"./canary\""));
+        assert!(global_error.contains("from \"../canary\""));
+        assert!(!global_error.contains("@canary-obs/sdk"));
         assert!(changes.iter().any(|change| {
             change["path"]
                 .as_str()
-                .is_some_and(|path| path.ends_with("instrumentation.ts"))
-                && change["status"] == "skipped"
+                .is_some_and(|path| path.ends_with("canary.ts"))
+                && change["status"] == "updated"
         }));
         assert!(changes.iter().any(|change| {
             change["path"]
@@ -5912,6 +5917,38 @@ Vercel CLI completed
     }
 
     #[test]
+    fn integration_patch_preserves_unmarked_canary_file()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = temp_project("patch-canary-file")?;
+        fs::write(
+            root.join("package.json"),
+            r#"{"dependencies":{"next":"15.0.0"}}"#,
+        )?;
+        let original = "export const canaryMode = false;\n";
+        fs::write(root.join("canary.ts"), original)?;
+
+        let patched = integration_patch(&IntegrationInput {
+            target: root.clone(),
+            service: Some("vanity".to_owned()),
+            production_url: Some("https://www.example.com".to_owned()),
+            platform_project: None,
+            endpoint: DEFAULT_ENDPOINT.to_owned(),
+        })?;
+        let changes = patched["changes"].as_array().ok_or("missing changes")?;
+
+        assert_eq!(fs::read_to_string(root.join("canary.ts"))?, original);
+        assert!(changes.iter().any(|change| {
+            change["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("canary.ts"))
+                && change["status"] == "skipped"
+        }));
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn integration_patch_skips_foreign_health_routes_and_escapes_literals()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let root = temp_project("patch-safe")?;
@@ -5943,10 +5980,18 @@ Vercel CLI completed
                 .is_some_and(|path| path.ends_with("app/api/health/route.ts"))
                 && change["status"] == "skipped"
         }));
-        assert!(instrumentation.contains(r#"service: "bad\"; throw new Error(\"boom\") //""#));
-        assert!(instrumentation.contains(
-            r#"endpoint: process.env.CANARY_ENDPOINT ?? "https://canary.example/\"quoted\"""#
-        ));
+        let expected_service = format!(
+            "const service = {}bad\\\"; throw new Error(\\\"boom\\\") //{};",
+            char::from(34),
+            char::from(34)
+        );
+        assert!(instrumentation.contains(&expected_service));
+        let expected_endpoint = format!(
+            "const endpoint = process.env.CANARY_ENDPOINT ?? {}https://canary.example/\\\"quoted\\\"{};",
+            char::from(34),
+            char::from(34)
+        );
+        assert!(instrumentation.contains(&expected_endpoint));
 
         fs::remove_dir_all(root)?;
         Ok(())
@@ -5987,8 +6032,7 @@ Vercel CLI completed
     fn integration_coverage_verdict_merges_local_live_query_and_dogfood_evidence() {
         let discovery = json!({
             "signals": {
-                "canary_present": true,
-                "canary_sdk_dependency": false
+                "canary_present": true
             }
         });
         let targets = json!({"ok": true, "response": {"targets": [{"service": "linejam"}]}});
@@ -6038,7 +6082,7 @@ Vercel CLI completed
             "integration_receipt": null,
             "signals": {
                 "canary_present": false,
-                "canary_sdk_dependency": false
+                "legacy_canary_package_dependency": true
             }
         });
         let targets = json!({"ok": true, "response": {"targets": []}});

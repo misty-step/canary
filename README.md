@@ -25,12 +25,13 @@ coordination philosophy live in
 git clone https://github.com/misty-step/canary && cd canary
 cp .env.example .env
 set -a; . ./.env; set +a
-./bin/bootstrap    # installs deps for the core service and SDK packages
+./bin/bootstrap    # installs Rust and source-reference dependencies
 cargo run -p canary-server
 ```
 
 No Docker is required for local development outside the Dagger gate. The repo
-includes the Rust service workspace and the TypeScript SDK package.
+includes the Rust service workspace and a private TypeScript source reference;
+supported application integrations use the HTTP API, CLI, and MCP surfaces.
 For a Docker-only self-hosted first boot, use
 [`docs/self-host-docker.md`](docs/self-host-docker.md).
 
@@ -93,10 +94,10 @@ for the decision record.
 
 ## Development
 
-This is a monorepo with two maintained package surfaces:
+This is a monorepo with two maintained implementation surfaces:
 
-- `crates/` — Canary Rust service workspace
-- `clients/typescript/` — TypeScript SDK
+- `crates/` — Canary Rust service workspace and HTTP/API implementation
+- `clients/typescript/` — private TypeScript source reference (not a published package)
 
 ### Toolchain
 
@@ -139,7 +140,7 @@ From the repo root:
 
 That command:
 
-- runs `npm ci` for `clients/typescript/`
+- runs `npm ci` for the private TypeScript source reference
 - runs `cargo fetch --locked` for the Rust workspace
 - configures `core.hooksPath` to use `.githooks/`
 

@@ -1,7 +1,7 @@
 {
-  "name": "@canary-obs/sdk",
-  "version": "1.0.0",
-  "description": "Canary error reporting SDK for TypeScript/Next.js",
+  "name": "canary-typescript-reference",
+  "version": "0.0.0",
+  "description": "Source-only TypeScript instrumentation reference for Canary's HTTP API",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -21,6 +21,7 @@
   "files": [
     "dist"
   ],
+  "private": true,
   "repository": {
     "type": "git",
     "url": "git+https://github.com/misty-step/canary.git",
@@ -36,15 +37,13 @@
     "observability",
     "nextjs",
     "monitoring",
-    "sdk"
+    "http-api",
+    "reference"
   ],
   "author": "Misty Step",
   "license": "MIT",
   "engines": {
     "node": ">=18.18"
-  },
-  "publishConfig": {
-    "access": "public"
   },
   "scripts": {
     "build": "tsup",
