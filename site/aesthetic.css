@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════
-   aesthetic v2.17.1
+   aesthetic v0.25.0
    The Misty Step design system. https://github.com/misty-step/aesthetic
 
    The law:
@@ -105,7 +105,10 @@
   --ae-space-8: 3em; /* section — top-level margins */
 
   /* z-index scale: named layers so consumers don't guess at magic numbers */
-  --ae-z-tip: 10; /* tooltips, hover whispers */
+  --ae-z-backdrop: 40; /* modal backdrop below its decision panel */
+  --ae-z-dialog: 41; /* modal decision panel */
+  --ae-z-pop: 50; /* portaled menus and popovers above modal decisions */
+  --ae-z-tip: 60; /* portaled tooltips above popovers and dialogs */
   --ae-z-toast: 100; /* toasts, persistent notifications */
 
   /* motion: feedback, never decoration */
@@ -565,6 +568,17 @@ a:hover {
   color: var(--ae-ink);
 }
 
+/* Headless triggers render real buttons; remove UA chrome when a status
+   mark is used as the trigger without turning its words into a button. */
+button.ae-status {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
 .ae-icon-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -835,22 +849,26 @@ a:hover {
     transform: rotate(0) scale(1);
   }
 
-  :root:not(.light):not([data-ae-mode='light']) dialog.ae-dialog {
+  :root:not(.light):not([data-ae-mode='light']) dialog.ae-dialog,
+  :root:not(.light):not([data-ae-mode='light']) .ae-dialog-panel {
     background: var(--ae-wash);
     box-shadow: none;
   }
 
-  :root:not(.light):not([data-ae-mode='light']) dialog.ae-dialog::backdrop {
+  :root:not(.light):not([data-ae-mode='light']) dialog.ae-dialog::backdrop,
+  :root:not(.light):not([data-ae-mode='light']) .ae-dialog-backdrop {
     background: rgba(18, 18, 18, 0.4);
   }
 
   :root:not(.light):not([data-ae-mode='light']) .ae-pop,
+  :root:not(.light):not([data-ae-mode='light']) .ae-pop-surface,
   :root:not(.light):not([data-ae-mode='light']) .ae-toast {
     background: var(--ae-wash);
     box-shadow: none;
   }
 
-  :root:not(.light):not([data-ae-mode='light']) [data-ae-tip]::after {
+  :root:not(.light):not([data-ae-mode='light']) [data-ae-tip]::after,
+  :root:not(.light):not([data-ae-mode='light']) .ae-tip-surface {
     background: var(--ae-wash);
   }
 }
@@ -887,6 +905,50 @@ dialog.ae-dialog::backdrop {
 
 .dark dialog.ae-dialog::backdrop,
 [data-ae-mode='dark'] dialog.ae-dialog::backdrop {
+  background: rgba(18, 18, 18, 0.4);
+}
+
+/* Headless dialog anatomy: Base UI renders separate popup and backdrop
+   elements rather than a native <dialog>. Behavior stays with Base UI;
+   these classes carry the same Aesthetic costume. */
+.ae-dialog-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  translate: -50% -50%;
+  z-index: var(--ae-z-dialog);
+  border: 0;
+  border-radius: var(--ae-radius);
+  background: var(--ae-surface);
+  color: var(--ae-ink);
+  width: min(26em, calc(100vw - 3em));
+  box-sizing: border-box;
+  padding: var(--ae-space-6);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.05),
+    0 12px 36px rgba(0, 0, 0, 0.09);
+  outline: none;
+}
+
+.ae-dialog-panel[data-open] {
+  animation: ae-enter var(--ae-soft) var(--ae-ease) both;
+}
+
+.ae-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--ae-z-backdrop);
+  background: rgba(252, 252, 252, 0.4);
+}
+
+.dark .ae-dialog-panel,
+[data-ae-mode='dark'] .ae-dialog-panel {
+  background: var(--ae-wash);
+  box-shadow: none;
+}
+
+.dark .ae-dialog-backdrop,
+[data-ae-mode='dark'] .ae-dialog-backdrop {
   background: rgba(18, 18, 18, 0.4);
 }
 
@@ -942,6 +1004,41 @@ dialog.ae-dialog::backdrop {
   box-shadow: none;
 }
 
+/* Headless menu/popover popup: its Positioner owns geometry. */
+.ae-pop-positioner {
+  z-index: var(--ae-z-pop);
+}
+
+.ae-pop-surface {
+  position: relative;
+  z-index: var(--ae-z-pop);
+  border: 1px solid var(--ae-line);
+  background: var(--ae-surface);
+  color: var(--ae-ink);
+  width: max-content;
+  max-width: 22em;
+  padding: 1em 1.2em;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.04),
+    0 8px 28px rgba(0, 0, 0, 0.06);
+  outline: none;
+}
+
+.ae-pop-surface[data-open] {
+  animation: ae-enter var(--ae-quick) var(--ae-ease) both;
+}
+
+.ae-pop-surface > .ae-menu:only-child {
+  margin: -1em -1.2em;
+  border: 0;
+}
+
+.dark .ae-pop-surface,
+[data-ae-mode='dark'] .ae-pop-surface {
+  background: var(--ae-wash);
+  box-shadow: none;
+}
+
 /* the tip: a whisper that answers hover — chrome-register words in a
    hairline slip. Patience built in: it waits a beat on hover, answers
    focus at once. Set the words in data-ae-tip; keep them short. */
@@ -981,6 +1078,36 @@ dialog.ae-dialog::backdrop {
 
 .dark [data-ae-tip]::after,
 [data-ae-mode='dark'] [data-ae-tip]::after {
+  background: var(--ae-wash);
+}
+
+/* Headless tooltip popup: a real element instead of [data-ae-tip]'s
+   generated pseudo-element. Base UI owns delay and positioning. */
+.ae-tip-positioner {
+  z-index: var(--ae-z-tip);
+}
+
+.ae-tip-surface {
+  z-index: var(--ae-z-tip);
+  background: var(--ae-surface);
+  color: var(--ae-ink-muted);
+  border: 1px solid var(--ae-line);
+  font-family: var(--ae-font);
+  font-size: 13px;
+  font-weight: var(--ae-w-regular);
+  letter-spacing: normal;
+  line-height: 1.5;
+  padding: 0.25em 0.7em;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.ae-tip-surface[data-open] {
+  animation: ae-enter var(--ae-quick) var(--ae-ease) both;
+}
+
+.dark .ae-tip-surface,
+[data-ae-mode='dark'] .ae-tip-surface {
   background: var(--ae-wash);
 }
 
@@ -2298,7 +2425,8 @@ input.ae-switch:checked::before {
   overflow-y: auto;
 }
 
-.ae-menu button {
+.ae-menu button,
+.ae-menu-item {
   display: block;
   width: 100%;
   text-align: left;
@@ -2316,12 +2444,15 @@ input.ae-switch:checked::before {
     background-color var(--ae-quick) var(--ae-ease);
 }
 
-.ae-menu button:hover {
+.ae-menu button:hover,
+.ae-menu-item:hover,
+.ae-menu-item[data-highlighted] {
   background: var(--ae-wash);
   color: var(--ae-ink);
 }
 
-.ae-menu button.is-sel {
+.ae-menu button.is-sel,
+.ae-menu-item.is-sel {
   color: var(--ae-ink);
   font-weight: var(--ae-w-medium);
 }

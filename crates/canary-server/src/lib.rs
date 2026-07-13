@@ -1011,7 +1011,7 @@ mod tests {
             .await?;
         assert_eq!(aesthetic.status(), StatusCode::OK);
         let aesthetic_body = text_body(aesthetic).await?;
-        assert!(aesthetic_body.contains("aesthetic v2.16.0"));
+        assert!(aesthetic_body.contains("aesthetic v0.25.0"));
 
         Ok(())
     }

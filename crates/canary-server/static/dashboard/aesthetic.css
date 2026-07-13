@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════
-   aesthetic v2.16.0
+   aesthetic v0.25.0
    The Misty Step design system. https://github.com/misty-step/aesthetic
 
    The law:
@@ -22,9 +22,9 @@
    · Light and dark, defaulting to the system, with a user toggle.
 
    Steering: every token is a CSS custom property; downstream projects
-   steer the scheme — --ae-accent / --ae-accent-dark, and the status
-   triplet when their domain needs different hues. Everything else is
-   the shared identity.
+   pin a named theme or steer the scheme — --ae-accent /
+   --ae-accent-dark, and the status triplet when their domain needs
+   different hues. Everything else is the shared identity.
    ═══════════════════════════════════════════════════════════════════ */
 
 /* ── tokens ───────────────────────────────────────────────────────── */
@@ -105,7 +105,10 @@
   --ae-space-8: 3em; /* section — top-level margins */
 
   /* z-index scale: named layers so consumers don't guess at magic numbers */
-  --ae-z-tip: 10; /* tooltips, hover whispers */
+  --ae-z-backdrop: 40; /* modal backdrop below its decision panel */
+  --ae-z-dialog: 41; /* modal decision panel */
+  --ae-z-pop: 50; /* portaled menus and popovers above modal decisions */
+  --ae-z-tip: 60; /* portaled tooltips above popovers and dialogs */
   --ae-z-toast: 100; /* toasts, persistent notifications */
 
   /* motion: feedback, never decoration */
@@ -115,6 +118,95 @@
   --ae-gentle: 480ms; /* state resolutions: slower than feedback, never abrupt */
 
   color-scheme: light dark;
+}
+
+/* named themes: opt-in flavor presets over the same token contract.
+   Projects pin one on <html data-ae-theme="moss">, or include
+   recipes/theme.js to let users switch. Theme presets steer accent and
+   categorical inks; status semantics stay the house triplet unless a
+   project deliberately overrides them. */
+:root[data-ae-theme='ultramarine'] {
+  --ae-accent: #2643d0;
+  --ae-accent-dark: #8c9eff;
+  --ae-cat-0: #8c2f1f;
+  --ae-cat-1: #2c6e62;
+  --ae-cat-2: #a67c1e;
+  --ae-cat-3: #6b4c86;
+  --ae-cat-4: #46586b;
+  --ae-cat-5: #5b7444;
+  --ae-cat-6: #3d5a80;
+  --ae-cat-7: #a1452e;
+  --ae-cat-0-dark: #d06a4f;
+  --ae-cat-1-dark: #54bba4;
+  --ae-cat-2-dark: #d8b25a;
+  --ae-cat-3-dark: #b98fe0;
+  --ae-cat-4-dark: #93a8c2;
+  --ae-cat-5-dark: #9bc47a;
+  --ae-cat-6-dark: #7ea1d1;
+  --ae-cat-7-dark: #e08a6a;
+}
+
+:root[data-ae-theme='moss'] {
+  --ae-accent: #2f6b3f;
+  --ae-accent-dark: #80d98e;
+  --ae-cat-0: #6f3f1f;
+  --ae-cat-1: #2f6b3f;
+  --ae-cat-2: #8a6a1f;
+  --ae-cat-3: #5d5686;
+  --ae-cat-4: #4b6470;
+  --ae-cat-5: #55743d;
+  --ae-cat-6: #3d6472;
+  --ae-cat-7: #934b2f;
+  --ae-cat-0-dark: #d28a5f;
+  --ae-cat-1-dark: #80d98e;
+  --ae-cat-2-dark: #d6b65c;
+  --ae-cat-3-dark: #b8a8e8;
+  --ae-cat-4-dark: #9ab8c4;
+  --ae-cat-5-dark: #a8d68a;
+  --ae-cat-6-dark: #88c4d2;
+  --ae-cat-7-dark: #df8a62;
+}
+
+:root[data-ae-theme='ember'] {
+  --ae-accent: #c2410c;
+  --ae-accent-dark: #ff8a5c;
+  --ae-cat-0: #9b2f1f;
+  --ae-cat-1: #6b5a2f;
+  --ae-cat-2: #8a5f32;
+  --ae-cat-3: #6d4c86;
+  --ae-cat-4: #5a6172;
+  --ae-cat-5: #5b7444;
+  --ae-cat-6: #3d5a80;
+  --ae-cat-7: #a1452e;
+  --ae-cat-0-dark: #f08a70;
+  --ae-cat-1-dark: #c49d72;
+  --ae-cat-2-dark: #ffb45c;
+  --ae-cat-3-dark: #b98fe0;
+  --ae-cat-4-dark: #93a8c2;
+  --ae-cat-5-dark: #9bc47a;
+  --ae-cat-6-dark: #7ea1d1;
+  --ae-cat-7-dark: #ff8a5c;
+}
+
+:root[data-ae-theme='violet'] {
+  --ae-accent: #6d28d9;
+  --ae-accent-dark: #c4a3ff;
+  --ae-cat-0: #8c2f5a;
+  --ae-cat-1: #2c6e62;
+  --ae-cat-2: #8a721e;
+  --ae-cat-3: #6d28d9;
+  --ae-cat-4: #46586b;
+  --ae-cat-5: #5b7444;
+  --ae-cat-6: #3d5a80;
+  --ae-cat-7: #9945a1;
+  --ae-cat-0-dark: #e08ab8;
+  --ae-cat-1-dark: #54bba4;
+  --ae-cat-2-dark: #d8b25a;
+  --ae-cat-3-dark: #c4a3ff;
+  --ae-cat-4-dark: #93a8c2;
+  --ae-cat-5-dark: #9bc47a;
+  --ae-cat-6-dark: #7ea1d1;
+  --ae-cat-7-dark: #df8ae8;
 }
 
 /* auto dark: follows the OS unless the page pins a mode */
@@ -149,8 +241,8 @@
 }
 
 /* pinned dark: class or attribute set by the site's mode toggle */
-.dark,
-[data-ae-mode='dark'] {
+:root.dark,
+:root[data-ae-mode='dark'] {
   color-scheme: dark;
   --ae-surface: var(--ae-surface-dark);
   --ae-wash: var(--ae-wash-dark);
@@ -476,6 +568,17 @@ a:hover {
   color: var(--ae-ink);
 }
 
+/* Headless triggers render real buttons; remove UA chrome when a status
+   mark is used as the trigger without turning its words into a button. */
+button.ae-status {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
 .ae-icon-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -746,22 +849,26 @@ a:hover {
     transform: rotate(0) scale(1);
   }
 
-  :root:not(.light):not([data-ae-mode='light']) dialog.ae-dialog {
+  :root:not(.light):not([data-ae-mode='light']) dialog.ae-dialog,
+  :root:not(.light):not([data-ae-mode='light']) .ae-dialog-panel {
     background: var(--ae-wash);
     box-shadow: none;
   }
 
-  :root:not(.light):not([data-ae-mode='light']) dialog.ae-dialog::backdrop {
+  :root:not(.light):not([data-ae-mode='light']) dialog.ae-dialog::backdrop,
+  :root:not(.light):not([data-ae-mode='light']) .ae-dialog-backdrop {
     background: rgba(18, 18, 18, 0.4);
   }
 
   :root:not(.light):not([data-ae-mode='light']) .ae-pop,
+  :root:not(.light):not([data-ae-mode='light']) .ae-pop-surface,
   :root:not(.light):not([data-ae-mode='light']) .ae-toast {
     background: var(--ae-wash);
     box-shadow: none;
   }
 
-  :root:not(.light):not([data-ae-mode='light']) [data-ae-tip]::after {
+  :root:not(.light):not([data-ae-mode='light']) [data-ae-tip]::after,
+  :root:not(.light):not([data-ae-mode='light']) .ae-tip-surface {
     background: var(--ae-wash);
   }
 }
@@ -798,6 +905,50 @@ dialog.ae-dialog::backdrop {
 
 .dark dialog.ae-dialog::backdrop,
 [data-ae-mode='dark'] dialog.ae-dialog::backdrop {
+  background: rgba(18, 18, 18, 0.4);
+}
+
+/* Headless dialog anatomy: Base UI renders separate popup and backdrop
+   elements rather than a native <dialog>. Behavior stays with Base UI;
+   these classes carry the same Aesthetic costume. */
+.ae-dialog-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  translate: -50% -50%;
+  z-index: var(--ae-z-dialog);
+  border: 0;
+  border-radius: var(--ae-radius);
+  background: var(--ae-surface);
+  color: var(--ae-ink);
+  width: min(26em, calc(100vw - 3em));
+  box-sizing: border-box;
+  padding: var(--ae-space-6);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.05),
+    0 12px 36px rgba(0, 0, 0, 0.09);
+  outline: none;
+}
+
+.ae-dialog-panel[data-open] {
+  animation: ae-enter var(--ae-soft) var(--ae-ease) both;
+}
+
+.ae-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--ae-z-backdrop);
+  background: rgba(252, 252, 252, 0.4);
+}
+
+.dark .ae-dialog-panel,
+[data-ae-mode='dark'] .ae-dialog-panel {
+  background: var(--ae-wash);
+  box-shadow: none;
+}
+
+.dark .ae-dialog-backdrop,
+[data-ae-mode='dark'] .ae-dialog-backdrop {
   background: rgba(18, 18, 18, 0.4);
 }
 
@@ -853,6 +1004,41 @@ dialog.ae-dialog::backdrop {
   box-shadow: none;
 }
 
+/* Headless menu/popover popup: its Positioner owns geometry. */
+.ae-pop-positioner {
+  z-index: var(--ae-z-pop);
+}
+
+.ae-pop-surface {
+  position: relative;
+  z-index: var(--ae-z-pop);
+  border: 1px solid var(--ae-line);
+  background: var(--ae-surface);
+  color: var(--ae-ink);
+  width: max-content;
+  max-width: 22em;
+  padding: 1em 1.2em;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.04),
+    0 8px 28px rgba(0, 0, 0, 0.06);
+  outline: none;
+}
+
+.ae-pop-surface[data-open] {
+  animation: ae-enter var(--ae-quick) var(--ae-ease) both;
+}
+
+.ae-pop-surface > .ae-menu:only-child {
+  margin: -1em -1.2em;
+  border: 0;
+}
+
+.dark .ae-pop-surface,
+[data-ae-mode='dark'] .ae-pop-surface {
+  background: var(--ae-wash);
+  box-shadow: none;
+}
+
 /* the tip: a whisper that answers hover — chrome-register words in a
    hairline slip. Patience built in: it waits a beat on hover, answers
    focus at once. Set the words in data-ae-tip; keep them short. */
@@ -892,6 +1078,36 @@ dialog.ae-dialog::backdrop {
 
 .dark [data-ae-tip]::after,
 [data-ae-mode='dark'] [data-ae-tip]::after {
+  background: var(--ae-wash);
+}
+
+/* Headless tooltip popup: a real element instead of [data-ae-tip]'s
+   generated pseudo-element. Base UI owns delay and positioning. */
+.ae-tip-positioner {
+  z-index: var(--ae-z-tip);
+}
+
+.ae-tip-surface {
+  z-index: var(--ae-z-tip);
+  background: var(--ae-surface);
+  color: var(--ae-ink-muted);
+  border: 1px solid var(--ae-line);
+  font-family: var(--ae-font);
+  font-size: 13px;
+  font-weight: var(--ae-w-regular);
+  letter-spacing: normal;
+  line-height: 1.5;
+  padding: 0.25em 0.7em;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.ae-tip-surface[data-open] {
+  animation: ae-enter var(--ae-quick) var(--ae-ease) both;
+}
+
+.dark .ae-tip-surface,
+[data-ae-mode='dark'] .ae-tip-surface {
   background: var(--ae-wash);
 }
 
@@ -2209,7 +2425,8 @@ input.ae-switch:checked::before {
   overflow-y: auto;
 }
 
-.ae-menu button {
+.ae-menu button,
+.ae-menu-item {
   display: block;
   width: 100%;
   text-align: left;
@@ -2227,12 +2444,15 @@ input.ae-switch:checked::before {
     background-color var(--ae-quick) var(--ae-ease);
 }
 
-.ae-menu button:hover {
+.ae-menu button:hover,
+.ae-menu-item:hover,
+.ae-menu-item[data-highlighted] {
   background: var(--ae-wash);
   color: var(--ae-ink);
 }
 
-.ae-menu button.is-sel {
+.ae-menu button.is-sel,
+.ae-menu-item.is-sel {
   color: var(--ae-ink);
   font-weight: var(--ae-w-medium);
 }
