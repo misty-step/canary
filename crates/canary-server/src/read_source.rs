@@ -13,14 +13,20 @@
 //! `report_error_groups_scoped` and `active_incidents` are deliberately not
 //! mirrored here: `Store`'s versions fuse a claim-expiry write into the
 //! read, so they always run on the writer. Callers needing them still use
-//! `IngestState::lock_store`.
+//! `IngestState::lock_store`. That is the eligibility rule in general: a
+//! read belongs here only if it performs no write at all. `active_claims`
+//! qualifies because it is a pure predicate `SELECT` that deliberately
+//! skips the expiry-stamping sweep the subject-scoped claim reads fuse in
+//! (see `canary_store::claims::list_active`); a claims read that needs the
+//! sweep must stay on the writer.
 
 use parking_lot::MutexGuard;
 
-use canary_core::query::{ErrorDetail, ErrorsByClass, TimelineResponse};
+use canary_core::query::{ActiveClaimsResponse, ErrorDetail, ErrorsByClass, TimelineResponse};
 use canary_store::{
-    ApiKeyRecord, ErrorSummaryItem, HealthMonitorStatus, HealthTargetStatus, QueryResult, Result,
-    Store, TargetCheckRead, TimelineQueryOptions, TimelineQueryResult,
+    ActiveClaimListOptions, ApiKeyRecord, ClaimResult, ErrorSummaryItem, HealthMonitorStatus,
+    HealthTargetStatus, QueryResult, Result, Store, TargetCheckRead, TimelineQueryOptions,
+    TimelineQueryResult,
 };
 use canary_store::{RecentTransition, SearchResult, ServiceSliSummary};
 
@@ -214,6 +220,16 @@ impl ReadSource<'_> {
         match self {
             Self::Pool(conn) => conn.list_api_keys_scoped(tenant_id, project_id),
             Self::Writer(store) => store.list_api_keys_scoped(tenant_id, project_id),
+        }
+    }
+
+    pub(crate) fn active_claims(
+        &self,
+        options: &ActiveClaimListOptions,
+    ) -> ClaimResult<ActiveClaimsResponse> {
+        match self {
+            Self::Pool(conn) => conn.active_claims(options),
+            Self::Writer(store) => store.active_claims(options),
         }
     }
 }

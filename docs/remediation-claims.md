@@ -38,6 +38,8 @@ service authority.
 The canonical routes are:
 
 - `GET /api/v1/claims?subject_type=...&subject_id=...&limit=20&cursor=...`
+- `GET /api/v1/claims/active?service=...&limit=20&cursor=...` — fleet-wide
+  active claims across all subjects, newest activity first
 - `POST /api/v1/claims`
 - `GET /api/v1/claims/{id}`
 - `POST /api/v1/claims/{id}/transition`

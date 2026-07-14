@@ -2,9 +2,10 @@
 
 use axum::{
     body::{Body, Bytes},
-    extract::{Path, Query, State},
+    extract::{Path, Query, RawQuery, State},
     http::{HeaderMap, Response, StatusCode},
 };
+use canary_core::redaction::scrub_value;
 use canary_http::{
     problem_details::{
         ProblemDetails, internal_problem, not_found_problem, payload_too_large_problem,
@@ -13,7 +14,10 @@ use canary_http::{
     request::decode_json_object,
 };
 use canary_ingest::{IngestEffect, ValidationErrors};
-use canary_store::{ClaimError, ClaimInsert, ClaimListOptions, ClaimTransition, VerifiedApiKey};
+use canary_store::{
+    ActiveClaimListOptions, ClaimError, ClaimInsert, ClaimListOptions, ClaimTransition,
+    VerifiedApiKey,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use time::Duration;
@@ -23,6 +27,7 @@ use crate::{
     body_fields::{optional_positive_i64, required_string},
     http_contract::{check_content_length, json_status_response, problem_response},
     require_read_scope, require_responder_write_scope,
+    server_auth::enforce_service_authority,
     server_time::{current_rfc3339, current_utc, format_rfc3339},
 };
 
@@ -32,6 +37,14 @@ pub(crate) struct ClaimListParams {
     subject_id: Option<String>,
     limit: Option<String>,
     cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ActiveClaimParams {
+    service: Option<String>,
+    limit: Option<String>,
+    cursor: Option<String>,
+    after: Option<String>,
 }
 
 struct ClaimCreate {
@@ -99,6 +112,87 @@ pub(crate) async fn list_claims(
         Err(
             ClaimError::InvalidState
             | ClaimError::InvalidClaim
+            | ClaimError::Conflict(_)
+            | ClaimError::InvalidTransition,
+        ) => problem_response(internal_problem()),
+    }
+}
+
+/// `GET /api/v1/claims/active` — fleet-wide "who is working what".
+///
+/// A pure snapshot read: active claims across every subject type, newest
+/// activity first, served from the read pool so it never queues behind the
+/// single writer. Service-bound keys are pinned to their own service;
+/// unbound keys may optionally filter with `?service=`. The response passes
+/// through the shared redaction floor because this surface repeats
+/// freeform claim text (owner, purpose, evidence links) across service
+/// boundaries.
+pub(crate) async fn active_claims(
+    State(state): State<IngestState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response<Body> {
+    let authority = match require_read_scope(&state, &headers) {
+        Ok(authority) => authority,
+        Err(problem) => return problem_response(*problem),
+    };
+    // Parse the query string in the handler instead of via `Query<T>` so a
+    // malformed shape (for example a duplicated key) yields RFC 9457
+    // Problem Details rather than axum's plain-text extractor rejection.
+    let params: ActiveClaimParams =
+        match serde_urlencoded::from_str(raw_query.as_deref().unwrap_or("")) {
+            Ok(params) => params,
+            Err(_) => {
+                return problem_response(claim_validation_problem(
+                    "query",
+                    "is malformed; each parameter may appear at most once",
+                ));
+            }
+        };
+    let service = match (authority.service.as_deref(), params.service) {
+        (Some(_bound_service), Some(service)) => {
+            if let Err(problem) = enforce_service_authority(&authority, &service) {
+                return problem_response(*problem);
+            }
+            Some(service)
+        }
+        (Some(bound_service), None) => Some(bound_service.to_owned()),
+        (None, service) => service.filter(|value| !value.is_empty()),
+    };
+    let after = params.after.filter(|value| !value.is_empty());
+    let options = ActiveClaimListOptions {
+        tenant_id: authority.tenant_id,
+        project_id: authority.project_id,
+        service,
+        limit: params.limit,
+        cursor: after.or(params.cursor),
+    };
+    let reader = match state.read_source() {
+        Ok(reader) => reader,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    let result = reader.active_claims(&options);
+    // Release the read connection (or the writer guard on the no-pool test
+    // fallback) before the CPU-bound redaction pass below.
+    drop(reader);
+    match result {
+        Ok(result) => match serde_json::to_value(&result) {
+            Ok(value) => json_status_response(StatusCode::OK.as_u16(), scrub_value(&value)),
+            Err(_) => problem_response(internal_problem()),
+        },
+        Err(ClaimError::InvalidLimit) => problem_response(claim_validation_problem(
+            "limit",
+            "must be between 1 and 50",
+        )),
+        Err(ClaimError::InvalidCursor) => {
+            problem_response(claim_validation_problem("cursor", "is invalid"))
+        }
+        Err(ClaimError::Sqlite(_)) => problem_response(internal_problem()),
+        Err(
+            ClaimError::InvalidSubjectType
+            | ClaimError::InvalidState
+            | ClaimError::InvalidClaim
+            | ClaimError::NotFound
             | ClaimError::Conflict(_)
             | ClaimError::InvalidTransition,
         ) => problem_response(internal_problem()),

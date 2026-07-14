@@ -422,6 +422,29 @@
       "name": "canary_claims_list"
     },
     {
+      "description": "List active remediation claims fleet-wide across all subjects and services, newest activity first. Service-bound read keys see only their own service's claims.",
+      "input_schema": {
+        "properties": {
+          "after": {
+            "type": "string"
+          },
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "service": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "canary_claims_active"
+    },
+    {
       "description": "Read one remediation claim by id.",
       "input_schema": {
         "properties": {

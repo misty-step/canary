@@ -620,6 +620,61 @@ pub fn summarize_claims(value: &Value) -> Vec<String> {
     }
 }
 
+/// Build the `/api/v1/claims/active` request path. Shared by the CLI
+/// command and the MCP tool so the two surfaces cannot drift.
+pub fn active_claims_path(
+    service: Option<&str>,
+    limit: Option<u16>,
+    cursor: Option<&str>,
+    after: Option<&str>,
+) -> String {
+    let mut params = Vec::new();
+    if let Some(service) = service {
+        params.push(format!("service={}", encode(service)));
+    }
+    if let Some(limit) = limit {
+        params.push(format!("limit={limit}"));
+    }
+    if let Some(cursor) = cursor {
+        params.push(format!("cursor={}", encode(cursor)));
+    }
+    if let Some(after) = after {
+        params.push(format!("after={}", encode(after)));
+    }
+    let mut path = "/api/v1/claims/active".to_owned();
+    if !params.is_empty() {
+        path.push('?');
+        path.push_str(&params.join("&"));
+    }
+    path
+}
+
+/// Summarize the fleet-wide active claims response.
+pub fn summarize_active_claims(value: &Value) -> Vec<String> {
+    let mut lines = vec![format!("summary: {}", string_field(value, "summary"))];
+    if let Some(claims) = value.get("claims").and_then(Value::as_array) {
+        lines.extend(claims.iter().map(|claim| {
+            format!(
+                "- {} {} subject={}/{} service={} owner={} updated_at={}",
+                string_field(claim, "id"),
+                string_field(claim, "state"),
+                string_field(claim, "subject_type"),
+                string_field(claim, "subject_id"),
+                nullable_string_field(claim, "service"),
+                string_field(claim, "owner"),
+                string_field(claim, "updated_at"),
+            )
+        }));
+    }
+    lines.push(format!("limit: {}", number_field(value, "limit")));
+    lines.push(format!("truncated: {}", bool_field(value, "truncated")));
+    lines.push(format!(
+        "cursor: {}",
+        nullable_string_field(value, "cursor")
+    ));
+    lines
+}
+
 /// Summarize annotation list or create responses.
 pub fn summarize_annotations(value: &Value) -> Vec<String> {
     if value.get("annotations").is_some() {
@@ -4665,6 +4720,25 @@ impl McpToolContext {
                     response,
                 ))
             }
+            "canary_claims_active" => {
+                let client = self.read_client()?;
+                let service = optional_string(arguments, "service")?;
+                let limit = optional_u16(arguments, "limit")?;
+                let cursor = optional_string(arguments, "cursor")?;
+                let after = optional_string(arguments, "after")?;
+                let path = active_claims_path(
+                    service.as_deref(),
+                    limit,
+                    cursor.as_deref(),
+                    after.as_deref(),
+                );
+                let response = client.get_auth_json(&path)?;
+                Ok(json_envelope(
+                    "canary_claims_active",
+                    client.endpoint(),
+                    response,
+                ))
+            }
             "canary_claim_get" => {
                 let client = self.read_client()?;
                 let claim_id = required_string(arguments, "claim_id")?;
@@ -5317,6 +5391,11 @@ pub fn tool_manifest() -> Vec<ToolSpec> {
             name: "canary_claims_list",
             description: "List remediation claims for one Canary subject.",
             input_schema: json!({"type":"object","required":["subject_type","subject_id"],"properties":{"subject_type":{"type":"string","enum":["incident","error_group","target","monitor"]},"subject_id":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":50},"cursor":{"type":"string"}}}),
+        },
+        ToolSpec {
+            name: "canary_claims_active",
+            description: "List active remediation claims fleet-wide across all subjects and services, newest activity first. Service-bound read keys see only their own service's claims.",
+            input_schema: json!({"type":"object","properties":{"service":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":50},"cursor":{"type":"string"},"after":{"type":"string"}}}),
         },
         ToolSpec {
             name: "canary_claim_get",

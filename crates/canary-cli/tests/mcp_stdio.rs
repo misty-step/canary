@@ -480,6 +480,168 @@ fn mcp_stdio_timeline_tool_forwards_after_and_cursor() -> Result<(), Box<dyn std
 }
 
 #[test]
+fn cli_claims_active_reads_body_matching_http_route_body() -> Result<(), Box<dyn std::error::Error>>
+{
+    let server = FixtureServer::spawn(vec![FixtureResponse::ok(active_claims_body())])?;
+    let response = run_cli_json(&server, ["claims", "active"])?;
+
+    assert_eq!(response["command"], json!("claims active"));
+    assert_eq!(response["response"], active_claims_body());
+
+    let requests = server.join()?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[0].path, "/api/v1/claims/active");
+    assert_eq!(
+        requests[0].authorization.as_deref(),
+        Some("Bearer read-key")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn cli_claims_active_forwards_query_params() -> Result<(), Box<dyn std::error::Error>> {
+    let server = FixtureServer::spawn(vec![FixtureResponse::ok(active_claims_body())])?;
+    let response = run_cli_json(
+        &server,
+        [
+            "claims",
+            "active",
+            "--service",
+            "svc-alpha",
+            "--limit",
+            "5",
+            "--cursor",
+            "abc",
+        ],
+    )?;
+    assert_eq!(response["command"], json!("claims active"));
+
+    let requests = server.join()?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].path,
+        "/api/v1/claims/active?service=svc-alpha&limit=5&cursor=abc"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn mcp_stdio_claims_active_tool_reads_body_matching_http_route_body()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = FixtureServer::spawn(vec![FixtureResponse::ok(active_claims_body())])?;
+    let repo_root = repo_root()?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_canary"))
+        .args(["--endpoint", server.endpoint(), "mcp-server"])
+        .current_dir(&repo_root)
+        .env("CANARY_READ_KEY", "mcp-read-key")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| std::io::Error::other("child stdin unavailable"))?;
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "canary_claims_active",
+                "arguments": {}
+            }
+        })
+    )?;
+    drop(stdin);
+
+    let output = child.wait_with_output()?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let responses = String::from_utf8(output.stdout)?
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        responses[0]["result"]["structuredContent"]["command"],
+        json!("canary_claims_active")
+    );
+    assert_eq!(
+        responses[0]["result"]["structuredContent"]["response"],
+        active_claims_body()
+    );
+
+    let requests = server.join()?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/api/v1/claims/active");
+    assert_eq!(
+        requests[0].authorization.as_deref(),
+        Some("Bearer mcp-read-key")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn mcp_stdio_claims_active_tool_forwards_query_params_matching_cli()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = FixtureServer::spawn(vec![FixtureResponse::ok(active_claims_body())])?;
+    let repo_root = repo_root()?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_canary"))
+        .args(["--endpoint", server.endpoint(), "mcp-server"])
+        .current_dir(&repo_root)
+        .env("CANARY_READ_KEY", "mcp-read-key")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| std::io::Error::other("child stdin unavailable"))?;
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "canary_claims_active",
+                "arguments": {"service": "svc-alpha", "limit": 5}
+            }
+        })
+    )?;
+    drop(stdin);
+
+    let output = child.wait_with_output()?;
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests = server.join()?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].path,
+        "/api/v1/claims/active?service=svc-alpha&limit=5"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn mcp_stdio_exercises_incident_loop_tools() -> Result<(), Box<dyn std::error::Error>> {
     let server = FixtureServer::spawn(vec![
         FixtureResponse::ok(incident_detail_body()),
@@ -778,6 +940,53 @@ fn claim_body(state: &str) -> Value {
         "expires_at": "2026-05-28T20:16:00Z",
         "released_at": if state == "released" { json!("2026-05-28T20:02:00Z") } else { Value::Null },
         "completed_at": if state == "released" { json!("2026-05-28T20:02:00Z") } else { Value::Null }
+    })
+}
+
+fn active_claims_body() -> Value {
+    json!({
+        "summary": "2 active remediation claims across 2 services.",
+        "claims": [
+            {
+                "id": "CLM-alpha",
+                "tenant_id": "TENANT-bootstrap",
+                "project_id": "PROJECT-bootstrap",
+                "service": "svc-alpha",
+                "subject_type": "incident",
+                "subject_id": "INC-alpha",
+                "owner": "codex",
+                "purpose": "triage",
+                "state": "claimed",
+                "idempotency_key": "run-alpha",
+                "evidence_links": [],
+                "created_at": "2026-07-14T20:00:00Z",
+                "updated_at": "2026-07-14T20:01:00Z",
+                "expires_at": "2026-07-14T20:15:00Z",
+                "released_at": null,
+                "completed_at": null
+            },
+            {
+                "id": "CLM-beta",
+                "tenant_id": "TENANT-bootstrap",
+                "project_id": "PROJECT-bootstrap",
+                "service": "svc-beta",
+                "subject_type": "error_group",
+                "subject_id": "GRP-beta",
+                "owner": "claude",
+                "purpose": "fix rollout",
+                "state": "in_progress",
+                "idempotency_key": "run-beta",
+                "evidence_links": ["https://example.com/beta"],
+                "created_at": "2026-07-14T19:50:00Z",
+                "updated_at": "2026-07-14T19:55:00Z",
+                "expires_at": "2026-07-14T20:10:00Z",
+                "released_at": null,
+                "completed_at": null
+            }
+        ],
+        "limit": 20,
+        "cursor": null,
+        "truncated": false
     })
 }
 

@@ -41,8 +41,8 @@ pub use api_keys::{
 };
 pub use canary_core::metrics::MetricsSnapshot;
 pub use claims::{
-    ClaimCreateOutcome, ClaimError, ClaimInsert, ClaimListOptions, ClaimResult, ClaimTransition,
-    subject_types as claim_subject_types,
+    ActiveClaimListOptions, ClaimCreateOutcome, ClaimError, ClaimInsert, ClaimListOptions,
+    ClaimResult, ClaimTransition, subject_types as claim_subject_types,
 };
 pub use escalation::{
     DeescalateOutcome, DeescalationRequest, EscalateOutcome, EscalationError, EscalationInsert,
@@ -981,6 +981,14 @@ impl Store {
         options: ClaimListOptions,
     ) -> ClaimResult<canary_core::query::RemediationClaimsResponse> {
         claims::list(&mut self.connection, options)
+    }
+
+    /// List active claims across all subjects for one tenant/project.
+    pub fn active_claims(
+        &self,
+        options: &ActiveClaimListOptions,
+    ) -> ClaimResult<canary_core::query::ActiveClaimsResponse> {
+        claims::list_active(&self.connection, options)
     }
 
     /// Return one remediation claim in a tenant/project/service boundary.
@@ -2669,6 +2677,263 @@ mod tests {
     }
 
     #[test]
+    fn active_claims_snapshot_filters_scopes_and_paginates_without_mutating()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        seed_api_target(&mut store)?;
+        for (id, service) in [
+            ("TGT-worker", "worker"),
+            ("TGT-webc", "webc"),
+            ("TGT-extra", "extra"),
+        ] {
+            store.insert_target(TargetInsert {
+                id: id.to_owned(),
+                url: format!("https://{service}.example.com/health"),
+                name: service.to_owned(),
+                service: service.to_owned(),
+                method: "GET".to_owned(),
+                headers: None,
+                interval_ms: 60_000,
+                timeout_ms: 10_000,
+                expected_status: "200".to_owned(),
+                body_contains: None,
+                degraded_after: 1,
+                down_after: 3,
+                up_after: 1,
+                active: true,
+                created_at: "2026-05-28T19:00:00Z".to_owned(),
+            })?;
+        }
+
+        let claim_on_api = store.create_claim(ClaimInsert {
+            service: Some("api".to_owned()),
+            ..claim_insert(
+                ClaimId::generate().into_string(),
+                EventId::generate().into_string(),
+                "codex",
+                "investigate api regression",
+                "run-active-api",
+                "2026-05-28T20:00:00Z",
+                "2099-05-28T20:00:00Z",
+            )
+        })?;
+        let claim_on_worker = store.create_claim(ClaimInsert {
+            service: Some("worker".to_owned()),
+            subject_id: "TGT-worker".to_owned(),
+            idempotency_key: "run-active-worker".to_owned(),
+            now: "2026-05-28T20:05:00Z".to_owned(),
+            ..claim_insert(
+                ClaimId::generate().into_string(),
+                EventId::generate().into_string(),
+                "claude",
+                "investigate worker backlog",
+                "unused",
+                "unused",
+                "2099-05-28T20:00:00Z",
+            )
+        })?;
+        // Due-but-unswept: expires_at is already in the past, and no
+        // subject-scoped read has stamped it expired.
+        let due_unswept = store.create_claim(ClaimInsert {
+            service: Some("webc".to_owned()),
+            subject_id: "TGT-webc".to_owned(),
+            idempotency_key: "run-due-unswept".to_owned(),
+            now: "1970-01-01T00:00:00Z".to_owned(),
+            expires_at: "1970-01-01T00:01:00Z".to_owned(),
+            ..claim_insert(
+                ClaimId::generate().into_string(),
+                EventId::generate().into_string(),
+                "pi",
+                "stale webc claim",
+                "unused",
+                "unused",
+                "unused",
+            )
+        })?;
+        // ClaimInsert.service None: create resolves the stored service from
+        // the subject (here target TGT-extra -> "extra"), so the row is
+        // still service-attributed.
+        let unattributed = store.create_claim(ClaimInsert {
+            subject_id: "TGT-extra".to_owned(),
+            idempotency_key: "run-active-extra".to_owned(),
+            now: "2026-05-28T20:15:00Z".to_owned(),
+            ..claim_insert(
+                ClaimId::generate().into_string(),
+                EventId::generate().into_string(),
+                "gpt",
+                "extra service triage",
+                "unused",
+                "unused",
+                "2099-05-28T20:00:00Z",
+            )
+        })?;
+
+        let all = store.active_claims(&ActiveClaimListOptions {
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: None,
+            limit: None,
+            cursor: None,
+        })?;
+        assert_eq!(
+            all.claims
+                .iter()
+                .map(|claim| claim.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                unattributed.id.as_str(),
+                claim_on_worker.id.as_str(),
+                claim_on_api.id.as_str()
+            ]
+        );
+        assert_eq!(
+            all.summary,
+            "3 active remediation claims across 3 services."
+        );
+        assert_eq!(all.limit, 20);
+        assert_eq!(all.cursor, None);
+        assert!(!all.truncated);
+
+        // The pure read must not stamp the due row expired.
+        let unswept_state: String = store.connection.query_row(
+            "SELECT state FROM remediation_claims WHERE id = ?1",
+            [due_unswept.id.as_str()],
+            |row| row.get(0),
+        )?;
+        assert_eq!(unswept_state, "claimed");
+
+        let api_only = store.active_claims(&ActiveClaimListOptions {
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: Some("api".to_owned()),
+            limit: None,
+            cursor: None,
+        })?;
+        assert_eq!(api_only.claims.len(), 1);
+        assert_eq!(api_only.claims[0].id, claim_on_api.id);
+        assert_eq!(
+            api_only.summary,
+            "1 active remediation claim across 1 service."
+        );
+
+        let first_page = store.active_claims(&ActiveClaimListOptions {
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: None,
+            limit: Some("2".to_owned()),
+            cursor: None,
+        })?;
+        assert_eq!(first_page.claims.len(), 2);
+        assert!(first_page.truncated);
+        let cursor = first_page.cursor.clone().ok_or("missing cursor")?;
+        let second_page = store.active_claims(&ActiveClaimListOptions {
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: None,
+            limit: Some("2".to_owned()),
+            cursor: Some(cursor),
+        })?;
+        assert_eq!(second_page.claims.len(), 1);
+        assert_eq!(second_page.claims[0].id, claim_on_api.id);
+        assert_eq!(second_page.cursor, None);
+        assert!(!second_page.truncated);
+        let walked: Vec<&str> = first_page
+            .claims
+            .iter()
+            .chain(second_page.claims.iter())
+            .map(|claim| claim.id.as_str())
+            .collect();
+        assert_eq!(
+            walked,
+            all.claims
+                .iter()
+                .map(|claim| claim.id.as_str())
+                .collect::<Vec<_>>(),
+            "cursor walk must equal the single-page read"
+        );
+
+        // Service filter combined with cursor pagination exercises both
+        // optional SQL predicates in one statement.
+        store.insert_target(TargetInsert {
+            id: "TGT-api2".to_owned(),
+            url: "https://api2.example.com/health".to_owned(),
+            name: "API 2".to_owned(),
+            service: "api".to_owned(),
+            method: "GET".to_owned(),
+            headers: None,
+            interval_ms: 60_000,
+            timeout_ms: 10_000,
+            expected_status: "200".to_owned(),
+            body_contains: None,
+            degraded_after: 1,
+            down_after: 3,
+            up_after: 1,
+            active: true,
+            created_at: "2026-05-28T19:00:00Z".to_owned(),
+        })?;
+        let second_api_claim = store.create_claim(ClaimInsert {
+            service: Some("api".to_owned()),
+            subject_id: "TGT-api2".to_owned(),
+            idempotency_key: "run-active-api2".to_owned(),
+            now: "2026-05-28T20:20:00Z".to_owned(),
+            ..claim_insert(
+                ClaimId::generate().into_string(),
+                EventId::generate().into_string(),
+                "codex",
+                "second api investigation",
+                "unused",
+                "unused",
+                "2099-05-28T20:00:00Z",
+            )
+        })?;
+        let api_page_one = store.active_claims(&ActiveClaimListOptions {
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: Some("api".to_owned()),
+            limit: Some("1".to_owned()),
+            cursor: None,
+        })?;
+        assert_eq!(api_page_one.claims.len(), 1);
+        assert_eq!(api_page_one.claims[0].id, second_api_claim.id);
+        assert!(api_page_one.truncated);
+        let api_cursor = api_page_one.cursor.clone().ok_or("missing api cursor")?;
+        let api_page_two = store.active_claims(&ActiveClaimListOptions {
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: Some("api".to_owned()),
+            limit: Some("1".to_owned()),
+            cursor: Some(api_cursor),
+        })?;
+        assert_eq!(api_page_two.claims.len(), 1);
+        assert_eq!(api_page_two.claims[0].id, claim_on_api.id);
+        assert_eq!(api_page_two.cursor, None);
+        assert!(!api_page_two.truncated);
+
+        assert!(matches!(
+            store.active_claims(&ActiveClaimListOptions {
+                tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+                project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+                service: None,
+                limit: Some("0".to_owned()),
+                cursor: None,
+            }),
+            Err(ClaimError::InvalidLimit)
+        ));
+        assert!(matches!(
+            store.active_claims(&ActiveClaimListOptions {
+                tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+                project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+                service: None,
+                limit: None,
+                cursor: Some("bogus".to_owned()),
+            }),
+            Err(ClaimError::InvalidCursor)
+        ));
+
+        Ok(())
+    }
+
+    #[test]
     fn remediation_claim_transitions_append_evidence_and_prevent_terminal_reopen()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut store = migrated_store()?;
@@ -2759,6 +3024,36 @@ mod tests {
         assert!(
             plan_text.contains("oban_jobs_worker_state_queue_index"),
             "expected oban_jobs_worker_state_queue_index in query plan, got: {plan_text}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn active_claims_query_uses_partial_index_without_temp_btree_sort() -> Result<()> {
+        let store = migrated_store()?;
+
+        let mut statement = store.connection.prepare(
+            "EXPLAIN QUERY PLAN
+             SELECT id
+             FROM remediation_claims
+             WHERE tenant_id = 'TENANT-bootstrap' AND project_id = 'PROJECT-bootstrap'
+               AND state IN ('claimed', 'investigating', 'fix_proposed')
+               AND expires_at > '2026-05-28T20:00:00Z'
+             ORDER BY updated_at DESC, id DESC
+             LIMIT 21",
+        )?;
+        let details = statement
+            .query_map([], |row| row.get::<_, String>(3))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let plan_text = details.join(" | ");
+
+        assert!(
+            plan_text.contains("remediation_claims_active_updated_at_index"),
+            "expected remediation_claims_active_updated_at_index in query plan, got: {plan_text}"
+        );
+        assert!(
+            !plan_text.contains("TEMP B-TREE"),
+            "active-claims plan must not sort via temp b-tree, got: {plan_text}"
         );
         Ok(())
     }

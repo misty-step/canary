@@ -2,9 +2,11 @@
 
 use canary_core::ids::EventId;
 use canary_core::query::{
-    ClaimCursor, DEFAULT_CLAIM_LIMIT, MAX_CLAIM_LIMIT, REMEDIATION_CLAIM_SUBJECT_TYPES,
-    RemediationClaim, RemediationClaimSummary, RemediationClaimsResponse, claim_state_is_valid,
-    decode_claim_cursor, encode_claim_cursor, remediation_claims_response,
+    ActiveClaimCursor, ActiveClaimsResponse, ClaimCursor, DEFAULT_CLAIM_LIMIT, MAX_CLAIM_LIMIT,
+    REMEDIATION_CLAIM_SUBJECT_TYPES, RemediationClaim, RemediationClaimSummary,
+    RemediationClaimsResponse, active_claims_response, claim_state_is_valid,
+    decode_active_claim_cursor, decode_claim_cursor, encode_active_claim_cursor,
+    encode_claim_cursor, remediation_claims_response,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params, types::Type};
 use serde_json::json;
@@ -120,6 +122,21 @@ pub struct ClaimListOptions {
     pub subject_type: String,
     /// Subject id.
     pub subject_id: String,
+    /// Optional limit string.
+    pub limit: Option<String>,
+    /// Optional pagination cursor.
+    pub cursor: Option<String>,
+}
+
+/// Fleet-wide active-claim list options.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActiveClaimListOptions {
+    /// Tenant namespace.
+    pub tenant_id: String,
+    /// Project namespace.
+    pub project_id: String,
+    /// Optional service authority boundary or caller filter.
+    pub service: Option<String>,
     /// Optional limit string.
     pub limit: Option<String>,
     /// Optional pagination cursor.
@@ -318,6 +335,68 @@ pub(crate) fn list(
         current_claim,
         cursor,
     ))
+}
+
+/// List active claims across all subjects for one tenant/project, newest
+/// activity first.
+///
+/// This is a pure `SELECT`: activeness is the predicate
+/// `state IN (claimed, investigating, fix_proposed) AND expires_at > now`,
+/// so a due-but-unswept row is excluded without mutating it. Expiry
+/// stamping (and its `remediation_claim.expired` event) stays with the
+/// write-fusing subject-scoped paths; keeping this read side-effect-free is
+/// what lets it run on a read-only pooled connection instead of the single
+/// writer.
+pub(crate) fn list_active(
+    connection: &Connection,
+    options: &ActiveClaimListOptions,
+) -> ClaimResult<ActiveClaimsResponse> {
+    let limit = parse_limit(options.limit.as_deref())?;
+    let cursor = parse_active_cursor(options.cursor.as_deref())?;
+    let now = current_time_string();
+
+    let mut sql = String::from(
+        "SELECT id, tenant_id, project_id, service, subject_type, subject_id, owner, purpose,
+                state, idempotency_key, evidence_links, created_at, updated_at, expires_at,
+                released_at, completed_at
+         FROM remediation_claims
+         WHERE tenant_id = ?1 AND project_id = ?2
+           AND state IN ('claimed', 'investigating', 'fix_proposed')
+           AND expires_at > ?3",
+    );
+    let mut arguments: Vec<&dyn rusqlite::ToSql> =
+        vec![&options.tenant_id, &options.project_id, &now];
+    let service = options
+        .service
+        .as_deref()
+        .filter(|service| !service.is_empty());
+    if let Some(service) = service.as_ref() {
+        arguments.push(service);
+        sql.push_str(&format!(" AND service = ?{}", arguments.len()));
+    }
+    if let Some(cursor) = cursor.as_ref() {
+        arguments.push(&cursor.updated_at);
+        let updated_at_position = arguments.len();
+        arguments.push(&cursor.id);
+        sql.push_str(&format!(
+            " AND (updated_at < ?{position} OR (updated_at = ?{position} AND id < ?{id_position}))",
+            position = updated_at_position,
+            id_position = arguments.len()
+        ));
+    }
+    let page_size = (limit + 1) as i64;
+    arguments.push(&page_size);
+    sql.push_str(&format!(
+        " ORDER BY updated_at DESC, id DESC LIMIT ?{}",
+        arguments.len()
+    ));
+
+    let mut statement = connection.prepare(&sql)?;
+    let mut claims = statement
+        .query_map(rusqlite::params_from_iter(arguments), claim_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let cursor = paginate_active(&mut claims, limit);
+    Ok(active_claims_response(claims, limit, cursor))
 }
 
 pub(crate) fn read_scoped(
@@ -928,6 +1007,28 @@ fn paginate(rows: &mut Vec<RemediationClaim>, limit: usize) -> Option<String> {
     rows.last().and_then(|last| {
         encode_claim_cursor(&ClaimCursor {
             created_at: last.created_at.clone(),
+            id: last.id.clone(),
+        })
+    })
+}
+
+fn parse_active_cursor(cursor: Option<&str>) -> ClaimResult<Option<ActiveClaimCursor>> {
+    match cursor {
+        None | Some("") => Ok(None),
+        Some(value) => decode_active_claim_cursor(value)
+            .map(Some)
+            .ok_or(ClaimError::InvalidCursor),
+    }
+}
+
+fn paginate_active(rows: &mut Vec<RemediationClaim>, limit: usize) -> Option<String> {
+    if rows.len() <= limit {
+        return None;
+    }
+    rows.truncate(limit);
+    rows.last().and_then(|last| {
+        encode_active_claim_cursor(&ActiveClaimCursor {
+            updated_at: last.updated_at.clone(),
             id: last.id.clone(),
         })
     })

@@ -714,6 +714,6 @@ mod tests {
     }
 
     const fn canary_store_schema_version() -> u32 {
-        2026071300
+        2026071400
     }
 }
