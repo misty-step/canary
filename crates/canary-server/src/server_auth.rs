@@ -42,6 +42,12 @@ pub(crate) fn require_read_scope(
     {
         return Err(Box::new(responder_service_binding_problem()));
     }
+    if ApiKeyScope::parse(&key.scope) == Some(ApiKeyScope::ReadOnly)
+        && key.service.is_none()
+        && !key.allow_unbound
+    {
+        return Err(Box::new(read_service_binding_problem()));
+    }
     enforce_rate_limit(state, RateLimitKind::Query, &key.id)?;
     Ok(key)
 }
@@ -175,6 +181,17 @@ pub(crate) fn responder_service_binding_problem() -> ProblemDetails {
         None,
     )
     .with_extra("scope", json!("responder-write"))
+    .with_extra("required_service_binding", json!(true))
+}
+
+pub(crate) fn read_service_binding_problem() -> ProblemDetails {
+    ProblemDetails::new(
+        StatusCode::FORBIDDEN.as_u16(),
+        ProblemCode::InsufficientScope,
+        "API key scope `read-only` must be service-bound unless project-wide read authority was explicitly granted.",
+        None,
+    )
+    .with_extra("scope", json!("read-only"))
     .with_extra("required_service_binding", json!(true))
 }
 

@@ -56,6 +56,7 @@ pub fn mint_key(
     scope: &str,
     name: &str,
     service: Option<&str>,
+    allow_unbound: bool,
 ) -> Result<String, MintKeyError> {
     if !VALID_SCOPES.contains(&scope) {
         return Err(MintKeyError::InvalidScope(scope.to_owned()));
@@ -79,6 +80,21 @@ pub fn mint_key(
             "--service cannot be set on admin keys".to_owned(),
         ));
     }
+    if scope == "read-only" && service.is_none() && !allow_unbound {
+        return Err(MintKeyError::InvalidServiceBinding(
+            "--service is required for read-only keys unless --allow-unbound is set".to_owned(),
+        ));
+    }
+    if service.is_some() && allow_unbound {
+        return Err(MintKeyError::InvalidServiceBinding(
+            "--allow-unbound cannot be combined with --service".to_owned(),
+        ));
+    }
+    if allow_unbound && scope != "read-only" {
+        return Err(MintKeyError::InvalidServiceBinding(
+            "--allow-unbound is only valid for read-only keys".to_owned(),
+        ));
+    }
 
     let mut store = Store::open(db_path).map_err(MintKeyError::Store)?;
     store.migrate().map_err(MintKeyError::Store)?;
@@ -98,6 +114,7 @@ pub fn mint_key(
             tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
             project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
             service,
+            allow_unbound,
         })
         .map_err(MintKeyError::Store)?;
 
@@ -139,7 +156,7 @@ mod tests {
         let db_path = unique_db_path("roundtrip");
         let _guard = DbGuard(db_path.clone());
 
-        let raw_key = mint_key(&db_path, "admin", "recovery", None)?;
+        let raw_key = mint_key(&db_path, "admin", "recovery", None, false)?;
 
         let store = Store::open(&db_path)?;
         let verified = store
@@ -154,7 +171,7 @@ mod tests {
         let db_path = unique_db_path("badscope");
         let _guard = DbGuard(db_path.clone());
 
-        let result = mint_key(&db_path, "superuser", "x", None);
+        let result = mint_key(&db_path, "superuser", "x", None, false);
         assert!(
             matches!(&result, Err(MintKeyError::InvalidScope(scope)) if scope == "superuser"),
             "expected InvalidScope(\"superuser\"), got {result:?}"
@@ -166,19 +183,38 @@ mod tests {
         let db_path = unique_db_path("responder");
         let _guard = DbGuard(db_path.clone());
 
-        let missing = mint_key(&db_path, "responder-write", "bot", None);
+        let missing = mint_key(&db_path, "responder-write", "bot", None, false);
         assert!(
             matches!(&missing, Err(MintKeyError::InvalidServiceBinding(message)) if message.contains("--service is required")),
             "expected missing service binding, got {missing:?}"
         );
 
-        let raw_key = mint_key(&db_path, "responder-write", "bot", Some("billing"))?;
+        let raw_key = mint_key(&db_path, "responder-write", "bot", Some("billing"), false)?;
         let store = Store::open(&db_path)?;
         let verified = store
             .verify_api_key(&raw_key)?
             .ok_or("minted key should verify as active")?;
         assert_eq!(verified.scope, "responder-write");
         assert_eq!(verified.service.as_deref(), Some("billing"));
+        Ok(())
+    }
+
+    #[test]
+    fn read_key_requires_service_or_explicit_unbound_grant()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let db_path = unique_db_path("read-authority");
+        let _guard = DbGuard(db_path.clone());
+
+        let missing = mint_key(&db_path, "read-only", "reader", None, false);
+        assert!(matches!(
+            missing,
+            Err(MintKeyError::InvalidServiceBinding(_))
+        ));
+
+        let raw_key = mint_key(&db_path, "read-only", "fleet-reader", None, true)?;
+        let store = Store::open(&db_path)?;
+        let verified = store.verify_api_key(&raw_key)?.ok_or("key should verify")?;
+        assert!(verified.allow_unbound);
         Ok(())
     }
 }

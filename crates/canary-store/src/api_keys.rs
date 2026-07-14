@@ -35,6 +35,8 @@ pub struct ApiKeyInsert {
     pub project_id: String,
     /// Optional service this key is bound to for constrained ingest/read use.
     pub service: Option<String>,
+    /// Explicit grant for a read-only key to read every service in its project.
+    pub allow_unbound: bool,
 }
 
 /// Active API key whose bcrypt hash matched the supplied raw bearer token.
@@ -52,6 +54,8 @@ pub struct VerifiedApiKey {
     pub project_id: String,
     /// Optional service this key is bound to for constrained ingest/read use.
     pub service: Option<String>,
+    /// Whether this read-only key was deliberately granted project-wide reads.
+    pub allow_unbound: bool,
 }
 
 /// Admin-visible API key metadata. The raw key and hash are never exposed here.
@@ -75,14 +79,16 @@ pub struct ApiKeyRecord {
     pub project_id: String,
     /// Optional service this key is bound to for constrained ingest/read use.
     pub service: Option<String>,
+    /// Whether this read-only key was deliberately granted project-wide reads.
+    pub allow_unbound: bool,
 }
 
 pub(crate) fn insert(connection: &Connection, key: ApiKeyInsert) -> Result<()> {
     connection.execute(
         "INSERT INTO api_keys (
             id, name, key_prefix, key_hash, created_at, revoked_at, scope,
-            tenant_id, project_id, service
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            tenant_id, project_id, service, allow_unbound
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             key.id,
             key.name,
@@ -93,7 +99,8 @@ pub(crate) fn insert(connection: &Connection, key: ApiKeyInsert) -> Result<()> {
             key.scope,
             key.tenant_id,
             key.project_id,
-            key.service
+            key.service,
+            key.allow_unbound
         ],
     )?;
     Ok(())
@@ -102,7 +109,7 @@ pub(crate) fn insert(connection: &Connection, key: ApiKeyInsert) -> Result<()> {
 pub(crate) fn list(connection: &Connection) -> Result<Vec<ApiKeyRecord>> {
     let mut statement = connection.prepare(
         "SELECT id, name, scope, key_prefix, created_at, revoked_at,
-                tenant_id, project_id, service
+                tenant_id, project_id, service, allow_unbound
          FROM api_keys
          ORDER BY created_at DESC",
     )?;
@@ -118,6 +125,7 @@ pub(crate) fn list(connection: &Connection) -> Result<Vec<ApiKeyRecord>> {
                 tenant_id: row.get(6)?,
                 project_id: row.get(7)?,
                 service: row.get(8)?,
+                allow_unbound: row.get(9)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -132,7 +140,7 @@ pub(crate) fn list_scoped(
 ) -> Result<Vec<ApiKeyRecord>> {
     let mut statement = connection.prepare(
         "SELECT id, name, scope, key_prefix, created_at, revoked_at,
-                tenant_id, project_id, service
+                tenant_id, project_id, service, allow_unbound
          FROM api_keys
          WHERE tenant_id = ?1 AND project_id = ?2
          ORDER BY created_at DESC",
@@ -149,6 +157,7 @@ pub(crate) fn list_scoped(
                 tenant_id: row.get(6)?,
                 project_id: row.get(7)?,
                 service: row.get(8)?,
+                allow_unbound: row.get(9)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -212,6 +221,7 @@ pub fn verify_key_candidates(
                 tenant_id: candidate.tenant_id,
                 project_id: candidate.project_id,
                 service: candidate.service,
+                allow_unbound: candidate.allow_unbound,
             });
         }
     }
@@ -241,7 +251,7 @@ pub(crate) fn active_candidates(
     key_prefix: &str,
 ) -> Result<Vec<ApiKeyVerifyCandidate>> {
     let mut statement = connection.prepare(
-        "SELECT id, name, scope, key_hash, tenant_id, project_id, service
+        "SELECT id, name, scope, key_hash, tenant_id, project_id, service, allow_unbound
          FROM api_keys
          WHERE key_prefix = ?1 AND revoked_at IS NULL
          ORDER BY created_at ASC, id ASC",
@@ -256,6 +266,7 @@ pub(crate) fn active_candidates(
                 tenant_id: row.get(4)?,
                 project_id: row.get(5)?,
                 service: row.get(6)?,
+                allow_unbound: row.get(7)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -275,4 +286,5 @@ pub struct ApiKeyVerifyCandidate {
     tenant_id: String,
     project_id: String,
     service: Option<String>,
+    allow_unbound: bool,
 }

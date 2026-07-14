@@ -120,6 +120,7 @@ mod tests {
             tenant_id: "tenant".to_owned(),
             project_id: "project".to_owned(),
             service: None,
+            allow_unbound: true,
         }
     }
 

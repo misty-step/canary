@@ -5,12 +5,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use rusqlite::Connection;
 
 /// Current Rust schema version.
-pub const SCHEMA_VERSION: u32 = 2026071000;
+pub const SCHEMA_VERSION: u32 = 2026071300;
 
 pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
     transaction.execute_batch(SCHEMA_SQL)?;
     add_bootstrap_ownership_columns(&transaction)?;
+    add_api_key_unbound_grant_column(&transaction)?;
     scope_error_group_identity(&transaction)?;
     backfill_service_scope_columns(&transaction)?;
     add_service_event_telemetry_columns(&transaction)?;
@@ -192,6 +193,17 @@ fn add_bootstrap_ownership_columns(connection: &Connection) -> rusqlite::Result<
         add_text_column_if_missing(connection, table, "service", "TEXT")?;
     }
 
+    Ok(())
+}
+
+fn add_api_key_unbound_grant_column(connection: &Connection) -> rusqlite::Result<()> {
+    if table_column_names(connection, "api_keys")?.contains("allow_unbound") {
+        return Ok(());
+    }
+    connection.execute(
+        "ALTER TABLE api_keys ADD COLUMN allow_unbound INTEGER NOT NULL DEFAULT 0",
+        [],
+    )?;
     Ok(())
 }
 
@@ -472,7 +484,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
   scope TEXT NOT NULL DEFAULT 'admin',
   tenant_id TEXT NOT NULL DEFAULT 'TENANT-bootstrap',
   project_id TEXT NOT NULL DEFAULT 'PROJECT-bootstrap',
-  service TEXT
+  service TEXT,
+  allow_unbound INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS rate_limit_buckets (

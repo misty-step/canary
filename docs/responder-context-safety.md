@@ -16,7 +16,9 @@ Canary, and leaves durable audit evidence.
 | `responder-write` with `service=<name>` | May read incident context for the bound service. |
 | `responder-write` without a service binding | Rejected with RFC 9457 `insufficient_scope`. |
 | `responder-write` bound to a different service | Rejected with RFC 9457 `insufficient_scope`; response includes `bound_service` and `requested_service`. |
-| `read-only` | May read incident detail across the key owner scope. |
+| `read-only` with `service=<name>` | May read incident detail only for the bound service. |
+| `read-only` with explicit `allow_unbound=true` grant | May read incident detail across the key owner scope. |
+| legacy unbound `read-only` without an explicit grant | Rejected with RFC 9457 `insufficient_scope`; rotate the key. |
 | `admin` | Break-glass read; context response is still redacted, but no responder read-audit event is written. |
 
 Responder keys are not tenant-wide read keys. They are service-bound automation
@@ -45,6 +47,11 @@ Every incident detail response includes `context_envelope`:
     "redaction_rules": [
       "bearer_token",
       "canary_api_key",
+      "jwt",
+      "aws_access_key",
+      "private_key_block",
+      "provider_token",
+      "credential_database_uri",
       "email",
       "sensitive_key_value"
     ],
@@ -87,6 +94,11 @@ read model: `summary`, `incident`, `signals`, `signals_truncated`,
 | --- | --- | --- |
 | `bearer_token` | `Bearer <token-like-value>` | `Bearer [REDACTED]` |
 | `canary_api_key` | `sk_live_*` or `sk_test_*` | `[CANARY_API_KEY]` |
+| `jwt` | Three base64url-like segments beginning with `eyJ` | `[JWT]` |
+| `aws_access_key` | `AKIA*` or `ASIA*` access-key ID | `[AWS_ACCESS_KEY]` |
+| `private_key_block` | PEM private-key block | `[PRIVATE_KEY]` |
+| `provider_token` | Declared GitHub, Slack, OpenAI, Anthropic, OpenRouter, Google, Hugging Face, GitLab, or npm token shape | `[PROVIDER_TOKEN]` |
+| `credential_database_uri` | PostgreSQL, MySQL, MongoDB, or Redis URI with user info | Scheme plus `[REDACTED]@` |
 | `email` | Email-shaped strings | `[EMAIL]` |
 | `sensitive_key_value` | Object keys or assignment names such as `authorization`, `cookie`, `password`, `secret`, `token`, `api_key`, `access_token`, or `refresh_token` | `[REDACTED]` or `name=[REDACTED]` |
 | `max_string_chars` | Any string longer than 1024 characters | First 1024 characters plus ` [TRUNCATED]` |

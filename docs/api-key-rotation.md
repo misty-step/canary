@@ -3,7 +3,8 @@
 Canary API keys are scoped. Use the narrowest key that matches the caller:
 
 - `ingest-only`: `POST /api/v1/errors`
-- `read-only`: query, report, timeline, incidents, and read-only health endpoints
+- `read-only`: query, report, timeline, incidents, and read-only health endpoints;
+  service-bound by default
 - `responder-write`: service-bound read access plus remediation claim and annotation writeback
 - `admin`: target, webhook, onboarding, metrics, key management, and break-glass responder writes
 
@@ -42,14 +43,27 @@ curl -X POST $CANARY_ENDPOINT/api/v1/keys/KEY-old/revoke \
 
 ## Rotate A Read Or Admin Key
 
-1. Create the replacement with the same scope:
+1. Create the replacement with the same scope and service binding:
 
 ```bash
 curl -X POST $CANARY_ENDPOINT/api/v1/keys \
   -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name": "ops-read-2026-04", "scope": "read-only"}'
+  -d '{"name": "billing-read-2026-04", "scope": "read-only", "service": "billing"}'
 ```
+
+An intentionally project-wide reader is an exceptional administrative grant:
+
+```bash
+curl -X POST $CANARY_ENDPOINT/api/v1/keys \
+  -H "Authorization: Bearer $CANARY_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "fleet-read-2026-04", "scope": "read-only", "allow_unbound": true}'
+```
+
+Omitting both `service` and `allow_unbound: true` is rejected. Existing
+unbound read keys created before this contract have no explicit grant and fail
+closed after migration; issue and verify a replacement before revoking them.
 
 2. Update dashboards, scripts, or operator tooling to use the new key.
 3. Verify the expected access level:

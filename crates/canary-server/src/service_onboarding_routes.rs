@@ -84,6 +84,7 @@ pub(crate) async fn create_service_onboarding(
         tenant_id: authority.tenant_id.clone(),
         project_id: authority.project_id.clone(),
         service: Some(request.service.clone()),
+        allow_unbound: false,
     };
     let response_body =
         service_onboarding_response(&request, &target, &api_key, &raw_key, &base_url(&headers));

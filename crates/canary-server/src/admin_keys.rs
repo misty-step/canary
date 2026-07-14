@@ -31,6 +31,7 @@ struct ApiKeyCreate {
     name: String,
     scope: String,
     service: Option<String>,
+    allow_unbound: bool,
 }
 
 pub(crate) async fn list_api_keys(
@@ -107,6 +108,7 @@ pub(crate) async fn create_api_key(
         tenant_id: authority.tenant_id,
         project_id: authority.project_id,
         service: request.service,
+        allow_unbound: request.allow_unbound,
     };
     let response_body = api_key_insert_response(&key, &raw_key);
 
@@ -163,6 +165,7 @@ fn api_key_response(key: ApiKeyRecord) -> Value {
         "tenant_id": key.tenant_id,
         "project_id": key.project_id,
         "service": key.service,
+        "allow_unbound": key.allow_unbound,
     })
 }
 
@@ -177,6 +180,7 @@ fn api_key_insert_response(key: &ApiKeyInsert, raw_key: &str) -> Value {
         "tenant_id": key.tenant_id,
         "project_id": key.project_id,
         "service": key.service,
+        "allow_unbound": key.allow_unbound,
         "warning": "Store this key securely. It will not be shown again.",
     })
 }
@@ -192,7 +196,10 @@ fn decode_optional_json_object(body: &Bytes) -> Result<Map<String, Value>, Box<P
 fn parse_api_key_create(attrs: Map<String, Value>) -> Result<ApiKeyCreate, Box<ProblemDetails>> {
     let mut errors: ValidationErrors = ValidationErrors::new();
     for field in attrs.keys() {
-        if !matches!(field.as_str(), "name" | "scope" | "service") {
+        if !matches!(
+            field.as_str(),
+            "name" | "scope" | "service" | "allow_unbound"
+        ) {
             errors.insert(field.clone(), vec!["is not permitted".to_owned()]);
         }
     }
@@ -235,6 +242,17 @@ fn parse_api_key_create(attrs: Map<String, Value>) -> Result<ApiKeyCreate, Box<P
             None
         }
     };
+    let allow_unbound = match attrs.get("allow_unbound") {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::Null) | None => false,
+        Some(_) => {
+            errors.insert(
+                "allow_unbound".to_owned(),
+                vec!["must be a boolean".to_owned()],
+            );
+            false
+        }
+    };
     if service.is_some() && scope == "admin" {
         errors.insert(
             "service".to_owned(),
@@ -247,12 +265,31 @@ fn parse_api_key_create(attrs: Map<String, Value>) -> Result<ApiKeyCreate, Box<P
             vec!["is required for responder-write keys".to_owned()],
         );
     }
+    if scope == "read-only" && service.is_none() && !allow_unbound {
+        errors.insert(
+            "service".to_owned(),
+            vec!["is required unless allow_unbound is true".to_owned()],
+        );
+    }
+    if service.is_some() && allow_unbound {
+        errors.insert(
+            "allow_unbound".to_owned(),
+            vec!["cannot be combined with a service binding".to_owned()],
+        );
+    }
+    if allow_unbound && scope != "read-only" {
+        errors.insert(
+            "allow_unbound".to_owned(),
+            vec!["is only valid for read-only keys".to_owned()],
+        );
+    }
 
     if errors.is_empty() {
         Ok(ApiKeyCreate {
             name,
             scope,
             service,
+            allow_unbound,
         })
     } else {
         Err(Box::new(validation_problem(

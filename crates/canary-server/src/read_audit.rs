@@ -136,6 +136,7 @@ mod tests {
             tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
             project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
             service: service.map(|s| s.to_owned()),
+            allow_unbound: scope == "read-only" && service.is_none(),
         }
     }
 

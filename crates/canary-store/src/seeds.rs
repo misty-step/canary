@@ -43,6 +43,7 @@ pub(crate) fn apply_initial_seed(
             tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
             project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
             service: None,
+            allow_unbound: false,
         },
     )?;
     transaction.execute(

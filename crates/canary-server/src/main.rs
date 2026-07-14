@@ -45,6 +45,7 @@ fn run_mint_key(args: &[String]) -> Result<(), Box<dyn Error>> {
     let mut scope = "admin".to_owned();
     let mut name = "operator-minted".to_owned();
     let mut service: Option<String> = None;
+    let mut allow_unbound = false;
     let mut iter = args.iter();
     while let Some(flag) = iter.next() {
         match flag.as_str() {
@@ -57,6 +58,7 @@ fn run_mint_key(args: &[String]) -> Result<(), Box<dyn Error>> {
             "--service" => {
                 service = Some(iter.next().ok_or("--service requires a value")?.clone());
             }
+            "--allow-unbound" => allow_unbound = true,
             other => return Err(format!("unknown mint-key argument: {other}").into()),
         }
     }
@@ -65,7 +67,7 @@ fn run_mint_key(args: &[String]) -> Result<(), Box<dyn Error>> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_DB_PATH));
 
-    let raw_key = keygen::mint_key(&db_path, &scope, &name, service.as_deref())?;
+    let raw_key = keygen::mint_key(&db_path, &scope, &name, service.as_deref(), allow_unbound)?;
     // The raw key prints to stdout; everything else goes to stderr so the key
     // can be captured cleanly (e.g. `... mint-key | tail -1`).
     eprintln!(
