@@ -1,3 +1,10 @@
+## [0.16.2](https://github.com/misty-step/canary/compare/v0.16.1...v0.16.2) (2026-07-14)
+
+
+### Bug Fixes
+
+* **auth:** require explicit unbound read authority ([#266](https://github.com/misty-step/canary/issues/266)) ([fa64b00](https://github.com/misty-step/canary/commit/fa64b00b8d9acd789a636e0369c9d1fc8d00da09))
+
 ## [0.16.1](https://github.com/misty-step/canary/compare/v0.16.0...v0.16.1) (2026-07-10)
 
 
