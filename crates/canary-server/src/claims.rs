@@ -161,8 +161,8 @@ pub(crate) async fn active_claims(
     };
     let after = params.after.filter(|value| !value.is_empty());
     let options = ActiveClaimListOptions {
-        tenant_id: authority.tenant_id,
-        project_id: authority.project_id,
+        tenant_id: authority.tenant_id.clone(),
+        project_id: authority.project_id.clone(),
         service,
         limit: params.limit,
         cursor: after.or(params.cursor),
@@ -175,28 +175,39 @@ pub(crate) async fn active_claims(
     // Release the read connection (or the writer guard on the no-pool test
     // fallback) before the CPU-bound redaction pass below.
     drop(reader);
-    match result {
+    let response = match result {
         Ok(result) => match serde_json::to_value(&result) {
             Ok(value) => json_status_response(StatusCode::OK.as_u16(), scrub_value(&value)),
             Err(_) => problem_response(internal_problem()),
         },
-        Err(ClaimError::InvalidLimit) => problem_response(claim_validation_problem(
-            "limit",
-            "must be between 1 and 50",
-        )),
-        Err(ClaimError::InvalidCursor) => {
-            problem_response(claim_validation_problem("cursor", "is invalid"))
+        Err(ClaimError::InvalidLimit) => {
+            return problem_response(claim_validation_problem(
+                "limit",
+                "must be between 1 and 50",
+            ));
         }
-        Err(ClaimError::Sqlite(_)) => problem_response(internal_problem()),
+        Err(ClaimError::InvalidCursor) => {
+            return problem_response(claim_validation_problem("cursor", "is invalid"));
+        }
         Err(
-            ClaimError::InvalidSubjectType
+            ClaimError::Sqlite(_)
+            | ClaimError::InvalidSubjectType
             | ClaimError::InvalidState
             | ClaimError::InvalidClaim
             | ClaimError::NotFound
             | ClaimError::Conflict(_)
             | ClaimError::InvalidTransition,
-        ) => problem_response(internal_problem()),
-    }
+        ) => return problem_response(internal_problem()),
+    };
+
+    // The audit event is a write, so it stays on the writer; the fleet read
+    // above already ran off the writer connection.
+    let mut store = match state.lock_store() {
+        Ok(store) => store,
+        Err(_) => return problem_response(internal_problem()),
+    };
+    crate::read_audit::record_read_audit(&mut store, &authority, "GET /api/v1/claims/active");
+    response
 }
 
 pub(crate) async fn show_claim(

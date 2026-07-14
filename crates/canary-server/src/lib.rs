@@ -8277,7 +8277,7 @@ mod tests {
             })?;
             other_tenant_claim_id = other_claim.id;
         }
-        let router = ingest_router(state);
+        let router = ingest_router(state.clone());
 
         let api_claim = json_body(
             router
@@ -8494,6 +8494,29 @@ mod tests {
             after_release["summary"],
             "1 active remediation claim across 1 service."
         );
+
+        // Non-admin fleet reads leave a durable read-audit trail.
+        {
+            let store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            let audit_trail = store.timeline(
+                "1h",
+                canary_store::TimelineQueryOptions {
+                    tenant_id: Some(canary_store::BOOTSTRAP_TENANT_ID.to_owned()),
+                    project_id: Some(canary_store::BOOTSTRAP_PROJECT_ID.to_owned()),
+                    service: None,
+                    limit: Some("50".to_owned()),
+                    cursor: None,
+                    event_type: Some("telemetry.event".to_owned()),
+                },
+            )?;
+            assert!(
+                audit_trail
+                    .events
+                    .iter()
+                    .any(|event| event.summary.contains("GET /api/v1/claims/active")),
+                "expected a responder.context_read audit event for the fleet read"
+            );
+        }
 
         Ok(())
     }
