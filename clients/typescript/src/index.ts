@@ -1,8 +1,24 @@
 import { createClient, type CanaryClient, type CanaryResponse } from "./client";
-import type { CheckInPayload, CheckInResponse, EventPayload, EventResponse } from "./client";
+import type {
+  CheckInPayload,
+  CheckInResponse,
+  EventPayload,
+  EventResponse,
+  OperationalSignal,
+  OperationalSignalContext,
+} from "./client";
 import { scrub, scrubObject, type ScrubRule } from "./scrub";
 
-export type { CanaryResponse, CheckInPayload, CheckInResponse, EventPayload, EventResponse, ScrubRule };
+export type {
+  CanaryResponse,
+  CheckInPayload,
+  CheckInResponse,
+  EventPayload,
+  EventResponse,
+  OperationalSignal,
+  OperationalSignalContext,
+  ScrubRule,
+};
 
 export interface InitOptions {
   endpoint: string;

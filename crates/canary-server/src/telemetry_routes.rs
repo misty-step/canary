@@ -10,7 +10,7 @@ use canary_http::{
     request::{MAX_JSON_BODY_BYTES, decode_json_object},
 };
 use canary_ingest::{IngestEffect, ValidationErrors};
-use canary_store::{TelemetryEventError, TelemetryEventInsert};
+use canary_store::{OperationalSignalInsert, TelemetryEventError, TelemetryEventInsert};
 use serde_json::{Map, Value};
 
 use crate::{
@@ -27,6 +27,7 @@ pub(crate) async fn create_event(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    let received_at = current_rfc3339();
     if let Err(problem) = check_content_length(&headers) {
         return problem_response(*problem);
     }
@@ -44,7 +45,7 @@ pub(crate) async fn create_event(
         Ok(attrs) => attrs,
         Err(problem) => return problem_response(*problem),
     };
-    let insert = match parse_event(attrs, &key.tenant_id, &key.project_id) {
+    let insert = match parse_event(attrs, &key.tenant_id, &key.project_id, received_at) {
         Ok(insert) => insert,
         Err(errors) => {
             return problem_response(validation_problem("Invalid event payload.", errors));
@@ -60,17 +61,23 @@ pub(crate) async fn create_event(
         Ok(store) => store,
         Err(_) => return problem_response(internal_problem()),
     };
-    let result = store.insert_telemetry_event(insert);
+    let result = store.commit_telemetry_event(insert);
     drop(store);
 
     match result {
-        Ok(event) => {
-            let payload_json = webhook_payload(&event, &tenant_id, &project_id);
+        Ok(commit) => {
+            let payload_json = webhook_payload(&commit.event, &tenant_id, &project_id);
             let _ = state.handle_effects(&[IngestEffect::EnqueueWebhook {
-                event: event.event.clone(),
+                event: commit.event.event.clone(),
                 payload_json,
             }]);
-            json_status_response(StatusCode::CREATED.as_u16(), event)
+            if let Some(incident) = commit.incident_event.as_ref() {
+                let _ = state.handle_effects(&[IngestEffect::EnqueueWebhook {
+                    event: incident.event.clone(),
+                    payload_json: incident.payload_json.clone(),
+                }]);
+            }
+            json_status_response(StatusCode::CREATED.as_u16(), commit.event)
         }
         Err(TelemetryEventError::Validation(errors)) => {
             let mut validation = ValidationErrors::new();
@@ -79,7 +86,9 @@ pub(crate) async fn create_event(
             }
             problem_response(validation_problem("Invalid event payload.", validation))
         }
-        Err(TelemetryEventError::Sqlite(_)) => problem_response(internal_problem()),
+        Err(TelemetryEventError::Sqlite(_) | TelemetryEventError::Store(_)) => {
+            problem_response(internal_problem())
+        }
     }
 }
 
@@ -103,18 +112,13 @@ fn parse_event(
     attrs: Map<String, Value>,
     tenant_id: &str,
     project_id: &str,
+    received_at: String,
 ) -> Result<TelemetryEventInsert, ValidationErrors> {
     let mut errors = ValidationErrors::new();
     let service = required_string(&attrs, "service", &mut errors);
     let name = required_string(&attrs, "name", &mut errors);
     let summary = required_string(&attrs, "summary", &mut errors);
     let severity = optional_string(attrs.get("severity")).unwrap_or_else(|| "info".to_owned());
-    let retention_class =
-        optional_string(attrs.get("retention_class")).unwrap_or_else(|| "standard".to_owned());
-    let privacy_policy =
-        optional_string(attrs.get("privacy_policy")).unwrap_or_else(|| "redacted".to_owned());
-    let sampling_policy =
-        optional_string(attrs.get("sampling_policy")).unwrap_or_else(|| "unsampled".to_owned());
     let attributes = attrs
         .get("attributes")
         .cloned()
@@ -125,6 +129,18 @@ fn parse_event(
             vec!["must be an object".to_owned()],
         );
     }
+    let operational = parse_operational(attrs.get("operational"), &mut errors);
+    let retention_class = optional_string(attrs.get("retention_class")).unwrap_or_else(|| {
+        if operational.is_some() {
+            "audit".to_owned()
+        } else {
+            "standard".to_owned()
+        }
+    });
+    let privacy_policy =
+        optional_string(attrs.get("privacy_policy")).unwrap_or_else(|| "redacted".to_owned());
+    let sampling_policy =
+        optional_string(attrs.get("sampling_policy")).unwrap_or_else(|| "unsampled".to_owned());
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -141,6 +157,81 @@ fn parse_event(
         retention_class,
         privacy_policy,
         sampling_policy,
-        created_at: current_rfc3339(),
+        created_at: received_at,
+        operational,
     })
+}
+
+fn parse_operational(
+    value: Option<&Value>,
+    errors: &mut ValidationErrors,
+) -> Option<OperationalSignalInsert> {
+    let value = value?;
+    let Some(object) = value.as_object() else {
+        errors.insert(
+            "operational".to_owned(),
+            vec!["must be an object".to_owned()],
+        );
+        return None;
+    };
+    reject_unknown_fields(
+        object,
+        "operational",
+        &["subject", "state", "owner", "evidence_url", "observed_at"],
+        errors,
+    );
+    let subject = match object.get("subject").and_then(Value::as_object) {
+        Some(subject) => subject,
+        None => {
+            errors.insert(
+                "operational.subject".to_owned(),
+                vec!["must be an object".to_owned()],
+            );
+            return None;
+        }
+    };
+    reject_unknown_fields(subject, "operational.subject", &["type", "id"], errors);
+    let subject_type = required_string(subject, "type", errors);
+    let subject_id = required_string(subject, "id", errors);
+    let state = required_string(object, "state", errors);
+    let owner = required_string(object, "owner", errors);
+    let evidence_url = required_string(object, "evidence_url", errors);
+    let observed_at = required_string(object, "observed_at", errors);
+    if subject_type.is_none()
+        || subject_id.is_none()
+        || state.is_none()
+        || owner.is_none()
+        || evidence_url.is_none()
+        || observed_at.is_none()
+    {
+        return None;
+    }
+
+    Some(OperationalSignalInsert {
+        subject_type: subject_type.unwrap_or_default(),
+        subject_id: subject_id.unwrap_or_default(),
+        state: state.unwrap_or_default(),
+        owner: owner.unwrap_or_default(),
+        evidence_url: evidence_url.unwrap_or_default(),
+        observed_at: observed_at.unwrap_or_default(),
+        incident_id: canary_core::ids::IncidentId::generate(),
+        incident_event_id: canary_core::ids::EventId::generate(),
+    })
+}
+
+fn reject_unknown_fields(
+    object: &Map<String, Value>,
+    prefix: &str,
+    allowed: &[&str],
+    errors: &mut ValidationErrors,
+) {
+    for field in object
+        .keys()
+        .filter(|field| !allowed.contains(&field.as_str()))
+    {
+        errors.insert(
+            format!("{prefix}.{field}"),
+            vec!["is not allowed".to_owned()],
+        );
+    }
 }

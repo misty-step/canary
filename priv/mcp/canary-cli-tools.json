@@ -243,7 +243,7 @@
       "name": "canary_dogfood_value"
     },
     {
-      "description": "Capture one bounded analytics event as a telemetry.event timeline row.",
+      "description": "Capture one bounded telemetry event; an optional operational envelope participates in deterministic incident correlation and keeps evidence out of Canary.",
       "input_schema": {
         "properties": {
           "attributes": {
@@ -251,6 +251,53 @@
           },
           "name": {
             "type": "string"
+          },
+          "operational": {
+            "additionalProperties": false,
+            "properties": {
+              "evidence_url": {
+                "format": "uri",
+                "type": "string"
+              },
+              "observed_at": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "owner": {
+                "type": "string"
+              },
+              "state": {
+                "enum": [
+                  "active",
+                  "resolved"
+                ],
+                "type": "string"
+              },
+              "subject": {
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "subject",
+              "state",
+              "owner",
+              "evidence_url",
+              "observed_at"
+            ],
+            "type": "object"
           },
           "privacy_policy": {
             "enum": [

@@ -663,6 +663,30 @@ pub struct IncidentDetailSignal {
     /// Current active remediation claim for the signal's underlying subject.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_claim: Option<RemediationClaimSummary>,
+    /// Bounded producer context for caller-defined operational signals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operational: Option<OperationalSignalContext>,
+}
+
+/// Caller-owned operational signal context returned to incident responders.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OperationalSignalContext {
+    /// Caller-defined signal name.
+    pub name: String,
+    /// Stable caller-defined subject type.
+    pub subject_type: String,
+    /// Stable caller-defined subject id.
+    pub subject_id: String,
+    /// Current producer-declared state.
+    pub state: String,
+    /// Owner responsible for the signal.
+    pub owner: String,
+    /// Link to bounded evidence retained by the producer.
+    pub evidence_url: String,
+    /// Producer observation clock.
+    pub observed_at: String,
+    /// Canary receipt clock.
+    pub received_at: String,
 }
 
 /// Incident annotation view embedded in incident detail.
@@ -884,6 +908,15 @@ pub struct TelemetryEvent {
     pub sampling_policy: String,
     /// Creation timestamp.
     pub created_at: String,
+    /// Bounded operational signal receipt when this event participates in incidents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operational: Option<OperationalSignalContext>,
+    /// Incident event emitted by deterministic correlation, when any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incident_event: Option<String>,
+    /// Incident id produced or updated by deterministic correlation, when any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incident_id: Option<String>,
 }
 
 /// Response for `GET /api/v1/timeline`.

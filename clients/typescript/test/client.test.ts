@@ -289,4 +289,50 @@ describe("createClient", () => {
     expect(body.sampling_policy).toBe("unsampled");
     expect(result?.event).toBe("telemetry.event");
   });
+
+  it("sends operational events as bounded audit signals", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          id: "EVT-operational01",
+          service: "test-app",
+          event: "telemetry.event",
+          name: "capacity.saturation",
+          severity: "warning",
+          summary: "Capacity saturated",
+          attributes: {},
+          retention_class: "audit",
+          privacy_policy: "redacted",
+          sampling_policy: "unsampled",
+          created_at: "2026-07-14T14:01:01Z",
+          incident_event: "incident.opened",
+          incident_id: "INC-operational01",
+        }),
+        { status: 201 }
+      )
+    );
+
+    const client = createClient(opts);
+    await client.event({
+      name: "capacity.saturation",
+      summary: "Capacity saturated",
+      severity: "warning",
+      operational: {
+        subject: { type: "capacity", id: "worker-pool" },
+        state: "active",
+        owner: "infrastructure-operator",
+        evidence_url: "https://evidence.example/receipts/capacity",
+        observed_at: "2026-07-14T14:01:00Z",
+      },
+    });
+
+    const [, init] = fetchSpy.mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.retention_class).toBe("audit");
+    expect(body.attributes).toBeUndefined();
+    expect(body.operational.subject).toEqual({ type: "capacity", id: "worker-pool" });
+    expect(body.operational.evidence_url).toBe(
+      "https://evidence.example/receipts/capacity"
+    );
+  });
 });

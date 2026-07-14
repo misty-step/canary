@@ -646,7 +646,7 @@ pub fn summarize_annotations(value: &Value) -> Vec<String> {
 
 /// Summarize a telemetry event write receipt.
 pub fn summarize_event(value: &Value) -> Vec<String> {
-    vec![
+    let mut lines = vec![
         format!("id: {}", string_field(value, "id")),
         format!("service: {}", string_field(value, "service")),
         format!("event: {}", string_field(value, "event")),
@@ -661,7 +661,22 @@ pub fn summarize_event(value: &Value) -> Vec<String> {
             "sampling_policy: {}",
             string_field(value, "sampling_policy")
         ),
-    ]
+    ];
+    if let Some(operational) = value.get("operational") {
+        lines.extend([
+            format!(
+                "subject: {} {}",
+                string_field(operational, "subject_type"),
+                string_field(operational, "subject_id")
+            ),
+            format!("owner: {}", string_field(operational, "owner")),
+            format!("observed_at: {}", string_field(operational, "observed_at")),
+            format!("received_at: {}", string_field(operational, "received_at")),
+            format!("incident_id: {}", string_field(value, "incident_id")),
+            format!("incident_event: {}", string_field(value, "incident_event")),
+        ]);
+    }
+    lines
 }
 
 /// Summarize timeline events.
@@ -4621,19 +4636,29 @@ impl McpToolContext {
             }
             "canary_event_capture" => {
                 let client = self.ingest_client()?;
-                let response = client.post_auth_json(
-                    "/api/v1/events",
-                    &json!({
-                        "service": required_string(arguments, "service")?,
-                        "name": required_string(arguments, "name")?,
-                        "summary": required_string(arguments, "summary")?,
-                        "severity": optional_string(arguments, "severity")?.unwrap_or_else(|| "info".to_owned()),
-                        "attributes": optional_object(arguments, "attributes")?.unwrap_or_default(),
-                        "retention_class": optional_string(arguments, "retention_class")?.unwrap_or_else(|| "standard".to_owned()),
-                        "privacy_policy": optional_string(arguments, "privacy_policy")?.unwrap_or_else(|| "redacted".to_owned()),
-                        "sampling_policy": optional_string(arguments, "sampling_policy")?.unwrap_or_else(|| "unsampled".to_owned()),
-                    }),
-                )?;
+                let operational = optional_object(arguments, "operational")?;
+                let retention_class = optional_string(arguments, "retention_class")?
+                    .unwrap_or_else(|| {
+                        if operational.is_some() {
+                            "audit".to_owned()
+                        } else {
+                            "standard".to_owned()
+                        }
+                    });
+                let mut payload = json!({
+                    "service": required_string(arguments, "service")?,
+                    "name": required_string(arguments, "name")?,
+                    "summary": required_string(arguments, "summary")?,
+                    "severity": optional_string(arguments, "severity")?.unwrap_or_else(|| "info".to_owned()),
+                    "attributes": optional_object(arguments, "attributes")?.unwrap_or_default(),
+                    "retention_class": retention_class,
+                    "privacy_policy": optional_string(arguments, "privacy_policy")?.unwrap_or_else(|| "redacted".to_owned()),
+                    "sampling_policy": optional_string(arguments, "sampling_policy")?.unwrap_or_else(|| "unsampled".to_owned()),
+                });
+                if let Some(operational) = operational {
+                    payload["operational"] = Value::Object(operational);
+                }
+                let response = client.post_auth_json("/api/v1/events", &payload)?;
                 Ok(json_envelope(
                     "canary_event_capture",
                     client.endpoint(),
@@ -5046,8 +5071,8 @@ pub fn tool_manifest() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "canary_event_capture",
-            description: "Capture one bounded analytics event as a telemetry.event timeline row.",
-            input_schema: json!({"type":"object","required":["service","name","summary"],"properties":{"service":{"type":"string"},"name":{"type":"string"},"summary":{"type":"string"},"severity":{"type":"string","enum":["info","warning","error"]},"attributes":{"type":"object"},"retention_class":{"type":"string","enum":["ephemeral","standard","audit"]},"privacy_policy":{"type":"string","enum":["redacted","public","sensitive"]},"sampling_policy":{"type":"string"}}}),
+            description: "Capture one bounded telemetry event; an optional operational envelope participates in deterministic incident correlation and keeps evidence out of Canary.",
+            input_schema: json!({"type":"object","required":["service","name","summary"],"properties":{"service":{"type":"string"},"name":{"type":"string"},"summary":{"type":"string"},"severity":{"type":"string","enum":["info","warning","error"]},"attributes":{"type":"object"},"retention_class":{"type":"string","enum":["ephemeral","standard","audit"]},"privacy_policy":{"type":"string","enum":["redacted","public","sensitive"]},"sampling_policy":{"type":"string"},"operational":{"type":"object","additionalProperties":false,"required":["subject","state","owner","evidence_url","observed_at"],"properties":{"subject":{"type":"object","additionalProperties":false,"required":["type","id"],"properties":{"type":{"type":"string"},"id":{"type":"string"}}},"state":{"type":"string","enum":["active","resolved"]},"owner":{"type":"string"},"evidence_url":{"type":"string","format":"uri"},"observed_at":{"type":"string","format":"date-time"}}}}}),
         },
         ToolSpec {
             name: "canary_claims_list",

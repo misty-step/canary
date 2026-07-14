@@ -78,7 +78,10 @@ pub use retention::{
 pub use service_sli::{
     MIN_TRAJECTORY_SAMPLES, ServiceSliSummary, ServiceSliTrajectory, TrajectoryStatus,
 };
-pub use telemetry::{TelemetryEventError, TelemetryEventInsert, TelemetryEventResult};
+pub use telemetry::{
+    OperationalSignalInsert, TelemetryEventCommit, TelemetryEventError, TelemetryEventInsert,
+    TelemetryEventResult,
+};
 pub use webhook_deliveries::{
     WebhookDeliveryInsert, WebhookDeliveryListOptions, WebhookDeliveryPageError,
     WebhookDeliveryPageOptions, WebhookDeliveryPageResult, WebhookDeliveryRow,
@@ -163,7 +166,15 @@ impl Store {
         &mut self,
         event: TelemetryEventInsert,
     ) -> TelemetryEventResult<canary_core::query::TelemetryEvent> {
-        telemetry::insert_event(&self.connection, event)
+        telemetry::insert_event(&mut self.connection, event).map(|commit| commit.event)
+    }
+
+    /// Persist one bounded event and return its atomic incident-correlation outcome.
+    pub fn commit_telemetry_event(
+        &mut self,
+        event: TelemetryEventInsert,
+    ) -> TelemetryEventResult<TelemetryEventCommit> {
+        telemetry::insert_event(&mut self.connection, event)
     }
 
     /// Correlate one post-commit signal into Canary's incident graph.
@@ -5098,6 +5109,7 @@ mod tests {
             privacy_policy: "redacted".to_owned(),
             sampling_policy: "sampled:0.25".to_owned(),
             created_at: "2026-05-28T20:59:50Z".to_owned(),
+            operational: None,
         })?;
 
         assert_eq!(event.event, "telemetry.event");
@@ -5140,6 +5152,7 @@ mod tests {
             privacy_policy: "unknown".to_owned(),
             sampling_policy: "".to_owned(),
             created_at: "2026-05-28T20:59:51Z".to_owned(),
+            operational: None,
         });
         assert!(matches!(invalid, Err(TelemetryEventError::Validation(_))));
 

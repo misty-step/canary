@@ -1478,6 +1478,200 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn operational_event_opens_updates_signs_and_replays_incident()
+    -> Result<(), Box<dyn Error>> {
+        let path = temp_db_path("operational-incident");
+        let (url, http_server) = spawn_webhook_server(204, &[])?;
+        {
+            let mut store = Store::open(&path)?;
+            store.migrate()?;
+            let _ = store.apply_initial_seed("2026-07-14T14:00:00Z")?;
+            seed_api_key(&mut store, "KEY-ingest", INGEST_KEY, "ingest-only", None)?;
+            seed_api_key(&mut store, "KEY-read", READ_KEY, "read-only", None)?;
+            store.insert_webhook_subscription(webhook_subscription_insert(
+                "WHK-operational-incident",
+                &url,
+                vec!["incident.opened".to_owned()],
+                "test-webhook-secret",
+                true,
+                "2026-07-14T14:00:00Z",
+            ))?;
+        }
+
+        let server = CanaryServer::boot(ServerConfig {
+            webhook_drain_interval: StdDuration::from_millis(10),
+            webhook_transport_builder: local_webhook_transport_builder,
+            ..ServerConfig::new(path.clone())
+        })?;
+        let router = server.router();
+        let first = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/events",
+                INGEST_KEY,
+                r#"{
+                    "service":"infrastructure-control",
+                    "name":"capacity.saturation",
+                    "summary":"Capacity policy crossed its bounded threshold",
+                    "severity":"warning",
+                    "operational":{
+                        "subject":{"type":"capacity","id":"worker-pool-primary"},
+                        "state":"active",
+                        "owner":"infrastructure-operator",
+                        "evidence_url":"https://evidence.example/receipts/capacity-001",
+                        "observed_at":"2026-07-14T14:01:00Z"
+                    }
+                }"#,
+            )?)
+            .await?;
+        assert_eq!(first.status(), StatusCode::CREATED);
+        let first = json_body(first).await?;
+        let incident_id = first["incident_id"]
+            .as_str()
+            .ok_or("operational receipt omitted incident_id")?
+            .to_owned();
+        assert_eq!(first["incident_event"], "incident.opened");
+        assert_eq!(first["operational"]["owner"], "infrastructure-operator");
+        assert_eq!(first["operational"]["observed_at"], "2026-07-14T14:01:00Z");
+        assert!(first["operational"]["received_at"].as_str().is_some());
+        assert_ne!(
+            first["operational"]["observed_at"],
+            first["operational"]["received_at"]
+        );
+
+        let update = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/events",
+                INGEST_KEY,
+                r#"{
+                    "service":"infrastructure-control",
+                    "name":"capacity.saturation",
+                    "summary":"Capacity remains saturated; evidence refreshed",
+                    "severity":"error",
+                    "operational":{
+                        "subject":{"type":"capacity","id":"worker-pool-primary"},
+                        "state":"active",
+                        "owner":"infrastructure-operator",
+                        "evidence_url":"https://evidence.example/receipts/capacity-002",
+                        "observed_at":"2026-07-14T14:02:00Z"
+                    }
+                }"#,
+            )?)
+            .await?;
+        assert_eq!(update.status(), StatusCode::CREATED);
+        let update = json_body(update).await?;
+        assert_eq!(update["incident_event"], "incident.updated");
+        assert_eq!(update["incident_id"], incident_id);
+
+        let active = router
+            .clone()
+            .oneshot(read_request(READ_KEY, "/api/v1/incidents")?)
+            .await?;
+        assert_eq!(active.status(), StatusCode::OK);
+        let active = json_body(active).await?;
+        assert_eq!(active["incidents"][0]["id"], incident_id);
+        assert_eq!(
+            active["incidents"][0]["signals"][0]["signal_type"],
+            "operational_event"
+        );
+
+        let resolved = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/events",
+                INGEST_KEY,
+                r#"{
+                    "service":"infrastructure-control",
+                    "name":"capacity.saturation",
+                    "summary":"Capacity returned within policy",
+                    "severity":"info",
+                    "operational":{
+                        "subject":{"type":"capacity","id":"worker-pool-primary"},
+                        "state":"resolved",
+                        "owner":"infrastructure-operator",
+                        "evidence_url":"https://evidence.example/receipts/capacity-003",
+                        "observed_at":"2026-07-14T14:03:00Z"
+                    }
+                }"#,
+            )?)
+            .await?;
+        assert_eq!(resolved.status(), StatusCode::CREATED);
+        let resolved = json_body(resolved).await?;
+        assert_eq!(resolved["incident_event"], "incident.resolved");
+        assert_eq!(resolved["incident_id"], incident_id);
+
+        let detail = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                &format!("/api/v1/incidents/{incident_id}"),
+            )?)
+            .await?;
+        assert_eq!(detail.status(), StatusCode::OK);
+        let detail = json_body(detail).await?;
+        assert_eq!(detail["signals"][0]["type"], "operational_event");
+        assert_eq!(
+            detail["signals"][0]["operational"]["evidence_url"],
+            "https://evidence.example/receipts/capacity-003"
+        );
+        assert_eq!(
+            detail["signals"][0]["operational"]["subject_id"],
+            "worker-pool-primary"
+        );
+
+        let timeline = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/timeline?service=infrastructure-control&limit=10",
+            )?)
+            .await?;
+        assert_eq!(timeline.status(), StatusCode::OK);
+        let timeline = json_body(timeline).await?;
+        let events = timeline["events"]
+            .as_array()
+            .ok_or("missing timeline events")?;
+        assert!(
+            events
+                .iter()
+                .any(|event| event["event"] == "telemetry.event")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event["event"] == "incident.opened")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event["event"] == "incident.updated")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event["event"] == "incident.resolved")
+        );
+
+        wait_for_delivered_webhook(&path)?;
+        let captured = join_http_server(http_server)?;
+        assert_eq!(
+            header_value(&captured.head, "x-event").as_deref(),
+            Some("incident.opened")
+        );
+        assert!(header_value(&captured.head, "x-canary-signature").is_some());
+        assert!(header_value(&captured.head, "x-delivery-id").is_some());
+        assert!(captured.body.contains(&incident_id));
+
+        drop_server(server).await?;
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn canary_server_boot_wires_retention_prune_worker() -> Result<(), Box<dyn Error>> {
         let path = temp_db_path("retention-prune");
         let now = server_time::current_utc();
@@ -5788,6 +5982,103 @@ mod tests {
             invalid_body["errors"]["attributes"],
             json!(["must be an object"])
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn operational_event_names_are_caller_defined_and_payloads_stay_bounded()
+    -> Result<(), Box<dyn Error>> {
+        let router = ingest_router(test_ingest_state()?);
+        for (index, name) in [
+            "cost.anomaly",
+            "drift.violation",
+            "capacity.saturation",
+            "balance.low",
+            "recovery-proof.stale",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let body = serde_json::json!({
+                "service": format!("infrastructure-{index}"),
+                "name": name,
+                "summary": format!("Bounded operational signal {index}"),
+                "severity": "warning",
+                "operational": {
+                    "subject": {"type": "policy", "id": format!("subject-{index}")},
+                    "state": "active",
+                    "owner": "infrastructure-operator",
+                    "evidence_url": format!("https://evidence.example/receipts/{index}"),
+                    "observed_at": "2026-07-14T14:00:00Z"
+                }
+            });
+            let response = router
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/api/v1/events",
+                    INGEST_KEY,
+                    &body.to_string(),
+                )?)
+                .await?;
+            assert_eq!(response.status(), StatusCode::CREATED, "{name}");
+            let receipt = json_body(response).await?;
+            assert_eq!(receipt["name"], *name);
+            assert_eq!(receipt["incident_event"], "incident.opened");
+        }
+
+        let raw_snapshot = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/events",
+                INGEST_KEY,
+                r#"{
+                    "service":"infrastructure-control",
+                    "name":"drift.violation",
+                    "summary":"raw snapshot must not be warehoused",
+                    "attributes":{"provider_snapshot":{"droplets":[1,2,3]}},
+                    "operational":{
+                        "subject":{"type":"drift","id":"fleet"},
+                        "state":"active",
+                        "owner":"infrastructure-operator",
+                        "evidence_url":"https://evidence.example/receipts/drift",
+                        "observed_at":"2026-07-14T14:00:00Z"
+                    }
+                }"#,
+            )?)
+            .await?;
+        assert_eq!(raw_snapshot.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let problem = json_body(raw_snapshot).await?;
+        assert!(
+            problem["errors"]["attributes"][0]
+                .as_str()
+                .is_some_and(|message| message.contains("must be empty"))
+        );
+
+        let unknown = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/events",
+                INGEST_KEY,
+                r#"{
+                    "service":"infrastructure-control",
+                    "name":"balance.low",
+                    "summary":"unknown high-cardinality field must fail closed",
+                    "operational":{
+                        "subject":{"type":"balance","id":"account"},
+                        "state":"active",
+                        "owner":"infrastructure-operator",
+                        "evidence_url":"https://evidence.example/receipts/balance",
+                        "observed_at":"2026-07-14T14:00:00Z",
+                        "samples":[1,2,3]
+                    }
+                }"#,
+            )?)
+            .await?;
+        assert_eq!(unknown.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
         Ok(())
     }

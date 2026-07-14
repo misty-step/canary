@@ -33,6 +33,29 @@ export interface EventPayload {
   retention_class?: "ephemeral" | "standard" | "audit";
   privacy_policy?: "redacted" | "public" | "sensitive";
   sampling_policy?: string;
+  operational?: OperationalSignal;
+}
+
+export interface OperationalSignal {
+  subject: {
+    type: string;
+    id: string;
+  };
+  state: "active" | "resolved";
+  owner: string;
+  evidence_url: string;
+  observed_at: string;
+}
+
+export interface OperationalSignalContext {
+  name: string;
+  subject_type: string;
+  subject_id: string;
+  state: "active" | "resolved";
+  owner: string;
+  evidence_url: string;
+  observed_at: string;
+  received_at: string;
 }
 
 export interface CanaryResponse {
@@ -61,6 +84,9 @@ export interface EventResponse {
   privacy_policy: "redacted" | "public" | "sensitive";
   sampling_policy: string;
   created_at: string;
+  operational?: OperationalSignalContext;
+  incident_event?: "incident.opened" | "incident.updated" | "incident.resolved";
+  incident_id?: string;
 }
 
 export interface CanaryClient {
@@ -125,7 +151,7 @@ export function createClient(opts: ClientOptions): CanaryClient {
     const body = JSON.stringify({
       service: opts.service,
       severity: "info",
-      retention_class: "standard",
+      retention_class: payload.operational ? "audit" : "standard",
       privacy_policy: "redacted",
       sampling_policy: "unsampled",
       ...payload,

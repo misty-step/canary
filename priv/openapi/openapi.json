@@ -2436,12 +2436,12 @@
         "tags": [
           "Telemetry"
         ],
-        "summary": "Ingest a bounded analytics event",
-        "description": "Stores a typed analytics event as a telemetry.event timeline row. Use this for low-volume operational/product signals that help agents triage; do not send logs, metrics, traces, or raw PII.",
+        "summary": "Ingest a bounded telemetry or operational event",
+        "description": "Stores one low-volume telemetry.event timeline row. An optional operational envelope deterministically opens, updates, or resolves an incident for a caller-defined bounded subject. Canary retains the signal and incident timeline, not raw metrics, provider snapshots, logs, traces, or high-cardinality evidence.",
         "x-agent-guidance": {
-          "when_to_call": "Call when a consuming app or agent needs to record a low-volume typed event that helps correlate user flows, deploys, or agent work with errors, health, and incidents.",
-          "trust": "The caller owns redaction before ingest. Canary enforces size, shape, scoped API keys, and service authority, but retention_class and privacy_policy are policy labels until downstream retention/privacy automation consumes them.",
-          "next": "Read /api/v1/report for recent_events or replay /api/v1/timeline?event_type=telemetry.event with a cursor to verify the event and correlate it with incidents, errors, health, claims, and annotations."
+          "when_to_call": "Call when a producer needs to record a low-volume typed event. Include operational only when a stable caller-defined subject should participate in deterministic incident correlation.",
+          "trust": "The caller owns redaction before ingest. Canary enforces size, exact operational shape, scoped API keys, service authority, and empty attributes for operational signals. Evidence remains at evidence_url; only the bounded envelope is retained.",
+          "next": "Read /api/v1/report or replay /api/v1/timeline?event_type=telemetry.event. When incident_id is present, query that incident; its opened/updated/resolved webhook is the signed responder wake-up hint."
         },
         "requestBody": {
           "required": true,
@@ -3990,6 +3990,9 @@
           },
           {
             "$ref": "#/components/schemas/IncidentDetailSignalHealthTransition"
+          },
+          {
+            "$ref": "#/components/schemas/IncidentDetailSignalOperational"
           }
         ]
       },
@@ -4121,6 +4124,60 @@
           },
           "current_claim": {
             "$ref": "#/components/schemas/RemediationClaimSummary"
+          }
+        }
+      },
+      "IncidentDetailSignalOperational": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "summary",
+          "signal_ref",
+          "current_state",
+          "attached_at",
+          "resolved_at",
+          "annotation_count",
+          "operational"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "operational_event"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          },
+          "signal_ref": {
+            "type": "string"
+          },
+          "current_state": {
+            "type": "string",
+            "enum": [
+              "active",
+              "resolved"
+            ]
+          },
+          "attached_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "resolved_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "annotation_count": {
+            "type": "integer",
+            "enum": [
+              0
+            ]
+          },
+          "operational": {
+            "$ref": "#/components/schemas/OperationalSignalContext"
           }
         }
       },
@@ -6760,20 +6817,27 @@
           "attributes": {
             "type": "object",
             "additionalProperties": true,
-            "default": {}
+            "default": {},
+            "description": "Must be empty when operational is present; raw metrics, provider snapshots, logs and traces remain outside Canary."
           },
           "retention_class": {
             "$ref": "#/components/schemas/TelemetryRetentionClass",
-            "default": "standard"
+            "default": "standard",
+            "description": "Defaults to audit and must remain audit when operational is present."
           },
           "privacy_policy": {
             "$ref": "#/components/schemas/TelemetryPrivacyPolicy",
-            "default": "redacted"
+            "default": "redacted",
+            "description": "Must be redacted when operational is present."
           },
           "sampling_policy": {
             "type": "string",
             "minLength": 1,
-            "default": "unsampled"
+            "default": "unsampled",
+            "description": "Must be unsampled when operational is present."
+          },
+          "operational": {
+            "$ref": "#/components/schemas/OperationalSignalRequest"
           }
         }
       },
@@ -6834,7 +6898,102 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "operational": {
+            "$ref": "#/components/schemas/OperationalSignalContext"
+          },
+          "incident_event": {
+            "type": "string",
+            "enum": [
+              "incident.opened",
+              "incident.updated",
+              "incident.resolved"
+            ]
+          },
+          "incident_id": {
+            "type": "string"
           }
+        }
+      },
+      "OperationalSignalRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "subject",
+          "state",
+          "owner",
+          "evidence_url",
+          "observed_at"
+        ],
+        "properties": {
+          "subject": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "id"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[a-z0-9._-]+$"
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              }
+            }
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "active",
+              "resolved"
+            ]
+          },
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "evidence_url": {
+            "type": "string",
+            "format": "uri",
+            "maxLength": 2048,
+            "pattern": "^https://"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "OperationalSignalContext": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "subject_type",
+          "subject_id",
+          "state",
+          "owner",
+          "evidence_url",
+          "observed_at",
+          "received_at"
+        ],
+        "properties": {
+          "name": { "type": "string" },
+          "subject_type": { "type": "string" },
+          "subject_id": { "type": "string" },
+          "state": { "type": "string", "enum": ["active", "resolved"] },
+          "owner": { "type": "string" },
+          "evidence_url": { "type": "string", "format": "uri" },
+          "observed_at": { "type": "string", "format": "date-time" },
+          "received_at": { "type": "string", "format": "date-time" }
         }
       }
     }

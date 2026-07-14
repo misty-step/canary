@@ -60,7 +60,7 @@ enum Commands {
     Monitors,
     /// Inspect dogfood coverage.
     Dogfood(DogfoodArgs),
-    /// Capture bounded analytics events.
+    /// Capture bounded telemetry or operational events.
     Events(EventsArgs),
     /// Coordinate agentic remediation claims.
     Claims(ClaimsArgs),
@@ -234,7 +234,7 @@ struct EventsArgs {
 
 #[derive(Debug, Subcommand)]
 enum EventsCommand {
-    /// Capture one analytics event.
+    /// Capture one telemetry or operational event.
     Capture(EventCaptureArgs),
 }
 
@@ -250,12 +250,24 @@ struct EventCaptureArgs {
     severity: String,
     #[arg(long = "attribute")]
     attributes: Vec<String>,
-    #[arg(long, default_value = "standard")]
-    retention_class: String,
+    #[arg(long)]
+    retention_class: Option<String>,
     #[arg(long, default_value = "redacted")]
     privacy_policy: String,
     #[arg(long, default_value = "unsampled")]
     sampling_policy: String,
+    #[arg(long)]
+    operational_subject_type: Option<String>,
+    #[arg(long)]
+    operational_subject_id: Option<String>,
+    #[arg(long)]
+    operational_state: Option<String>,
+    #[arg(long)]
+    operational_owner: Option<String>,
+    #[arg(long)]
+    operational_evidence_url: Option<String>,
+    #[arg(long)]
+    operational_observed_at: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -903,19 +915,28 @@ fn jsonrpc_error(id: Value, code: i64, message: &str) -> Value {
 fn run_events_command(args: EventsArgs, client: &ApiClient, mode: RenderMode) -> Result<()> {
     match args.command {
         EventsCommand::Capture(args) => {
-            let response = client.post_auth_json(
-                "/api/v1/events",
-                &json!({
-                    "service": args.service,
-                    "name": args.name,
-                    "summary": args.summary,
-                    "severity": args.severity,
-                    "attributes": parse_attributes(&args.attributes)?,
-                    "retention_class": args.retention_class,
-                    "privacy_policy": args.privacy_policy,
-                    "sampling_policy": args.sampling_policy,
-                }),
-            )?;
+            let operational = operational_event_payload(&args)?;
+            let retention_class = args.retention_class.clone().unwrap_or_else(|| {
+                if operational.is_some() {
+                    "audit".to_owned()
+                } else {
+                    "standard".to_owned()
+                }
+            });
+            let mut payload = json!({
+                "service": args.service,
+                "name": args.name,
+                "summary": args.summary,
+                "severity": args.severity,
+                "attributes": parse_attributes(&args.attributes)?,
+                "retention_class": retention_class,
+                "privacy_policy": args.privacy_policy,
+                "sampling_policy": args.sampling_policy,
+            });
+            if let Some(operational) = operational {
+                payload["operational"] = operational;
+            }
+            let response = client.post_auth_json("/api/v1/events", &payload)?;
             render(
                 "events capture",
                 client.endpoint(),
@@ -925,6 +946,36 @@ fn run_events_command(args: EventsArgs, client: &ApiClient, mode: RenderMode) ->
             )
         }
     }
+}
+
+fn operational_event_payload(args: &EventCaptureArgs) -> Result<Option<Value>> {
+    let values = [
+        args.operational_subject_type.as_deref(),
+        args.operational_subject_id.as_deref(),
+        args.operational_state.as_deref(),
+        args.operational_owner.as_deref(),
+        args.operational_evidence_url.as_deref(),
+        args.operational_observed_at.as_deref(),
+    ];
+    if values.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    if values.iter().any(Option::is_none) {
+        return Err(CliError::Message(
+            "operational events require --operational-subject-type, --operational-subject-id, --operational-state, --operational-owner, --operational-evidence-url, and --operational-observed-at"
+                .to_owned(),
+        ));
+    }
+    Ok(Some(json!({
+        "subject": {
+            "type": args.operational_subject_type,
+            "id": args.operational_subject_id,
+        },
+        "state": args.operational_state,
+        "owner": args.operational_owner,
+        "evidence_url": args.operational_evidence_url,
+        "observed_at": args.operational_observed_at,
+    })))
 }
 
 fn parse_attributes(attributes: &[String]) -> Result<serde_json::Map<String, serde_json::Value>> {
