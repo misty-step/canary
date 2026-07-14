@@ -32,8 +32,11 @@ cargo run -p canary-server
 No Docker is required for local development outside the Dagger gate. The repo
 includes the Rust service workspace and a private TypeScript source reference;
 supported application integrations use the HTTP API, CLI, and MCP surfaces.
-For a Docker-only self-hosted first boot, use
-[`docs/self-host-docker.md`](docs/self-host-docker.md).
+The declarative contract for a future portable OCI release and its runtime is
+in
+[`docs/portable-runtime-contract.md`](docs/portable-runtime-contract.md).
+Canary does not yet publish or sign that artifact; live pull and signature
+verification remain unproved acceptance work.
 
 ### First run: capturing the bootstrap API key
 
@@ -77,12 +80,10 @@ Responder incident context uses a redacted envelope, service-bound
 `responder-write` read authority, and durable read-audit events; see
 [`docs/responder-context-safety.md`](docs/responder-context-safety.md).
 
-For Docker deployment, including Compose, local volume persistence, doctor,
-and an ingest/query smoke, see
-[`docs/self-host-docker.md`](docs/self-host-docker.md). The Misty Step production
-instance runs on a dedicated DigitalOcean host; its operator path is documented
-in [`docs/upgrade-and-rollback.md`](docs/upgrade-and-rollback.md) and
-[`docs/backup-restore-dr.md`](docs/backup-restore-dr.md).
+For OCI verification, runtime inputs, health, version, migrations, and generic
+S3-compatible recovery, see
+[`docs/portable-runtime-contract.md`](docs/portable-runtime-contract.md).
+Deployment topology and promotion policy belong to each deployer.
 
 Canary has no human dashboard by design — agents are the UI. Operators who
 need to look at current state use the query API directly (`GET
@@ -115,9 +116,10 @@ surface.
 The production Dockerfile builds the Rust `canary-server` binary, and CI uses
 the same pinned toolchain versions.
 
-### Production Evidence
+### Historical production evidence
 
-Rust production claims are evidence-scoped:
+These records preserve earlier Fly-era production evidence. They are
+historical and non-authoritative for current deployment topology or policy:
 
 - [docs/architecture/rust-cutover-evidence-2026-06-06.md](docs/architecture/rust-cutover-evidence-2026-06-06.md)
   proves the first Fly Rust cutover plus public/read-route smoke.
@@ -195,9 +197,9 @@ packages:
 
 Agents wiring another runtime into Canary should use the 15-minute recipe in
 [`docs/factory-fleet-integration.md`](docs/factory-fleet-integration.md). It
-covers HTTP target enrollment, Fly private-network reachability, non-HTTP
-check-in monitors, and strict dogfood readback without requiring route trivia
-or secret values in receipts.
+covers HTTP target enrollment, deployment-owned private reachability,
+non-HTTP check-in monitors, and strict dogfood readback without requiring
+route trivia or secret values in receipts.
 
 The default gate also includes the git-history secrets scan. Run live
 dependency advisory scans explicitly when you want current registry state as
@@ -614,77 +616,29 @@ schema (`priv/openapi/openapi.json`) for the authoritative contract.
 | `GET /healthz` | Liveness — HTTP router alive |
 | `GET /readyz` | Readiness — DB + supervisor healthy |
 
-## Deployment
+## Portable OCI release contract
 
-Deploy the same Docker image on a generic host. The smallest Compose path uses
-a local volume. The Misty Step production instance uses a dedicated
-DigitalOcean host, a mounted block volume, `canary.service`, container `canary`,
-Caddy ingress, and Litestream replication to DigitalOcean Spaces.
+Canary now declares the provider-neutral shape of a future multi-platform OCI
+artifact and signed release manifest. No release workflow currently builds,
+publishes, or signs that artifact: live pull, signature verification, and
+atomic publication are still open acceptance criteria.
 
-- Generic Docker or Compose: [docs/self-host-docker.md](docs/self-host-docker.md)
-- Misty Step production operations:
-  [docs/upgrade-and-rollback.md](docs/upgrade-and-rollback.md)
-  and [docs/backup-restore-dr.md](docs/backup-restore-dr.md)
+Once a release publisher can satisfy the contract atomically, acceptance must
+prove the manifest, signature bundle, digest-pinned image, classified runtime
+inputs, health, readiness, version, migration, application readback, and the
+generic S3-compatible restore check.
 
-```bash
-export CANARY_ENDPOINT="https://canary.mistystep.io"
-export CANARY_SSH_HOST="<operator-ssh-target>"
-ssh "$CANARY_SSH_HOST" sudo systemctl is-active canary.service
-ssh "$CANARY_SSH_HOST" sudo docker inspect canary \
-  --format '{{.Image}} {{.State.Status}}'
-curl -fsS "$CANARY_ENDPOINT/healthz"
-curl -fsS "$CANARY_ENDPOINT/readyz"
-```
-
-There is no provider auto-deploy workflow. Production promotion is an explicit
-immutable-image update on the dedicated host after `./bin/validate --strict`
-passes. On first boot, capture the one-time bootstrap admin key from container
-logs and store it in the operator's secret manager:
-
-```bash
-ssh "$CANARY_SSH_HOST" \
-  "sudo docker logs canary 2>&1 | grep -E 'Bootstrap API key:'"
-```
-
-If the first boot log was missed, mint a replacement admin key without data
-loss. This prints a raw admin key once:
-
-```bash
-ssh "$CANARY_SSH_HOST" sudo docker exec canary \
-  /app/bin/canary-server mint-key --scope admin --name operator-recovery
-```
-
-After the key is stored, prove the new instance with the same smoke commands an
-agent will use later:
-
-```bash
-export CANARY_ADMIN_KEY="<stored-admin-key>"
-curl -fsS "$CANARY_ENDPOINT/healthz"
-curl -fsS "$CANARY_ENDPOINT/readyz"
-curl -fsS "$CANARY_ENDPOINT/api/v1/report?window=1h" \
-  -H "Authorization: Bearer $CANARY_ADMIN_KEY"
-bin/canary-write-path-rehearsal \
-  --endpoint "$CANARY_ENDPOINT" \
-  --api-key "$CANARY_ADMIN_KEY" \
-  --host "$CANARY_SSH_HOST" \
-  --json
-```
-
-DR verification and restore procedures live in [docs/backup-restore-dr.md](docs/backup-restore-dr.md).
-Use `bin/dr-status` for a read-only Litestream preflight and
-`bin/dr-restore-check` for a non-destructive restore drill inside the running
-container. Both require `CANARY_SSH_HOST` or `--host` and use the production
-container's mounted Litestream configuration.
-
-See `Dockerfile`, `litestream.yml`, and `bin/entrypoint.sh`.
+The exact commands and evidence schemas are in
+[`docs/portable-runtime-contract.md`](docs/portable-runtime-contract.md).
+Canary does not choose placement, networking, persistence, resource sizing,
+promotion, rollback, or recovery policy.
 
 ## Tech Stack
 
 - **Rust** — Typed service core, Axum HTTP runtime, deterministic workers, and compile-time guardrails
 - **SQLite** — WAL mode with one explicit writer boundary in `canary-store`
 - **Reqwest** — HTTP target probes and outbound webhook delivery
-- **Litestream + S3-compatible storage** — Continuous SQLite replication;
-  Misty Step production uses DigitalOcean Spaces
+- **Litestream + S3-compatible storage** — Portable continuous SQLite replication
 
 ## License
 

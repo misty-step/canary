@@ -31,7 +31,8 @@ RUN useradd --create-home app && \
 COPY --from=build --chown=app:app /app/target/release/canary-server /app/bin/canary-server
 COPY --chown=app:app litestream.yml /etc/litestream.yml
 COPY --chown=app:app bin/entrypoint.sh /app/bin/entrypoint.sh
-RUN chmod +x /app/bin/entrypoint.sh /app/bin/canary-server
+COPY --chown=app:app bin/canary-recovery /app/bin/canary-recovery
+RUN chmod +x /app/bin/entrypoint.sh /app/bin/canary-server /app/bin/canary-recovery
 
 USER app
 

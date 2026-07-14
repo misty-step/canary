@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG="${LITESTREAM_CONFIG:-/etc/litestream.yml}"
+DATABASE="${CANARY_DB_PATH:-}"
+SERVER_BIN="${CANARY_BIN:-/app/bin/canary-server}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  bin/canary-recovery status [--config <path>]
+  bin/canary-recovery restore-check --database <path> [--config <path>] [--server-bin <path>]
+
+Exercise Canary's generic Litestream/S3-compatible recovery contract.
+The restore check materializes a temporary database, migrates a disposable copy,
+and emits health-independent version, migration, and data-verification evidence.
+It never overwrites the configured live database.
+EOF
+}
+
+fail() {
+  printf 'canary-recovery: %s\n' "$1" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
+}
+
+COMMAND="${1:-}"
+if [[ -z "$COMMAND" || "$COMMAND" == "-h" || "$COMMAND" == "--help" ]]; then
+  usage
+  [[ -n "$COMMAND" ]] || exit 1
+  exit 0
+fi
+shift
+
+while (($#)); do
+  case "$1" in
+    --config)
+      (($# >= 2)) || fail "--config requires a value"
+      CONFIG="$2"
+      shift 2
+      ;;
+    --database)
+      (($# >= 2)) || fail "--database requires a value"
+      DATABASE="$2"
+      shift 2
+      ;;
+    --server-bin)
+      (($# >= 2)) || fail "--server-bin requires a value"
+      SERVER_BIN="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ -f "$CONFIG" ]] || fail "Litestream config not found: $CONFIG"
+require_command litestream
+
+case "$COMMAND" in
+  status)
+    litestream status -config "$CONFIG"
+    ;;
+  restore-check)
+    [[ -n "$DATABASE" ]] || fail "database path required: pass --database or set CANARY_DB_PATH"
+    [[ -x "$SERVER_BIN" ]] || fail "Canary server binary is not executable: $SERVER_BIN"
+
+    restore_path="$(mktemp "${TMPDIR:-/tmp}/canary-restore.XXXXXX")"
+    migrated_path="$(mktemp "${TMPDIR:-/tmp}/canary-migrated.XXXXXX")"
+    rm -f "$restore_path" "$migrated_path"
+    cleanup() {
+      rm -f "$restore_path" "$migrated_path"
+    }
+    trap cleanup EXIT
+
+    litestream restore -if-replica-exists -o "$restore_path" -config "$CONFIG" "$DATABASE"
+    [[ -s "$restore_path" ]] || fail "restore did not materialize a non-empty database"
+    cp "$restore_path" "$migrated_path"
+
+    version_json="$($SERVER_BIN version)"
+    verification_json="$($SERVER_BIN migrate --database "$migrated_path")"
+    restored_bytes="$(wc -c < "$restore_path" | tr -d '[:space:]')"
+    printf '{"schema":"canary.recovery-check.v1","restored_bytes":%s,"runtime":%s,"migration_and_data":%s}\n' \
+      "$restored_bytes" "$version_json" "$verification_json"
+    ;;
+  *)
+    usage >&2
+    exit 1
+    ;;
+esac

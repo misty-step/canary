@@ -1,16 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
 ENDPOINT="${CANARY_ENDPOINT:-}"
 API_KEY="${CANARY_API_KEY:-}"
 WEBHOOK_URL="${CANARY_REHEARSAL_WEBHOOK_URL:-https://httpbingo.org/status/204}"
 TARGET_URL="${CANARY_REHEARSAL_TARGET_URL:-}"
-HOST="${CANARY_SSH_HOST:-}"
 PREFIX=""
 JSON_OUTPUT=0
-RUN_DR_STATUS=1
 POLL_ATTEMPTS="${CANARY_REHEARSAL_POLL_ATTEMPTS:-20}"
 POLL_SLEEP="${CANARY_REHEARSAL_POLL_SLEEP:-2}"
 
@@ -25,7 +21,6 @@ WEBHOOK_ID=""
 WEBHOOK_DELIVERY_ID=""
 ERROR_ID=""
 ERROR_GROUP_HASH=""
-DEPLOY_IDENTITY="{}"
 SERVICE=""
 KEY_NAME=""
 TARGET_NAME=""
@@ -34,13 +29,13 @@ WEBHOOK_RUN_URL=""
 
 usage() {
   cat <<'EOF'
-Usage: bin/canary-write-path-rehearsal [--endpoint <url>] [--api-key <key>] [--webhook-url <url>] [--target-url <url>] [--prefix <prefix>] [--host <ssh-target>] [--poll-attempts <n>] [--poll-sleep <seconds>] [--no-dr-status] [--json] [-h|--help]
+Usage: bin/canary-write-path-rehearsal [--endpoint <url>] [--api-key <key>] [--webhook-url <url>] [--target-url <url>] [--prefix <prefix>] [--poll-attempts <n>] [--poll-sleep <seconds>] [--json] [-h|--help]
 
 Exercise Canary's live write paths with uniquely named disposable resources.
 
 By default the command reads CANARY_ENDPOINT and CANARY_API_KEY from the
 environment, creates a temporary ingest-only key, target, monitor, webhook,
-error, check-in, webhook delivery, and DR-status receipt, then deletes or
+error, check-in, and webhook delivery, then deletes or
 revokes every disposable live resource it can clean up.
 
 The JSON receipt redacts one-time API keys and webhook secrets. Error events
@@ -62,17 +57,6 @@ require_command() {
   fi
 
   fail "Missing required command: $command_name"
-}
-
-require_ssh_host() {
-  local host="$1"
-
-  [[ -n "$host" ]] || fail "Missing Canary SSH host. Set CANARY_SSH_HOST, pass --host, or pass --no-dr-status."
-  case "$host" in
-    -*|*[!A-Za-z0-9_.:@-]*)
-      fail "Invalid Canary SSH host. Use an SSH alias, host, IP, or user@host without options."
-      ;;
-  esac
 }
 
 urlencode() {
@@ -497,55 +481,6 @@ wait_for_webhook_delivery() {
   fail "timed out waiting for delivered webhook delivery for $WEBHOOK_ID; last delivery ${last_delivery_id:-none} status ${last_delivery_status:-none}"
 }
 
-collect_deploy_identity() {
-  local service_output service_status container_output container_status identity
-  local inspect_command
-
-  require_command ssh
-
-  set +e
-  service_output="$(ssh "$HOST" sudo systemctl is-active canary.service 2>&1)"
-  service_status=$?
-  set -e
-  record_shell_step "host_service_identity" \
-    "ssh $HOST sudo systemctl is-active canary.service" \
-    "$service_status" "$service_output"
-  if ((service_status != 0)) || [[ "$service_output" != "active" ]]; then
-    fail "canary.service is not active on $HOST: $(sanitize_text "$service_output")"
-  fi
-
-  inspect_command="sudo docker inspect canary --format '{\"container_id\":{{json .Id}},\"image_id\":{{json .Image}},\"name\":{{json .Name}},\"state\":{{json .State.Status}},\"started_at\":{{json .State.StartedAt}}}'"
-  set +e
-  container_output="$(ssh "$HOST" "$inspect_command" 2>&1)"
-  container_status=$?
-  set -e
-  record_shell_step "host_container_identity" \
-    "ssh $HOST sudo docker inspect canary <safe-identity-format>" \
-    "$container_status" "$container_output"
-  if ((container_status != 0)) || ! jq -e '
-    (.container_id // "") != ""
-    and (.image_id // "" | startswith("sha256:"))
-    and .name == "/canary"
-    and .state == "running"
-    and (.started_at // "") != ""
-  ' >/dev/null 2>&1 <<<"$container_output"; then
-    fail "container identity was incomplete or not running on $HOST: $(sanitize_text "$container_output")"
-  fi
-
-  identity="$(jq -cn \
-    --arg host "$HOST" \
-    --arg service_state "$service_output" \
-    --argjson container "$container_output" \
-    '{
-      provider: "digitalocean",
-      host: $host,
-      service: {name: "canary.service", state: $service_state},
-      container: $container
-    }')"
-  DEPLOY_IDENTITY="$identity"
-  record_json_step "host_deploy_identity" "$identity"
-}
-
 while (($#)); do
   case "$1" in
     --endpoint)
@@ -573,11 +508,6 @@ while (($#)); do
       PREFIX="$2"
       shift 2
       ;;
-    --host)
-      (($# >= 2)) || { usage >&2; exit 1; }
-      HOST="$2"
-      shift 2
-      ;;
     --poll-attempts)
       (($# >= 2)) || { usage >&2; exit 1; }
       POLL_ATTEMPTS="$2"
@@ -588,12 +518,14 @@ while (($#)); do
       POLL_SLEEP="$2"
       shift 2
       ;;
-    --no-dr-status)
-      RUN_DR_STATUS=0
-      shift
-      ;;
     --json)
       JSON_OUTPUT=1
+      shift
+      ;;
+    --no-dr-status)
+      # Retained as a no-op while the trusted pull-request CI control plane
+      # moves from the former host-specific DR preflight to this portable
+      # write-path contract.
       shift
       ;;
     -h|--help)
@@ -613,9 +545,6 @@ require_command date
 
 [[ -n "$ENDPOINT" ]] || fail "Missing Canary endpoint. Set CANARY_ENDPOINT or pass --endpoint."
 [[ -n "$API_KEY" ]] || fail "Missing Canary API key. Set CANARY_API_KEY or pass --api-key."
-if ((RUN_DR_STATUS == 1)); then
-  require_ssh_host "$HOST"
-fi
 [[ "$POLL_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || fail "--poll-attempts must be a positive integer."
 [[ "$POLL_SLEEP" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail "--poll-sleep must be a non-negative number."
 
@@ -640,13 +569,6 @@ if [[ -z "$TARGET_URL" ]]; then
 fi
 WEBHOOK_RUN_URL="$(append_rehearsal_query "$WEBHOOK_URL")"
 remember_sensitive_literal "$WEBHOOK_RUN_URL"
-
-if ((RUN_DR_STATUS == 1)); then
-  collect_deploy_identity
-else
-  DEPLOY_IDENTITY="$(jq -cn '{status: "skipped", reason: "--no-dr-status"}')"
-  record_json_step "host_deploy_identity" "$DEPLOY_IDENTITY"
-fi
 
 key_body="$(jq -cn --arg name "$KEY_NAME" '{name: $name, scope: "ingest-only"}')"
 key_response="$(api_expect "api_key_create_ingest" POST "/api/v1/keys" "$API_KEY" "$key_body" 201)"
@@ -737,17 +659,6 @@ fi
 
 wait_for_webhook_delivery
 
-if ((RUN_DR_STATUS == 1)); then
-  set +e
-  dr_output="$(NO_COLOR=1 "$ROOT/bin/dr-status" --host "$HOST" 2>&1)"
-  dr_status=$?
-  set -e
-  record_shell_step "dr_status" "NO_COLOR=1 bin/dr-status --host $HOST" "$dr_status" "$dr_output"
-  if ((dr_status != 0)); then
-    fail "dr-status failed for $HOST: $(sanitize_text "$dr_output")"
-  fi
-fi
-
 api_expect "target_delete" DELETE "/api/v1/targets/$TARGET_ID" "$API_KEY" "" 204 >/dev/null
 api_expect "monitor_delete" DELETE "/api/v1/monitors/$MONITOR_ID" "$API_KEY" "" 204 >/dev/null
 api_expect "webhook_delete" DELETE "/api/v1/webhooks/$WEBHOOK_ID" "$API_KEY" "" 204 >/dev/null
@@ -786,28 +697,24 @@ resources_json="$(jq -cn \
     immutable_webhook_delivery_id: $delivery_id
 	  }')"
 receipt="$(jq -n \
-  --argjson schema_version 2 \
+  --argjson schema_version 3 \
   --arg status "ok" \
   --arg endpoint "${ENDPOINT%/}" \
-  --arg host "$HOST" \
   --arg prefix "$PREFIX" \
   --arg started_at "$RUN_STARTED_AT" \
   --arg finished_at "$finished_at" \
 	  --arg webhook_url "$WEBHOOK_RUN_URL" \
 	  --arg cleanup_note "Targets, monitors, and webhooks are deleted. The temporary ingest key is revoked and intentionally remains as an inactive audit row. Error and webhook-delivery rows are immutable evidence." \
-	  --argjson deploy_identity "$DEPLOY_IDENTITY" \
 	  --argjson resources "$resources_json" \
 	  --argjson steps "$steps_json" \
 	  '{
     schema_version: $schema_version,
     status: $status,
     endpoint: $endpoint,
-    host: $host,
     prefix: $prefix,
 	    started_at: $started_at,
 	    finished_at: $finished_at,
 	    webhook_url: ($webhook_url | gsub("\\?.*$"; "?<redacted-query>")),
-	    deploy_identity: $deploy_identity,
 	    resources: $resources,
 	    cleanup_note: $cleanup_note,
 	    steps: $steps

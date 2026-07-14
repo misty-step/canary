@@ -202,7 +202,8 @@ export class Ci {
       .withMountedDirectory("/work", source)
       .withWorkdir("/work")
       .withExec(["bash", "test/bin/entrypoint_test.sh"])
-      .withExec(["bash", "test/bin/dr_test.sh"])
+      .withExec(["bash", "test/bin/recovery_test.sh"])
+      .withExec(["bash", "test/bin/release_manifest_test.sh"])
       .withExec(["bash", "test/bin/dogfood_audit_test.sh"])
       .withExec(["bash", "test/bin/dogfood_inventory_test.sh"])
       .withExec(["bash", "test/bin/canary_witness_test.sh"])
@@ -403,7 +404,6 @@ receipt="$(
     --webhook-url https://httpbingo.org/status/204 \
     --target-url http://127.0.0.1:4000/healthz \
     --prefix "$prefix" \
-    --no-dr-status \
     --json
 )"
 printf '%s' "$receipt" >/tmp/canary-write-path-rehearsal.json

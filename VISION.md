@@ -198,10 +198,11 @@ alert reliability, cold-operator deployability, instance/product separation,
 stale evidence cleanup, responder safety, fewer overclaimed integrations, and a
 cleaner agent handoff from signal to action.
 
-The uncomfortable current truth is that Canary's live Misty Step instance is
-more mature than its stranger-owned deploy path. The next product bar is a
-clean instance run by another operator, with bootstrap-key recovery, Fly
-deployment, backup setup, and first service onboarding documented and proven.
+The next product bar is a clean instance run by another operator from the same
+verifiably signed OCI artifact and provider-neutral runtime/recovery contract used by every
+consumer. Instance topology and provider choices must never leak back into the
+product boundary. That artifact is a target state, not a claim about current
+release publication.
 
 ## Product Principles
 
@@ -237,8 +238,10 @@ operator's own agents before polishing the stranger path. In priority order:
 - keep releases and versions truthful (tags, releases, registries, and the
   running binary agree)
 - make responder context safe enough for arbitrary-agent consumers
-- stay substrate-agnostic: deploys, backups, and DR are Docker-first,
-  restore-proven, and never coupled to one host's tooling
+- stay substrate-agnostic: releases should become verifiably signed OCI
+  artifacts; backup and
+  recovery are S3-compatible, restore-proven, and independent of deployment
+  topology
 - make the operator web UI first-class: mobile-friendly, self-contained,
   degrading gracefully, rendering the shared contract
 - then: cold-operator/stranger deployability, OTel GenAI ingest interop, and

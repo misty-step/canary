@@ -1,8 +1,8 @@
 # Factory Fleet Integration
 
 This is the 15-minute path for a Factory repo to report health, uptime, and
-an error or check-in signal to the Misty Step Canary instance. Use it from the
-consumer repo; keep service-specific code changes in that repo.
+an error or check-in signal to a Canary deployment. Use it from the consumer
+repo; keep service-specific code changes in that repo.
 
 > **Rust apps reporting their own errors/check-ins from inside the process**
 > (services, workers, CLIs, build tools) should follow
@@ -14,7 +14,8 @@ consumer repo; keep service-specific code changes in that repo.
 
 ## Inputs
 
-- `CANARY_ENDPOINT`: `https://canary.mistystep.io` for Misty Step.
+- `CANARY_ENDPOINT`: the deployment's externally supplied Canary URL, for
+  example `https://canary.example`.
 - A read/admin operator key for inspection and enrollment. Do not print it.
 - The service name agents should query, for example `powder`.
 - One production health URL when the app exposes HTTP health.
@@ -22,10 +23,9 @@ consumer repo; keep service-specific code changes in that repo.
   process heartbeat.
 
 Prefer canonical HTTPS health URLs. Private target probes require an explicit
-route from the dedicated Canary host plus `ALLOW_PRIVATE_TARGETS=true` in the
-host's reviewed runtime environment. That setting belongs on the Canary host,
-not in a consumer repo; changing it must preserve the host environment hash and
-restart `canary.service` through the production runbook.
+route from the Canary runtime plus `ALLOW_PRIVATE_TARGETS=true` in its reviewed
+runtime environment. Routing, placement, and restart policy belong to the
+deployment owner, not this repository or a consumer repo.
 
 ## Path
 
@@ -38,11 +38,11 @@ restart `canary.service` through the production runbook.
   --json
 ```
 
-2. Verify the health URL from the Canary host when the URL is private.
+2. Verify the health URL from the deployed Canary runtime when the URL is
+private. The infrastructure owner supplies the execution mechanism.
 
 ```bash
-ssh "$CANARY_SSH_HOST" sudo docker exec canary \
-  curl -fsS https://<private-health-host>/healthz
+curl -fsS https://<private-health-url>/healthz
 ```
 
 Public URLs can be verified with a normal `curl -fsS <url>`.

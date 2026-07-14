@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/misty-step/canary/blob/master/contracts/release-manifest.v1.schema.json",
+  "title": "Canary portable release manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "product",
+    "version",
+    "source",
+    "artifact",
+    "contracts",
+    "compatibility",
+    "created_at"
+  ],
+  "properties": {
+    "schema": { "const": "canary.release-manifest.v1" },
+    "product": { "const": "canary" },
+    "version": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commit"],
+      "properties": {
+        "repository": { "const": "https://github.com/misty-step/canary" },
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "repository", "digest", "reference", "platforms"],
+      "properties": {
+        "kind": { "const": "oci-image" },
+        "repository": { "type": "string", "minLength": 1 },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "reference": { "type": "string", "minLength": 1 },
+        "platforms": {
+          "const": ["linux/amd64", "linux/arm64"]
+        }
+      }
+    },
+    "contracts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["configuration", "runtime", "health", "version", "migration", "backup_restore", "data_verification"],
+      "properties": {
+        "configuration": { "const": "contracts/runtime-config.v1.schema.json" },
+        "runtime": { "const": "docs/portable-runtime-contract.md#runtime" },
+        "health": { "const": "docs/portable-runtime-contract.md#health" },
+        "version": { "const": "docs/portable-runtime-contract.md#version" },
+        "migration": { "const": "docs/portable-runtime-contract.md#migration" },
+        "backup_restore": { "const": "docs/portable-runtime-contract.md#backup-and-restore" },
+        "data_verification": { "const": "docs/portable-runtime-contract.md#data-verification" }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["database_migrations", "automatic_previous_image_rollback"],
+      "properties": {
+        "database_migrations": { "const": "forward-only" },
+        "automatic_previous_image_rollback": { "type": "boolean" }
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    }
+  }
+}

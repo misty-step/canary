@@ -1,9 +1,9 @@
 dbs:
-  - path: /data/canary.db
+  - path: ${CANARY_DB_PATH}
     replicas:
       - type: s3
         bucket: ${BUCKET_NAME}
-        path: canary.db
+        path: ${CANARY_REPLICA_PATH}
         endpoint: ${LITESTREAM_ENDPOINT}
         region: ${LITESTREAM_REGION}
         force-path-style: true
