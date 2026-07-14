@@ -158,6 +158,10 @@ fn api_key_insert_response(key: &ApiKeyInsert, raw_key: &str) -> Value {
         "key": raw_key,
         "key_prefix": key.key_prefix,
         "created_at": key.created_at,
+        "tenant_id": key.tenant_id,
+        "project_id": key.project_id,
+        "service": key.service,
+        "allow_unbound": key.allow_unbound,
         "warning": "Store this key securely. It will not be shown again.",
     })
 }

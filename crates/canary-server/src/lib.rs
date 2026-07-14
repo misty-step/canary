@@ -3650,6 +3650,10 @@ mod tests {
         assert_eq!(created["service"], "billing api");
         assert_eq!(created["api_key"]["name"], "billing api-ingest");
         assert_eq!(created["api_key"]["scope"], "ingest-only");
+        assert_eq!(created["api_key"]["tenant_id"], "TENANT-bootstrap");
+        assert_eq!(created["api_key"]["project_id"], "PROJECT-bootstrap");
+        assert_eq!(created["api_key"]["service"], "billing api");
+        assert_eq!(created["api_key"]["allow_unbound"], false);
         assert!(raw_key.starts_with("sk_live_"));
         assert_eq!(
             created["api_key"]["key_prefix"],
