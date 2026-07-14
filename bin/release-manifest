@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  bin/release-manifest generate --version <vX.Y.Z> --commit <40-hex> --oci-repository <ref> --oci-digest <sha256:hex> --created-at <RFC3339> --output <path> [--automatic-rollback]
+  bin/release-manifest verify --file <path>
+
+Generate or verify Canary's provider-neutral release manifest. Signing is a
+separate cosign blob operation so the manifest bytes remain independently
+verifiable and the signature bundle can travel beside them.
+EOF
+}
+
+fail() {
+  printf 'release-manifest: %s\n' "$1" >&2
+  exit 1
+}
+
+require_jq() {
+  command -v jq >/dev/null 2>&1 || fail "jq is required"
+}
+
+verify_manifest() {
+  local file="$1"
+  [[ -f "$file" ]] || fail "manifest not found: $file"
+  jq -e '
+    (keys | sort) == (["artifact", "compatibility", "contracts", "created_at", "product", "schema", "source", "version"] | sort)
+    and .schema == "canary.release-manifest.v1"
+    and .product == "canary"
+    and (.version | test("^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"))
+    and (.source | keys | sort) == (["commit", "repository"] | sort)
+    and .source.repository == "https://github.com/misty-step/canary"
+    and (.source.commit | test("^[0-9a-f]{40}$"))
+    and (.artifact | keys | sort) == (["digest", "kind", "platforms", "reference", "repository"] | sort)
+    and .artifact.kind == "oci-image"
+    and (.artifact.digest | test("^sha256:[0-9a-f]{64}$"))
+    and .artifact.reference == (.artifact.repository + "@" + .artifact.digest)
+    and .artifact.platforms == ["linux/amd64", "linux/arm64"]
+    and (.contracts | keys | sort) == (["backup_restore", "configuration", "data_verification", "health", "migration", "runtime", "version"] | sort)
+    and .contracts.configuration == "contracts/runtime-config.v1.schema.json"
+    and .contracts.runtime == "docs/portable-runtime-contract.md#runtime"
+    and .contracts.health == "docs/portable-runtime-contract.md#health"
+    and .contracts.version == "docs/portable-runtime-contract.md#version"
+    and .contracts.migration == "docs/portable-runtime-contract.md#migration"
+    and .contracts.backup_restore == "docs/portable-runtime-contract.md#backup-and-restore"
+    and .contracts.data_verification == "docs/portable-runtime-contract.md#data-verification"
+    and (.compatibility | keys | sort) == (["automatic_previous_image_rollback", "database_migrations"] | sort)
+    and .compatibility.database_migrations == "forward-only"
+    and (.compatibility.automatic_previous_image_rollback | type) == "boolean"
+    and (.created_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+    and (.created_at as $created_at
+      | try (($created_at | fromdateiso8601 | todateiso8601) == $created_at)
+        catch false)
+  ' "$file" >/dev/null || fail "manifest does not satisfy canary.release-manifest.v1"
+}
+
+COMMAND="${1:-}"
+shift || true
+require_jq
+
+case "$COMMAND" in
+  generate)
+    VERSION=""
+    COMMIT=""
+    OCI_REPOSITORY=""
+    OCI_DIGEST=""
+    CREATED_AT=""
+    OUTPUT=""
+    AUTOMATIC_ROLLBACK=false
+    while (($#)); do
+      case "$1" in
+        --version) VERSION="${2:-}"; shift 2 ;;
+        --commit) COMMIT="${2:-}"; shift 2 ;;
+        --oci-repository) OCI_REPOSITORY="${2:-}"; shift 2 ;;
+        --oci-digest) OCI_DIGEST="${2:-}"; shift 2 ;;
+        --created-at) CREATED_AT="${2:-}"; shift 2 ;;
+        --output) OUTPUT="${2:-}"; shift 2 ;;
+        --automatic-rollback) AUTOMATIC_ROLLBACK=true; shift ;;
+        *) fail "unknown generate argument: $1" ;;
+      esac
+    done
+    [[ -n "$VERSION" && -n "$COMMIT" && -n "$OCI_REPOSITORY" && -n "$OCI_DIGEST" && -n "$CREATED_AT" && -n "$OUTPUT" ]] \
+      || fail "generate requires version, commit, OCI repository, OCI digest, created-at, and output"
+    mkdir -p "$(dirname "$OUTPUT")"
+    jq -nS \
+      --arg version "$VERSION" \
+      --arg commit "$COMMIT" \
+      --arg repository "$OCI_REPOSITORY" \
+      --arg digest "$OCI_DIGEST" \
+      --arg created_at "$CREATED_AT" \
+      --argjson automatic_rollback "$AUTOMATIC_ROLLBACK" \
+      '{
+        schema: "canary.release-manifest.v1",
+        product: "canary",
+        version: $version,
+        source: {repository: "https://github.com/misty-step/canary", commit: $commit},
+        artifact: {
+          kind: "oci-image",
+          repository: $repository,
+          digest: $digest,
+          reference: ($repository + "@" + $digest),
+          platforms: ["linux/amd64", "linux/arm64"]
+        },
+        contracts: {
+          configuration: "contracts/runtime-config.v1.schema.json",
+          runtime: "docs/portable-runtime-contract.md#runtime",
+          health: "docs/portable-runtime-contract.md#health",
+          version: "docs/portable-runtime-contract.md#version",
+          migration: "docs/portable-runtime-contract.md#migration",
+          backup_restore: "docs/portable-runtime-contract.md#backup-and-restore",
+          data_verification: "docs/portable-runtime-contract.md#data-verification"
+        },
+        compatibility: {
+          database_migrations: "forward-only",
+          automatic_previous_image_rollback: $automatic_rollback
+        },
+        created_at: $created_at
+      }' > "$OUTPUT"
+    verify_manifest "$OUTPUT"
+    ;;
+  verify)
+    [[ "${1:-}" == "--file" && -n "${2:-}" && $# == 2 ]] || fail "verify requires --file <path>"
+    verify_manifest "$2"
+    ;;
+  -h|--help|"") usage ;;
+  *) fail "unknown command: $COMMAND" ;;
+esac

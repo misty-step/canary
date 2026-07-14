@@ -2,7 +2,10 @@
 
 use std::{error::Error, path::PathBuf, process};
 
+use canary_http::public::CANARY_VERSION;
 use canary_server::{CanaryServer, ServerProcessConfig, keygen};
+use canary_store::{CURRENT_SCHEMA_VERSION, Store, verify_database};
+use serde_json::json;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -23,12 +26,9 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Box<dyn Error>> {
-    // Operator subcommand: `canary-server mint-key [--scope S] [--name N] [--service SERVICE]`.
-    // Recovery path for issuing a scoped API key directly against the SQLite
-    // store when the one-time bootstrap key has been lost. Defaults to admin.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("mint-key") {
-        return run_mint_key(&args[1..]);
+    if let Some(result) = run_operator_command(&args) {
+        return result;
     }
 
     let config = ServerProcessConfig::from_env(std::env::vars())?;
@@ -39,6 +39,66 @@ async fn run() -> Result<(), Box<dyn Error>> {
     info!(%local_addr, "canary-server listening");
     server.serve(listener, shutdown_signal()).await?;
     Ok(())
+}
+
+fn run_operator_command(args: &[String]) -> Option<Result<(), Box<dyn Error>>> {
+    match args.first().map(String::as_str) {
+        Some("version" | "--version" | "-V") => Some(run_version(&args[1..])),
+        Some("verify-data") => Some(run_verify_data(&args[1..], false)),
+        Some("migrate") => Some(run_verify_data(&args[1..], true)),
+        // Recovery path for issuing a scoped API key directly against the
+        // SQLite store when the one-time bootstrap key has been lost.
+        Some("mint-key") => Some(run_mint_key(&args[1..])),
+        Some(_) | None => None,
+    }
+}
+
+fn run_version(args: &[String]) -> Result<(), Box<dyn Error>> {
+    if !args.is_empty() {
+        return Err("version takes no arguments".into());
+    }
+    println!(
+        "{}",
+        serde_json::to_string(&json!({
+            "schema": "canary.runtime-version.v1",
+            "version": CANARY_VERSION,
+            "database_schema_version": CURRENT_SCHEMA_VERSION,
+        }))?
+    );
+    Ok(())
+}
+
+fn run_verify_data(args: &[String], migrate: bool) -> Result<(), Box<dyn Error>> {
+    let database_path = parse_database_path(args)?;
+    if migrate {
+        let mut store = Store::open(&database_path)?;
+        store.migrate()?;
+    }
+    let evidence = verify_database(&database_path)?;
+    println!("{}", serde_json::to_string(&evidence)?);
+    if !evidence.verified() {
+        return Err("database verification failed".into());
+    }
+    Ok(())
+}
+
+fn parse_database_path(args: &[String]) -> Result<PathBuf, Box<dyn Error>> {
+    let mut database_path = std::env::var("CANARY_DB_PATH").ok().map(PathBuf::from);
+    let mut iter = args.iter();
+    while let Some(flag) = iter.next() {
+        match flag.as_str() {
+            "--database" => {
+                let value = iter.next().ok_or("--database requires a value")?;
+                database_path = Some(PathBuf::from(value));
+            }
+            other => return Err(format!("unknown database command argument: {other}").into()),
+        }
+    }
+    database_path.ok_or_else(|| {
+        "database path required: pass --database or set CANARY_DB_PATH"
+            .to_owned()
+            .into()
+    })
 }
 
 fn run_mint_key(args: &[String]) -> Result<(), Box<dyn Error>> {
@@ -107,4 +167,28 @@ async fn shutdown_signal() {
 
     #[cfg(not(unix))]
     ctrl_c.await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn database_commands_require_an_explicit_path() {
+        // Unit-test the parser with a known empty argument list only when the
+        // process environment is not supplying the product input.
+        if std::env::var_os("CANARY_DB_PATH").is_none() {
+            assert!(parse_database_path(&[]).is_err());
+        }
+    }
+
+    #[test]
+    fn database_commands_parse_only_the_portable_database_input() -> Result<(), Box<dyn Error>> {
+        assert_eq!(
+            parse_database_path(&["--database".to_owned(), "/tmp/restored.db".to_owned()])?,
+            PathBuf::from("/tmp/restored.db")
+        );
+        assert!(parse_database_path(&["--host".to_owned()]).is_err());
+        Ok(())
+    }
 }

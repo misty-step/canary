@@ -1,6 +1,14 @@
 # Canary — Agent Router
 
-Self-hosted observability substrate for AI agents (not humans). Rust + SQLite + Litestream → S3-compatible object storage. Misty Step production runs on a dedicated DigitalOcean host at **`https://canary.mistystep.io`** under `canary.service`; the Docker container is **`canary`** and the durable host mount is **`/var/lib/canary`**. v1: single region, one Docker image, one SQLite file. Read `VISION.md` for the product north star before changing product scope, responder boundaries, or agent-facing surfaces. Load-bearing footguns are inlined below (this file is now the single canonical harness doc — `CLAUDE.md` is a symlink to it).
+Self-hosted observability substrate for AI agents (not humans). Rust + SQLite +
+Litestream to S3-compatible object storage. Canary owns the declarative shape
+of a portable OCI release, one SQLite process contract, and provider-neutral health, version, migration,
+backup/restore, and data-verification surfaces. Deployers own every instance's
+placement, networking, persistence, resource sizing, credentials, promotion,
+rollback, and recovery policy. Read `VISION.md` before changing product scope,
+responder boundaries, or agent-facing surfaces. Load-bearing footguns are
+inlined below (this file is the canonical harness doc; `CLAUDE.md` is a
+symlink).
 
 ## Stack & boundaries
 
@@ -53,8 +61,8 @@ Prefer these over re-deriving from the code base.
 | `./bin/validate --strict` | → `dagger call strict` (full gate + advisories + optional `.codex/agents/*.toml` validation when present) | `.githooks/pre-push` |
 | `./bin/validate --advisories` | live advisory scan only | manual run |
 | `dagger call strict --source=../candidate` | Hosted CI in `pull_request_target` immutable control plane (trusted base checkout at `.ci/trusted/`, candidate at `.ci/candidate/`) | `.github/workflows/ci.yml` |
-| `bin/dr-status --host "$CANARY_SSH_HOST"` | Production Litestream status through the host/container boundary | manual pre-deploy and incident check |
-| `bin/dr-restore-check --host "$CANARY_SSH_HOST"` | Non-destructive restore into container tmpfs | manual pre-deploy and DR drill |
+| `bin/canary-recovery status --config <path>` | Read-only Litestream status against caller-supplied configuration | manual pre-deploy check |
+| `bin/canary-recovery restore-check --config <path> --database <path> --server-bin <path>` | Non-destructive restore, migration, version, and data-verification receipt | manual recovery drill |
 
 **Package gates inside strict:**
 - Rust workspace: format, check, clippy (`-D warnings`), tests.
@@ -71,15 +79,15 @@ Prefer these over re-deriving from the code base.
 | **canary-010 Ramp pattern** (blocked, XL, north-star) | Powder | Blocked ~3.5 months on nonexistent bitterblossom artifacts; unblock-or-kill proposal via canary-932 child 5. |
 | **canary-020 Adminifi HTTP surface verification** (blocked, S) | Powder | Upstream Adminifi HTTP surface stability. |
 | **canary-063 Triage contract hardening** (backlog, XL, P1) | Powder | Durable webhook cooldown, dispatch budgets, claim-gated delivery. |
-| **canary-064 Trustworthy release/upgrade** (backlog, L, P1) | Powder | Rescoped 2026-07-09: release restore → canary-931, pullable image → canary-934; likely closeable after both. |
-| **canary-065 Runtime hardening** (backlog, L, P1) | Powder | bcrypt child superseded by canary-930; proxy-header trust invariant, DO backup posture, witness cadence truth. |
+| **canary-064 Trustworthy release/upgrade** (backlog, L, P1) | Powder | Rescoped 2026-07-09: release restore → canary-931, declarative image contract → canary-934; live artifact publication remains open. |
+| **canary-065 Runtime hardening** (backlog, L, P1) | Powder | bcrypt child superseded by canary-930; proxy-header trust invariant and witness cadence truth. |
 | **canary-066 Consolidation and archaeology deletion** (backlog, XL, P2) | Powder | Worker lifecycle QUINT unification (webhook_delivery is the divergent fifth), oban_jobs rename (gated on prod DB restamp), ValidationErrors relocation / canary-ingest fold, fixture WAL ignore. |
 | Recurring footgun surface | Footguns section below + Rust store/runtime/schema modules | Every remediation here must cite the footgun list and extend it when new failure modes appear. |
 | **canary-930 Request-path concurrency** (ready, P0) | Powder | bcrypt-under-store-lock root cause (live-reproduced), /readyz spiral, mutex poisoning, monitor_overdue scan, oban_jobs growth. Consolidates the slow-API/500 cards. |
 | **canary-931 Release pipeline restore** (ready, P0) | Powder | Releaser App secrets missing (releases hard-down), zero GitHub releases, version truth, and API/CLI/MCP integration contract. |
 | **canary-932 Coordination loop in anger** (ready, P0) | Powder | CLI/MCP read-half parity (incident get, timeline cursor, drill-downs, parity guard) + dogfood claims on real incidents. |
 | **canary-933 Gate proves live behavior** (ready, P1) | Powder | Latency floor, seeded-volume + concurrency rehearsal, post-deploy gate, Rust coverage ratchet, diff-scoped strict. Absorbs 914/972. |
-| **canary-934 De-Fly ops surface** (ready, P1) | Powder | DO Spaces backups, DR transport seam, pullable image, deploy/witness cutover, DR runbook rewrite. Coordinates with do-migration-104/105. |
+| **canary-934 Portable release and recovery** (claimed, P1) | Powder | Declarative OCI release manifest, generic S3-compatible recovery, data verification, and product/deployment boundary cleanup; live publication/signing acceptance remains open. |
 | **canary-935 /ui first-class** (ready, P1) | Powder | Vendored fonts, graceful degradation, read contract, UI smoke, mobile-first. Folds 067/068/915 intent. |
 | **canary-936 Service-bound reads + redaction corpus** (ready, P0) | Powder | Unbound read keys read cross-service rich context; four-regex redaction. 048 successor; ADR-gated scope model. |
 
@@ -97,34 +105,31 @@ Canary reports its own errors through the Rust runtime direct-ingest path, no HT
 
 `bin/canary-readiness-proof --json` is the one discoverable entrypoint proving a cold agent can inspect and operate this instance: doctor, mcp-manifest/mcp-server, dogfood discovery, and `bin/validate --fast`, ending in a redacted receipt. See `docs/agent-inspection-cli.md#cold-agent-readiness-proof`.
 
-## Deploy (operational crib)
+## Portable release acceptance crib
+
+The repository does not currently publish or sign the declared OCI release.
+When an atomic publisher exists, live acceptance must exercise this sequence;
+the commands are not evidence that a pullable artifact exists today.
 
 ```bash
-export CANARY_ENDPOINT=https://canary.mistystep.io
-export CANARY_SSH_HOST=<operator-ssh-target>
-ssh "$CANARY_SSH_HOST" sudo systemctl is-active canary.service
-ssh "$CANARY_SSH_HOST" sudo docker inspect canary --format '{{.Image}} {{.State.Status}}'
-bin/dr-status
-bin/dr-restore-check
-curl -fsS "$CANARY_ENDPOINT/healthz"
-curl -fsS "$CANARY_ENDPOINT/readyz"
+bin/release-manifest verify --file canary-release-manifest.json
+image="$(jq -r '.artifact.reference' canary-release-manifest.json)"
+cosign verify "$image" <identity-policy-arguments>
+docker pull "$image"
+bin/canary-recovery restore-check \
+  --config <litestream-config> \
+  --database <runtime-database> \
+  --server-bin <canary-server>
 ```
 
-There is no provider auto-deploy workflow. Production promotion is an explicit
-immutable-image update on the dedicated host, followed by the live proof above;
-see `docs/upgrade-and-rollback.md`.
+See `docs/portable-runtime-contract.md`. Canary does not perform provider
+deployment or promotion. The deployer must stop the single writer before any
+destructive database replacement and must preserve a verified rollback copy.
+The product intentionally supplies no destructive restore command.
 
-**Nuclear reset (human-gated, do NOT automate).** The invariant, in order:
-**stop `canary.service`** (SQLite must release its WAL/SHM handles) → verify no
-`canary` container remains → restore or remove `canary.db*` only while the
-writer is stopped and the durable `/var/lib/canary` mount is verified → restart
-the service so `bin/entrypoint.sh` restores from the Litestream replica. Never
-delete `/data/canary.db*` through `docker exec` against the running container.
-See `docs/backup-restore-dr.md`.
-
-Bootstrap API key logged once on first boot — inspect `sudo docker logs canary`
-on the host. If missed, use the supported `canary-server mint-key` path from
-`docs/self-host-docker.md`; the original cannot be re-shown.
+The bootstrap API key is logged once on first boot. If missed, use the
+supported `canary-server mint-key` path against the configured database; the
+original cannot be re-shown.
 
 ## Footguns
 
@@ -148,8 +153,8 @@ on the host. If missed, use the supported `canary-server mint-key` path from
 - **Readiness is live.** `/readyz` must query the writable store each request.
   Do not replace it with static process state.
 - **SQLite WAL and `rm -f`.** Deleting the DB while the app is running does
-  nothing useful because SQLite WAL keeps file handles open. Stop the machine
-  before destructive maintenance.
+  nothing useful because SQLite WAL keeps file handles open. Stop the single
+  writer before destructive maintenance.
 - **Retention prune lock time.** Retention deletes share the single writer with
   ingest, probes, and webhook delivery. Keep pruning in bounded batches and
   release the store lock between batches.

@@ -3,6 +3,8 @@ set -e
 
 DB_PATH="${CANARY_DB_PATH:-/data/canary.db}"
 CANARY_BIN="${CANARY_BIN:-/app/bin/canary-server}"
+export CANARY_DB_PATH="$DB_PATH"
+export CANARY_REPLICA_PATH="${CANARY_REPLICA_PATH:-canary.db}"
 
 # --- Litestream env validation ---
 LITESTREAM_READY=0

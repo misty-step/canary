@@ -127,10 +127,10 @@ jobs:
 
           1. Check the uploaded \`canary-witness-receipt.json\` artifact.
           2. Re-probe the canonical endpoint: \`curl -fsS $CANARY_WITNESS_ENDPOINT/healthz\` and \`curl -fsS $CANARY_WITNESS_ENDPOINT/readyz\`.
-          3. From an authorized operator workstation, inspect the dedicated host: \`ssh "\$CANARY_SSH_HOST" sudo systemctl status canary.service --no-pager\`.
-          4. Inspect service logs: \`ssh "\$CANARY_SSH_HOST" sudo journalctl -u canary.service --since=-1h --no-pager\`.
+          3. Inspect the deployment through its infrastructure owner's runtime and routing controls.
+          4. Inspect application logs through that same deployment-owned execution boundary.
           5. Check recent self-errors: \`bin/canary errors list canary --window 1h\`.
-          6. If storage or corruption is suspected, run \`CANARY_SSH_HOST=<operator-ssh-target> bin/dr-status\` and see \`docs/backup-restore-dr.md\`.
+          6. If storage or corruption is suspected, run \`LITESTREAM_CONFIG=<path> bin/dr-status\` inside an authorized runtime and see \`docs/backup-restore-dr.md\`.
 
           This issue will auto-close when the witness detects recovery.
           EOF

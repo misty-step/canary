@@ -364,6 +364,7 @@ dependencies = [
  "bcrypt",
  "canary-core",
  "rusqlite",
+ "serde",
  "serde_json",
  "thiserror",
  "time",

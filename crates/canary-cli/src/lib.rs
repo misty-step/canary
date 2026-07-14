@@ -3767,22 +3767,22 @@ fn run_dr_status(repo_root: &Path) -> Value {
             "reason": "bin/dr-status not found"
         });
     }
-    let Some(host) = env::var("CANARY_SSH_HOST")
+    let Some(config) = env::var("LITESTREAM_CONFIG")
         .ok()
         .filter(|value| !value.trim().is_empty())
     else {
         return json!({
             "ok": false,
-            "reason": "CANARY_SSH_HOST not configured",
-            "command": "NO_COLOR=1 bin/dr-status --host <ssh-target>"
+            "reason": "LITESTREAM_CONFIG not configured",
+            "command": "NO_COLOR=1 bin/dr-status --config <litestream-config>"
         });
     };
-    let command_display = format!("NO_COLOR=1 bin/dr-status --host {host}");
+    let command_display = "NO_COLOR=1 bin/dr-status --config <litestream-config>";
     match Command::new(&program)
         .current_dir(repo_root)
         .env("NO_COLOR", "1")
-        .arg("--host")
-        .arg(&host)
+        .arg("--config")
+        .arg(&config)
         .output()
     {
         Ok(output) => json!({

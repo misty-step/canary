@@ -28,6 +28,7 @@ mod scope;
 mod seeds;
 mod service_sli;
 mod telemetry;
+mod verification;
 mod webhook_deliveries;
 
 pub use annotations::{
@@ -82,6 +83,7 @@ pub use telemetry::{
     OperationalSignalInsert, TelemetryEventCommit, TelemetryEventError, TelemetryEventInsert,
     TelemetryEventResult,
 };
+pub use verification::{DataVerification, verify_database};
 pub use webhook_deliveries::{
     WebhookDeliveryInsert, WebhookDeliveryListOptions, WebhookDeliveryPageError,
     WebhookDeliveryPageOptions, WebhookDeliveryPageResult, WebhookDeliveryRow,
@@ -91,6 +93,9 @@ pub use webhook_deliveries::{
 
 /// Result type returned by the store boundary.
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+/// Current SQLite schema version expected by this Canary build.
+pub const CURRENT_SCHEMA_VERSION: u32 = schema::SCHEMA_VERSION;
 
 /// Persistence-layer failure.
 #[derive(Debug, thiserror::Error)]

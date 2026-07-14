@@ -96,19 +96,6 @@ CANARY_API_KEY="$CANARY_ADMIN_KEY" \
 bin/canary doctor --json</code></pre>
             </div>
 
-            <div class="msk-command">
-              <p class="ae-chrome">Docker Compose first boot</p>
-              <pre><code>docker compose up --build -d canary
-docker compose logs canary | grep "Bootstrap API key:"
-export CANARY_ADMIN_KEY="&lt;store-the-bootstrap-key-securely&gt;"</code></pre>
-            </div>
-
-            <div class="msk-command">
-              <p class="ae-chrome">Docker-only doctor</p>
-              <pre><code>export CANARY_ENDPOINT="http://localhost:4000"
-export CANARY_API_KEY="$CANARY_ADMIN_KEY"
-docker compose run --rm canary-doctor</code></pre>
-            </div>
           </section>
 
           <section class="msk-section" aria-labelledby="docs-title">

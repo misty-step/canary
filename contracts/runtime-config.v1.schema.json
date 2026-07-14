@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/misty-step/canary/blob/master/contracts/runtime-config.v1.schema.json",
+  "title": "Canary runtime configuration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "CANARY_DB_PATH": { "type": "string", "minLength": 1, "description": "Runtime-local SQLite file path. Persistence placement is chosen by the deployer." },
+    "PORT": { "type": "string", "pattern": "^[0-9]{1,5}$", "description": "Runtime listen port. External exposure is chosen by the deployer." },
+    "CANARY_DISCLOSE_BOOTSTRAP_KEY": { "enum": ["true", "false"] },
+    "ALLOW_PRIVATE_TARGETS": { "enum": ["true", "false"] },
+    "ERROR_RETENTION_DAYS": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+    "CHECK_RETENTION_DAYS": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+    "CANARY_REQUIRE_LITESTREAM": { "enum": ["0", "1"] },
+    "BUCKET_NAME": { "type": "string", "minLength": 1, "x-secret": false },
+    "CANARY_REPLICA_PATH": { "type": "string", "minLength": 1, "x-secret": false },
+    "LITESTREAM_ENDPOINT": { "type": "string", "minLength": 1, "x-secret": false },
+    "LITESTREAM_REGION": { "type": "string", "minLength": 1, "x-secret": false },
+    "AWS_ACCESS_KEY_ID": { "type": "string", "minLength": 1, "x-secret": true },
+    "AWS_SECRET_ACCESS_KEY": { "type": "string", "minLength": 1, "x-secret": true }
+  }
+}

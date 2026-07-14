@@ -43,14 +43,14 @@ their convergence into one copy-paste pattern:
 
 | Var | Meaning | Unset behavior |
 |---|---|---|
-| `CANARY_ENDPOINT` | Base URL, e.g. `https://canary.mistystep.io`. Trailing `/` trimmed. | Reporter no-ops. |
+| `CANARY_ENDPOINT` | Base URL, e.g. `https://canary.example`. Trailing `/` trimmed. | Reporter no-ops. |
 | `CANARY_API_KEY` | Ingest-scoped bearer key. (`CANARY_INGEST_KEY` accepted as alias.) | Reporter no-ops. |
 | `CANARY_SERVICE` | Optional override for the reported `service` name. | Falls back to the module const. |
 | `CANARY_ENVIRONMENT` | Optional `environment` tag. | Defaults to `"production"`. |
 
 **Never read the key file or print the key.** In steady state the value comes
-from the app's own secret store / Fly secret. For a one-time fired-event proof
-the operator supplies it via env from a sanctioned key file, never inlined.
+from the app's own secret store. For a one-time fired-event proof the operator
+supplies it via env from a sanctioned key file, never inlined.
 
 ## HTTP surface used
 
@@ -368,7 +368,7 @@ port** and asserts the call returns without panic/hang — that proves invariant
 the hub. From the app checkout, with a real ingest key in env:
 
 ```bash
-CANARY_ENDPOINT=https://canary.mistystep.io \
+CANARY_ENDPOINT=https://canary.example \
 CANARY_API_KEY=<ingest-key-from-secret-store> \
   cargo run --release -- <a normal invocation>   # or boot the service
 
@@ -376,7 +376,7 @@ CANARY_API_KEY=<ingest-key-from-secret-store> \
 # used by the reporter). Errors surface as ERROR GROUPS + correlated incidents,
 # NOT a flat `.errors` array:
 curl -fsS -H "Authorization: Bearer $CANARY_READ_API_KEY" \
-  "https://canary.mistystep.io/api/v1/report?window=1h" \
+  "https://canary.example/api/v1/report?window=1h" \
   | jq '.monitors[]     | select(.service=="<service>"),
         .error_groups[]? | select(.service=="<service>")'
 ```

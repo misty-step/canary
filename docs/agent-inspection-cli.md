@@ -196,10 +196,11 @@ alert_plane: impaired 1 worker: monitor_overdue pressured
 dr: litestream ok, restore_receipt_missing: no architecture DR receipt found, fallback=docs/backup-restore-dr.md
 ```
 
-The `dr` line is data, not a request-path dependency. It runs the operator
-`bin/dr-status --host "$CANARY_SSH_HOST"` check when available and points to the latest
-checked-in restore-specific receipt when one exists. Production startup can be
-made fail-closed on backup configuration with `CANARY_REQUIRE_LITESTREAM=1`.
+The `dr` line is data, not a request-path dependency. When
+`LITESTREAM_CONFIG` is set, it runs the provider-neutral `bin/dr-status`
+replica check and points to the latest checked-in restore-specific receipt when
+one exists. Production startup can be made fail-closed on backup configuration
+with `CANARY_REQUIRE_LITESTREAM=1`.
 
 The witness line is:
 

@@ -106,16 +106,16 @@ due webhook job
 - The server has no human dashboard. Agents and operators read through the same
   query/report/status APIs.
 
-## Operations
+## Portable operations
 
 `./bin/validate` is the canonical local gate. It delegates to the pinned Dagger
 module and covers the Rust workspace, TypeScript SDK, operator scripts,
 production image smoke, secrets scanning, and advisory checks in strict mode.
 
-The Misty Step production deployment uses a dedicated DigitalOcean host. The
-`canary.service` systemd unit owns exactly one Docker container named `canary`,
-binds its durable volume at `/var/lib/canary`, and exposes the process only
-through Caddy at `https://canary.mistystep.io`. The Dockerfile builds the Rust
-`canary-server` binary and `bin/entrypoint.sh` wraps Litestream restore and
-replication before executing it. Generic operators can use the same image and
-storage contract through `docs/self-host-docker.md`.
+The Dockerfile builds one multi-platform `canary-server` image and
+`bin/entrypoint.sh` wraps optional Litestream restore and replication before
+executing it. Canary owns the signed image, runtime inputs, health and version
+surfaces, forward migration, and restored-data verification. Deployment
+instances own placement, networking, persistence, resource sizing, credentials,
+promotion, rollback, and recovery policy. See
+`docs/portable-runtime-contract.md`.

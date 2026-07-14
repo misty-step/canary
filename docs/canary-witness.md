@@ -137,6 +137,6 @@ false` before the alert plane is healthy. A pressured worker is still
 route-ready evidence; it is not healthy alert-plane evidence.
 
 `doctor` also prints a `dr:` line. That line reflects the operator
-`bin/dr-status --host "$CANARY_SSH_HOST"` Litestream check when available and points to
-the latest checked-in restore-specific receipt when one exists; otherwise it
-reports `restore_receipt_missing` and the fallback runbook path.
+`bin/dr-status` Litestream check when `LITESTREAM_CONFIG` is available and
+points to the latest checked-in restore-specific receipt when one exists;
+otherwise it reports `restore_receipt_missing` and the fallback runbook path.
