@@ -170,8 +170,20 @@ original cannot be re-shown.
   `Mutex<Store>` makes every subsequent authenticated request 500 until
   restart. Contain panics or use a non-poisoning lock.
 - **One egress oracle.** There is exactly one public-destination filter for
-  outbound HTTP; probe and webhook paths must share it. Hand-maintained copies
-  drift (the IPv4-mapped-address rejection landed in the probe copy only).
+  outbound HTTP — `canary-server::egress::is_global_ip` — and probe and
+  webhook paths must share it. Hand-maintained copies drift (the
+  IPv4-mapped-address rejection landed in the probe copy only, leaving
+  `http://[::ffff:169.254.169.254]/` past the webhook filter until the
+  2026-07-14 unification). Related trap: URL host extraction returns IPv6
+  literals in brackets, which `to_socket_addrs` cannot parse — IP literals
+  must be judged directly by the filter
+  (`egress::resolve_destination_addrs`), never left to fail as DNS errors. The
+  oracle must fail closed over IANA's currently allocated global-unicast space,
+  the current special-purpose registries, and translator prefixes; policy
+  changes update the shared table oracle and its explicitly allowed
+  boundary/exception rows together. Validated probe plans remain opaque to
+  callers, and the concrete transport rechecks public plans before connecting;
+  otherwise a forged pinned address bypasses the shared resolver.
 
 This list is load-bearing — every remediation in the Known-debt map above must cite it and extend it when new failure modes appear.
 </content>
