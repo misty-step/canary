@@ -1317,6 +1317,7 @@ mod tests {
         health::state_machine::HealthState,
         ids::{ClaimId, ErrorId, EventId, IncidentId},
         ingest::classification::{Category, Classification, Component, Persistence},
+        query::{TimelineCursor, decode_timeline_cursor, encode_timeline_cursor},
     };
     use rusqlite::params;
     use serde_json::{Value, json};
@@ -5223,6 +5224,68 @@ mod tests {
         )?;
         assert_eq!(second.events[0].event, "incident.opened");
         assert!(second.cursor.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_timeline_cursors_continue_without_duplicate_or_skip_for_either_anchor_class()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let store = migrated_store()?;
+        let created_at = "2026-05-28T20:59:50Z";
+        for (id, event) in [
+            ("EVT-z", "telemetry.event"),
+            ("EVT-y", "incident.opened"),
+            ("EVT-x", "telemetry.event"),
+            ("EVT-w", "incident.updated"),
+        ] {
+            store.connection.execute(
+                "INSERT INTO service_events (
+                    id, service, event, entity_type, entity_ref, severity, summary, payload, created_at
+                 ) VALUES (?1, 'legacy-cursor', ?2, 'deployment', 'production', 'warning',
+                    'summary', '{}', ?3)",
+                params![id, event, created_at],
+            )?;
+        }
+        let now = OffsetDateTime::parse("2026-05-28T21:00:00Z", &Rfc3339)?;
+
+        for (anchor, expected) in [
+            ("EVT-z", vec!["EVT-y", "EVT-x", "EVT-w"]),
+            ("EVT-y", vec!["EVT-x", "EVT-w"]),
+        ] {
+            let mut cursor = encode_timeline_cursor(&TimelineCursor {
+                created_at: created_at.to_owned(),
+                causal_rank: None,
+                id: anchor.to_owned(),
+            });
+            let mut actual = Vec::new();
+
+            loop {
+                let page = query::timeline_at(
+                    &store.connection,
+                    "1h",
+                    TimelineQueryOptions {
+                        service: Some("legacy-cursor".to_owned()),
+                        limit: Some("1".to_owned()),
+                        cursor,
+                        ..TimelineQueryOptions::default()
+                    },
+                    now,
+                )?;
+                actual.extend(page.events.into_iter().map(|event| event.id));
+                let Some(next_cursor) = page.cursor else {
+                    break;
+                };
+                assert_eq!(
+                    decode_timeline_cursor(&next_cursor).and_then(|cursor| cursor.causal_rank),
+                    None,
+                    "legacy continuation must not guess the anchor event class"
+                );
+                cursor = Some(next_cursor);
+            }
+
+            assert_eq!(actual, expected, "legacy anchor {anchor}");
+        }
 
         Ok(())
     }

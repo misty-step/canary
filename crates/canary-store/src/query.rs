@@ -760,25 +760,42 @@ pub(crate) fn timeline_at(
         sql.push(')');
         filters.extend(event_types.iter().cloned());
     }
+    let legacy_cursor = cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.causal_rank.is_none());
     if let Some(cursor) = cursor.as_ref() {
-        sql.push_str(
-            " AND (created_at < ? OR (created_at = ? AND (
-                CASE WHEN event LIKE 'incident.%' THEN '1' ELSE '0' END > ?
-                OR (CASE WHEN event LIKE 'incident.%' THEN '1' ELSE '0' END = ? AND id < ?)
-            )))",
-        );
-        filters.push(cursor.created_at.clone());
-        filters.push(cursor.created_at.clone());
-        filters.push(cursor.causal_rank.to_string());
-        filters.push(cursor.causal_rank.to_string());
-        filters.push(cursor.id.clone());
+        match cursor.causal_rank {
+            Some(causal_rank) => {
+                sql.push_str(
+                    " AND (created_at < ? OR (created_at = ? AND (
+                        CASE WHEN event LIKE 'incident.%' THEN '1' ELSE '0' END > ?
+                        OR (CASE WHEN event LIKE 'incident.%' THEN '1' ELSE '0' END = ? AND id < ?)
+                    )))",
+                );
+                filters.push(cursor.created_at.clone());
+                filters.push(cursor.created_at.clone());
+                filters.push(causal_rank.to_string());
+                filters.push(causal_rank.to_string());
+                filters.push(cursor.id.clone());
+            }
+            None => {
+                sql.push_str(" AND (created_at < ? OR (created_at = ? AND id < ?))");
+                filters.push(cursor.created_at.clone());
+                filters.push(cursor.created_at.clone());
+                filters.push(cursor.id.clone());
+            }
+        }
     }
 
-    sql.push_str(
-        " ORDER BY created_at DESC,
-          CASE WHEN event LIKE 'incident.%' THEN '1' ELSE '0' END ASC,
-          id DESC LIMIT ?",
-    );
+    if legacy_cursor {
+        sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ?");
+    } else {
+        sql.push_str(
+            " ORDER BY created_at DESC,
+              CASE WHEN event LIKE 'incident.%' THEN '1' ELSE '0' END ASC,
+              id DESC LIMIT ?",
+        );
+    }
     filters.push((limit + 1).to_string());
 
     let mut statement = connection.prepare(&sql)?;
@@ -810,7 +827,7 @@ pub(crate) fn timeline_at(
         rows.last().and_then(|event| {
             encode_timeline_cursor(&TimelineCursor {
                 created_at: event.created_at.clone(),
-                causal_rank: timeline_causal_rank(&event.event),
+                causal_rank: (!legacy_cursor).then(|| timeline_causal_rank(&event.event)),
                 id: event.id.clone(),
             })
         })
