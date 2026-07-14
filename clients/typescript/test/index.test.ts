@@ -289,6 +289,34 @@ describe("captureEvent", () => {
     expect(body.summary).toBe("Signup completed for [EMAIL]");
     expect(body.attributes).toEqual({ email: "[EMAIL]", plan: "pro" });
   });
+
+  it("preserves the discriminated operational envelope without analytics attributes", async () => {
+    initCanary({
+      endpoint: "https://canary.test",
+      apiKey: "sk_test_abc",
+      service: "test-svc",
+    });
+
+    await captureEvent({
+      name: "drift.violation",
+      summary: "Drift detected",
+      operational: {
+        subject: { type: "deployment", id: "production" },
+        state: "active",
+        owner: "infrastructure-operator",
+        evidence_url: "https://evidence.example/receipts/drift",
+        observed_at: "2026-07-14T14:01:00Z",
+      },
+    });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.attributes).toEqual({});
+    expect(body.retention_class).toBe("audit");
+    expect(body.operational.subject).toEqual({
+      type: "deployment",
+      id: "production",
+    });
+  });
 });
 
 describe("uninitialized capture helpers", () => {

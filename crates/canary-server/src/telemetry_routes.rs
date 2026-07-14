@@ -115,6 +115,22 @@ fn parse_event(
     received_at: String,
 ) -> Result<TelemetryEventInsert, ValidationErrors> {
     let mut errors = ValidationErrors::new();
+    reject_unknown_fields(
+        &attrs,
+        "",
+        &[
+            "service",
+            "name",
+            "summary",
+            "severity",
+            "attributes",
+            "retention_class",
+            "privacy_policy",
+            "sampling_policy",
+            "operational",
+        ],
+        &mut errors,
+    );
     let service = required_string(&attrs, "service", &mut errors);
     let name = required_string(&attrs, "name", &mut errors);
     let summary = required_string(&attrs, "summary", &mut errors);
@@ -229,9 +245,11 @@ fn reject_unknown_fields(
         .keys()
         .filter(|field| !allowed.contains(&field.as_str()))
     {
-        errors.insert(
-            format!("{prefix}.{field}"),
-            vec!["is not allowed".to_owned()],
-        );
+        let key = if prefix.is_empty() {
+            field.to_owned()
+        } else {
+            format!("{prefix}.{field}")
+        };
+        errors.insert(key, vec!["is not allowed".to_owned()]);
     }
 }

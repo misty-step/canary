@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createClient, type CanaryClient } from "../src/client";
+import { createClient, type CanaryClient, type EventPayload } from "../src/client";
 
 describe("createClient", () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
@@ -329,10 +329,86 @@ describe("createClient", () => {
     const [, init] = fetchSpy.mock.calls[0];
     const body = JSON.parse(init.body);
     expect(body.retention_class).toBe("audit");
-    expect(body.attributes).toBeUndefined();
+    expect(body.attributes).toEqual({});
     expect(body.operational.subject).toEqual({ type: "capacity", id: "worker-pool" });
     expect(body.operational.evidence_url).toBe(
       "https://evidence.example/receipts/capacity"
     );
+  });
+
+  it("rejects conflicting or unbounded operational payloads before transport", async () => {
+    const client = createClient(opts);
+    const base = {
+      name: "capacity.saturation",
+      summary: "Capacity saturated",
+      operational: {
+        subject: { type: "capacity", id: "worker-pool" },
+        state: "active",
+        owner: "infrastructure-operator",
+        evidence_url: "https://evidence.example/receipts/capacity",
+        observed_at: "2026-07-14T14:01:00Z",
+      },
+    };
+    for (const invalid of [
+      { ...base, attributes: { raw_metrics: [1, 2, 3] } },
+      { ...base, retention_class: "standard" },
+      { ...base, privacy_policy: "public" },
+      { ...base, sampling_policy: "sampled:0.5" },
+      { ...base, provider_snapshot: { droplets: [1, 2, 3] } },
+      { ...base, operational: null },
+      { ...base, operational: [] },
+      { ...base, operational: { ...base.operational, samples: [1, 2, 3] } },
+      { ...base, operational: { ...base.operational, subject: null } },
+      { ...base, operational: { ...base.operational, subject: [] } },
+      {
+        ...base,
+        operational: {
+          ...base.operational,
+          subject: { ...base.operational.subject, provider: "private" },
+        },
+      },
+      {
+        ...base,
+        operational: {
+          ...base.operational,
+          subject: { ...base.operational.subject, type: "Invalid" },
+        },
+      },
+      {
+        ...base,
+        operational: {
+          ...base.operational,
+          subject: { ...base.operational.subject, id: "invalid/id" },
+        },
+      },
+      { ...base, operational: { ...base.operational, state: "unknown" } },
+      { ...base, operational: { ...base.operational, owner: "" } },
+      { ...base, operational: { ...base.operational, owner: "x".repeat(129) } },
+      { ...base, operational: { ...base.operational, evidence_url: 42 } },
+      { ...base, operational: { ...base.operational, evidence_url: "x".repeat(2049) } },
+      { ...base, operational: { ...base.operational, evidence_url: "not a url" } },
+      { ...base, operational: { ...base.operational, evidence_url: "http://unsafe.test" } },
+      {
+        ...base,
+        operational: {
+          ...base.operational,
+          evidence_url: "https://user:password@evidence.example/receipt",
+        },
+      },
+      { ...base, operational: { ...base.operational, observed_at: 42 } },
+      { ...base, operational: { ...base.operational, observed_at: "not-a-clock" } },
+      {
+        ...base,
+        operational: {
+          ...base.operational,
+          observed_at: "2026-99-99T14:01:00Z",
+        },
+      },
+    ]) {
+      await expect(
+        client.event(invalid as unknown as EventPayload)
+      ).resolves.toBeNull();
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

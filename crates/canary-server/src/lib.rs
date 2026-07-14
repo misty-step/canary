@@ -2052,6 +2052,19 @@ mod tests {
                 .any(|entity_type| entity_type.as_str() == Some("telemetry_event")),
             "TimelineEvent.entity_type must include telemetry_event"
         );
+        let request = document
+            .pointer("/components/schemas/TelemetryEventRequest")
+            .ok_or("missing TelemetryEventRequest")?;
+        assert_eq!(request["additionalProperties"], json!(false));
+        assert_eq!(request["oneOf"].as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            request["oneOf"][1]["properties"]["retention_class"]["const"],
+            "audit"
+        );
+        assert_eq!(
+            request["oneOf"][1]["properties"]["attributes"]["maxProperties"],
+            0
+        );
 
         Ok(())
     }
@@ -6079,6 +6092,72 @@ mod tests {
             )?)
             .await?;
         assert_eq!(unknown.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        for field in ["raw_metrics", "provider_snapshot", "raw_logs", "raw_traces"] {
+            let mut body = serde_json::json!({
+                "service":"infrastructure-control",
+                "name":"drift.violation",
+                "summary":"unknown top-level payload must fail closed",
+                "operational":{
+                    "subject":{"type":"drift","id":"fleet"},
+                    "state":"active",
+                    "owner":"infrastructure-operator",
+                    "evidence_url":"https://evidence.example/receipts/drift",
+                    "observed_at":"2026-07-14T14:00:00Z"
+                }
+            });
+            body[field] = json!({"samples":[1,2,3]});
+            let response = router
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/api/v1/events",
+                    INGEST_KEY,
+                    &body.to_string(),
+                )?)
+                .await?;
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{field}"
+            );
+            let problem = json_body(response).await?;
+            assert_eq!(problem["errors"][field], json!(["is not allowed"]));
+        }
+
+        for (field, invalid) in [
+            ("retention_class", json!("standard")),
+            ("privacy_policy", json!("public")),
+            ("sampling_policy", json!("sampled:0.5")),
+        ] {
+            let mut body = serde_json::json!({
+                "service":"infrastructure-control",
+                "name":"drift.violation",
+                "summary":"operational settings are invariant",
+                "operational":{
+                    "subject":{"type":"drift","id":"fleet"},
+                    "state":"active",
+                    "owner":"infrastructure-operator",
+                    "evidence_url":"https://evidence.example/receipts/drift",
+                    "observed_at":"2026-07-14T14:00:00Z"
+                }
+            });
+            body[field] = invalid;
+            let response = router
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/api/v1/events",
+                    INGEST_KEY,
+                    &body.to_string(),
+                )?)
+                .await?;
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{field}"
+            );
+        }
 
         Ok(())
     }

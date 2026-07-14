@@ -6822,8 +6822,7 @@
           },
           "retention_class": {
             "$ref": "#/components/schemas/TelemetryRetentionClass",
-            "default": "standard",
-            "description": "Defaults to audit and must remain audit when operational is present."
+            "description": "Defaults to standard for analytics events and audit for operational events."
           },
           "privacy_policy": {
             "$ref": "#/components/schemas/TelemetryPrivacyPolicy",
@@ -6839,7 +6838,38 @@
           "operational": {
             "$ref": "#/components/schemas/OperationalSignalRequest"
           }
-        }
+        },
+        "oneOf": [
+          {
+            "title": "Analytics event",
+            "not": {
+              "required": ["operational"]
+            }
+          },
+          {
+            "title": "Operational event",
+            "required": ["operational"],
+            "properties": {
+              "attributes": {
+                "type": "object",
+                "maxProperties": 0,
+                "default": {}
+              },
+              "retention_class": {
+                "const": "audit",
+                "default": "audit"
+              },
+              "privacy_policy": {
+                "const": "redacted",
+                "default": "redacted"
+              },
+              "sampling_policy": {
+                "const": "unsampled",
+                "default": "unsampled"
+              }
+            }
+          }
+        ]
       },
       "TelemetryEvent": {
         "type": "object",

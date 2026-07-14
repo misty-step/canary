@@ -311,7 +311,13 @@ fn validate_operational_signal(
             "must be a non-empty string no longer than 128 characters",
         ));
     }
-    if signal.evidence_url.chars().count() > 2048 || !signal.evidence_url.starts_with("https://") {
+    let valid_evidence_url = url::Url::parse(&signal.evidence_url).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+    });
+    if signal.evidence_url.chars().count() > 2048 || !valid_evidence_url {
         errors.push((
             "operational.evidence_url",
             "must be an https URL no longer than 2048 characters",

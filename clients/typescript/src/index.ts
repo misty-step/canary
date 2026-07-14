@@ -2,8 +2,10 @@ import { createClient, type CanaryClient, type CanaryResponse } from "./client";
 import type {
   CheckInPayload,
   CheckInResponse,
+  AnalyticsEventPayload,
   EventPayload,
   EventResponse,
+  OperationalEventPayload,
   OperationalSignal,
   OperationalSignalContext,
 } from "./client";
@@ -13,8 +15,10 @@ export type {
   CanaryResponse,
   CheckInPayload,
   CheckInResponse,
+  AnalyticsEventPayload,
   EventPayload,
   EventResponse,
+  OperationalEventPayload,
   OperationalSignal,
   OperationalSignalContext,
   ScrubRule,
@@ -94,6 +98,13 @@ export async function captureEvent(
   payload: EventPayload
 ): Promise<EventResponse | null> {
   if (!client) return null;
+
+  if (payload.operational) {
+    return client.event({
+      ...payload,
+      summary: scrubPii ? scrub(payload.summary, scrubRules)! : payload.summary,
+    });
+  }
 
   return client.event({
     ...payload,

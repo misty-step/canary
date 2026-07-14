@@ -761,13 +761,24 @@ pub(crate) fn timeline_at(
         filters.extend(event_types.iter().cloned());
     }
     if let Some(cursor) = cursor.as_ref() {
-        sql.push_str(" AND (created_at < ? OR (created_at = ? AND id < ?))");
+        sql.push_str(
+            " AND (created_at < ? OR (created_at = ? AND (
+                CASE WHEN event LIKE 'incident.%' THEN '1' ELSE '0' END > ?
+                OR (CASE WHEN event LIKE 'incident.%' THEN '1' ELSE '0' END = ? AND id < ?)
+            )))",
+        );
         filters.push(cursor.created_at.clone());
         filters.push(cursor.created_at.clone());
+        filters.push(cursor.causal_rank.to_string());
+        filters.push(cursor.causal_rank.to_string());
         filters.push(cursor.id.clone());
     }
 
-    sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ?");
+    sql.push_str(
+        " ORDER BY created_at DESC,
+          CASE WHEN event LIKE 'incident.%' THEN '1' ELSE '0' END ASC,
+          id DESC LIMIT ?",
+    );
     filters.push((limit + 1).to_string());
 
     let mut statement = connection.prepare(&sql)?;
@@ -799,6 +810,7 @@ pub(crate) fn timeline_at(
         rows.last().and_then(|event| {
             encode_timeline_cursor(&TimelineCursor {
                 created_at: event.created_at.clone(),
+                causal_rank: timeline_causal_rank(&event.event),
                 id: event.id.clone(),
             })
         })
@@ -807,6 +819,10 @@ pub(crate) fn timeline_at(
     };
 
     Ok(timeline_response(rows, service, window, cursor))
+}
+
+fn timeline_causal_rank(event: &str) -> u8 {
+    u8::from(event.starts_with("incident."))
 }
 
 pub(crate) fn error_detail(

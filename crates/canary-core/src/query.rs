@@ -144,6 +144,9 @@ pub struct GroupCursor {
 pub struct TimelineCursor {
     /// Last row timestamp from the previous page.
     pub created_at: String,
+    /// Causal rank within one timestamp; causes sort before incident effects.
+    #[serde(default)]
+    pub causal_rank: u8,
     /// Last row id from the previous page.
     pub id: String,
 }
@@ -213,6 +216,7 @@ pub fn decode_timeline_cursor(cursor: &str) -> Option<TimelineCursor> {
     let cursor = serde_json::from_slice::<TimelineCursor>(&decoded).ok()?;
     if cursor.created_at.is_empty()
         || cursor.id.is_empty()
+        || cursor.causal_rank > 1
         || OffsetDateTime::parse(&cursor.created_at, &Rfc3339).is_err()
     {
         return None;
@@ -1599,6 +1603,7 @@ mod tests {
     {
         let cursor = TimelineCursor {
             created_at: "2026-05-28T20:59:50Z".to_owned(),
+            causal_rank: 0,
             id: "EVT-b".to_owned(),
         };
         let Some(encoded) = encode_timeline_cursor(&cursor) else {

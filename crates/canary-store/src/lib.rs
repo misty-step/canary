@@ -5160,6 +5160,74 @@ mod tests {
     }
 
     #[test]
+    fn operational_timeline_pages_keep_cause_before_incident_effect()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        let created_at = "2026-05-28T20:59:50Z";
+        let commit = store.commit_telemetry_event(TelemetryEventInsert {
+            id: EventId::from_str("EVT-aaaaaaaaaaaa")?,
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: "infrastructure-control".to_owned(),
+            name: "drift.violation".to_owned(),
+            severity: "warning".to_owned(),
+            summary: "Declared state differs from observed state".to_owned(),
+            attributes_json: "{}".to_owned(),
+            retention_class: "audit".to_owned(),
+            privacy_policy: "redacted".to_owned(),
+            sampling_policy: "unsampled".to_owned(),
+            created_at: created_at.to_owned(),
+            operational: Some(OperationalSignalInsert {
+                subject_type: "deployment".to_owned(),
+                subject_id: "production".to_owned(),
+                state: "active".to_owned(),
+                owner: "infrastructure-operator".to_owned(),
+                evidence_url: "https://evidence.example/receipts/drift".to_owned(),
+                observed_at: created_at.to_owned(),
+                incident_id: IncidentId::from_str("INC-cccccccccccc")?,
+                incident_event_id: EventId::from_str("EVT-zzzzzzzzzzzz")?,
+            }),
+        })?;
+        assert_eq!(
+            commit
+                .incident_event
+                .as_ref()
+                .map(|event| event.event.as_str()),
+            Some("incident.opened")
+        );
+
+        let now = OffsetDateTime::parse("2026-05-28T21:00:00Z", &Rfc3339)?;
+        let first = query::timeline_at(
+            &store.connection,
+            "1h",
+            TimelineQueryOptions {
+                service: Some("infrastructure-control".to_owned()),
+                limit: Some("1".to_owned()),
+                ..TimelineQueryOptions::default()
+            },
+            now,
+        )?;
+        assert_eq!(first.events[0].event, "telemetry.event");
+        assert!(first.cursor.is_some());
+
+        let second = query::timeline_at(
+            &store.connection,
+            "1h",
+            TimelineQueryOptions {
+                service: Some("infrastructure-control".to_owned()),
+                limit: Some("1".to_owned()),
+                cursor: first.cursor,
+                ..TimelineQueryOptions::default()
+            },
+            now,
+        )?;
+        assert_eq!(second.events[0].event, "incident.opened");
+        assert!(second.cursor.is_none());
+
+        Ok(())
+    }
+
+    #[test]
     fn active_incidents_filters_inactive_signals_and_annotation_actions()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut store = migrated_store()?;

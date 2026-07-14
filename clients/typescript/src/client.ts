@@ -25,16 +25,29 @@ export interface CheckInPayload {
   context?: Record<string, unknown>;
 }
 
-export interface EventPayload {
+interface EventPayloadBase {
   name: string;
   summary: string;
   severity?: "info" | "warning" | "error";
+}
+
+export interface AnalyticsEventPayload extends EventPayloadBase {
   attributes?: Record<string, unknown>;
   retention_class?: "ephemeral" | "standard" | "audit";
   privacy_policy?: "redacted" | "public" | "sensitive";
   sampling_policy?: string;
-  operational?: OperationalSignal;
+  operational?: never;
 }
+
+export interface OperationalEventPayload extends EventPayloadBase {
+  operational: OperationalSignal;
+  attributes?: never;
+  retention_class?: "audit";
+  privacy_policy?: "redacted";
+  sampling_policy?: "unsampled";
+}
+
+export type EventPayload = AnalyticsEventPayload | OperationalEventPayload;
 
 export interface OperationalSignal {
   subject: {
@@ -146,15 +159,13 @@ export function createClient(opts: ClientOptions): CanaryClient {
 
   async function event(payload: EventPayload): Promise<EventResponse | null> {
     if (inflight >= maxQueue) return null;
+    const normalized = normalizeEventPayload(payload);
+    if (!normalized) return null;
     inflight++;
 
     const body = JSON.stringify({
       service: opts.service,
-      severity: "info",
-      retention_class: payload.operational ? "audit" : "standard",
-      privacy_policy: "redacted",
-      sampling_policy: "unsampled",
-      ...payload,
+      ...normalized,
     });
 
     try {
@@ -174,6 +185,81 @@ export function createClient(opts: ClientOptions): CanaryClient {
       return inflight;
     },
   };
+}
+
+function normalizeEventPayload(payload: EventPayload): Record<string, unknown> | null {
+  const object = payload as unknown as Record<string, unknown>;
+  const allowed = new Set([
+    "name",
+    "summary",
+    "severity",
+    "attributes",
+    "retention_class",
+    "privacy_policy",
+    "sampling_policy",
+    "operational",
+  ]);
+  if (Object.keys(object).some((field) => !allowed.has(field))) return null;
+
+  if (!Object.prototype.hasOwnProperty.call(object, "operational")) {
+    return {
+      severity: "info",
+      retention_class: "standard",
+      privacy_policy: "redacted",
+      sampling_policy: "unsampled",
+      ...payload,
+    };
+  }
+
+  if (
+    object.attributes !== undefined ||
+    (object.retention_class !== undefined && object.retention_class !== "audit") ||
+    (object.privacy_policy !== undefined && object.privacy_policy !== "redacted") ||
+    (object.sampling_policy !== undefined && object.sampling_policy !== "unsampled") ||
+    !validOperationalSignal(object.operational)
+  ) {
+    return null;
+  }
+
+  return {
+    severity: "info",
+    ...payload,
+    attributes: {},
+    retention_class: "audit",
+    privacy_policy: "redacted",
+    sampling_policy: "unsampled",
+  };
+}
+
+function validOperationalSignal(value: unknown): value is OperationalSignal {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const object = value as Record<string, unknown>;
+  if (
+    Object.keys(object).some(
+      (field) => !["subject", "state", "owner", "evidence_url", "observed_at"].includes(field)
+    )
+  ) return false;
+  if (!object.subject || typeof object.subject !== "object" || Array.isArray(object.subject)) {
+    return false;
+  }
+  const subject = object.subject as Record<string, unknown>;
+  if (Object.keys(subject).some((field) => !["type", "id"].includes(field))) return false;
+  if (typeof subject.type !== "string" || !/^[a-z0-9._-]{1,64}$/.test(subject.type)) return false;
+  if (typeof subject.id !== "string" || !/^[A-Za-z0-9._:-]{1,160}$/.test(subject.id)) return false;
+  if (object.state !== "active" && object.state !== "resolved") return false;
+  if (typeof object.owner !== "string" || object.owner.trim().length === 0 || [...object.owner].length > 128) return false;
+  if (typeof object.evidence_url !== "string" || [...object.evidence_url].length > 2048) return false;
+  try {
+    const evidence = new URL(object.evidence_url);
+    if (evidence.protocol !== "https:" || evidence.username || evidence.password || !evidence.hostname) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  return typeof object.observed_at === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(
+    object.observed_at
+  ) && !Number.isNaN(Date.parse(object.observed_at));
 }
 
 async function attempt<T>(

@@ -11,13 +11,14 @@ use canary_cli::{
     ApiClient, CliError, Config, IntegrationEnrollRequest, IntegrationInput, McpToolContext,
     RenderMode, Result, Window, doctor_report, dogfood_strict_failure_count, dogfood_value_report,
     encode, find_repo_root, integration_discover, integration_enroll, integration_patch,
-    integration_plan, integration_status, json_envelope, mcp_tool_manifest, print_json,
-    print_lines, resolve_endpoint_without_config, run_dogfood_inventory, summarize_annotations,
-    summarize_claims, summarize_doctor, summarize_dogfood, summarize_dogfood_value,
-    summarize_error_detail, summarize_event, summarize_incident_detail,
-    summarize_incident_escalation, summarize_incidents, summarize_integration, summarize_monitors,
-    summarize_query, summarize_report, summarize_services, summarize_targets, summarize_timeline,
-    summarize_webhook_delivery, tool_manifest,
+    integration_plan, integration_status, json_envelope, mcp_tool_manifest,
+    normalize_event_payload, print_json, print_lines, resolve_endpoint_without_config,
+    run_dogfood_inventory, summarize_annotations, summarize_claims, summarize_doctor,
+    summarize_dogfood, summarize_dogfood_value, summarize_error_detail, summarize_event,
+    summarize_incident_detail, summarize_incident_escalation, summarize_incidents,
+    summarize_integration, summarize_monitors, summarize_query, summarize_report,
+    summarize_services, summarize_targets, summarize_timeline, summarize_webhook_delivery,
+    tool_manifest,
 };
 use clap::{Args, Parser, Subcommand};
 use serde_json::{Value, json};
@@ -936,6 +937,7 @@ fn run_events_command(args: EventsArgs, client: &ApiClient, mode: RenderMode) ->
             if let Some(operational) = operational {
                 payload["operational"] = operational;
             }
+            let payload = normalize_event_payload(payload)?;
             let response = client.post_auth_json("/api/v1/events", &payload)?;
             render(
                 "events capture",

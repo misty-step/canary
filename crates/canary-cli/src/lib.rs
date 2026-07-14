@@ -4636,28 +4636,7 @@ impl McpToolContext {
             }
             "canary_event_capture" => {
                 let client = self.ingest_client()?;
-                let operational = optional_object(arguments, "operational")?;
-                let retention_class = optional_string(arguments, "retention_class")?
-                    .unwrap_or_else(|| {
-                        if operational.is_some() {
-                            "audit".to_owned()
-                        } else {
-                            "standard".to_owned()
-                        }
-                    });
-                let mut payload = json!({
-                    "service": required_string(arguments, "service")?,
-                    "name": required_string(arguments, "name")?,
-                    "summary": required_string(arguments, "summary")?,
-                    "severity": optional_string(arguments, "severity")?.unwrap_or_else(|| "info".to_owned()),
-                    "attributes": optional_object(arguments, "attributes")?.unwrap_or_default(),
-                    "retention_class": retention_class,
-                    "privacy_policy": optional_string(arguments, "privacy_policy")?.unwrap_or_else(|| "redacted".to_owned()),
-                    "sampling_policy": optional_string(arguments, "sampling_policy")?.unwrap_or_else(|| "unsampled".to_owned()),
-                });
-                if let Some(operational) = operational {
-                    payload["operational"] = Value::Object(operational);
-                }
+                let payload = normalize_event_payload(Value::Object(arguments.clone()))?;
                 let response = client.post_auth_json("/api/v1/events", &payload)?;
                 Ok(json_envelope(
                     "canary_event_capture",
@@ -4991,6 +4970,220 @@ fn optional_string_array(
     }
 }
 
+/// Normalize one event payload and reject operational contract conflicts before transport.
+pub fn normalize_event_payload(mut payload: Value) -> Result<Value> {
+    let object = payload
+        .as_object_mut()
+        .ok_or_else(|| CliError::Message("event payload must be an object".to_owned()))?;
+    let allowed = [
+        "service",
+        "name",
+        "summary",
+        "severity",
+        "attributes",
+        "retention_class",
+        "privacy_policy",
+        "sampling_policy",
+        "operational",
+    ];
+    if let Some(field) = object
+        .keys()
+        .find(|field| !allowed.contains(&field.as_str()))
+    {
+        return Err(CliError::Message(format!("unknown event field `{field}`")));
+    }
+    for field in ["service", "name", "summary"] {
+        let value = object
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| CliError::Message(format!("event {field} must be a string")))?;
+        if value.trim().is_empty() {
+            return Err(CliError::Message(format!(
+                "event {field} must not be empty"
+            )));
+        }
+    }
+    if object
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.chars().count() > 128)
+    {
+        return Err(CliError::Message(
+            "event name must not exceed 128 characters".to_owned(),
+        ));
+    }
+    if object
+        .get("summary")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.chars().count() > 512)
+    {
+        return Err(CliError::Message(
+            "event summary must not exceed 512 characters".to_owned(),
+        ));
+    }
+    object
+        .entry("severity")
+        .or_insert_with(|| Value::String("info".to_owned()));
+    object
+        .entry("attributes")
+        .or_insert_with(|| Value::Object(Default::default()));
+    object
+        .entry("privacy_policy")
+        .or_insert_with(|| Value::String("redacted".to_owned()));
+    object
+        .entry("sampling_policy")
+        .or_insert_with(|| Value::String("unsampled".to_owned()));
+
+    let Some(operational) = object.get("operational").cloned() else {
+        object
+            .entry("retention_class")
+            .or_insert_with(|| Value::String("standard".to_owned()));
+        return Ok(payload);
+    };
+    object
+        .entry("retention_class")
+        .or_insert_with(|| Value::String("audit".to_owned()));
+
+    let attributes = object
+        .get("attributes")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            CliError::Message("operational event attributes must be an object".to_owned())
+        })?;
+    if !attributes.is_empty() {
+        return Err(CliError::Message(
+            "operational event attributes must be empty; retain raw evidence outside Canary"
+                .to_owned(),
+        ));
+    }
+    require_event_setting(object, "retention_class", "audit")?;
+    require_event_setting(object, "privacy_policy", "redacted")?;
+    require_event_setting(object, "sampling_policy", "unsampled")?;
+    validate_operational_value(&operational)?;
+    Ok(payload)
+}
+
+fn require_event_setting(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+    expected: &str,
+) -> Result<()> {
+    match object.get(field).and_then(Value::as_str) {
+        Some(value) if value == expected => Ok(()),
+        _ => Err(CliError::Message(format!(
+            "operational event `{field}` must be `{expected}`"
+        ))),
+    }
+}
+
+fn validate_operational_value(value: &Value) -> Result<()> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| CliError::Message("operational must be an object".to_owned()))?;
+    let allowed = ["subject", "state", "owner", "evidence_url", "observed_at"];
+    if let Some(field) = object
+        .keys()
+        .find(|field| !allowed.contains(&field.as_str()))
+    {
+        return Err(CliError::Message(format!(
+            "unknown operational field `{field}`"
+        )));
+    }
+    let subject = object
+        .get("subject")
+        .and_then(Value::as_object)
+        .ok_or_else(|| CliError::Message("operational.subject must be an object".to_owned()))?;
+    if let Some(field) = subject
+        .keys()
+        .find(|field| !["type", "id"].contains(&field.as_str()))
+    {
+        return Err(CliError::Message(format!(
+            "unknown operational.subject field `{field}`"
+        )));
+    }
+    let subject_type = bounded_operational_string(subject, "type", 64)?;
+    if !subject_type.chars().all(|character| {
+        character.is_ascii_lowercase()
+            || character.is_ascii_digit()
+            || matches!(character, '.' | '_' | '-')
+    }) {
+        return Err(CliError::Message(
+            "operational.subject.type must use lowercase letters, digits, dots, underscores, or hyphens"
+                .to_owned(),
+        ));
+    }
+    let subject_id = bounded_operational_string(subject, "id", 160)?;
+    if !subject_id.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | ':' | '-')
+    }) {
+        return Err(CliError::Message(
+            "operational.subject.id contains an unsupported character".to_owned(),
+        ));
+    }
+    let state = required_nested_string(object, "state", "operational.state")?;
+    if !matches!(state, "active" | "resolved") {
+        return Err(CliError::Message(
+            "operational.state must be active or resolved".to_owned(),
+        ));
+    }
+    let owner = required_nested_string(object, "owner", "operational.owner")?;
+    if owner.trim().is_empty() || owner.chars().count() > 128 {
+        return Err(CliError::Message(
+            "operational.owner must contain 1-128 characters".to_owned(),
+        ));
+    }
+    let evidence_url = required_nested_string(object, "evidence_url", "operational.evidence_url")?;
+    let parsed = reqwest::Url::parse(evidence_url).map_err(|_| {
+        CliError::Message("operational.evidence_url must be a valid HTTPS URL".to_owned())
+    })?;
+    if evidence_url.chars().count() > 2048
+        || parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(CliError::Message(
+            "operational.evidence_url must be a valid HTTPS URL no longer than 2048 characters"
+                .to_owned(),
+        ));
+    }
+    let observed_at = required_nested_string(object, "observed_at", "operational.observed_at")?;
+    if time::OffsetDateTime::parse(observed_at, &time::format_description::well_known::Rfc3339)
+        .is_err()
+    {
+        return Err(CliError::Message(
+            "operational.observed_at must be an RFC3339 timestamp".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn required_nested_string<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    field: &str,
+    path: &str,
+) -> Result<&'a str> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::Message(format!("{path} must be a string")))
+}
+
+fn bounded_operational_string<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    field: &str,
+    max: usize,
+) -> Result<&'a str> {
+    let path = format!("operational.subject.{field}");
+    let value = required_nested_string(object, field, &path)?;
+    if value.is_empty() || value.chars().count() > max {
+        return Err(CliError::Message(format!(
+            "{path} must contain 1-{max} characters"
+        )));
+    }
+    Ok(value)
+}
+
 /// Return the CLI-backed tool manifest.
 pub fn tool_manifest() -> Vec<ToolSpec> {
     vec![
@@ -5072,7 +5265,53 @@ pub fn tool_manifest() -> Vec<ToolSpec> {
         ToolSpec {
             name: "canary_event_capture",
             description: "Capture one bounded telemetry event; an optional operational envelope participates in deterministic incident correlation and keeps evidence out of Canary.",
-            input_schema: json!({"type":"object","required":["service","name","summary"],"properties":{"service":{"type":"string"},"name":{"type":"string"},"summary":{"type":"string"},"severity":{"type":"string","enum":["info","warning","error"]},"attributes":{"type":"object"},"retention_class":{"type":"string","enum":["ephemeral","standard","audit"]},"privacy_policy":{"type":"string","enum":["redacted","public","sensitive"]},"sampling_policy":{"type":"string"},"operational":{"type":"object","additionalProperties":false,"required":["subject","state","owner","evidence_url","observed_at"],"properties":{"subject":{"type":"object","additionalProperties":false,"required":["type","id"],"properties":{"type":{"type":"string"},"id":{"type":"string"}}},"state":{"type":"string","enum":["active","resolved"]},"owner":{"type":"string"},"evidence_url":{"type":"string","format":"uri"},"observed_at":{"type":"string","format":"date-time"}}}}}),
+            input_schema: json!({
+                "type":"object",
+                "additionalProperties":false,
+                "required":["service","name","summary"],
+                "properties":{
+                    "service":{"type":"string","minLength":1},
+                    "name":{"type":"string","minLength":1,"maxLength":128},
+                    "summary":{"type":"string","minLength":1,"maxLength":512},
+                    "severity":{"type":"string","enum":["info","warning","error"]},
+                    "attributes":{"type":"object"},
+                    "retention_class":{"type":"string","enum":["ephemeral","standard","audit"]},
+                    "privacy_policy":{"type":"string","enum":["redacted","public","sensitive"]},
+                    "sampling_policy":{"type":"string","minLength":1},
+                    "operational":{
+                        "type":"object",
+                        "additionalProperties":false,
+                        "required":["subject","state","owner","evidence_url","observed_at"],
+                        "properties":{
+                            "subject":{
+                                "type":"object",
+                                "additionalProperties":false,
+                                "required":["type","id"],
+                                "properties":{
+                                    "type":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[a-z0-9._-]+$"},
+                                    "id":{"type":"string","minLength":1,"maxLength":160,"pattern":"^[A-Za-z0-9._:-]+$"}
+                                }
+                            },
+                            "state":{"type":"string","enum":["active","resolved"]},
+                            "owner":{"type":"string","minLength":1,"maxLength":128},
+                            "evidence_url":{"type":"string","format":"uri","maxLength":2048,"pattern":"^https://"},
+                            "observed_at":{"type":"string","format":"date-time"}
+                        }
+                    }
+                },
+                "oneOf":[
+                    {"not":{"required":["operational"]}},
+                    {
+                        "required":["operational"],
+                        "properties":{
+                            "attributes":{"type":"object","maxProperties":0},
+                            "retention_class":{"const":"audit"},
+                            "privacy_policy":{"const":"redacted"},
+                            "sampling_policy":{"const":"unsampled"}
+                        }
+                    }
+                ]
+            }),
         },
         ToolSpec {
             name: "canary_claims_list",
@@ -6402,6 +6641,20 @@ Vercel CLI completed
             json!(["service", "name", "summary"])
         );
         assert_eq!(
+            tool_by_name["canary_event_capture"].input_schema["additionalProperties"],
+            json!(false)
+        );
+        assert_eq!(
+            tool_by_name["canary_event_capture"].input_schema["properties"]["operational"]["properties"]
+                ["subject"]["properties"]["type"]["pattern"],
+            "^[a-z0-9._-]+$"
+        );
+        assert_eq!(
+            tool_by_name["canary_event_capture"].input_schema["properties"]["operational"]["properties"]
+                ["evidence_url"]["pattern"],
+            "^https://"
+        );
+        assert_eq!(
             tool_by_name["canary_claim_create"].input_schema["required"],
             json!([
                 "subject_type",
@@ -6441,6 +6694,45 @@ Vercel CLI completed
                 tool.name
             );
         }
+    }
+
+    #[test]
+    fn operational_event_normalization_is_discriminated_and_fail_closed()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let valid = json!({
+            "service":"infrastructure-control",
+            "name":"drift.violation",
+            "summary":"Drift detected",
+            "operational":{
+                "subject":{"type":"deployment","id":"production"},
+                "state":"active",
+                "owner":"infrastructure-operator",
+                "evidence_url":"https://evidence.example/receipts/drift",
+                "observed_at":"2026-07-14T14:00:00Z"
+            }
+        });
+        let normalized = normalize_event_payload(valid.clone())?;
+        assert_eq!(normalized["attributes"], json!({}));
+        assert_eq!(normalized["retention_class"], "audit");
+        assert_eq!(normalized["privacy_policy"], "redacted");
+        assert_eq!(normalized["sampling_policy"], "unsampled");
+
+        for (field, value) in [
+            ("attributes", json!({"raw_metrics":[1,2,3]})),
+            ("retention_class", json!("standard")),
+            ("privacy_policy", json!("public")),
+            ("sampling_policy", json!("sampled:0.5")),
+            ("provider_snapshot", json!({"droplets":[1,2,3]})),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            assert!(normalize_event_payload(invalid).is_err(), "{field}");
+        }
+
+        let mut insecure = valid;
+        insecure["operational"]["evidence_url"] = json!("http://unsafe.example/receipt");
+        assert!(normalize_event_payload(insecure).is_err());
+        Ok(())
     }
 
     fn temp_project(name: &str) -> std::result::Result<PathBuf, Box<dyn std::error::Error>> {
