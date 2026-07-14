@@ -1,3 +1,10 @@
+## [0.16.3](https://github.com/misty-step/canary/compare/v0.16.2...v0.16.3) (2026-07-14)
+
+
+### Bug Fixes
+
+* **api:** complete onboarding key receipts ([#267](https://github.com/misty-step/canary/issues/267)) ([2f1e078](https://github.com/misty-step/canary/commit/2f1e078d4db219b3b4faeed3378b8764af7ed546))
+
 ## [0.16.2](https://github.com/misty-step/canary/compare/v0.16.1...v0.16.2) (2026-07-14)
 
 
