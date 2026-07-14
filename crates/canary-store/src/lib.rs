@@ -1669,6 +1669,7 @@ mod tests {
                 tenant_id: "TENANT-wrong".to_owned(),
                 project_id: "PROJECT-wrong".to_owned(),
                 service: Some("onboard".to_owned()),
+                allow_unbound: false,
             },
             "TENANT-right",
             "PROJECT-right",
@@ -1739,6 +1740,7 @@ mod tests {
             tenant_id: "TENANT-alpha".to_owned(),
             project_id: "PROJECT-api".to_owned(),
             service: Some("linejam".to_owned()),
+            allow_unbound: false,
         })?;
 
         let verified = store
@@ -4039,6 +4041,7 @@ mod tests {
             tenant_id: api_keys::BOOTSTRAP_TENANT_ID.to_owned(),
             project_id: api_keys::BOOTSTRAP_PROJECT_ID.to_owned(),
             service: None,
+            allow_unbound: false,
         })?;
 
         let keys = store.list_api_keys()?;
@@ -7607,6 +7610,7 @@ mod tests {
             tenant_id: api_keys::BOOTSTRAP_TENANT_ID.to_owned(),
             project_id: api_keys::BOOTSTRAP_PROJECT_ID.to_owned(),
             service: None,
+            allow_unbound: scope == "read-only",
         })?;
         Ok(())
     }

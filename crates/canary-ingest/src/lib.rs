@@ -160,11 +160,16 @@ fn prepare(
     context: IngestContext,
 ) -> Result<ErrorIngest> {
     let service = required_string(attrs, "service")?;
-    let error_class = required_string(attrs, "error_class")?;
+    let error_class = scrub_string(&required_string(attrs, "error_class")?);
     let message = scrub_string(&required_string(attrs, "message")?);
 
     validate_context(attrs)?;
-    let fingerprint = validate_fingerprint(attrs)?;
+    let fingerprint = validate_fingerprint(attrs)?.map(|items| {
+        items
+            .into_iter()
+            .map(|item| scrub_string(&item))
+            .collect::<Vec<_>>()
+    });
 
     let stack_trace = optional_string(attrs, "stack_trace").map(|value| scrub_string(&value));
     let grouping = compute(GroupingInput {
@@ -194,12 +199,15 @@ fn prepare(
             message_template: grouping.message_template,
             stack_trace: stack_trace.map(|value| truncate(&value, MAX_STACK_TRACE_LEN)),
             context_json: context_json(attrs),
-            severity: optional_string(attrs, "severity").unwrap_or_else(|| "error".to_owned()),
+            severity: optional_string(attrs, "severity")
+                .map(|value| scrub_string(&value))
+                .unwrap_or_else(|| "error".to_owned()),
             environment: optional_string(attrs, "environment")
+                .map(|value| scrub_string(&value))
                 .unwrap_or_else(|| "production".to_owned()),
             group_hash: grouping.group_hash,
             fingerprint_json: fingerprint_json(fingerprint.as_deref()),
-            region: optional_string(attrs, "region"),
+            region: optional_string(attrs, "region").map(|value| scrub_string(&value)),
             classification,
             created_at: context.now,
         },
@@ -576,16 +584,48 @@ mod tests {
     #[test]
     fn server_side_redaction_runs_before_persistence() -> Result<()> {
         let mut store = migrated_store()?;
+        let corpus = [
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue",
+            "AKIAIOSFODNN7EXAMPLE",
+            "-----BEGIN PRIVATE KEY-----\nsecret-material\n-----END PRIVATE KEY-----",
+            "ghp_0123456789abcdefghijklmnopqrstuv",
+            "gho_0123456789abcdefghijklmnopqrstuv",
+            "ghu_0123456789abcdefghijklmnopqrstuv",
+            "ghs_0123456789abcdefghijklmnopqrstuv",
+            "ghr_0123456789abcdefghijklmnopqrstuv",
+            "github_pat_0123456789_abcdefghijklmnopqrstuv",
+            concat!("xox", "b-123456789012-abcdefghijklmnop"),
+            concat!("xox", "a-123456789012-abcdefghijklmnop"),
+            concat!("xox", "p-123456789012-abcdefghijklmnop"),
+            concat!("xox", "r-123456789012-abcdefghijklmnop"),
+            concat!("xox", "s-123456789012-abcdefghijklmnop"),
+            "sk-0123456789abcdefghijklmnop",
+            "sk-proj-0123456789abcdefghijklmnop",
+            "sk-ant-0123456789abcdefghijklmnop",
+            "sk-ant-api03-0123456789abcdefghijklmnop",
+            "sk-or-v1-0123456789abcdefghijklmnop",
+            "AIza0123456789abcdefghijklmnopqrst",
+            "hf_0123456789abcdefghijklmnopqrst",
+            "glpat-0123456789abcdefghijklmnopqrst",
+            "npm_0123456789abcdefghijklmnopqrst",
+            "postgresql://canary:hunter2@db.internal/canary",
+        ];
         let attrs = json!({
             "service": "svc",
-            "error_class": "RuntimeError",
-            "message": "failed for alice@example.com with sk_live_secret123",
-            "stack_trace": "Authorization: Bearer abc.def.ghi\npassword = \"hunter2\"\ntoken='abc123'",
+            "error_class": format!("RuntimeError {}", corpus[0]),
+            "message": format!("failed for alice@example.com with sk_live_secret123 {}", corpus[1]),
+            "stack_trace": format!("Authorization: Bearer abc.def.ghi\npassword = \"hunter2\"\ntoken='abc123'\n{}", corpus[2]),
+            "severity": corpus[3],
+            "environment": corpus[4],
+            "fingerprint": [corpus[5]],
+            "region": corpus[6],
             "context": {
                 "authorization": "Bearer context-secret",
                 "nested": {
                     "email": "bob@example.com",
-                    "api_key": "sk_live_nested_secret"
+                    "api_key": "sk_live_nested_secret",
+                    "more_provider_tokens": corpus[7..23],
+                    "database": corpus[23]
                 }
             }
         });
@@ -614,12 +654,17 @@ mod tests {
             }
         };
 
-        assert_eq!(detail.message, "failed for [EMAIL] with [CANARY_API_KEY]");
-        assert_eq!(
-            detail.stack_trace.as_deref(),
-            Some("Authorization: Bearer [REDACTED]\npassword=[REDACTED]\ntoken=[REDACTED]")
+        assert!(
+            detail
+                .message
+                .starts_with("failed for [EMAIL] with [CANARY_API_KEY]")
         );
-        let Some(context) = detail.context else {
+        assert!(detail.stack_trace.as_deref().is_some_and(|value| {
+            value.starts_with(
+                "Authorization: Bearer [REDACTED]\npassword=[REDACTED]\ntoken=[REDACTED]",
+            )
+        }));
+        let Some(ref context) = detail.context else {
             return Err(IngestError::PayloadTooLarge(
                 "redacted context should be present".to_owned(),
             ));
@@ -627,6 +672,13 @@ mod tests {
         assert_eq!(context["authorization"], REDACTED);
         assert_eq!(context["nested"]["email"], "[EMAIL]");
         assert_eq!(context["nested"]["api_key"], REDACTED);
+        let persisted_read_model = format!("{detail:?}");
+        for secret in corpus {
+            assert!(
+                !persisted_read_model.contains(secret),
+                "secret corpus value survived persistence: {secret}"
+            );
+        }
 
         Ok(())
     }
@@ -662,6 +714,6 @@ mod tests {
     }
 
     const fn canary_store_schema_version() -> u32 {
-        2026071000
+        2026071300
     }
 }

@@ -6,7 +6,7 @@
 
 use canary_core::{
     query::IncidentDetail,
-    redaction::{REDACTED, scrub_string, sensitive_key},
+    redaction::{REDACTED, REDACTION_RULE_NAMES, scrub_string, sensitive_key},
 };
 use canary_store::VerifiedApiKey;
 use serde_json::{Value, json};
@@ -59,12 +59,7 @@ pub(crate) fn incident_context_response(
                 },
                 "privacy_policy": {
                     "classification": "redacted",
-                    "redaction_rules": [
-                        "bearer_token",
-                        "canary_api_key",
-                        "email",
-                        "sensitive_key_value"
-                    ],
+                    "redaction_rules": REDACTION_RULE_NAMES,
                     "max_string_chars": MAX_CONTEXT_STRING_CHARS,
                     "max_metadata_bytes": MAX_METADATA_BYTES,
                     "max_evidence_link_chars": MAX_EVIDENCE_LINK_CHARS
@@ -180,6 +175,7 @@ mod tests {
             tenant_id: "TENANT-test".to_owned(),
             project_id: "PROJECT-test".to_owned(),
             service: Some("svc".to_owned()),
+            allow_unbound: false,
         }
     }
 
@@ -260,5 +256,9 @@ mod tests {
             "https://example.test?token=[REDACTED]"
         );
         assert_eq!(value["context_envelope"]["schema"], INCIDENT_CONTEXT_SCHEMA);
+        assert_eq!(
+            value["context_envelope"]["privacy_policy"]["redaction_rules"],
+            json!(REDACTION_RULE_NAMES)
+        );
     }
 }

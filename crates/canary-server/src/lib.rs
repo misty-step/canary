@@ -5004,7 +5004,7 @@ mod tests {
                 "POST",
                 "/api/v1/keys",
                 ADMIN_KEY,
-                r#"{"name":"deploy","scope":"read-only"}"#,
+                r#"{"name":"deploy","scope":"read-only","allow_unbound":true}"#,
             )?)
             .await?;
         assert_eq!(create_response.status(), StatusCode::CREATED);
@@ -5016,6 +5016,7 @@ mod tests {
         assert_eq!(created["name"], "deploy");
         assert_eq!(created["scope"], "read-only");
         assert_eq!(created["service"], Value::Null);
+        assert_eq!(created["allow_unbound"], true);
         assert_eq!(created["tenant_id"], canary_store::BOOTSTRAP_TENANT_ID);
         assert_eq!(created["project_id"], canary_store::BOOTSTRAP_PROJECT_ID);
         assert_eq!(
@@ -5043,6 +5044,7 @@ mod tests {
         assert_eq!(listed_key["name"], "deploy");
         assert_eq!(listed_key["scope"], "read-only");
         assert_eq!(listed_key["service"], Value::Null);
+        assert_eq!(listed_key["allow_unbound"], true);
         assert_eq!(listed_key["tenant_id"], canary_store::BOOTSTRAP_TENANT_ID);
         assert_eq!(listed_key["project_id"], canary_store::BOOTSTRAP_PROJECT_ID);
         assert_eq!(
@@ -5172,6 +5174,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn implicit_unbound_read_key_fails_closed_at_runtime() -> Result<(), Box<dyn Error>> {
+        let state = test_ingest_state()?;
+        let raw_key = "sk_live_legacy_unbound_read";
+        {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            store.insert_api_key(ApiKeyInsert {
+                id: "KEY-legacy-unbound-read".to_owned(),
+                name: "legacy fleet reader".to_owned(),
+                key_prefix: raw_key.chars().take(API_KEY_PREFIX_LEN).collect(),
+                key_hash: bcrypt::hash(raw_key, TEST_BCRYPT_COST)?,
+                created_at: "2026-05-28T20:00:00Z".to_owned(),
+                revoked_at: None,
+                scope: "read-only".to_owned(),
+                tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
+                project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
+                service: None,
+                allow_unbound: false,
+            })?;
+        }
+
+        let response = ingest_router(state)
+            .oneshot(read_request(raw_key, "/api/v1/incidents")?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = json_body(response).await?;
+        assert_eq!(body["code"], "insufficient_scope");
+        assert_eq!(body["scope"], "read-only");
+        assert_eq!(body["required_service_binding"], true);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn admin_api_key_create_defaults_and_rejects_invalid_scope() -> Result<(), Box<dyn Error>>
     {
         let router = ingest_router(test_ingest_state()?);
@@ -5216,6 +5251,24 @@ mod tests {
         assert_eq!(
             json_body(unbound_responder).await?["errors"]["service"],
             json!(["is required for responder-write keys"])
+        );
+
+        let implicit_unbound_read = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/keys",
+                ADMIN_KEY,
+                r#"{"name":"implicit-fleet-reader","scope":"read-only"}"#,
+            )?)
+            .await?;
+        assert_eq!(
+            implicit_unbound_read.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            json_body(implicit_unbound_read).await?["errors"]["service"],
+            json!(["is required unless allow_unbound is true"])
         );
 
         let forbidden_response = router
@@ -5435,6 +5488,7 @@ mod tests {
                 tenant_id: "TENANT-alpha".to_owned(),
                 project_id: "PROJECT-web".to_owned(),
                 service: Some("linejam".to_owned()),
+                allow_unbound: false,
             })?;
             store.commit_error_ingest(owned_error_ingest(
                 "TENANT-alpha",
@@ -6862,6 +6916,7 @@ mod tests {
                 tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
                 project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
                 service: Some("linejam".to_owned()),
+                allow_unbound: false,
             })?;
         }
         let router = ingest_router(state);
@@ -9016,6 +9071,7 @@ mod tests {
                 tenant_id: "TENANT-alpha".to_owned(),
                 project_id: "PROJECT-web".to_owned(),
                 service: Some("linejam".to_owned()),
+                allow_unbound: false,
             })?;
         }
 
@@ -9053,6 +9109,7 @@ mod tests {
             tenant_id: "TENANT-alpha".to_owned(),
             project_id: "PROJECT-web".to_owned(),
             service: Some("linejam".to_owned()),
+            allow_unbound: false,
         })?;
         let mut matching = webhook_subscription_insert(
             "WHK-linejam",
@@ -9131,6 +9188,7 @@ mod tests {
                 tenant_id: "TENANT-alpha".to_owned(),
                 project_id: "PROJECT-web".to_owned(),
                 service: Some("linejam".to_owned()),
+                allow_unbound: false,
             })?;
         }
 
@@ -10217,6 +10275,7 @@ mod tests {
             tenant_id: tenant_id.to_owned(),
             project_id: project_id.to_owned(),
             service: None,
+            allow_unbound: scope == "read-only",
         })?;
         Ok(())
     }
@@ -10238,6 +10297,7 @@ mod tests {
             tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
             project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
             service: Some(service.to_owned()),
+            allow_unbound: false,
         })?;
         Ok(())
     }
@@ -10259,6 +10319,7 @@ mod tests {
             tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
             project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
             service: Some(service.to_owned()),
+            allow_unbound: false,
         })?;
         Ok(())
     }
@@ -10280,6 +10341,7 @@ mod tests {
             tenant_id: canary_store::BOOTSTRAP_TENANT_ID.to_owned(),
             project_id: canary_store::BOOTSTRAP_PROJECT_ID.to_owned(),
             service: Some(service.to_owned()),
+            allow_unbound: false,
         })?;
         Ok(())
     }

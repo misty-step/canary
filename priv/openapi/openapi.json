@@ -23,7 +23,7 @@
       "responder_context_safety": {
         "incident_schema": "canary.responder_context.incident.v1",
         "authority": "Service-bound responder-write keys may read responder incident context only for their bound service; cross-service reads return RFC 9457 insufficient_scope and unbound responder-write keys are rejected.",
-        "redaction": "Incident context applies bearer_token, canary_api_key, email, and sensitive_key_value redaction plus field allowlists and size bounds before serialization.",
+        "redaction": "Incident context applies bearer_token, canary_api_key, jwt, aws_access_key, private_key_block, provider_token, credential_database_uri, email, and sensitive_key_value redaction plus field allowlists and size bounds before serialization.",
         "audit": "Successful non-admin incident context reads emit telemetry.event signal responder.context_read with retention_class audit, privacy_policy redacted, and reader/subject/context envelope metadata only."
       },
       "cold_start": {
@@ -4425,6 +4425,11 @@
                   "enum": [
                     "bearer_token",
                     "canary_api_key",
+                    "jwt",
+                    "aws_access_key",
+                    "private_key_block",
+                    "provider_token",
+                    "credential_database_uri",
                     "email",
                     "sensitive_key_value"
                   ]
@@ -6053,7 +6058,8 @@
           "revoked_at",
           "tenant_id",
           "project_id",
-          "service"
+          "service",
+          "allow_unbound"
         ],
         "properties": {
           "id": {
@@ -6091,6 +6097,10 @@
               "null"
             ]
           },
+          "allow_unbound": {
+            "type": "boolean",
+            "description": "True only when a read-only key was explicitly granted project-wide read authority."
+          },
           "scope": {
             "$ref": "#/components/schemas/ApiKeyScope"
           }
@@ -6124,7 +6134,12 @@
           },
           "service": {
             "type": "string",
-            "description": "Optional service binding for non-admin ingest/read keys. Service-bound keys cannot access or ingest for other services."
+            "description": "Service binding for non-admin ingest/read keys. Read-only keys require this unless allow_unbound is explicitly true."
+          },
+          "allow_unbound": {
+            "type": "boolean",
+            "default": false,
+            "description": "Explicitly grant a read-only key project-wide reads. Cannot be combined with service or used by another scope."
           }
         }
       },
@@ -6141,6 +6156,7 @@
           "tenant_id",
           "project_id",
           "service",
+          "allow_unbound",
           "warning"
         ],
         "properties": {
@@ -6171,6 +6187,9 @@
               "string",
               "null"
             ]
+          },
+          "allow_unbound": {
+            "type": "boolean"
           },
           "warning": {
             "type": "string"
