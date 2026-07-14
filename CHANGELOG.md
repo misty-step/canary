@@ -1,3 +1,10 @@
+## [0.16.4](https://github.com/misty-step/canary/compare/v0.16.3...v0.16.4) (2026-07-14)
+
+
+### Features
+
+* **claims:** fleet-wide active-claims read across API, CLI, and MCP ([#270](https://github.com/misty-step/canary/issues/270)) ([09b370a](https://github.com/misty-step/canary/commit/09b370a675e5a6725f88caf8269d5c323d708c34))
+
 ## [0.16.3](https://github.com/misty-step/canary/compare/v0.16.2...v0.16.3) (2026-07-14)
 
 
