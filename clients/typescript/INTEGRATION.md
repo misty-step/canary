@@ -117,7 +117,37 @@ curl -fsS -X POST "$CANARY_ENDPOINT/api/v1/check-ins" \
 
 Use `alive` for TTL-style freshness and `in_progress`, `ok`, or `error` for
 scheduled runs. Send operational events to `/api/v1/events` with the same
-scoped server key.
+scoped server key. Operational events carry one stable caller-defined subject,
+an owner, an evidence link, and producer/server clocks; raw metrics and provider
+snapshots stay at the evidence link:
+
+The SDK exposes analytics and operational events as a discriminated union.
+Operational events cannot carry analytics attributes and always normalize to
+`audit` retention, `redacted` privacy, and `unsampled` delivery; conflicting
+values and unknown fields are rejected before transport.
+
+```bash
+curl -fsS -X POST "$CANARY_ENDPOINT/api/v1/events" \
+  -H "Authorization: Bearer $CANARY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "service":"my-control-plane",
+    "name":"capacity.saturation",
+    "summary":"Worker capacity crossed policy",
+    "severity":"warning",
+    "operational":{
+      "subject":{"type":"capacity","id":"worker-pool"},
+      "state":"active",
+      "owner":"platform-operator",
+      "evidence_url":"https://evidence.example/receipts/capacity",
+      "observed_at":"2026-07-14T14:01:00Z"
+    }
+  }'
+```
+
+Canary stores the bounded event, opens or updates the service incident, and
+uses the existing signed incident webhook as a responder wake-up hint. Replay
+the timeline or query the returned `incident_id` for correctness.
 
 ## 6. Verify live coverage
 

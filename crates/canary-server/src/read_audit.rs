@@ -52,6 +52,7 @@ pub(crate) fn record_read_audit(store: &mut Store, key: &VerifiedApiKey, route: 
         privacy_policy: "redacted".to_owned(),
         sampling_policy: "unsampled".to_owned(),
         created_at: now,
+        operational: None,
     };
 
     let _ = store.insert_telemetry_event(event);
@@ -110,6 +111,7 @@ pub(crate) fn record_context_read_audit(
         privacy_policy: "redacted".to_owned(),
         sampling_policy: "unsampled".to_owned(),
         created_at: now,
+        operational: None,
     };
 
     store.insert_telemetry_event(event)?;

@@ -144,6 +144,9 @@ pub struct GroupCursor {
 pub struct TimelineCursor {
     /// Last row timestamp from the previous page.
     pub created_at: String,
+    /// Causal rank within one timestamp; absent on cursors issued before causal ordering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causal_rank: Option<u8>,
     /// Last row id from the previous page.
     pub id: String,
 }
@@ -213,6 +216,7 @@ pub fn decode_timeline_cursor(cursor: &str) -> Option<TimelineCursor> {
     let cursor = serde_json::from_slice::<TimelineCursor>(&decoded).ok()?;
     if cursor.created_at.is_empty()
         || cursor.id.is_empty()
+        || cursor.causal_rank.is_some_and(|rank| rank > 1)
         || OffsetDateTime::parse(&cursor.created_at, &Rfc3339).is_err()
     {
         return None;
@@ -663,6 +667,30 @@ pub struct IncidentDetailSignal {
     /// Current active remediation claim for the signal's underlying subject.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_claim: Option<RemediationClaimSummary>,
+    /// Bounded producer context for caller-defined operational signals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operational: Option<OperationalSignalContext>,
+}
+
+/// Caller-owned operational signal context returned to incident responders.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OperationalSignalContext {
+    /// Caller-defined signal name.
+    pub name: String,
+    /// Stable caller-defined subject type.
+    pub subject_type: String,
+    /// Stable caller-defined subject id.
+    pub subject_id: String,
+    /// Current producer-declared state.
+    pub state: String,
+    /// Owner responsible for the signal.
+    pub owner: String,
+    /// Link to bounded evidence retained by the producer.
+    pub evidence_url: String,
+    /// Producer observation clock.
+    pub observed_at: String,
+    /// Canary receipt clock.
+    pub received_at: String,
 }
 
 /// Incident annotation view embedded in incident detail.
@@ -884,6 +912,15 @@ pub struct TelemetryEvent {
     pub sampling_policy: String,
     /// Creation timestamp.
     pub created_at: String,
+    /// Bounded operational signal receipt when this event participates in incidents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operational: Option<OperationalSignalContext>,
+    /// Incident event emitted by deterministic correlation, when any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incident_event: Option<String>,
+    /// Incident id produced or updated by deterministic correlation, when any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incident_id: Option<String>,
 }
 
 /// Response for `GET /api/v1/timeline`.
@@ -1566,6 +1603,7 @@ mod tests {
     {
         let cursor = TimelineCursor {
             created_at: "2026-05-28T20:59:50Z".to_owned(),
+            causal_rank: Some(0),
             id: "EVT-b".to_owned(),
         };
         let Some(encoded) = encode_timeline_cursor(&cursor) else {
@@ -1577,6 +1615,23 @@ mod tests {
 
         let malformed = BASE64_URL_SAFE_NO_PAD.encode(r#"{"created_at":1,"id":2}"#);
         assert_eq!(decode_timeline_cursor(&malformed), None);
+        Ok(())
+    }
+
+    #[test]
+    fn timeline_cursor_decoder_preserves_missing_causal_rank_as_legacy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let encoded =
+            BASE64_URL_SAFE_NO_PAD.encode(r#"{"created_at":"2026-05-28T20:59:50Z","id":"EVT-b"}"#);
+
+        assert_eq!(
+            decode_timeline_cursor(&encoded),
+            Some(TimelineCursor {
+                created_at: "2026-05-28T20:59:50Z".to_owned(),
+                causal_rank: None,
+                id: "EVT-b".to_owned(),
+            })
+        );
         Ok(())
     }
 

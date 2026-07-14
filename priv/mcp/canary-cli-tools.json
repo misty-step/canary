@@ -243,14 +243,103 @@
       "name": "canary_dogfood_value"
     },
     {
-      "description": "Capture one bounded analytics event as a telemetry.event timeline row.",
+      "description": "Capture one bounded telemetry event; an optional operational envelope participates in deterministic incident correlation and keeps evidence out of Canary.",
       "input_schema": {
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "not": {
+              "required": [
+                "operational"
+              ]
+            }
+          },
+          {
+            "properties": {
+              "attributes": {
+                "maxProperties": 0,
+                "type": "object"
+              },
+              "privacy_policy": {
+                "const": "redacted"
+              },
+              "retention_class": {
+                "const": "audit"
+              },
+              "sampling_policy": {
+                "const": "unsampled"
+              }
+            },
+            "required": [
+              "operational"
+            ]
+          }
+        ],
         "properties": {
           "attributes": {
             "type": "object"
           },
           "name": {
+            "maxLength": 128,
+            "minLength": 1,
             "type": "string"
+          },
+          "operational": {
+            "additionalProperties": false,
+            "properties": {
+              "evidence_url": {
+                "format": "uri",
+                "maxLength": 2048,
+                "pattern": "^https://",
+                "type": "string"
+              },
+              "observed_at": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "owner": {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              "state": {
+                "enum": [
+                  "active",
+                  "resolved"
+                ],
+                "type": "string"
+              },
+              "subject": {
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "maxLength": 160,
+                    "minLength": 1,
+                    "pattern": "^[A-Za-z0-9._:-]+$",
+                    "type": "string"
+                  },
+                  "type": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "pattern": "^[a-z0-9._-]+$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "id"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "subject",
+              "state",
+              "owner",
+              "evidence_url",
+              "observed_at"
+            ],
+            "type": "object"
           },
           "privacy_policy": {
             "enum": [
@@ -269,9 +358,11 @@
             "type": "string"
           },
           "sampling_policy": {
+            "minLength": 1,
             "type": "string"
           },
           "service": {
+            "minLength": 1,
             "type": "string"
           },
           "severity": {
@@ -283,6 +374,8 @@
             "type": "string"
           },
           "summary": {
+            "maxLength": 512,
+            "minLength": 1,
             "type": "string"
           }
         },

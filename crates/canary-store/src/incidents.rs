@@ -51,6 +51,8 @@ pub struct IncidentCorrelationEvent {
     pub id: String,
     /// JSON payload sent to responders.
     pub payload_json: String,
+    /// Incident subject opened or updated by the correlation.
+    pub incident_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +101,7 @@ pub(crate) fn correlate_in_transaction(
         &command.signal_ref,
         &command.tenant_id,
         &command.project_id,
+        &command.service,
         &command.now,
     )?;
     match open_incident(
@@ -158,6 +161,7 @@ fn update_incident(
         &incident.id,
         &incident.tenant_id,
         &incident.project_id,
+        &incident.service,
         &command.now,
     )?;
     let mut incident =
@@ -214,6 +218,15 @@ fn sync_signal(
             )?;
             Ok((true, false))
         }
+        (Some(signal), true) if command.signal_type == "operational_event" => {
+            transaction.execute(
+                "UPDATE incident_signals
+                 SET attached_at = ?1
+                 WHERE id = ?2",
+                params![command.now, signal.id],
+            )?;
+            Ok((true, false))
+        }
         (Some(signal), false) if signal.resolved_at.is_none() => {
             transaction.execute(
                 "UPDATE incident_signals
@@ -232,6 +245,7 @@ fn normalize_signals(
     incident_id: &str,
     tenant_id: &str,
     project_id: &str,
+    service: &str,
     now: &str,
 ) -> Result<bool> {
     let mut changed = false;
@@ -242,6 +256,7 @@ fn normalize_signals(
             &signal.signal_ref,
             tenant_id,
             project_id,
+            service,
             now,
         )?;
         if active && signal.resolved_at.is_some() {
@@ -344,7 +359,10 @@ fn desired_severity(active_signals: &[&SignalRow], now: &str) -> String {
 
 fn signal_counts_for_severity(signal: &SignalRow, now: &str) -> bool {
     // Intentional divergence: health-transition signals are active state, not attached_at recency.
-    signal.signal_type == "health_transition" || within_active_window(&signal.attached_at, now)
+    matches!(
+        signal.signal_type.as_str(),
+        "health_transition" | "operational_event"
+    ) || within_active_window(&signal.attached_at, now)
 }
 
 fn signal_active(
@@ -353,6 +371,7 @@ fn signal_active(
     signal_ref: &str,
     tenant_id: &str,
     project_id: &str,
+    service: &str,
     now: &str,
 ) -> Result<bool> {
     match signal_type {
@@ -376,6 +395,22 @@ fn signal_active(
             Ok(target
                 .or(monitor)
                 .is_some_and(|state| HealthState::persisted_incident_signal_active(&state)))
+        }
+        "operational_event" => {
+            let state = transaction
+                .query_row(
+                    "SELECT json_extract(payload, '$.operational.state')
+                     FROM service_events
+                     WHERE tenant_id = ?1 AND project_id = ?2 AND service = ?3
+                       AND entity_type = 'operational_signal' AND entity_ref = ?4
+                     ORDER BY created_at DESC, rowid DESC
+                     LIMIT 1",
+                    params![tenant_id, project_id, service, signal_ref],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten();
+            Ok(state.as_deref() == Some("active"))
         }
         _ => Ok(false),
     }
@@ -543,6 +578,7 @@ fn insert_incident_event(
         event: event.to_owned(),
         id: command.event_id.to_string(),
         payload_json,
+        incident_id: incident.id.clone(),
     })
 }
 

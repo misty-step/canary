@@ -4,12 +4,12 @@ use canary_core::{
         ActiveIncident, ActiveIncidentSignal, ActiveIncidents, ErrorClassAggregate,
         ErrorClassification, ErrorDetail, ErrorDetailGroup, ErrorGroupSummary, ErrorsByClass,
         ErrorsByErrorClass, ErrorsByService, IncidentAnnotation, IncidentDetail,
-        IncidentDetailIncident, IncidentDetailSignal, IncidentTimelineEvent, QueryCursor,
-        QueryWindow, RemediationClaim, RemediationClaimSummary, TimelineCursor, TimelineEvent,
-        TimelineResponse, active_incidents_response, decode_cursor, decode_timeline_cursor,
-        encode_timeline_cursor, error_detail_response, errors_by_class_response,
-        errors_by_error_class_response, errors_by_service_response, incident_detail_response,
-        timeline_response,
+        IncidentDetailIncident, IncidentDetailSignal, IncidentTimelineEvent,
+        OperationalSignalContext, QueryCursor, QueryWindow, RemediationClaim,
+        RemediationClaimSummary, TimelineCursor, TimelineEvent, TimelineResponse,
+        active_incidents_response, decode_cursor, decode_timeline_cursor, encode_timeline_cursor,
+        error_detail_response, errors_by_class_response, errors_by_error_class_response,
+        errors_by_service_response, incident_detail_response, timeline_response,
     },
     webhook_events,
 };
@@ -760,14 +760,42 @@ pub(crate) fn timeline_at(
         sql.push(')');
         filters.extend(event_types.iter().cloned());
     }
+    let legacy_cursor = cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.causal_rank.is_none());
     if let Some(cursor) = cursor.as_ref() {
-        sql.push_str(" AND (created_at < ? OR (created_at = ? AND id < ?))");
-        filters.push(cursor.created_at.clone());
-        filters.push(cursor.created_at.clone());
-        filters.push(cursor.id.clone());
+        match cursor.causal_rank {
+            Some(causal_rank) => {
+                sql.push_str(
+                    " AND (created_at < ? OR (created_at = ? AND (
+                        CASE WHEN event LIKE 'incident.%' THEN '1' ELSE '0' END > ?
+                        OR (CASE WHEN event LIKE 'incident.%' THEN '1' ELSE '0' END = ? AND id < ?)
+                    )))",
+                );
+                filters.push(cursor.created_at.clone());
+                filters.push(cursor.created_at.clone());
+                filters.push(causal_rank.to_string());
+                filters.push(causal_rank.to_string());
+                filters.push(cursor.id.clone());
+            }
+            None => {
+                sql.push_str(" AND (created_at < ? OR (created_at = ? AND id < ?))");
+                filters.push(cursor.created_at.clone());
+                filters.push(cursor.created_at.clone());
+                filters.push(cursor.id.clone());
+            }
+        }
     }
 
-    sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ?");
+    if legacy_cursor {
+        sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ?");
+    } else {
+        sql.push_str(
+            " ORDER BY created_at DESC,
+              CASE WHEN event LIKE 'incident.%' THEN '1' ELSE '0' END ASC,
+              id DESC LIMIT ?",
+        );
+    }
     filters.push((limit + 1).to_string());
 
     let mut statement = connection.prepare(&sql)?;
@@ -799,6 +827,7 @@ pub(crate) fn timeline_at(
         rows.last().and_then(|event| {
             encode_timeline_cursor(&TimelineCursor {
                 created_at: event.created_at.clone(),
+                causal_rank: (!legacy_cursor).then(|| timeline_causal_rank(&event.event)),
                 id: event.id.clone(),
             })
         })
@@ -807,6 +836,10 @@ pub(crate) fn timeline_at(
     };
 
     Ok(timeline_response(rows, service, window, cursor))
+}
+
+fn timeline_causal_rank(event: &str) -> u8 {
+    u8::from(event.starts_with("incident."))
 }
 
 pub(crate) fn error_detail(
@@ -896,7 +929,7 @@ pub(crate) fn active_incidents_at(
 
         let signals = incident_signals(connection, &row.id)?;
         let signal_owner = row.owner();
-        let active_signals = active_signals(connection, signals, signal_owner, now)?;
+        let active_signals = active_signals(connection, signals, signal_owner, &row.service, now)?;
 
         if active_signals.is_empty() {
             continue;
@@ -969,8 +1002,13 @@ fn incident_detail_for_owner(
     let now_string = now
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
-    let signal_context =
-        load_incident_signal_context(connection, &signal_rows, signal_owner, &now_string)?;
+    let signal_context = load_incident_signal_context(
+        connection,
+        &signal_rows,
+        signal_owner,
+        &incident.service,
+        &now_string,
+    )?;
     let signals = signal_rows
         .iter()
         .map(|signal| format_incident_signal(signal, &signal_context))
@@ -1168,6 +1206,7 @@ struct IncidentSignalContext {
     error_groups: std::collections::HashMap<String, ErrorGroupSignalContext>,
     targets: std::collections::HashMap<String, TargetSignalContext>,
     monitors: std::collections::HashMap<String, MonitorSignalContext>,
+    operational: std::collections::HashMap<String, OperationalSignalContext>,
     annotation_counts: std::collections::HashMap<(String, String), u64>,
     claim_summaries: std::collections::HashMap<(String, String), RemediationClaimSummary>,
 }
@@ -1347,10 +1386,12 @@ fn load_incident_signal_context(
     connection: &Connection,
     signals: &[IncidentDetailSignalRow],
     owner: Option<(&str, &str)>,
+    service: &str,
     now: &str,
 ) -> QueryResult<IncidentSignalContext> {
     let error_refs = signal_refs_for_detail(signals, "error_group");
     let health_refs = signal_refs_for_detail(signals, "health_transition");
+    let operational_refs = signal_refs_for_detail(signals, "operational_event");
     let target_refs = health_refs
         .iter()
         .filter(|reference| reference.starts_with("TGT-"))
@@ -1366,9 +1407,62 @@ fn load_incident_signal_context(
         error_groups: load_error_group_signal_context(connection, &error_refs, owner)?,
         targets: load_target_signal_context(connection, &target_refs)?,
         monitors: load_monitor_signal_context(connection, &monitor_refs)?,
+        operational: load_operational_signal_context(
+            connection,
+            &operational_refs,
+            owner,
+            service,
+        )?,
         annotation_counts: load_signal_annotation_counts(connection, signals, owner)?,
         claim_summaries: load_signal_claim_summaries(connection, signals, owner, now)?,
     })
+}
+
+fn load_operational_signal_context(
+    connection: &Connection,
+    refs: &[String],
+    owner: Option<(&str, &str)>,
+    service: &str,
+) -> QueryResult<std::collections::HashMap<String, OperationalSignalContext>> {
+    let Some((tenant_id, project_id)) = owner else {
+        return Ok(std::collections::HashMap::new());
+    };
+    let mut statement = connection.prepare(
+        "SELECT signal_name,
+                json_extract(payload, '$.operational.subject_type'),
+                json_extract(payload, '$.operational.subject_id'),
+                json_extract(payload, '$.operational.state'),
+                json_extract(payload, '$.operational.owner'),
+                json_extract(payload, '$.operational.evidence_url'),
+                json_extract(payload, '$.operational.observed_at'),
+                json_extract(payload, '$.operational.received_at')
+         FROM service_events
+         WHERE tenant_id = ?1 AND project_id = ?2 AND service = ?3
+           AND entity_type = 'operational_signal' AND entity_ref = ?4
+         ORDER BY created_at DESC, rowid DESC
+         LIMIT 1",
+    )?;
+    let mut context = std::collections::HashMap::new();
+    for signal_ref in refs {
+        let value = statement
+            .query_row(params![tenant_id, project_id, service, signal_ref], |row| {
+                Ok(OperationalSignalContext {
+                    name: row.get(0)?,
+                    subject_type: row.get(1)?,
+                    subject_id: row.get(2)?,
+                    state: row.get(3)?,
+                    owner: row.get(4)?,
+                    evidence_url: row.get(5)?,
+                    observed_at: row.get(6)?,
+                    received_at: row.get(7)?,
+                })
+            })
+            .optional()?;
+        if let Some(value) = value {
+            context.insert(signal_ref.clone(), value);
+        }
+    }
+    Ok(context)
 }
 
 fn signal_refs_for_detail(signals: &[IncidentDetailSignalRow], signal_type: &str) -> Vec<String> {
@@ -1742,6 +1836,44 @@ fn format_incident_signal(
         "health_transition" if signal.signal_ref.starts_with("MON-") => {
             format_monitor_signal(signal, context)
         }
+        "operational_event" => {
+            let operational = context.operational.get(&signal.signal_ref).cloned();
+            IncidentDetailSignal {
+                signal_type: "operational_event".to_owned(),
+                summary: operational.as_ref().map_or_else(
+                    || {
+                        format!(
+                            "Operational signal {} (detail unavailable).",
+                            signal.signal_ref
+                        )
+                    },
+                    |value| {
+                        format!(
+                            "{} {} is {} (owner {}).",
+                            value.subject_type, value.subject_id, value.state, value.owner
+                        )
+                    },
+                ),
+                group_hash: None,
+                error_class: None,
+                total_count: None,
+                first_seen_at: None,
+                last_seen_at: None,
+                classification: None,
+                target_id: None,
+                target_name: None,
+                monitor_id: None,
+                monitor_name: None,
+                current_state: operational.as_ref().map(|value| value.state.clone()),
+                consecutive_failures: None,
+                signal_ref: Some(signal.signal_ref.clone()),
+                attached_at: signal.attached_at.clone(),
+                resolved_at: signal.resolved_at.clone(),
+                annotation_count: 0,
+                current_claim: None,
+                operational,
+            }
+        }
         "health_transition" => IncidentDetailSignal {
             signal_type: "health_transition".to_owned(),
             summary: format!(
@@ -1765,6 +1897,7 @@ fn format_incident_signal(
             resolved_at: signal.resolved_at.clone(),
             annotation_count: 0,
             current_claim: claim_summary(context, &signal.signal_type, &signal.signal_ref),
+            operational: None,
         },
         _ => IncidentDetailSignal {
             signal_type: signal.signal_type.clone(),
@@ -1789,6 +1922,7 @@ fn format_incident_signal(
             resolved_at: signal.resolved_at.clone(),
             annotation_count: annotation_count(context, &signal.signal_type, &signal.signal_ref),
             current_claim: claim_summary(context, &signal.signal_type, &signal.signal_ref),
+            operational: None,
         },
     }
 }
@@ -1838,6 +1972,7 @@ fn format_error_group_signal(
         resolved_at: signal.resolved_at.clone(),
         annotation_count: annotation_count(context, &signal.signal_type, &signal.signal_ref),
         current_claim: claim_summary(context, &signal.signal_type, &signal.signal_ref),
+        operational: None,
     }
 }
 
@@ -1884,6 +2019,7 @@ fn format_target_signal(
         resolved_at: signal.resolved_at.clone(),
         annotation_count: annotation_count(context, &signal.signal_type, &signal.signal_ref),
         current_claim: claim_summary(context, &signal.signal_type, &signal.signal_ref),
+        operational: None,
     }
 }
 
@@ -1924,6 +2060,7 @@ fn format_monitor_signal(
         resolved_at: signal.resolved_at.clone(),
         annotation_count: annotation_count(context, &signal.signal_type, &signal.signal_ref),
         current_claim: claim_summary(context, &signal.signal_type, &signal.signal_ref),
+        operational: None,
     }
 }
 
@@ -2018,6 +2155,7 @@ fn active_signals(
     connection: &Connection,
     signals: Vec<IncidentSignalRow>,
     owner: Option<(&str, &str)>,
+    service: &str,
     now: OffsetDateTime,
 ) -> QueryResult<Vec<ActiveIncidentSignal>> {
     let mut active = Vec::new();
@@ -2027,7 +2165,7 @@ fn active_signals(
             continue;
         }
 
-        if signal_active_for_report(connection, &signal, owner, now)? {
+        if signal_active_for_report(connection, &signal, owner, service, now)? {
             active.push(ActiveIncidentSignal {
                 signal_type: signal.signal_type,
                 signal_ref: signal.signal_ref,
@@ -2044,13 +2182,42 @@ fn signal_active_for_report(
     connection: &Connection,
     signal: &IncidentSignalRow,
     owner: Option<(&str, &str)>,
+    service: &str,
     now: OffsetDateTime,
 ) -> QueryResult<bool> {
     match signal.signal_type.as_str() {
         "health_transition" => health_signal_active(connection, &signal.signal_ref),
         "error_group" => error_group_signal_active(connection, &signal.signal_ref, owner, now),
+        "operational_event" => {
+            operational_signal_active(connection, &signal.signal_ref, owner, service)
+        }
         _ => Ok(false),
     }
+}
+
+fn operational_signal_active(
+    connection: &Connection,
+    signal_ref: &str,
+    owner: Option<(&str, &str)>,
+    service: &str,
+) -> QueryResult<bool> {
+    let Some((tenant_id, project_id)) = owner else {
+        return Ok(false);
+    };
+    let state = connection
+        .query_row(
+            "SELECT json_extract(payload, '$.operational.state')
+             FROM service_events
+             WHERE tenant_id = ?1 AND project_id = ?2 AND service = ?3
+               AND entity_type = 'operational_signal' AND entity_ref = ?4
+             ORDER BY created_at DESC, rowid DESC
+             LIMIT 1",
+            params![tenant_id, project_id, service, signal_ref],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(state.as_deref() == Some("active"))
 }
 
 fn health_signal_active(connection: &Connection, signal_ref: &str) -> QueryResult<bool> {
@@ -2157,8 +2324,11 @@ fn incident_severity(signals: &[ActiveIncidentSignal], now: OffsetDateTime) -> S
 }
 
 fn signal_counts_for_severity(signal: &ActiveIncidentSignal, now: OffsetDateTime) -> bool {
-    // Intentional divergence: health-transition signals are active state, not attached_at recency.
-    signal.signal_type == "health_transition" || within_incident_window(&signal.attached_at, now)
+    // Health and operational signals are active state, not attached_at recency.
+    matches!(
+        signal.signal_type.as_str(),
+        "health_transition" | "operational_event"
+    ) || within_incident_window(&signal.attached_at, now)
 }
 
 fn within_incident_window(timestamp: &str, now: OffsetDateTime) -> bool {
