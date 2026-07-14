@@ -196,6 +196,13 @@ fn parity_table() -> Vec<(&'static str, Coverage)> {
             },
         ),
         (
+            "/api/v1/claims/active",
+            Covered {
+                cli_path: &["claims", "active"],
+                mcp_tool: "canary_claims_active",
+            },
+        ),
+        (
             "/api/v1/claims/{id}",
             Covered {
                 cli_path: &["claims", "get"],

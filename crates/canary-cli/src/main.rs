@@ -9,13 +9,13 @@ use std::{
 
 use canary_cli::{
     ApiClient, CliError, Config, IntegrationEnrollRequest, IntegrationInput, McpToolContext,
-    RenderMode, Result, Window, doctor_report, dogfood_strict_failure_count, dogfood_value_report,
-    encode, find_repo_root, integration_discover, integration_enroll, integration_patch,
-    integration_plan, integration_status, json_envelope, mcp_tool_manifest,
+    RenderMode, Result, Window, active_claims_path, doctor_report, dogfood_strict_failure_count,
+    dogfood_value_report, encode, find_repo_root, integration_discover, integration_enroll,
+    integration_patch, integration_plan, integration_status, json_envelope, mcp_tool_manifest,
     normalize_event_payload, print_json, print_lines, resolve_endpoint_without_config,
-    run_dogfood_inventory, summarize_annotations, summarize_claims, summarize_doctor,
-    summarize_dogfood, summarize_dogfood_value, summarize_error_detail, summarize_event,
-    summarize_incident_detail, summarize_incident_escalation, summarize_incidents,
+    run_dogfood_inventory, summarize_active_claims, summarize_annotations, summarize_claims,
+    summarize_doctor, summarize_dogfood, summarize_dogfood_value, summarize_error_detail,
+    summarize_event, summarize_incident_detail, summarize_incident_escalation, summarize_incidents,
     summarize_integration, summarize_monitors, summarize_query, summarize_report,
     summarize_services, summarize_targets, summarize_timeline, summarize_webhook_delivery,
     tool_manifest,
@@ -281,6 +281,8 @@ struct ClaimsArgs {
 enum ClaimsCommand {
     /// List claims for one subject.
     List(ClaimSubjectArgs),
+    /// List active claims fleet-wide across all subjects and services.
+    Active(ClaimsActiveArgs),
     /// Read one claim by id.
     Get(ClaimIdArgs),
     /// Claim one subject.
@@ -301,6 +303,18 @@ struct ClaimSubjectArgs {
     limit: Option<u16>,
     #[arg(long)]
     cursor: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct ClaimsActiveArgs {
+    #[arg(long)]
+    service: Option<String>,
+    #[arg(long)]
+    limit: Option<u16>,
+    #[arg(long)]
+    cursor: Option<String>,
+    #[arg(long)]
+    after: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1026,6 +1040,23 @@ fn run_claims_command(
                 response,
                 mode,
                 summarize_claims,
+            )
+        }
+        ClaimsCommand::Active(args) => {
+            let client = ApiClient::new(Config::resolve(endpoint, api_key, config_path)?)?;
+            let path = active_claims_path(
+                args.service.as_deref(),
+                args.limit,
+                args.cursor.as_deref(),
+                args.after.as_deref(),
+            );
+            let response = client.get_auth_json(&path)?;
+            render(
+                "claims active",
+                client.endpoint(),
+                response,
+                mode,
+                summarize_active_claims,
             )
         }
         ClaimsCommand::Claim(args) => {

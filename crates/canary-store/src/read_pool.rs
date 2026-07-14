@@ -325,6 +325,14 @@ impl ReadConnection {
     ) -> Result<Vec<ApiKeyRecord>> {
         api_keys::list_scoped(&self.connection, tenant_id, project_id)
     }
+
+    /// List active claims across all subjects for one tenant/project.
+    pub fn active_claims(
+        &self,
+        options: &crate::ActiveClaimListOptions,
+    ) -> crate::ClaimResult<canary_core::query::ActiveClaimsResponse> {
+        crate::claims::list_active(&self.connection, options)
+    }
 }
 
 #[cfg(test)]
@@ -402,6 +410,57 @@ mod tests {
 
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].id, "TGT-read-pool-1");
+        Ok(())
+    }
+
+    #[test]
+    fn checkout_active_claims_matches_writer_read() -> Result<()> {
+        let path = temp_db_path("active-claims");
+        let mut store = Store::open(&path)?;
+        store.migrate()?;
+        store.insert_target_scoped(
+            sample_target_insert("TGT-read-pool-claims"),
+            BOOTSTRAP_TENANT_ID,
+            BOOTSTRAP_PROJECT_ID,
+        )?;
+        store
+            .create_claim(crate::ClaimInsert {
+                id: "CLM-read-pool-1".to_owned(),
+                event_id: "EVT-read-pool-1".to_owned(),
+                tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+                project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+                service: Some("canary".to_owned()),
+                subject_type: "target".to_owned(),
+                subject_id: "TGT-read-pool-claims".to_owned(),
+                owner: "codex".to_owned(),
+                purpose: "read pool parity".to_owned(),
+                idempotency_key: "run-read-pool-1".to_owned(),
+                evidence_links: vec![],
+                now: "2026-05-28T20:00:00Z".to_owned(),
+                expires_at: "2099-05-28T20:00:00Z".to_owned(),
+            })
+            .expect("create claim");
+        let options = crate::ActiveClaimListOptions {
+            tenant_id: BOOTSTRAP_TENANT_ID.to_owned(),
+            project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
+            service: None,
+            limit: None,
+            cursor: None,
+        };
+        let via_writer = store.active_claims(&options).expect("writer read");
+        drop(store);
+
+        let pool = ReadPool::open(&path)?;
+        let conn = pool.checkout()?;
+        let via_pool = conn.active_claims(&options).expect("pool read");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+
+        assert_eq!(via_pool, via_writer);
+        assert_eq!(via_pool.claims.len(), 1);
+        assert_eq!(via_pool.claims[0].id, "CLM-read-pool-1");
         Ok(())
     }
 

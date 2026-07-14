@@ -101,6 +101,7 @@
             "WebhookDelivery",
             "TargetChecksResponse",
             "AnnotationsResponse",
+            "ActiveClaimsResponse",
             "RemediationClaimsResponse"
           ]
         },
@@ -136,7 +137,8 @@
           "remediation_claim.updated",
           "remediation_claim.expired",
           "remediation_claim.released"
-        ]
+        ],
+        "fleet_visibility": "GET /api/v1/claims/active lists every active claim across all subjects and services (scope permitting), newest activity first — the fleet-wide who-is-working-what read."
       },
       "telemetry_model": {
         "summary": "Canary owns errors, health checks, check-ins, incidents, annotations, remediation claims, and bounded analytics events that help agents triage operational state.",
@@ -2265,6 +2267,85 @@
           }
         },
         "x-canary-required-scope": "responder-write"
+      }
+    },
+    "/api/v1/claims/active": {
+      "get": {
+        "tags": [
+          "Claims"
+        ],
+        "summary": "List active remediation claims across the fleet",
+        "description": "Returns every active claim (state claimed, investigating, or fix_proposed with expires_at still in the future) across all subject types for the caller's tenant/project, ordered by updated_at descending (freshest activity first). This is the fleet-wide \"who is working what\" read: agents call it to discover in-flight remediation work without knowing subject ids. Service-bound keys see only their own service's claims; unbound read keys see every service and may narrow with the service filter. Freeform claim text (owner, purpose, evidence_links) passes through the shared redaction floor before it crosses service boundaries. This is a pure snapshot: a claim past its expires_at is excluded here even if its stored state has not yet been stamped expired by a write path.",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "description": "Filter to one service. Service-bound keys may only name their own bound service; any other value returns 403.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 20
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque cursor from the previous page.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Alias for cursor. When both are supplied, after wins.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active claims across the fleet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActiveClaimsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/UnauthorizedProblem"
+          },
+          "403": {
+            "$ref": "#/components/responses/ForbiddenProblem"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationProblem"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitedProblem"
+          }
+        },
+        "x-canary-required-scope": "read-only",
+        "x-agent-guidance": {
+          "when_to_call": "Before claiming or planning remediation work, to see which subjects are already owned fleet-wide, or on a coordination tick to monitor in-flight work across services.",
+          "trust": "Point-in-time snapshot ordered by last update; a claim updated during a cursor walk can move ahead of the walk, and two claims updated within the same second may present out of strict chronological order. Expired-but-unswept claims are excluded by predicate, so absence here means no live ownership.",
+          "next": "Drill into a subject with GET /api/v1/claims?subject_type=...&subject_id=..., fetch one claim via GET /api/v1/claims/{id}, or take ownership with POST /api/v1/claims."
+        }
       }
     },
     "/api/v1/claims/{id}": {
@@ -6529,6 +6610,43 @@
               "null"
             ],
             "format": "date-time"
+          }
+        }
+      },
+      "ActiveClaimsResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "summary",
+          "claims",
+          "limit",
+          "cursor",
+          "truncated"
+        ],
+        "properties": {
+          "summary": {
+            "type": "string"
+          },
+          "claims": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RemediationClaim"
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for fetching the next page, or null when all matching claims are visible."
+          },
+          "truncated": {
+            "type": "boolean"
           }
         }
       },

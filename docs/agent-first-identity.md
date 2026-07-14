@@ -106,6 +106,8 @@ knowing internal table names, raw route trivia, or chat-only instructions.
 - `GET /api/v1/timeline`: durable replay after report or webhook wake-up.
 - `GET /api/v1/incidents/{id}`: incident-level entrypoint with correlated
   signals and annotations.
+- `GET /api/v1/claims/active`: fleet-wide "who is working what" before
+  claiming or planning remediation.
 - `POST /api/v1/claims`: ownership before triage or repair.
 - `POST /api/v1/annotations`: evidence and decisions after work.
 - `bin/canary integrate status/plan/patch/enroll`: setup loop for deployed

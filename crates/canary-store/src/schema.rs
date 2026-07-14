@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rusqlite::Connection;
 
 /// Current Rust schema version.
-pub const SCHEMA_VERSION: u32 = 2026071300;
+pub const SCHEMA_VERSION: u32 = 2026071400;
 
 pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
@@ -809,6 +809,15 @@ WHERE state IN ('claimed', 'investigating', 'fix_proposed');
 
 CREATE INDEX IF NOT EXISTS remediation_claims_service_updated_at_index
 ON remediation_claims(service, updated_at);
+
+-- Serves the fleet-wide active-claims list (ORDER BY updated_at DESC,
+-- id DESC with LIMIT) without a temp b-tree sort. SQLite only uses a
+-- partial index when the query's WHERE contains this state IN (...)
+-- literal byte-for-byte, same term order — keep the list in sync with
+-- the active-state literals in claims.rs and query.rs.
+CREATE INDEX IF NOT EXISTS remediation_claims_active_updated_at_index
+ON remediation_claims(tenant_id, project_id, updated_at DESC, id DESC)
+WHERE state IN ('claimed', 'investigating', 'fix_proposed');
 
 CREATE TABLE IF NOT EXISTS webhook_deliveries (
   delivery_id TEXT PRIMARY KEY,

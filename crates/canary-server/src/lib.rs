@@ -67,7 +67,9 @@ use annotations::{
     create_annotation, create_group_annotation, create_incident_annotation, list_annotations,
     list_group_annotations, list_incident_annotations,
 };
-use claims::{create_claim, list_claims, release_claim, show_claim, transition_claim};
+use claims::{
+    active_claims, create_claim, list_claims, release_claim, show_claim, transition_claim,
+};
 pub use dashboard_routes::dashboard_router;
 pub use health_fanout::{
     EnqueueFailure, EnqueueFailureKey, EnqueueFailureRecorder, EnqueueFailureSink,
@@ -188,6 +190,7 @@ pub fn ingest_router(state: IngestState) -> Router {
             get(list_annotations).post(create_annotation),
         )
         .route("/api/v1/claims", get(list_claims).post(create_claim))
+        .route("/api/v1/claims/active", get(active_claims))
         .route("/api/v1/claims/{id}", get(show_claim))
         .route("/api/v1/claims/{id}/transition", post(transition_claim))
         .route("/api/v1/claims/{id}/release", post(release_claim))
@@ -467,6 +470,12 @@ mod tests {
             "responder-write",
         ),
         auth_route("GET", "/api/v1/claims", "/api/v1/claims", "read-only"),
+        auth_route(
+            "GET",
+            "/api/v1/claims/active",
+            "/api/v1/claims/active",
+            "read-only",
+        ),
         auth_route(
             "POST",
             "/api/v1/claims",
@@ -2023,6 +2032,25 @@ mod tests {
             assert!(
                 response.pointer(&format!("/properties/{field}")).is_some(),
                 "RemediationClaimsResponse must define {field}"
+            );
+        }
+
+        let active = document
+            .pointer("/components/schemas/ActiveClaimsResponse")
+            .ok_or("missing ActiveClaimsResponse schema")?;
+        assert!(
+            active.get("allOf").is_none(),
+            "ActiveClaimsResponse must be a single closed object"
+        );
+        assert_eq!(active["additionalProperties"], false);
+        for field in ["summary", "claims", "limit", "cursor", "truncated"] {
+            assert!(
+                schema_required_field(active, field),
+                "ActiveClaimsResponse must require {field}"
+            );
+            assert!(
+                active.pointer(&format!("/properties/{field}")).is_some(),
+                "ActiveClaimsResponse must define {field}"
             );
         }
 
@@ -8191,6 +8219,302 @@ mod tests {
                     "remediation_claim.updated",
                     "remediation_claim.released"
                 ]
+            );
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn active_claims_route_lists_fleet_wide_with_scope_and_redaction()
+    -> Result<(), Box<dyn Error>> {
+        const API_READ_KEY: &str = "sk_live_active_claims_api_read_secret";
+        const API_RESPONDER_KEY: &str = "sk_live_active_claims_api_responder_secret";
+        let state = test_ingest_state()?;
+        let other_tenant_claim_id;
+        {
+            let mut store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            seed_read_api_key_for_service(
+                &mut store,
+                "KEY-active-claims-api-read",
+                API_READ_KEY,
+                "api",
+            )?;
+            seed_responder_api_key_for_service(
+                &mut store,
+                "KEY-active-claims-api-responder",
+                API_RESPONDER_KEY,
+                "api",
+            )?;
+            seed_api_key_with_owner(
+                &mut store,
+                "KEY-active-claims-other-read",
+                OTHER_READ_KEY,
+                "read-only",
+                None,
+                "TENANT-other",
+                "PROJECT-other",
+            )?;
+            seed_target(&mut store, "api")?;
+            seed_target(&mut store, "web")?;
+            let mut other_target = target_insert("other-api");
+            other_target.id = "TGT-other-api".to_owned();
+            store.insert_target_scoped(other_target, "TENANT-other", "PROJECT-other")?;
+            let other_claim = store.create_claim(canary_store::ClaimInsert {
+                id: canary_core::ids::ClaimId::generate().into_string(),
+                event_id: canary_core::ids::EventId::generate().into_string(),
+                tenant_id: "TENANT-other".to_owned(),
+                project_id: "PROJECT-other".to_owned(),
+                service: None,
+                subject_type: "target".to_owned(),
+                subject_id: "TGT-other-api".to_owned(),
+                owner: "other-agent".to_owned(),
+                purpose: "other tenant triage".to_owned(),
+                idempotency_key: "run-other-1".to_owned(),
+                evidence_links: Vec::new(),
+                now: "2026-05-28T20:00:00Z".to_owned(),
+                expires_at: "2099-05-28T20:00:00Z".to_owned(),
+            })?;
+            other_tenant_claim_id = other_claim.id;
+        }
+        let router = ingest_router(state.clone());
+
+        let api_claim = json_body(
+            router
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/api/v1/claims",
+                    ADMIN_KEY,
+                    r#"{"subject_type":"target","subject_id":"TGT-api","owner":"codex","purpose":"investigate deploy with token=sk_live_leaked_secret","ttl_ms":900000,"idempotency_key":"run-active-1","evidence_links":["https://example.com/run/1?auth=Bearer sk_live_evidence_secret"]}"#,
+                )?)
+                .await?,
+        )
+        .await?;
+        let web_claim = json_body(
+            router
+                .clone()
+                .oneshot(json_request(
+                    "POST",
+                    "/api/v1/claims",
+                    ADMIN_KEY,
+                    r#"{"subject_type":"target","subject_id":"TGT-web","owner":"claude","purpose":"triage web timeouts","ttl_ms":900000,"idempotency_key":"run-active-2"}"#,
+                )?)
+                .await?,
+        )
+        .await?;
+        let api_claim_id = api_claim["id"].as_str().ok_or("missing api claim id")?;
+        let web_claim_id = web_claim["id"].as_str().ok_or("missing web claim id")?;
+
+        // Unauthenticated and ingest-scope callers are rejected.
+        let unauthenticated = router
+            .clone()
+            .oneshot(Request::get("/api/v1/claims/active").body(Body::empty())?)
+            .await?;
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        let ingest_scope = router
+            .clone()
+            .oneshot(read_request(INGEST_KEY, "/api/v1/claims/active")?)
+            .await?;
+        assert_eq!(ingest_scope.status(), StatusCode::FORBIDDEN);
+
+        // Unbound read key sees the whole fleet, newest activity first,
+        // with freeform text passed through the redaction floor.
+        let fleet = router
+            .clone()
+            .oneshot(read_request(READ_KEY, "/api/v1/claims/active")?)
+            .await?;
+        assert_eq!(fleet.status(), StatusCode::OK);
+        let fleet_body = json_body(fleet).await?;
+        assert_eq!(
+            fleet_body["summary"],
+            "2 active remediation claims across 2 services."
+        );
+        assert_eq!(fleet_body["claims"].as_array().map(Vec::len), Some(2));
+        assert_eq!(fleet_body["truncated"], false);
+        assert_eq!(fleet_body["cursor"], Value::Null);
+        let fleet_ids = fleet_body["claims"]
+            .as_array()
+            .ok_or("claims must be an array")?
+            .iter()
+            .filter_map(|claim| claim["id"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            fleet_ids,
+            [api_claim_id, web_claim_id].into_iter().collect()
+        );
+        assert!(
+            !fleet_ids.contains(other_tenant_claim_id.as_str()),
+            "fleet list must not leak another tenant's claims"
+        );
+
+        // The second tenant's unbound read key sees only its own claim.
+        let other_fleet = json_body(
+            router
+                .clone()
+                .oneshot(read_request(OTHER_READ_KEY, "/api/v1/claims/active")?)
+                .await?,
+        )
+        .await?;
+        assert_eq!(other_fleet["claims"].as_array().map(Vec::len), Some(1));
+        assert_eq!(other_fleet["claims"][0]["id"], other_tenant_claim_id);
+        let redacted_api_claim = fleet_body["claims"]
+            .as_array()
+            .ok_or("claims must be an array")?
+            .iter()
+            .find(|claim| claim["id"] == api_claim_id)
+            .ok_or("api claim missing from fleet list")?;
+        assert_eq!(
+            redacted_api_claim["purpose"],
+            "investigate deploy with token=[REDACTED]"
+        );
+        assert_eq!(
+            redacted_api_claim["evidence_links"][0],
+            "https://example.com/run/1?auth=Bearer [REDACTED]"
+        );
+
+        // Service-bound read key is pinned to its own service.
+        let bound = json_body(
+            router
+                .clone()
+                .oneshot(read_request(API_READ_KEY, "/api/v1/claims/active")?)
+                .await?,
+        )
+        .await?;
+        assert_eq!(bound["claims"].as_array().map(Vec::len), Some(1));
+        assert_eq!(bound["claims"][0]["id"], api_claim_id);
+        let bound_mismatch = router
+            .clone()
+            .oneshot(read_request(
+                API_READ_KEY,
+                "/api/v1/claims/active?service=web",
+            )?)
+            .await?;
+        assert_eq!(bound_mismatch.status(), StatusCode::FORBIDDEN);
+
+        // Unbound key may narrow to one service.
+        let narrowed = json_body(
+            router
+                .clone()
+                .oneshot(read_request(READ_KEY, "/api/v1/claims/active?service=web")?)
+                .await?,
+        )
+        .await?;
+        assert_eq!(narrowed["claims"].as_array().map(Vec::len), Some(1));
+        assert_eq!(narrowed["claims"][0]["id"], web_claim_id);
+
+        // A service-bound responder-write key reads its own service's claims.
+        let responder_view = json_body(
+            router
+                .clone()
+                .oneshot(read_request(API_RESPONDER_KEY, "/api/v1/claims/active")?)
+                .await?,
+        )
+        .await?;
+        assert_eq!(responder_view["claims"].as_array().map(Vec::len), Some(1));
+        assert_eq!(responder_view["claims"][0]["id"], api_claim_id);
+
+        // A duplicated query key is a 422 problem, not a plain-text 400.
+        let duplicate_key = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/claims/active?service=api&service=web",
+            )?)
+            .await?;
+        assert_eq!(duplicate_key.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let duplicate_body = json_body(duplicate_key).await?;
+        assert_eq!(duplicate_body["code"], "validation_error");
+
+        // Pagination: limit=1 truncates and hands back a cursor; `after`
+        // wins over an invalid `cursor` (alias precedence).
+        let first_page = json_body(
+            router
+                .clone()
+                .oneshot(read_request(READ_KEY, "/api/v1/claims/active?limit=1")?)
+                .await?,
+        )
+        .await?;
+        assert_eq!(first_page["claims"].as_array().map(Vec::len), Some(1));
+        assert_eq!(first_page["truncated"], true);
+        let cursor = first_page["cursor"]
+            .as_str()
+            .ok_or("missing cursor")?
+            .to_owned();
+        let second_page = json_body(
+            router
+                .clone()
+                .oneshot(read_request(
+                    READ_KEY,
+                    &format!("/api/v1/claims/active?limit=1&cursor=bogus&after={cursor}"),
+                )?)
+                .await?,
+        )
+        .await?;
+        assert_eq!(second_page["claims"].as_array().map(Vec::len), Some(1));
+        assert_ne!(
+            second_page["claims"][0]["id"], first_page["claims"][0]["id"],
+            "cursor walk must not duplicate"
+        );
+        let invalid_cursor = router
+            .clone()
+            .oneshot(read_request(
+                READ_KEY,
+                "/api/v1/claims/active?cursor=bogus",
+            )?)
+            .await?;
+        assert_eq!(invalid_cursor.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let invalid_limit = router
+            .clone()
+            .oneshot(read_request(READ_KEY, "/api/v1/claims/active?limit=0")?)
+            .await?;
+        assert_eq!(invalid_limit.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // A released claim drops out of the active snapshot.
+        let released = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                &format!("/api/v1/claims/{api_claim_id}/release"),
+                ADMIN_KEY,
+                r#"{"owner":"codex"}"#,
+            )?)
+            .await?;
+        assert_eq!(released.status(), StatusCode::OK);
+        let after_release = json_body(
+            router
+                .clone()
+                .oneshot(read_request(READ_KEY, "/api/v1/claims/active")?)
+                .await?,
+        )
+        .await?;
+        assert_eq!(after_release["claims"].as_array().map(Vec::len), Some(1));
+        assert_eq!(after_release["claims"][0]["id"], web_claim_id);
+        assert_eq!(
+            after_release["summary"],
+            "1 active remediation claim across 1 service."
+        );
+
+        // Non-admin fleet reads leave a durable read-audit trail.
+        {
+            let store = state.lock_store().map_err(|_| "store lock poisoned")?;
+            let audit_trail = store.timeline(
+                "1h",
+                canary_store::TimelineQueryOptions {
+                    tenant_id: Some(canary_store::BOOTSTRAP_TENANT_ID.to_owned()),
+                    project_id: Some(canary_store::BOOTSTRAP_PROJECT_ID.to_owned()),
+                    service: None,
+                    limit: Some("50".to_owned()),
+                    cursor: None,
+                    event_type: Some("telemetry.event".to_owned()),
+                },
+            )?;
+            assert!(
+                audit_trail
+                    .events
+                    .iter()
+                    .any(|event| event.summary.contains("GET /api/v1/claims/active")),
+                "expected a responder.context_read audit event for the fleet read"
             );
         }
 

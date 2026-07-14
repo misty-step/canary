@@ -178,6 +178,21 @@ pub struct ClaimCursor {
     pub id: String,
 }
 
+/// Structured cursor used by fleet-wide active-claim pagination.
+///
+/// Active claims order by `updated_at` (freshest activity first), so the
+/// cursor carries that column rather than `created_at`. A claim transition
+/// during a cursor walk moves the row to the front of the ordering; the
+/// walk stays gap/duplicate-free over a quiescent set, which is the
+/// contract the read advertises.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveClaimCursor {
+    /// Last row update timestamp from the previous page.
+    pub updated_at: String,
+    /// Last row id from the previous page.
+    pub id: String,
+}
+
 /// Offset cursor used by Phoenix for the unified report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReportCursor {
@@ -277,6 +292,25 @@ pub fn decode_claim_cursor(cursor: &str) -> Option<ClaimCursor> {
 
 /// Encode a remediation claim cursor.
 pub fn encode_claim_cursor(cursor: &ClaimCursor) -> Option<String> {
+    let json = serde_json::to_vec(cursor).ok()?;
+    Some(BASE64_URL_SAFE_NO_PAD.encode(json))
+}
+
+/// Decode a fleet-wide active-claim cursor.
+pub fn decode_active_claim_cursor(cursor: &str) -> Option<ActiveClaimCursor> {
+    let decoded = BASE64_URL_SAFE_NO_PAD.decode(cursor).ok()?;
+    let cursor = serde_json::from_slice::<ActiveClaimCursor>(&decoded).ok()?;
+    if cursor.updated_at.is_empty()
+        || cursor.id.is_empty()
+        || OffsetDateTime::parse(&cursor.updated_at, &Rfc3339).is_err()
+    {
+        return None;
+    }
+    Some(cursor)
+}
+
+/// Encode a fleet-wide active-claim cursor.
+pub fn encode_active_claim_cursor(cursor: &ActiveClaimCursor) -> Option<String> {
     let json = serde_json::to_vec(cursor).ok()?;
     Some(BASE64_URL_SAFE_NO_PAD.encode(json))
 }
@@ -474,6 +508,21 @@ pub struct RemediationClaimsResponse {
     pub limit: usize,
     /// Current active claim for the subject, if one exists.
     pub current_claim: Option<RemediationClaimSummary>,
+    /// Next-page cursor, or null when all matching claims are visible.
+    pub cursor: Option<String>,
+    /// Whether more claims exist past this response.
+    pub truncated: bool,
+}
+
+/// Response for `GET /api/v1/claims/active`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveClaimsResponse {
+    /// Deterministic summary.
+    pub summary: String,
+    /// Active claims ordered by last update, newest first.
+    pub claims: Vec<RemediationClaim>,
+    /// Effective page limit.
+    pub limit: usize,
     /// Next-page cursor, or null when all matching claims are visible.
     pub cursor: Option<String>,
     /// Whether more claims exist past this response.
@@ -1267,6 +1316,39 @@ pub fn remediation_claims_response(
         claims,
         limit,
         current_claim,
+        cursor,
+        truncated,
+    }
+}
+
+/// Build the deterministic fleet-wide active-claims response.
+pub fn active_claims_response(
+    claims: Vec<RemediationClaim>,
+    limit: usize,
+    cursor: Option<String>,
+) -> ActiveClaimsResponse {
+    let claim_count = claims.len();
+    let mut services: Vec<&str> = claims
+        .iter()
+        .map(|claim| claim.service.as_deref().unwrap_or("unattributed"))
+        .collect();
+    services.sort_unstable();
+    services.dedup();
+    let service_count = services.len();
+    let truncated = cursor.is_some();
+    let summary = if claim_count == 0 {
+        "0 active remediation claims.".to_owned()
+    } else {
+        format!(
+            "{claim_count} active remediation {} across {service_count} {}.",
+            pluralize_usize(claim_count, "claim", "claims"),
+            pluralize_usize(service_count, "service", "services")
+        )
+    };
+    ActiveClaimsResponse {
+        summary,
+        claims,
+        limit,
         cursor,
         truncated,
     }
