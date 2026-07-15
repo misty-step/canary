@@ -8,7 +8,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs},
+    net::{IpAddr, SocketAddr, TcpStream},
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, Condvar, Mutex,
@@ -19,6 +19,7 @@ use std::{
     time::{Duration as StdDuration, Instant},
 };
 
+use crate::egress::{host_without_ipv6_brackets, is_global_ip, resolve_destination_addrs};
 use crate::route_state::SharedStore;
 use canary_core::health::state_machine::{Counters, HealthState, Thresholds};
 use canary_store::{ActiveTargetProbeSchedule, TargetProbeSnapshot};
@@ -127,18 +128,51 @@ pub trait ProbeTransport: Send + Sync {
 pub struct ReqwestProbeTransport;
 
 /// Validated HTTP request passed to the transport.
+///
+/// Fields stay private so this value is an unforgeable policy capability:
+/// callers may inspect an approved plan through getters but cannot substitute
+/// an address or private-target grant before invoking a concrete transport.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeRequest {
     /// HTTP method.
-    pub method: String,
+    method: String,
     /// Original URL, preserving host for Host/SNI.
-    pub url: String,
+    url: String,
     /// Parsed request headers.
-    pub headers: BTreeMap<String, String>,
+    headers: BTreeMap<String, String>,
     /// Timeout in milliseconds.
-    pub timeout_ms: i64,
+    timeout_ms: i64,
     /// Resolved and approved socket addresses for this probe.
-    pub resolved_addrs: Vec<SocketAddr>,
+    resolved_addrs: Vec<SocketAddr>,
+    /// Whether the internal planner explicitly approved private destinations.
+    allow_private_targets: bool,
+}
+
+impl ProbeRequest {
+    /// Validated HTTP method.
+    pub fn method(&self) -> &str {
+        &self.method
+    }
+
+    /// Original validated URL, preserving its Host/SNI authority.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Validated request headers.
+    pub fn headers(&self) -> &BTreeMap<String, String> {
+        &self.headers
+    }
+
+    /// Request timeout in milliseconds.
+    pub fn timeout_ms(&self) -> i64 {
+        self.timeout_ms
+    }
+
+    /// Resolved and policy-approved socket addresses pinned to this request.
+    pub fn resolved_addrs(&self) -> &[SocketAddr] {
+        &self.resolved_addrs
+    }
 }
 
 /// Runtime boundary for executing target probes.
@@ -887,6 +921,7 @@ impl ProbeTransport for ReqwestProbeTransport {
         let timeout = timeout(request.timeout_ms);
         let url = Url::parse(&request.url)
             .map_err(|error| ProbeTransportError::Connection(error.to_string()))?;
+        validate_transport_destination(&url, &request)?;
         let host = url
             .host_str()
             .ok_or_else(|| ProbeTransportError::Connection("missing URL host".to_owned()))?;
@@ -923,6 +958,48 @@ impl ProbeTransport for ReqwestProbeTransport {
             tls_expires_at: None,
         })
     }
+}
+
+fn validate_transport_destination(
+    url: &Url,
+    request: &ProbeRequest,
+) -> Result<(), ProbeTransportError> {
+    if request.allow_private_targets {
+        return Ok(());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| ProbeTransportError::Connection("missing URL host".to_owned()))?;
+    if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
+        return Err(ProbeTransportError::Connection(
+            "target host resolves to localhost".to_owned(),
+        ));
+    }
+    if request.resolved_addrs.is_empty() {
+        return Err(ProbeTransportError::Connection(
+            "target DNS resolution returned no addresses".to_owned(),
+        ));
+    }
+    for addr in &request.resolved_addrs {
+        if !is_global_ip(addr.ip()) {
+            return Err(ProbeTransportError::Connection(format!(
+                "target resolved to non-global address {}",
+                addr.ip()
+            )));
+        }
+    }
+    if let Ok(literal) = host_without_ipv6_brackets(host).parse::<IpAddr>()
+        && (request
+            .resolved_addrs
+            .iter()
+            .any(|addr| addr.ip() != literal)
+            || !is_global_ip(literal))
+    {
+        return Err(ProbeTransportError::Connection(format!(
+            "target URL contains non-global or unpinned address {literal}"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -982,13 +1059,17 @@ fn extract_tls_expiry(
     if scheme != "https" {
         return None;
     }
-    let server_name = ServerName::try_from(host.to_owned()).ok()?;
+    let server_name = tls_server_name(host)?;
     for addr in resolved_addrs {
         if let Some(expiry) = extract_tls_expiry_from_addr(*addr, server_name.clone(), timeout) {
             return Some(expiry);
         }
     }
     None
+}
+
+fn tls_server_name(host: &str) -> Option<ServerName<'static>> {
+    ServerName::try_from(host_without_ipv6_brackets(host).to_owned()).ok()
 }
 
 fn extract_tls_expiry_from_addr(
@@ -1118,6 +1199,7 @@ fn probe_request(
         headers: parse_headers(snapshot.headers.as_deref())?,
         timeout_ms: snapshot.timeout_ms,
         resolved_addrs,
+        allow_private_targets,
     })
 }
 
@@ -1131,13 +1213,7 @@ fn resolve_and_validate(
     {
         return Err("target host resolves to localhost".to_owned());
     }
-    let addrs = (host, port)
-        .to_socket_addrs()
-        .map_err(|error| format!("target DNS resolution failed: {error}"))?
-        .collect::<Vec<_>>();
-    if addrs.is_empty() {
-        return Err("target DNS resolution returned no addresses".to_owned());
-    }
+    let addrs = resolve_destination_addrs(host, port, "target")?;
     if !allow_private_targets {
         for addr in &addrs {
             if !is_global_ip(addr.ip()) {
@@ -1302,53 +1378,6 @@ fn deterministic_jitter(target_id: &str, jitter_range: i64) -> i64 {
         hash = hash.wrapping_mul(31).wrapping_add(i64::from(byte));
     }
     hash.rem_euclid(span) - jitter_range
-}
-
-fn is_global_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => is_global_ipv4(ip),
-        IpAddr::V6(ip) => is_global_ipv6(ip),
-    }
-}
-
-fn is_global_ipv4(ip: Ipv4Addr) -> bool {
-    let [a, b, _, d] = ip.octets();
-    !(ip.is_private()
-        || ip.is_loopback()
-        || ip.is_link_local()
-        || ip.is_unspecified()
-        || ip.is_broadcast()
-        || ip.is_multicast()
-        || (a == 100 && (64..=127).contains(&b))
-        || a == 0
-        || a >= 224
-        || (a == 169 && b == 254)
-        || (a == 192 && b == 0)
-        || (a == 192 && b == 0 && d == 8)
-        || (a == 192 && b == 0 && d == 9)
-        || (a == 192 && b == 0 && d == 10)
-        || (a == 192 && b == 0 && d == 170)
-        || (a == 192 && b == 0 && d == 171)
-        || (a == 192 && b == 0 && d == 2)
-        || (a == 198 && b == 18)
-        || (a == 198 && b == 19)
-        || (a == 198 && b == 51)
-        || (a == 203 && b == 0))
-}
-
-fn is_global_ipv6(ip: Ipv6Addr) -> bool {
-    let segments = ip.segments();
-    let first = segments[0];
-    !(ip.is_loopback()
-        || ip.is_unspecified()
-        || ip.is_multicast()
-        || (first & 0xfe00) == 0xfc00
-        || (first & 0xffc0) == 0xfe80
-        || (first == 0x2001 && segments[1] == 0x0db8)
-        || (segments[0..5] == [0, 0, 0, 0, 0] && segments[5] == 0xffff)
-        || ip
-            .to_ipv4_mapped()
-            .is_some_and(|mapped| !is_global_ipv4(mapped)))
 }
 
 #[cfg(test)]
@@ -1647,19 +1676,36 @@ mod tests {
     }
 
     #[test]
-    fn ssrf_classification_blocks_non_global_addresses_by_default() {
-        for ip in [
-            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)),
-            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
-            IpAddr::V6(Ipv6Addr::LOCALHOST),
-            IpAddr::V6("fc00::1".parse().unwrap_or(Ipv6Addr::LOCALHOST)),
-            IpAddr::V6("::ffff:127.0.0.1".parse().unwrap_or(Ipv6Addr::LOCALHOST)),
+    fn probe_resolution_consults_the_shared_egress_oracle() -> Result<(), String> {
+        for host in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "169.254.169.254",
+            "192.0.2.10",
+            "fc00::1",
+            "::ffff:169.254.169.254",
+            "[::ffff:169.254.169.254]",
+            "::169.254.169.254",
+            "2002:a9fe:a9fe::",
+            "64:ff9b::a00:1",
         ] {
-            assert!(!is_global_ip(ip), "{ip} should be blocked");
+            match resolve_and_validate(host, 80, false) {
+                Ok(_) => return Err(format!("{host} must be rejected on the probe path")),
+                Err(error) => assert!(
+                    error.contains("non-global address"),
+                    "{host}: unexpected rejection reason: {error}"
+                ),
+            }
         }
-        assert!(is_global_ip(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))));
+        assert!(resolve_and_validate("127.0.0.1", 80, true).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn tls_server_name_normalizes_bracketed_ipv6_literal() {
+        let host = "[2606:4700:4700::1111]";
+        assert!(ServerName::try_from(host.to_owned()).is_err());
+        assert!(tls_server_name(host).is_some());
     }
 
     #[test]
@@ -1696,7 +1742,7 @@ mod tests {
 
     #[test]
     fn ssrf_block_persists_failed_probe_without_opening_transport() -> Result<(), Box<dyn Error>> {
-        let store = seeded_store("http://127.0.0.1/health", "up")?;
+        let store = seeded_store("http://[::ffff:169.254.169.254]/health", "up")?;
         let transport = StaticTransport::ok(200, "ok");
         let sink = Arc::new(RecordingSink::default());
         let fanout = HealthEventFanout::new_without_failure_sink(sink);
@@ -1719,6 +1765,38 @@ mod tests {
             0,
             "no webhook subscriptions exist in this fixture"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn reqwest_transport_rejects_forged_non_global_destination_before_connecting()
+    -> Result<(), Box<dyn Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let request = ProbeRequest {
+            method: "GET".to_owned(),
+            url: format!("http://[::ffff:127.0.0.1]:{}/health", addr.port()),
+            headers: BTreeMap::new(),
+            timeout_ms: 50,
+            resolved_addrs: vec![addr],
+            allow_private_targets: false,
+        };
+
+        let error = match ReqwestProbeTransport.probe(request) {
+            Ok(_) => return Err("forged non-global destination was accepted".into()),
+            Err(error) => error,
+        };
+        let ProbeTransportError::Connection(detail) = error else {
+            return Err(format!("expected connection-policy error, got {error:?}").into());
+        };
+        assert!(detail.contains("non-global"));
+
+        listener.set_nonblocking(true)?;
+        match listener.accept() {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Ok(_) => return Err("transport connected to forged non-global destination".into()),
+            Err(error) => return Err(error.into()),
+        }
         Ok(())
     }
 

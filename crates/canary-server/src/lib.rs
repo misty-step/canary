@@ -2785,12 +2785,12 @@ mod tests {
     }
 
     #[test]
-    fn http_webhook_transport_rejects_private_destination_before_request()
+    fn http_webhook_transport_rejects_mapped_destinations_before_request()
     -> Result<(), Box<dyn Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let addr = listener.local_addr()?;
-        let request = WebhookRequest {
-            url: format!("http://{addr}/hook"),
+        let mut request = WebhookRequest {
+            url: format!("http://[::ffff:127.0.0.1]:{}/hook", addr.port()),
             body: "{}".to_owned(),
             headers: canary_http::webhooks::headers_for_body(
                 "{}",
@@ -2805,9 +2805,16 @@ mod tests {
         let transport = HttpWebhookTransport::with_timeout(StdDuration::from_millis(200))?;
 
         let TransportResult::RequestError(reason) = transport.send(&request) else {
-            return Err("private destination should be rejected before HTTP request".into());
+            return Err("mapped loopback should be rejected before HTTP request".into());
         };
-        assert!(reason.contains("non-global") || reason.contains("localhost"));
+        assert!(reason.contains("non-global"));
+
+        request.url = "http://[::ffff:169.254.169.254]/hook".to_owned();
+        let TransportResult::RequestError(reason) = transport.send(&request) else {
+            return Err("mapped metadata should be rejected before HTTP request".into());
+        };
+        assert!(reason.contains("non-global"));
+
         listener.set_nonblocking(true)?;
         match listener.accept() {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -4668,7 +4675,7 @@ mod tests {
                 "POST",
                 "/api/v1/targets",
                 ADMIN_KEY,
-                r#"{"url":"http://127.0.0.1:9/health","name":"Local API","allow_private":true}"#,
+                r#"{"url":"http://[::ffff:169.254.169.254]/health","name":"Metadata","allow_private":true}"#,
             )?)
             .await?;
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -5105,22 +5112,25 @@ mod tests {
             "Invalid webhook configuration."
         );
 
-        let local_webhook_response = router
+        let non_global_webhook_response = router
             .clone()
             .oneshot(json_request(
                 "POST",
                 "/api/v1/webhooks",
                 ADMIN_KEY,
-                r#"{"url":"http://127.0.0.1:9/hook","events":["error.new_class"]}"#,
+                r#"{"url":"http://[::ffff:169.254.169.254]/hook","events":["error.new_class"]}"#,
             )?)
             .await?;
         assert_eq!(
-            local_webhook_response.status(),
+            non_global_webhook_response.status(),
             StatusCode::UNPROCESSABLE_ENTITY
         );
-        let local_webhook = json_body(local_webhook_response).await?;
-        assert_eq!(local_webhook["code"], "validation_error");
-        assert_eq!(local_webhook["detail"], "Invalid webhook configuration.");
+        let non_global_webhook = json_body(non_global_webhook_response).await?;
+        assert_eq!(non_global_webhook["code"], "validation_error");
+        assert_eq!(
+            non_global_webhook["detail"],
+            "Invalid webhook configuration."
+        );
 
         Ok(())
     }
