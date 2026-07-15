@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(
+    os.environ.get("CANARY_CI_SOURCE_ROOT", Path(__file__).resolve().parents[2])
+)
 INDEX_PATH = ROOT / "dagger/src/index.ts"
 
 COMMON_IGNORE = [
@@ -35,11 +38,20 @@ FUNCTION_POLICIES = {
     "openapiContract": "without_git",
     "typescriptQuality": "without_git",
     "rustQuality": "without_git",
+    "rustCoverage": "without_git",
     "productionImageSmoke": "without_git",
+    "changeScope": "without_git",
     "productionImageAlertPlaneRehearsal": "without_git",
     "rustAdvisories": "without_git",
     "secrets": "with_git",
     "secretsHistory": "with_git",
+}
+
+AUXILIARY_ARGUMENT_POLICIES = {
+    ("strict", "base"): "without_git",
+    ("deterministic", "policy"): "without_git",
+    ("rustCoverage", "policy"): "without_git",
+    ("changeScope", "base"): "without_git",
 }
 
 ARGUMENT_BLOCK_PATTERN = re.compile(
@@ -52,6 +64,47 @@ ARGUMENT_SUFFIX = "\n      ],\n    })\n    source?: Directory,"
 def render_ignore_block(policy_name: str) -> str:
     entries = SOURCE_POLICIES[policy_name]
     return "\n".join(f'        "{entry}",' for entry in entries)
+
+
+def render_auxiliary_argument(argument_name: str, policy_name: str) -> str:
+    return "\n".join(
+        [
+            "    @argument({",
+            "      ignore: [",
+            render_ignore_block(policy_name),
+            "      ],",
+            "    })",
+            f"    {argument_name}?: Directory,",
+        ]
+    )
+
+
+def method_parameters(source_text: str, method_name: str) -> str:
+    match = re.search(rf"\basync\s+{re.escape(method_name)}\s*\(", source_text)
+    if match is None:
+        raise RuntimeError(f"{INDEX_PATH}: missing async {method_name}()")
+    start = match.end() - 1
+    depth = 0
+    for index in range(start, len(source_text)):
+        character = source_text[index]
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth == 0:
+                return source_text[start + 1 : index]
+    raise RuntimeError(f"{INDEX_PATH}: unterminated parameters for async {method_name}()")
+
+
+def validate_auxiliary_arguments(source_text: str) -> None:
+    for (method_name, argument_name), policy_name in AUXILIARY_ARGUMENT_POLICIES.items():
+        expected = render_auxiliary_argument(argument_name, policy_name)
+        parameters = method_parameters(source_text, method_name)
+        if expected not in parameters:
+            raise RuntimeError(
+                f"{INDEX_PATH}: {method_name}() {argument_name} Directory argument "
+                f"must use the canonical {policy_name} ignore policy"
+            )
 
 
 def sync_source_arguments(source_text: str) -> str:
@@ -90,6 +143,8 @@ def sync_source_arguments(source_text: str) -> str:
             problems.append(f"unmapped functions in dagger/src/index.ts: {', '.join(unexpected)}")
         raise RuntimeError("; ".join(problems))
 
+    validate_auxiliary_arguments(updated)
+
     return updated
 
 
@@ -117,7 +172,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     original = INDEX_PATH.read_text()
-    updated = sync_source_arguments(original)
+    try:
+        updated = sync_source_arguments(original)
+    except RuntimeError as error:
+        print(error, file=sys.stderr)
+        return 1
 
     if args.write:
         if updated != original:

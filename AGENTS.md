@@ -60,15 +60,19 @@ Prefer these over re-deriving from the code base.
 | `./bin/validate --fast` | → `dagger call fast` (lint + core tests) | `.githooks/pre-commit` |
 | `./bin/validate --strict` | → `dagger call strict` (full gate + advisories + optional `.codex/agents/*.toml` validation when present) | `.githooks/pre-push` |
 | `./bin/validate --advisories` | live advisory scan only | manual run |
-| `dagger call strict --source=../candidate` | Hosted CI in `pull_request_target` immutable control plane (trusted base checkout at `.ci/trusted/`, candidate at `.ci/candidate/`) | `.github/workflows/ci.yml` |
+| `dagger call strict --source=../candidate --base=../trusted` | Hosted CI in `pull_request_target` immutable control plane; the trusted base alone classifies documentation-only diffs | `.github/workflows/ci.yml` |
 | `bin/canary-recovery status --config <path>` | Read-only Litestream status against caller-supplied configuration | manual pre-deploy check |
 | `bin/canary-recovery restore-check --config <path> --database <path> --server-bin <path>` | Non-destructive restore, migration, version, and data-verification receipt | manual recovery drill |
 
 **Package gates inside strict:**
 - Rust workspace: format, check, clippy (`-D warnings`), tests.
+- Rust workspace coverage: pinned `cargo-llvm-cov` with a trusted 90% line floor.
 - `clients/typescript/`: typecheck, coverage, build.
 - Operator scripts: entrypoint, DR, and dogfood audit shell tests.
 - Production image: Docker build + `/healthz` and `/readyz` smoke.
+- Seeded production-image load: 50k current + 20k expired errors, concurrent
+  ingest/query/report/readiness, enforced query/report p95, zero HTTP errors,
+  and observed retention deletion.
 
 `bin/dagger` refuses CLI version drift from `dagger.json`. Do not hand-edit `.github/workflows/ci.yml` from a PR branch — the workflow lives outside the candidate diff per `docs/ci-control-plane.md`.
 
@@ -86,7 +90,6 @@ Prefer these over re-deriving from the code base.
 | **canary-930 Request-path concurrency** (ready, P0) | Powder | bcrypt-under-store-lock root cause (live-reproduced), /readyz spiral, mutex poisoning, monitor_overdue scan, oban_jobs growth. Consolidates the slow-API/500 cards. |
 | **canary-931 Release pipeline restore** (ready, P0) | Powder | Releaser App secrets missing (releases hard-down), zero GitHub releases, version truth, and API/CLI/MCP integration contract. |
 | **canary-932 Coordination loop in anger** (ready, P0) | Powder | CLI/MCP read-half parity (incident get, timeline cursor, drill-downs, parity guard) + dogfood claims on real incidents. |
-| **canary-933 Gate proves live behavior** (ready, P1) | Powder | Latency floor, seeded-volume + concurrency rehearsal, post-deploy gate, Rust coverage ratchet, diff-scoped strict. Absorbs 914/972. |
 | **canary-934 Portable release and recovery** (claimed, P1) | Powder | Declarative OCI release manifest, generic S3-compatible recovery, data verification, and product/deployment boundary cleanup; live publication/signing acceptance remains open. |
 | **canary-935 /ui first-class** (ready, P1) | Powder | Vendored fonts, graceful degradation, read contract, UI smoke, mobile-first. Folds 067/068/915 intent. |
 | **canary-936 Service-bound reads + redaction corpus** (ready, P0) | Powder | Unbound read keys read cross-service rich context; four-regex redaction. 048 successor; ADR-gated scope model. |

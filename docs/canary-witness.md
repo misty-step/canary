@@ -25,6 +25,11 @@ checking.
 | Alert plane | `/readyz` worker snapshots | Every required worker except `monitor_overdue` has `health: ok`, no backoff/circuit pressure, and no stale due-work pressure. `monitor_overdue` pressure is out of the witness's own scope (see below) and does not by itself degrade the witness. Any other `pressured` worker still keeps route-ready but blocks the witness from reporting healthy. |
 | Error readback | `GET /api/v1/query?service=canary&window=1h` | HTTP 200, service `canary`, and numeric `total_errors` |
 
+When `CANARY_WITNESS_MAX_LATENCY_MS` or `--max-latency-ms` is set, every route
+probe must also complete within that positive millisecond budget. A slow HTTP
+200 is operationally degraded: the witness exits nonzero and records the probe,
+observed latency, and budget in `latency_breaches`.
+
 ### Witness scope: `monitor_overdue` never blocks the witness alone
 
 The witness's own health verdict is scoped to its own signals — healthz,
@@ -82,6 +87,14 @@ The workflow keeps the cron expression at `*/5 * * * *` for best-effort
 freshness but sets `CANARY_WITNESS_TTL_MS=7200000` because observed GitHub
 scheduled runs can land roughly hourly or later. Tightening this TTL requires
 moving the witness to a scheduler that can meet the tighter cadence.
+The upstream workflow also sets `CANARY_WITNESS_MAX_LATENCY_MS=2000`, matching
+the seeded-volume query ceiling enforced before merge.
+
+The witness is a detector, not a deployment controller. A nonzero result blocks
+or aborts promotion when the deployer invokes it as a post-deploy gate. If a
+previous release was already replaced, rollback remains the deployer's
+responsibility under Canary's portable runtime boundary; Canary does not embed
+provider-specific promotion or rollback commands.
 
 Required repository secrets:
 

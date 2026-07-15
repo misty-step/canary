@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import hashlib
 import re
 import shutil
 import subprocess
@@ -10,7 +11,9 @@ errors = []
 
 
 def workspace_root():
-    candidate = os.environ.get("GITHUB_WORKSPACE")
+    candidate = os.environ.get("CANARY_CI_SOURCE_ROOT") or os.environ.get(
+        "GITHUB_WORKSPACE"
+    )
 
     if candidate:
         return Path(candidate)
@@ -27,11 +30,15 @@ def read_required_text(path, label):
 
 
 root = workspace_root()
+policy_root = Path(os.environ.get("CANARY_CI_POLICY_ROOT", root))
 workflow = read_required_text(root / ".github/workflows/ci.yml", "GitHub workflow")
+uptime_workflow = read_required_text(
+    root / ".github/workflows/uptime-monitor.yml", "witness workflow"
+)
 dagger_source = read_required_text(root / "dagger/src/index.ts", "Dagger source")
 dagger_config = read_required_text(root / "dagger.json", "Dagger config")
 dagger_wrapper = read_required_text(root / "bin/dagger", "Dagger wrapper")
-source_argument_sync = root / "dagger/scripts/sync_source_arguments.py"
+source_argument_sync = policy_root / "dagger/scripts/sync_source_arguments.py"
 real_path = os.environ.get("PATH", "")
 real_bash = shutil.which("bash", path=real_path) or "/bin/bash"
 real_uname = shutil.which("uname", path=real_path) or "/usr/bin/uname"
@@ -389,6 +396,111 @@ def parse_ci_methods(source_text):
     return methods
 
 
+def extract_named_body(source_text, function_name):
+    methods = [
+        item for item in parse_ci_methods(source_text) if item["name"] == function_name
+    ]
+    if len(methods) > 1:
+        raise ContractParseError(f"duplicate Ci method body for {function_name}")
+    if methods:
+        return methods[0]["body"]
+
+    matches = list(
+        re.finditer(
+        rf"\b(?:async\s+)?function\s+{re.escape(function_name)}\s*\(",
+        source_text,
+        )
+    )
+    if len(matches) > 1:
+        raise ContractParseError(f"duplicate top-level function body for {function_name}")
+    if not matches:
+        raise ContractParseError(f"missing function body for {function_name}")
+    match = matches[0]
+    arguments_start = match.end() - 1
+    arguments_end = find_matching(source_text, arguments_start, "(", ")")
+    index = arguments_end + 1
+    while index < len(source_text):
+        next_index = skip_non_code(source_text, index)
+        if next_index != index:
+            index = next_index
+            continue
+        if source_text[index] == "{":
+            body_end = find_matching(source_text, index, "{", "}")
+            return source_text[index + 1 : body_end]
+        index += 1
+    raise ContractParseError(f"missing opening body brace for {function_name}")
+
+
+def compact_code(source_text):
+    compact = []
+    index = 0
+    while index < len(source_text):
+        if source_text.startswith("//", index):
+            newline = source_text.find("\n", index + 2)
+            index = len(source_text) if newline == -1 else newline + 1
+            continue
+        if source_text.startswith("/*", index):
+            end = source_text.find("*/", index + 2)
+            if end == -1:
+                raise ContractParseError("unterminated block comment")
+            index = end + 2
+            continue
+        character = source_text[index]
+        if character in {'"', "'", "`"}:
+            quote = character
+            start = index
+            index += 1
+            while index < len(source_text):
+                if source_text[index] == "\\":
+                    index += 2
+                    continue
+                if source_text[index] == quote:
+                    index += 1
+                    compact.append(source_text[start:index])
+                    break
+                index += 1
+            else:
+                raise ContractParseError("unterminated string literal")
+            continue
+        if character.isspace():
+            index += 1
+            continue
+        compact.append(character)
+        index += 1
+    return "".join(compact)
+
+
+def body_digest(source_text, function_name):
+    body = extract_named_body(source_text, function_name)
+    return hashlib.sha256(compact_code(body).encode()).hexdigest()
+
+
+def top_level_const_expression(source_text, constant_name):
+    match = re.search(
+        rf"^const\s+{re.escape(constant_name)}\s*=\s*(.*?)\s*$",
+        source_text,
+        re.MULTILINE,
+    )
+    if match is None:
+        return None
+    return re.sub(r"\s+", "", match.group(1))
+
+
+def extract_top_level_const_bindings(method_body):
+    bindings = []
+    for line in method_body.splitlines():
+        match = re.match(r"^\s*const\s+(\w+)\s*=\s*(.*?)\s*;?\s*$", line)
+        if match is None:
+            continue
+        bindings.append(
+            {
+                "name": match.group(1),
+                "expression": re.sub(r"\s+", "", match.group(2)),
+            }
+        )
+    return bindings
+
+
 def compact_expression(source_text):
     compact = []
     index = 0
@@ -441,16 +553,12 @@ def parse_await_this_call(source_text, index=0):
         raise ContractParseError(f"await this.{method_name} call is missing its argument list")
 
     args_end = find_matching(source_text, index, "(", ")")
-    args = compact_expression(source_text[index + 1 : args_end]).rstrip(",")
-
-    if args != "repo":
-        return None, args_end + 1
-
-    return method_name, args_end + 1
+    arguments = compact_expression(source_text[index + 1 : args_end]).rstrip(",")
+    return {"name": method_name, "arguments": arguments}, args_end + 1
 
 
-def extract_strict_calls(strict_body):
-    calls = []
+def extract_strict_invocations(strict_body):
+    invocations = []
     index = 0
     paren_depth = 0
     bracket_depth = 0
@@ -504,10 +612,10 @@ def extract_strict_calls(strict_body):
             identifier, next_index = read_identifier(strict_body, index)
 
             if identifier == "await":
-                call_name, call_end = parse_await_this_call(strict_body, index)
+                invocation, call_end = parse_await_this_call(strict_body, index)
 
-                if call_name is not None:
-                    calls.append(call_name)
+                if invocation is not None:
+                    invocations.append(invocation)
                     index = call_end
                     continue
 
@@ -516,20 +624,31 @@ def extract_strict_calls(strict_body):
 
         index += 1
 
-    return calls
+    return invocations
 
 
 def extract_ci_contract(source_text):
     methods = parse_ci_methods(source_text)
+    method_names = [method["name"] for method in methods]
+    duplicate_method_names = sorted(
+        {name for name in method_names if method_names.count(name) > 1}
+    )
+    if duplicate_method_names:
+        raise ContractParseError(
+            f"duplicate Ci method names: {', '.join(duplicate_method_names)}"
+        )
     check_methods = [method["name"] for method in methods if "check" in method["decorators"]]
     strict_method = next((method for method in methods if method["name"] == "strict"), None)
 
     if strict_method is None:
         raise ContractParseError("missing Ci.strict method")
 
+    strict_invocations = extract_strict_invocations(strict_method["body"])
     return {
         "check_methods": check_methods,
-        "strict_calls": extract_strict_calls(strict_method["body"]),
+        "strict_calls": [invocation["name"] for invocation in strict_invocations],
+        "strict_invocations": strict_invocations,
+        "strict_bindings": extract_top_level_const_bindings(strict_method["body"]),
     }
 
 
@@ -539,7 +658,7 @@ def format_call_sequence(calls):
 
 def strict_contract_message(expected_calls, actual_calls):
     message_parts = [
-        "Ci.strict must execute codexAgentRoles, every @check gate in source order, then advisories",
+        "Ci.strict must resolve scope, execute codexAgentRoles and every @check gate in source order, then advisories",
         f"expected: {format_call_sequence(expected_calls)}",
         f"actual: {format_call_sequence(actual_calls)}",
     ]
@@ -567,7 +686,14 @@ def strict_contract_message(expected_calls, actual_calls):
     return "; ".join(message_parts)
 
 
-def require_parser_fixture(label, source_text, expected_checks, expected_calls):
+def require_parser_fixture(
+    label,
+    source_text,
+    expected_checks,
+    expected_calls,
+    expected_arguments=None,
+    expected_bindings=None,
+):
     try:
         contract = extract_ci_contract(source_text)
     except ContractParseError as exc:
@@ -582,6 +708,16 @@ def require_parser_fixture(label, source_text, expected_checks, expected_calls):
         contract["strict_calls"] == expected_calls,
         f"{label}: expected strict calls {expected_calls}, got {contract['strict_calls']}",
     )
+    require(
+        [invocation["arguments"] for invocation in contract["strict_invocations"]]
+        == (expected_arguments or ["repo"] * len(expected_calls)),
+        f"{label}: strict call arguments drifted: {contract['strict_invocations']}",
+    )
+    if expected_bindings is not None:
+        require(
+            contract["strict_bindings"] == expected_bindings,
+            f"{label}: strict authority bindings drifted: {contract['strict_bindings']}",
+        )
 
 
 fixture_reformatted_ci = """
@@ -656,6 +792,31 @@ export class Ci {
 }
 """
 
+fixture_scoped_ci = """
+@object()
+export class Ci {
+  @func()
+  async strict(source?: Directory, base?: Directory): Promise<void> {
+    const repo = source!
+    const candidate = repo.withoutDirectory(".git")
+    const policy = (base ?? repo).withoutDirectory(".git")
+    const scope = await this.resolveChangeScope(repo, base)
+    await this.codexAgentRoles(candidate)
+    await this.deterministic(candidate, policy, scope.runtime_required)
+    await this.secretsHistory(repo)
+    await this.advisoriesForScope(candidate, scope.runtime_required)
+  }
+
+  @func()
+  @check()
+  async deterministic(source?: Directory): Promise<void> {}
+
+  @func()
+  @check()
+  async secretsHistory(source?: Directory): Promise<void> {}
+}
+"""
+
 require_parser_fixture(
     "parser handles reformatted strict and decorator spacing",
     fixture_reformatted_ci,
@@ -674,6 +835,70 @@ require_parser_fixture(
         "advisories",
     ],
 )
+require_parser_fixture(
+    "parser pins scoped strict arguments",
+    fixture_scoped_ci,
+    ["deterministic", "secretsHistory"],
+    [
+        "resolveChangeScope",
+        "codexAgentRoles",
+        "deterministic",
+        "secretsHistory",
+        "advisoriesForScope",
+    ],
+    [
+        "repo,base",
+        "candidate",
+        "candidate,policy,scope.runtime_required",
+        "repo",
+        "candidate,scope.runtime_required",
+    ],
+    [
+        {"name": "repo", "expression": "source!"},
+        {"name": "candidate", "expression": 'repo.withoutDirectory(".git")'},
+        {
+            "name": "policy",
+            "expression": '(base??repo).withoutDirectory(".git")',
+        },
+        {
+            "name": "scope",
+            "expression": "awaitthis.resolveChangeScope(repo,base)",
+        },
+    ],
+)
+scoped_policy_rebinding = extract_ci_contract(
+    fixture_scoped_ci.replace(
+        'const policy = (base ?? repo).withoutDirectory(".git")',
+        "const policy = candidate",
+    )
+)
+require(
+    scoped_policy_rebinding["strict_bindings"]
+    != extract_ci_contract(fixture_scoped_ci)["strict_bindings"],
+    "strict binding parser must detect candidate-as-policy rebinding",
+)
+require(
+    hashlib.sha256(compact_code("return trusted()\n").encode()).hexdigest()
+    != hashlib.sha256(
+        compact_code("return candidate()\n// return trusted()\n").encode()
+    ).hexdigest(),
+    "control-plane body digests must ignore comment decoys while detecting reachable changes",
+)
+try:
+    extract_ci_contract(
+        fixture_scoped_ci.replace(
+            "\n}\n",
+            "\n  private async resolveChangeScope(): Promise<void> {}\n"
+            "  private async resolveChangeScope(): Promise<void> {}\n}\n",
+        )
+    )
+except ContractParseError as exc:
+    require(
+        "duplicate Ci method names: resolveChangeScope" in str(exc),
+        f"duplicate method rejection must name the shadowed method, got {exc}",
+    )
+else:
+    require(False, "CI contract parser must reject duplicate class method shadowing")
 require(
     "missing: secretsHistory" in strict_contract_message(
         ["codexAgentRoles", "deterministic", "secretsHistory", "advisories"],
@@ -692,7 +917,81 @@ if dagger_source:
 
 check_methods = ci_contract["check_methods"] if ci_contract is not None else []
 strict_calls = ci_contract["strict_calls"] if ci_contract is not None else []
-expected_strict_calls = ["codexAgentRoles", *check_methods, "advisories"]
+strict_invocations = (
+    ci_contract["strict_invocations"] if ci_contract is not None else []
+)
+strict_bindings = ci_contract["strict_bindings"] if ci_contract is not None else []
+expected_strict_calls = [
+    "resolveChangeScope",
+    "codexAgentRoles",
+    *check_methods,
+    "advisoriesForScope",
+]
+expected_strict_invocations = [
+    {"name": "resolveChangeScope", "arguments": "repo,base"},
+    {"name": "codexAgentRoles", "arguments": "candidate"},
+    {
+        "name": "deterministic",
+        "arguments": "candidate,policy,scope.runtime_required",
+    },
+    {"name": "secretsHistory", "arguments": "repo"},
+    {
+        "name": "advisoriesForScope",
+        "arguments": "candidate,scope.runtime_required",
+    },
+]
+expected_strict_bindings = [
+    {"name": "repo", "expression": "source!"},
+    {"name": "candidate", "expression": 'repo.withoutDirectory(".git")'},
+    {
+        "name": "policy",
+        "expression": '(base??repo).withoutDirectory(".git")',
+    },
+    {
+        "name": "scope",
+        "expression": "awaitthis.resolveChangeScope(repo,base)",
+    },
+]
+critical_control_plane_functions = [
+    "ciContractContainer",
+    "changeScopeContainer",
+    "declaredRustCoverageMinimum",
+    "rustFastContainer",
+    "rustQualityContainer",
+    "rustCoverageContainer",
+    "rustAdvisoryContainer",
+    "productionImageContainer",
+    "productionImageService",
+    "productionImageLoadRehearsalContainer",
+    "productionImageIntegration",
+    "resolveChangeScope",
+    "deterministicForScope",
+    "advisoriesForScope",
+]
+expected_control_plane_digests = {
+    "ciContractContainer": {"3077600d7a8df2a0b30346ed8b0880fe6e862f62f58c4fd895b32d1f2294d69b"},
+    "changeScopeContainer": {"ee20c16c0a92ce90b387501f79f0fe243c61cd27246e050f6a40fc0c2e6f4a85"},
+    "declaredRustCoverageMinimum": {"8eece07e55b9a62e6ee57ec9f18b962d279df7c11709891edfa273c4289ae8c9"},
+    "rustFastContainer": {"18fe68d967595e2209a79b389e25a6575075f7239a5fa9019a268c706dc0e672"},
+    "rustQualityContainer": {"cabda5c56f8640c9d3b8b0128492c81bb722f05d917b2f81d19dff1108f2a825"},
+    "rustCoverageContainer": {"96f465a1c41abbe1732d3866413741308a9d324a8b8ed3ece5d9ba718f712cd4"},
+    "rustAdvisoryContainer": {"2382b5b3189cb3d9e51eed3ab044a03bf09b09120142fa94337d0c95a9b0973e"},
+    "productionImageContainer": {"79fffb6298d0708883d3ed4b4c6396009592178f979b0fa935ea2c942d5711c9"},
+    "productionImageService": {"0f96e41e8e1fe76ab17d2134e9eae04b74a6c052026c600dbdbe0efe38e5db89"},
+    "productionImageLoadRehearsalContainer": {"49a49af86e8e9364e46f878538abb31df25dec84057d12959fa7b03910f28d33"},
+    "productionImageIntegration": {"86260531fa90fedaf656def484c7b679be40df2f996704efee1ba78d06601b97"},
+    "resolveChangeScope": {"b6e6b1291e7cc647b32d9e77e47691b8ae410fea48db52ae9a636f3c11f61258"},
+    "deterministicForScope": {"30145b0c64c9e0c3f13fdff296deae480927da1bc7edaa750280a04056e9a7b8"},
+    "advisoriesForScope": {"223268ff835764eff52a84df3e826f47931b8963324decf699360ae9d62f396d"},
+}
+actual_control_plane_digests = {}
+for function_name in critical_control_plane_functions:
+    try:
+        actual_control_plane_digests[function_name] = body_digest(
+            dagger_source, function_name
+        )
+    except ContractParseError as exc:
+        errors.append(str(exc))
 dagger_version_match = re.search(r'"engineVersion"\s*:\s*"v([^"]+)"', dagger_config)
 required_dagger_version = (
     dagger_version_match.group(1) if dagger_version_match else None
@@ -705,6 +1004,29 @@ require(
 require(
     strict_calls == expected_strict_calls,
     strict_contract_message(expected_strict_calls, strict_calls),
+)
+require(
+    strict_invocations == expected_strict_invocations,
+    "Ci.strict must thread the trusted candidate, policy, and runtime-required decision through every gate; "
+    f"expected {expected_strict_invocations}, got {strict_invocations}",
+)
+require(
+    strict_bindings == expected_strict_bindings,
+    "Ci.strict must bind candidate and policy authority from source and the trusted base; "
+    f"expected {expected_strict_bindings}, got {strict_bindings}",
+)
+for function_name, allowed_digests in expected_control_plane_digests.items():
+    actual_digest = actual_control_plane_digests.get(function_name)
+    require(
+        actual_digest in allowed_digests,
+        f"trusted CI control-plane body {function_name} drifted: expected one of {sorted(allowed_digests)}, got {actual_digest}",
+    )
+require(
+    top_level_const_expression(dagger_source, "CARGO_LLVM_COV_VERSION")
+    == '"0.8.7"'
+    and top_level_const_expression(dagger_source, "RUST_COVERAGE_MIN_LINE_PCT")
+    == "90.0",
+    "trusted Rust coverage tool and line floor constants must remain pinned at 0.8.7 and 90.0",
 )
 require(
     required_dagger_version is not None,
@@ -743,7 +1065,8 @@ require(
 )
 require(
     "const targetDigest = await rustTargetCacheDigest(source)" in dagger_source
-    and 'cacheVolumeName("canary-rust-target", platformKey, imageKey, targetDigest)' in dagger_source,
+    and "cacheVolumeName(targetNamespace, platformKey, imageKey, targetDigest)"
+    in dagger_source,
     "Dagger must scope the Rust target cache by checkout/source identity to isolate concurrent divergent worktrees",
 )
 require(
@@ -752,26 +1075,12 @@ require(
     "bin/dagger must provide a physical checkout path cache scope for local Dagger invocations",
 )
 require(
-    "async function rustContainer(source: Directory)" in dagger_source
+    "async function rustContainer(" in dagger_source
     and ".withExec([\"cargo\", \"fmt\", \"--all\", \"--check\"])" in dagger_source
     and ".withExec([\"cargo\", \"check\", \"--workspace\", \"--all-targets\", \"--locked\"])" in dagger_source
     and "\"clippy\"" in dagger_source
     and ".withExec([\"cargo\", \"test\", \"--workspace\", \"--locked\"])" in dagger_source,
     "Dagger must run Rust format, check, clippy, and tests from a Rust container",
-)
-require(
-    "await (await this.rustFastContainer(repo)).sync()" in dagger_source
-    and "await this.rustQuality(repo)" in dagger_source
-    and "await (await this.rustAdvisoryContainer(repo)).sync()" in dagger_source,
-    "Dagger fast, deterministic, and advisory gates must include Rust validation",
-)
-require(
-    "source.dockerBuild()" in dagger_source
-    and "async productionImageSmoke(" in dagger_source
-    and "await this.productionImageSmoke(repo)" in dagger_source
-    and "http://canary:4000/healthz" in dagger_source
-    and "http://canary:4000/readyz" in dagger_source,
-    "Dagger deterministic gate must build and smoke-test the production Docker image",
 )
 
 sync_result = subprocess.run(
@@ -783,7 +1092,7 @@ sync_result = subprocess.run(
 require(
     sync_result.returncode == 0,
     (
-        "Dagger source arguments must stay in sync with "
+        "Dagger Directory arguments must stay in sync with "
         "dagger/scripts/sync_source_arguments.py"
         + (
             f": {(sync_result.stderr or sync_result.stdout).strip()}"
@@ -807,7 +1116,7 @@ with tempfile.TemporaryDirectory() as tmp:
     dagger_path.write_text(
         "#!/usr/bin/env bash\n"
         "if [[ \"$1\" == \"version\" ]]; then\n"
-        "  if [[ -v DAGGER_STUB_VERSION ]]; then\n"
+        "  if [[ -n \"${DAGGER_STUB_VERSION+x}\" ]]; then\n"
         "    version=\"$DAGGER_STUB_VERSION\"\n"
         "  else\n"
         f"    version=\"{required_dagger_version}\"\n"
@@ -1341,10 +1650,10 @@ require(
 )
 require(
     re.search(
-        r"name:\s+Run trusted Dagger strict CI[\s\S]*?uses:\s+dagger/dagger-for-github@[\s\S]*?workdir:\s+\.ci/trusted[\s\S]*?verb:\s+call[\s\S]*?args:\s+strict\s+--source=\.\./candidate",
+        r"name:\s+Run trusted Dagger strict CI with scoped base[\s\S]*?if:\s+github\.event_name\s+==\s+'pull_request_target'[\s\S]*?uses:\s+dagger/dagger-for-github@[\s\S]*?workdir:\s+\.ci/trusted[\s\S]*?verb:\s+call[\s\S]*?args:\s+strict\s+--source=\.\./candidate\s+--base=\.\./trusted",
         workflow,
     ),
-    "GitHub workflow must run the strict Dagger CI entrypoint from the trusted checkout against the separately checked-out candidate source",
+    "Pull-request CI must run trusted strict against the candidate and pass the trusted base for fail-closed scope classification",
 )
 require(
     "Run Dagger codex role validation" not in workflow,
@@ -1353,6 +1662,10 @@ require(
 require(
     "Run Dagger advisories" not in workflow,
     "GitHub workflow must not duplicate advisories outside the strict Dagger entrypoint",
+)
+require(
+    'CANARY_WITNESS_MAX_LATENCY_MS: "2000"' in uptime_workflow,
+    "The external witness workflow must enforce the post-deploy latency ceiling",
 )
 
 if not errors:

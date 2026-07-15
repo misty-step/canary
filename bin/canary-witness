@@ -10,12 +10,13 @@ RECEIPT="${CANARY_WITNESS_RECEIPT:-canary-witness-receipt.json}"
 CHECK_IN_TTL_MS="${CANARY_WITNESS_TTL_MS:-}"
 CURL_BIN="${CANARY_WITNESS_CURL:-curl}"
 TIMEOUT_SECONDS="${CANARY_WITNESS_TIMEOUT_SECONDS:-10}"
+MAX_LATENCY_MS="${CANARY_WITNESS_MAX_LATENCY_MS:-}"
 REQUIRE_CHECK_IN=0
 JSON_OUTPUT=0
 
 usage() {
   cat <<'EOF'
-Usage: bin/canary-witness [--endpoint <url>] [--read-api-key <key>] [--ingest-api-key <key>] [--monitor <name>] [--window <window>] [--receipt <path>] [--ttl-ms <millis>] [--require-check-in] [--json] [-h|--help]
+Usage: bin/canary-witness [--endpoint <url>] [--read-api-key <key>] [--ingest-api-key <key>] [--monitor <name>] [--window <window>] [--receipt <path>] [--ttl-ms <millis>] [--max-latency-ms <millis>] [--require-check-in] [--json] [-h|--help]
 
 Check Canary from outside the production host and preserve a receipt even when Canary is
 unreachable. The witness verifies:
@@ -98,6 +99,11 @@ while [[ $# -gt 0 ]]; do
       CHECK_IN_TTL_MS="$2"
       shift 2
       ;;
+    --max-latency-ms)
+      [[ $# -ge 2 ]] || fail_usage
+      MAX_LATENCY_MS="$2"
+      shift 2
+      ;;
     --require-check-in)
       REQUIRE_CHECK_IN=1
       shift
@@ -117,6 +123,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 validate_positive_millis "ttl-ms" "$CHECK_IN_TTL_MS"
+validate_positive_millis "max-latency-ms" "$MAX_LATENCY_MS"
 if [[ -z "$ENDPOINT" ]]; then
   printf 'canary-witness: missing endpoint: pass --endpoint or set CANARY_WITNESS_ENDPOINT/CANARY_ENDPOINT\n' >&2
   exit 2
@@ -215,17 +222,21 @@ request_json() {
     --argjson curl_exit "$curl_exit" \
     --arg http_status "$http_status" \
     --arg latency "$latency" \
+    --arg max_latency_ms "$MAX_LATENCY_MS" \
     --arg error "$error" \
     --arg body "$body" \
-    '{
+    '((($latency | tonumber? // 0) * 1000 | ceil)) as $latency_ms
+    | (if $max_latency_ms == "" then null else ($max_latency_ms | tonumber) end) as $budget
+    | {
       name: $name,
       method: $method,
       path: $path,
-      ok: (($curl_exit == 0) and (($http_status | tonumber? // 0) >= 200) and (($http_status | tonumber? // 0) < 300)),
+      ok: (($curl_exit == 0) and (($http_status | tonumber? // 0) >= 200) and (($http_status | tonumber? // 0) < 300) and ($budget == null or $latency_ms <= $budget)),
       skipped: false,
       http_status: ($http_status | tonumber? // 0),
       curl_exit: $curl_exit,
-      latency_ms: (($latency | tonumber? // 0) * 1000 | floor),
+      latency_ms: $latency_ms,
+      within_latency_budget: ($budget == null or $latency_ms <= $budget),
       error: (if $error == "" then null else $error end),
       response: (if $body == "" then null else (try ($body | fromjson) catch $body) end)
     }' >"$output"
@@ -243,10 +254,11 @@ request_json "healthz" "GET" "/healthz" "none" "$health_file"
 request_json "readyz" "GET" "/readyz" "none" "$ready_file"
 request_json "canary-query" "GET" "/api/v1/query?service=canary&window=${encoded_window}" "read" "$query_file"
 
-health_ok="$(jq -r 'try (.curl_exit == 0 and .http_status == 200 and (.response | type == "object") and .response.status == "ok") catch false' "$health_file")"
+health_ok="$(jq -r 'try (.curl_exit == 0 and .http_status == 200 and .within_latency_budget and (.response | type == "object") and .response.status == "ok") catch false' "$health_file")"
 ready_ok="$(jq -r 'try (
   .curl_exit == 0
   and .http_status == 200
+  and .within_latency_budget
   and (.response | type == "object")
   and .response.status == "ready"
   and .response.checks.database == "ok"
@@ -338,7 +350,7 @@ jq -n \
     }
     end' >"$alert_plane_file"
 alert_plane_ok="$(jq -r '.status == "healthy"' "$alert_plane_file")"
-query_ok="$(jq -r 'try (.curl_exit == 0 and .http_status == 200 and (.response | type == "object") and .response.service == "canary" and (.response.total_errors | type == "number")) catch false' "$query_file")"
+query_ok="$(jq -r 'try (.curl_exit == 0 and .http_status == 200 and .within_latency_budget and (.response | type == "object") and .response.service == "canary" and (.response.total_errors | type == "number")) catch false' "$query_file")"
 transport_failures="$(jq -s '[.[] | select((.skipped // false | not) and (.curl_exit != 0))] | length' "$health_file" "$ready_file" "$query_file")"
 
 # Witness self-heal scope: this witness's own health verdict is scoped to
@@ -414,7 +426,7 @@ else
   write_skipped_probe "check-in" "self signals were not healthy" "$check_in_file"
 fi
 
-check_in_ok="$(jq -r '.curl_exit == 0 and (.http_status >= 200 and .http_status < 300)' "$check_in_file")"
+check_in_ok="$(jq -r 'try (.ok == true) catch false' "$check_in_file")"
 if [[ "$REQUIRE_CHECK_IN" == "1" && "$status" == "healthy" && "$check_in_ok" != "true" ]]; then
   status="degraded"
 fi
@@ -426,6 +438,7 @@ jq -n \
   --arg observed_at "$observed_at" \
   --arg window "$WINDOW" \
   --arg status "$status" \
+  --arg max_latency_ms "$MAX_LATENCY_MS" \
   --argjson require_check_in "$REQUIRE_CHECK_IN" \
   --argjson self_heal_check_in "$([[ "$self_heal_check_in" == "true" ]] && echo true || echo false)" \
   --slurpfile health "$health_file" \
@@ -433,13 +446,18 @@ jq -n \
   --slurpfile query "$query_file" \
   --slurpfile alert_plane "$alert_plane_file" \
   --slurpfile check_in "$check_in_file" \
-  '{
+  '(if $max_latency_ms == "" then null else ($max_latency_ms | tonumber) end) as $budget
+  | {
     schema_version: $schema_version,
     witness: $witness,
     endpoint: $endpoint,
     observed_at: $observed_at,
     window: $window,
     status: $status,
+    max_latency_ms: $budget,
+    latency_breaches: ([$health[0], $ready[0], $query[0], $check_in[0]]
+      | map(select(((.skipped // false) | not) and .within_latency_budget == false))
+      | map({name, latency_ms, max_latency_ms: $budget})),
     require_check_in: ($require_check_in == 1),
     self_heal_check_in: $self_heal_check_in,
     probes: {
