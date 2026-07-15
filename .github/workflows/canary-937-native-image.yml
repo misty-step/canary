@@ -1,0 +1,89 @@
+name: Canary 937 native amd64 deploy image
+
+on:
+  push:
+    branches:
+      - ops/canary-937-native-image
+
+permissions:
+  contents: read
+
+jobs:
+  image-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact merged Canary source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: d47afb25a9089b7c3fe5dd45f9290ca2cb51ff1b
+          path: source
+          persist-credentials: false
+
+      - name: Build native linux amd64 image archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build \
+            --build-arg CANARY_VERSION=v0.16.4-1-gd47afb2 \
+            --tag canary:deploy-d47afb25 \
+            source
+          docker save \
+            --output /tmp/canary-d47afb25-linux-amd64.docker.tar \
+            canary:deploy-d47afb25
+
+      - name: Prove archive identity, architecture, version, and health
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p proof
+          archive=/tmp/canary-d47afb25-linux-amd64.docker.tar
+          archive_sha="$(sha256sum "$archive" | awk '{print $1}')"
+          image_id="$(docker image inspect canary:deploy-d47afb25 --format '{{.Id}}')"
+          architecture="$(docker image inspect "$image_id" --format '{{.Architecture}}')"
+          os="$(docker image inspect "$image_id" --format '{{.Os}}')"
+          test "$architecture" = amd64
+          test "$os" = linux
+          case "$image_id" in sha256:*) ;; *) exit 1;; esac
+
+          docker volume create canary-937-proof >/dev/null
+          docker run --detach --name canary-937-proof \
+            --publish 127.0.0.1:14000:4000 \
+            --volume canary-937-proof:/data \
+            --env CANARY_DB_PATH=/data/canary.db \
+            --env CANARY_REQUIRE_LITESTREAM=0 \
+            --env CANARY_DISCLOSE_BOOTSTRAP_KEY=false \
+            "$image_id" >/dev/null
+          trap 'docker rm --force canary-937-proof >/dev/null 2>&1 || true; docker volume rm canary-937-proof >/dev/null 2>&1 || true' EXIT
+
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:14000/healthz >/dev/null && \
+               curl -fsS http://127.0.0.1:14000/readyz >/dev/null; then
+              break
+            fi
+            test "$attempt" -lt 60
+            sleep 2
+          done
+          version="$(curl -fsS http://127.0.0.1:14000/api/v1/openapi.json | jq -r '.info.version')"
+          test "$version" = v0.16.4-1-gd47afb2
+
+          cp "$archive" proof/
+          printf '%s  %s\n' "$archive_sha" "canary-d47afb25-linux-amd64.docker.tar" > proof/SHA256SUMS
+          jq -n \
+            --arg source_commit d47afb25a9089b7c3fe5dd45f9290ca2cb51ff1b \
+            --arg version "$version" \
+            --arg archive_sha256 "$archive_sha" \
+            --arg image_id "$image_id" \
+            --arg architecture "$architecture" \
+            --arg os "$os" \
+            '{source_commit:$source_commit,version:$version,archive_sha256:$archive_sha256,image_id:$image_id,architecture:$architecture,os:$os,healthz:200,readyz:200}' \
+            > proof/receipt.json
+
+      - name: Upload immutable proof bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: canary-d47afb25-linux-amd64
+          path: proof/
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
