@@ -92,6 +92,30 @@ case "${STUB_SCENARIO:?}:$method:$url" in
     write_response 201 0.040 '{"monitor":"canary-watchman","status":"alive"}'
     ;;
 
+  slow-query:GET:https://canary.example/healthz)
+    write_response 200 0.010 '{"status":"ok"}'
+    ;;
+  slow-query:GET:https://canary.example/readyz)
+    write_response 200 0.020 "$READY_BODY"
+    ;;
+  slow-query:GET:https://canary.example/api/v1/query?service=canary\&window=1h)
+    write_response 200 1.250 '{"service":"canary","window":"1h","summary":"0 errors in canary in the last 1h.","total_errors":0,"groups":[]}'
+    ;;
+
+  slow-check-in:GET:https://canary.example/healthz)
+    write_response 200 0.010 '{"status":"ok"}'
+    ;;
+  slow-check-in:GET:https://canary.example/readyz)
+    write_response 200 0.020 "$READY_BODY"
+    ;;
+  slow-check-in:GET:https://canary.example/api/v1/query?service=canary\&window=1h)
+    write_response 200 0.030 '{"service":"canary","window":"1h","summary":"0 errors in canary in the last 1h.","total_errors":0,"groups":[]}'
+    ;;
+  slow-check-in:POST:https://canary.example/api/v1/check-ins)
+    assert_check_in_payload
+    write_response 201 1.250 '{"monitor":"canary-watchman","status":"alive"}'
+    ;;
+
   pressured:GET:https://canary.example/healthz)
     write_response 200 0.010 '{"status":"ok"}'
     ;;
@@ -258,6 +282,61 @@ assert_json_equals "$receipt" '.probes.healthz.response.status' 'ok' "healthy re
 assert_json_equals "$receipt" '.probes.readyz.response.status' 'ready' "healthy records readyz"
 assert_json_equals "$receipt" '.probes.canary_query.response.total_errors' '0' "healthy records canary query"
 assert_json_equals "$receipt" '.check_in.http_status' '201' "healthy sends check-in"
+
+receipt="$TMPDIR_TEST/healthy-latency.json"
+run_success "healthy witness stays within an explicit latency budget" \
+  env \
+    STUB_SCENARIO=healthy \
+    "${WITNESS[@]}" \
+    --endpoint https://canary.example \
+    --read-api-key read-key \
+    --ingest-api-key ingest-key \
+    --receipt "$receipt" \
+    --max-latency-ms 500 \
+    --json
+assert_json_equals "$receipt" '.max_latency_ms' '500' "latency receipt records the budget"
+assert_json_equals "$receipt" '.latency_breaches | length' '0' "healthy probes stay within the budget"
+
+receipt="$TMPDIR_TEST/slow-query.json"
+run_failure "slow HTTP 200 witness exits nonzero" \
+  env \
+    STUB_SCENARIO=slow-query \
+    "${WITNESS[@]}" \
+    --endpoint https://canary.example \
+    --read-api-key read-key \
+    --receipt "$receipt" \
+    --max-latency-ms 500 \
+    --json
+assert_json_equals "$receipt" '.status' 'degraded' "slow HTTP 200 degrades the receipt"
+assert_json_equals "$receipt" '.probes.canary_query.within_latency_budget' 'false' "slow query is outside the budget"
+assert_json_equals "$receipt" '.latency_breaches[0].name' 'canary-query' "slow receipt names the breached probe"
+
+receipt="$TMPDIR_TEST/slow-check-in.json"
+run_failure "slow check-in HTTP 201 witness exits nonzero" \
+  env \
+    STUB_SCENARIO=slow-check-in \
+    "${WITNESS[@]}" \
+    --endpoint https://canary.example \
+    --read-api-key read-key \
+    --ingest-api-key ingest-key \
+    --receipt "$receipt" \
+    --max-latency-ms 500 \
+    --require-check-in \
+    --json
+assert_json_equals "$receipt" '.latency_breaches[0].name' 'check-in' "slow receipt names the check-in breach"
+
+run_failure "zero latency budget is rejected" \
+  env \
+    STUB_SCENARIO=healthy \
+    "${WITNESS[@]}" \
+    --endpoint https://canary.example \
+    --read-api-key read-key \
+    --receipt "$TMPDIR_TEST/invalid-latency.json" \
+    --max-latency-ms 0 \
+    --json
+assert_stderr_contains \
+  "canary-witness: max-latency-ms must be a positive integer number of milliseconds" \
+  "invalid latency budget names the bad input"
 
 receipt="$TMPDIR_TEST/healthy-ttl.json"
 run_success "healthy witness sends configured ttl" \

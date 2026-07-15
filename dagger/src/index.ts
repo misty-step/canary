@@ -26,6 +26,16 @@ const RUST_IMAGE =
 const GITLEAKS_IMAGE =
   "zricethezav/gitleaks:latest@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f"
 const DIGEST_PREFIX = "sha256:"
+const CARGO_LLVM_COV_VERSION = "0.8.7"
+const RUST_COVERAGE_MIN_LINE_PCT = 90.0
+
+type ChangeScope = {
+  schema: "canary.ci-change-scope.v1"
+  changed_paths: string[]
+  runtime_required: boolean
+  reason: string
+  skipped_lanes: string[]
+}
 
 const CODEX_AGENT_ROLE_VALIDATION = `
 from pathlib import Path
@@ -133,7 +143,10 @@ async function nodeContainer(
     .withExec(["npm", "ci", "--ignore-scripts"])
 }
 
-async function rustContainer(source: Directory): Promise<Container> {
+async function rustContainer(
+  source: Directory,
+  targetNamespace = "canary-rust-target",
+): Promise<Container> {
   const digest = await lockfileDigest(source, "Cargo.lock")
   const targetDigest = await rustTargetCacheDigest(source)
   const platformKey = await cachePlatformKey()
@@ -145,7 +158,7 @@ async function rustContainer(source: Directory): Promise<Container> {
     cacheVolumeName("canary-rust-git", platformKey, imageKey, digest),
   )
   const targetCache = dag.cacheVolume(
-    cacheVolumeName("canary-rust-target", platformKey, imageKey, targetDigest),
+    cacheVolumeName(targetNamespace, platformKey, imageKey, targetDigest),
   )
 
   return dag
@@ -168,13 +181,60 @@ function codexAgentRolesContainer(source: Directory): Container {
     .withExec(["python", "-c", CODEX_AGENT_ROLE_VALIDATION])
 }
 
-function ciContractContainer(source: Directory): Container {
+function ciContractContainer(source: Directory, policy: Directory): Container {
   return dag
     .container()
     .from(PYTHON_IMAGE)
     .withMountedDirectory("/work", source)
+    .withMountedDirectory("/policy", policy)
     .withWorkdir("/work")
-    .withExec(["python", "dagger/scripts/ci_contract_validation.py"])
+    .withEnvVariable("CANARY_CI_SOURCE_ROOT", "/work")
+    .withEnvVariable("CANARY_CI_POLICY_ROOT", "/policy")
+    .withExec(["python", "/policy/dagger/scripts/ci_contract_validation.py"])
+}
+
+function changeScopeContainer(base: Directory, candidate: Directory): Container {
+  return dag
+    .container()
+    .from(PYTHON_IMAGE)
+    .withMountedDirectory("/base", base)
+    .withMountedDirectory("/candidate", candidate)
+    .withMountedDirectory("/policy", base)
+    .withExec([
+      "python",
+      "/policy/dagger/scripts/change_scope.py",
+      "--base",
+      "/base",
+      "--candidate",
+      "/candidate",
+    ])
+}
+
+async function declaredRustCoverageMinimum(
+  source: Directory,
+  policy: Directory = source,
+): Promise<number> {
+  const candidateDeclaration = (
+    await source.file("dagger/policy/rust-coverage-floor").contents()
+  ).trim()
+  const trustedDeclaration = (
+    await policy.file("dagger/policy/rust-coverage-floor").contents()
+  ).trim()
+  const candidateMinimum = Number(candidateDeclaration)
+  const trustedMinimum = Number(trustedDeclaration)
+  if (
+    !/^[0-9]+(?:\.[0-9]+)?$/.test(candidateDeclaration) ||
+    !Number.isFinite(candidateMinimum) ||
+    !/^[0-9]+(?:\.[0-9]+)?$/.test(trustedDeclaration) ||
+    !Number.isFinite(trustedMinimum) ||
+    trustedMinimum < RUST_COVERAGE_MIN_LINE_PCT ||
+    candidateMinimum < trustedMinimum
+  ) {
+    throw new Error(
+      `candidate Rust line coverage floor ${JSON.stringify(candidateDeclaration)} must be numeric and cannot be lower than trusted declaration ${JSON.stringify(trustedDeclaration)} or compiled floor ${RUST_COVERAGE_MIN_LINE_PCT}`,
+    )
+  }
+  return candidateMinimum
 }
 
 function secretsContainer(source: Directory, mode: "dir" | "git"): Container {
@@ -210,6 +270,16 @@ export class Ci {
       .withExec(["bash", "test/bin/canary_write_path_rehearsal_test.sh"])
       .withExec(["bash", "test/bin/canary_readiness_proof_test.sh"])
       .withExec(["bash", "test/bin/canary_doctor_entrypoint_test.sh"])
+      .withExec([
+        "python",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "test/dagger",
+        "-p",
+        "*_test.py",
+      ])
       .withExec(["bash", "-n", "bin/canary"])
       .withExec(["bash", "-n", "bin/canary-witness"])
       .withExec(["bash", "-n", "bin/canary-write-path-rehearsal"])
@@ -264,6 +334,53 @@ export class Ci {
       .withExec(["cargo", "test", "--workspace", "--locked"])
   }
 
+  private async rustCoverageContainer(
+    source: Directory,
+    policy: Directory = source,
+  ): Promise<Container> {
+    const candidateMinimum = await declaredRustCoverageMinimum(source, policy)
+
+    return (await rustContainer(source, "canary-rust-coverage-target"))
+      .withExec(["rustup", "component", "add", "llvm-tools-preview"])
+      .withExec(["apt-get", "update", "-q"])
+      .withExec([
+        "apt-get",
+        "install",
+        "-yq",
+        "--no-install-recommends",
+        "jq",
+      ])
+      .withExec([
+        "cargo",
+        "install",
+        "cargo-llvm-cov",
+        "--version",
+        CARGO_LLVM_COV_VERSION,
+        "--locked",
+      ])
+      .withExec([
+        "cargo",
+        "llvm-cov",
+        "--workspace",
+        "--locked",
+        "--fail-under-lines",
+        candidateMinimum.toString(),
+        "--json",
+        "--summary-only",
+        "--output-path",
+        "/tmp/canary-rust-coverage.json",
+      ])
+      .withExec([
+        "jq",
+        "-c",
+        "--argjson",
+        "floor_pct",
+        candidateMinimum.toString(),
+        '{schema:"canary.rust-coverage.v1",floor_pct:$floor_pct,lines:.data[0].totals.lines,functions:.data[0].totals.functions,regions:.data[0].totals.regions}',
+        "/tmp/canary-rust-coverage.json",
+      ])
+  }
+
   private async rustAdvisoryContainer(source: Directory): Promise<Container> {
     return (await rustContainer(source))
       .withExec(["cargo", "install", "cargo-audit", "--version", "0.22.1", "--locked"])
@@ -293,8 +410,10 @@ export class Ci {
 
   private async productionImageService(
     source: Directory,
-  ): Promise<{ service: Service; adminKey: Secret }> {
-    const prepared = this.productionImageContainer(source)
+    policy: Directory = source,
+    seededVolume = false,
+  ): Promise<{ service: Service; adminKey: Secret; reportKey: Secret }> {
+    let prepared = this.productionImageContainer(source)
       .withEnvVariable("CANARY_DB_PATH", "/tmp/canary-smoke.db")
       .withEnvVariable("PORT", "4000")
       .withEnvVariable("CANARY_DISCLOSE_BOOTSTRAP_KEY", "false")
@@ -307,11 +426,80 @@ export class Ci {
 
     const rawKey = (await prepared.file("/tmp/canary-admin-key").contents()).trim()
     const adminKey = dag.setSecret("canary-smoke-admin-key", rawKey)
+    let reportKey = adminKey
+
+    if (seededVolume) {
+      prepared = prepared.withExec([
+        "bash",
+        "-ceu",
+        "/app/bin/canary-server mint-key --scope read-only --allow-unbound --name production-smoke-report >/tmp/canary-report-key 2>/tmp/canary-report-key.log",
+      ])
+      const rawReportKey = (
+        await prepared.file("/tmp/canary-report-key").contents()
+      ).trim()
+      reportKey = dag.setSecret("canary-smoke-report-key", rawReportKey)
+
+      const seeded = dag
+        .container()
+        .from(PYTHON_IMAGE)
+        .withFile("/work/canary.db", prepared.file("/tmp/canary-smoke.db"))
+        .withFile("/policy/live_gate.py", policy.file("dagger/scripts/live_gate.py"))
+        .withExec([
+          "python",
+          "/policy/live_gate.py",
+          "seed",
+          "--database",
+          "/work/canary.db",
+          "--current-errors",
+          "50000",
+          "--expired-errors",
+          "20000",
+          "--services",
+          "200",
+        ])
+      prepared = prepared.withFile(
+        "/tmp/canary-smoke.db",
+        seeded.file("/work/canary.db"),
+      )
+    }
+
     const service = prepared
       .withExposedPort(4000)
       .asService()
 
-    return { service, adminKey }
+    return { service, adminKey, reportKey }
+  }
+
+  private productionImageLoadRehearsalContainer(
+    policy: Directory,
+    service: Service,
+    adminKey: Secret,
+    reportKey: Secret,
+  ): Container {
+    return dag
+      .container()
+      .from(PYTHON_IMAGE)
+      .withFile("/policy/live_gate.py", policy.file("dagger/scripts/live_gate.py"))
+      .withServiceBinding("canary", service)
+      .withSecretVariable("CANARY_API_KEY", adminKey)
+      .withSecretVariable("CANARY_REPORT_API_KEY", reportKey)
+      .withExec([
+        "python",
+        "/policy/live_gate.py",
+        "run",
+        "--endpoint",
+        "http://canary:4000",
+        "--query-budget-ms",
+        "2000",
+        "--report-budget-ms",
+        "4000",
+        "--seeded-errors",
+        "50000",
+        "--seeded-services",
+        "200",
+        "--expected-retention-deletes",
+        "20000",
+      ])
   }
 
   private readinessProbeScript(): string {
@@ -632,12 +820,78 @@ exit 1
       .withExec(["bash", "-ceu", this.alertPlaneImpairmentRehearsalScript()])
   }
 
-  private async productionImageIntegration(source: Directory): Promise<void> {
-    const { service, adminKey } = await this.productionImageService(source)
+  private async productionImageIntegration(
+    source: Directory,
+    policy: Directory = source,
+  ): Promise<void> {
+    const {
+      service: loadService,
+      adminKey: loadAdminKey,
+      reportKey: loadReportKey,
+    } =
+      await this.productionImageService(source, policy, true)
+
+    await this.productionImageLoadRehearsalContainer(
+      policy,
+      loadService,
+      loadAdminKey,
+      loadReportKey,
+    ).sync()
+
+    const { service, adminKey } = await this.productionImageService(source, policy)
 
     await (await this.productionImageNodeSmokeContainer(source, service, adminKey)).sync()
     await (await this.productionImageDoctorSmokeContainer(source, service, adminKey)).sync()
     await (await this.productionImageAlertPlaneRehearsalContainer(source, service, adminKey)).sync()
+  }
+
+  private async resolveChangeScope(
+    source: Directory,
+    base?: Directory,
+  ): Promise<ChangeScope> {
+    if (!base) {
+      return {
+        schema: "canary.ci-change-scope.v1",
+        changed_paths: [],
+        runtime_required: true,
+        reason: "no_trusted_base",
+        skipped_lanes: [],
+      }
+    }
+
+    const output = await changeScopeContainer(base, source).stdout()
+    const scope = JSON.parse(output) as ChangeScope
+    if (scope.schema !== "canary.ci-change-scope.v1") {
+      throw new Error(`unexpected change-scope schema: ${scope.schema}`)
+    }
+    return scope
+  }
+
+  private async deterministicForScope(
+    source: Directory,
+    policy: Directory,
+    runtimeRequired: boolean,
+  ): Promise<void> {
+    await ciContractContainer(source, policy).sync()
+    await (await this.openapiContractContainer(source)).sync()
+    await this.scriptsQualityContainer(source).sync()
+    await (await this.typescriptQualityContainer(source)).sync()
+    if (runtimeRequired) {
+      await (await this.rustQualityContainer(source)).sync()
+      await (await this.rustCoverageContainer(source, policy)).sync()
+      await this.productionImageIntegration(source, policy)
+    }
+    await secretsContainer(source, "dir").sync()
+  }
+
+  private async advisoriesForScope(
+    source: Directory,
+    runtimeRequired: boolean,
+  ): Promise<void> {
+    await (await this.typescriptAdvisoryContainer(source)).sync()
+    if (runtimeRequired) {
+      await (await this.rustAdvisoryContainer(source)).sync()
+    }
   }
 
   @func()
@@ -706,13 +960,30 @@ exit 1
       ],
     })
     source?: Directory,
+    @argument({
+      ignore: [
+        ".git",
+        "_build",
+        "deps",
+        "cover",
+        "clients/typescript/node_modules",
+        "clients/typescript/dist",
+        "clients/typescript/coverage",
+        "dagger/node_modules",
+        "target",
+      ],
+    })
+    base?: Directory,
   ): Promise<void> {
     const repo = source!
+    const candidate = repo.withoutDirectory(".git")
+    const policy = (base ?? repo).withoutDirectory(".git")
+    const scope = await this.resolveChangeScope(repo, base)
 
-    await this.codexAgentRoles(repo)
-    await this.deterministic(repo)
+    await this.codexAgentRoles(candidate)
+    await this.deterministic(candidate, policy, scope.runtime_required)
     await this.secretsHistory(repo)
-    await this.advisories(repo)
+    await this.advisoriesForScope(candidate, scope.runtime_required)
   }
 
   @func()
@@ -756,16 +1027,26 @@ exit 1
       ],
     })
     source?: Directory,
+    @argument({
+      ignore: [
+        ".git",
+        "_build",
+        "deps",
+        "cover",
+        "clients/typescript/node_modules",
+        "clients/typescript/dist",
+        "clients/typescript/coverage",
+        "dagger/node_modules",
+        "target",
+      ],
+    })
+    policy?: Directory,
+    runtimeRequired = true,
   ): Promise<void> {
     const repo = source!.withoutDirectory(".git")
+    const trustedPolicy = (policy ?? repo).withoutDirectory(".git")
 
-    await this.ciContract(repo)
-    await this.openapiContract(repo)
-    await this.scriptsQualityContainer(repo).sync()
-    await this.typescriptQuality(repo)
-    await this.rustQuality(repo)
-    await this.productionImageSmoke(repo)
-    await this.secrets(repo)
+    await this.deterministicForScope(repo, trustedPolicy, runtimeRequired)
   }
 
   @func()
@@ -786,7 +1067,8 @@ exit 1
     })
     source?: Directory,
   ): Promise<void> {
-    await ciContractContainer(source!).sync()
+    const repo = source!.withoutDirectory(".git")
+    await ciContractContainer(repo, repo).sync()
   }
 
   @func()
@@ -853,6 +1135,41 @@ exit 1
   }
 
   @func()
+  async rustCoverage(
+    @argument({
+      defaultPath: "/",
+      ignore: [
+        ".git",
+        "_build",
+        "deps",
+        "cover",
+        "clients/typescript/node_modules",
+        "clients/typescript/dist",
+        "clients/typescript/coverage",
+        "dagger/node_modules",
+        "target",
+      ],
+    })
+    source?: Directory,
+    @argument({
+      ignore: [
+        ".git",
+        "_build",
+        "deps",
+        "cover",
+        "clients/typescript/node_modules",
+        "clients/typescript/dist",
+        "clients/typescript/coverage",
+        "dagger/node_modules",
+        "target",
+      ],
+    })
+    policy?: Directory,
+  ): Promise<void> {
+    await (await this.rustCoverageContainer(source!, policy ?? source!)).sync()
+  }
+
+  @func()
   async productionImageSmoke(
     @argument({
       defaultPath: "/",
@@ -871,6 +1188,41 @@ exit 1
     source?: Directory,
   ): Promise<void> {
     await this.productionImageIntegration(source!)
+  }
+
+  @func()
+  async changeScope(
+    @argument({
+      defaultPath: "/",
+      ignore: [
+        ".git",
+        "_build",
+        "deps",
+        "cover",
+        "clients/typescript/node_modules",
+        "clients/typescript/dist",
+        "clients/typescript/coverage",
+        "dagger/node_modules",
+        "target",
+      ],
+    })
+    source?: Directory,
+    @argument({
+      ignore: [
+        ".git",
+        "_build",
+        "deps",
+        "cover",
+        "clients/typescript/node_modules",
+        "clients/typescript/dist",
+        "clients/typescript/coverage",
+        "dagger/node_modules",
+        "target",
+      ],
+    })
+    base?: Directory,
+  ): Promise<string> {
+    return JSON.stringify(await this.resolveChangeScope(source!, base))
   }
 
   @func()
