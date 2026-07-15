@@ -1,3 +1,10 @@
+## [0.16.5](https://github.com/misty-step/canary/compare/v0.16.4...v0.16.5) (2026-07-15)
+
+
+### Bug Fixes
+
+* **egress:** unify the public-destination oracle ([#272](https://github.com/misty-step/canary/issues/272)) ([d47afb2](https://github.com/misty-step/canary/commit/d47afb25a9089b7c3fe5dd45f9290ca2cb51ff1b))
+
 ## [0.16.4](https://github.com/misty-step/canary/compare/v0.16.3...v0.16.4) (2026-07-14)
 
 
