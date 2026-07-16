@@ -1420,7 +1420,6 @@ mod tests {
                  SELECT RAISE(ABORT, 'current-schema migration attempted a data update');
              END;",
         )?;
-        store.connection.pragma_update(None, "query_only", true)?;
 
         let started = Instant::now();
         store.migrate()?;
@@ -1567,6 +1566,15 @@ mod tests {
             );
         }
 
+        store.connection.execute(
+            "INSERT INTO annotations (
+                id, agent, action, created_at, subject_type, subject_id
+             ) VALUES (
+                'ANN-unresolved', 'agent', 'triaged',
+                '2026-05-28T20:00:00Z', 'unknown', 'unknown'
+            )",
+            [],
+        )?;
         store.connection.execute_batch(
             "CREATE TRIGGER reject_current_schema_backfill_annotations
              BEFORE UPDATE ON annotations
@@ -1579,7 +1587,6 @@ mod tests {
                  SELECT RAISE(ABORT, 'current-schema migration attempted a delivery update');
              END;",
         )?;
-        store.connection.pragma_update(None, "query_only", true)?;
         store.migrate()?;
 
         Ok(())
@@ -1600,18 +1607,43 @@ mod tests {
             .connection
             .pragma_update(None, "user_version", schema::SCHEMA_VERSION)?;
 
-        let error = store
-            .migrate()
+        let result = store.migrate();
+        assert!(
+            result.is_err(),
+            "migrate should fail on a current-version partial schema"
+        );
+        let error = result
             .err()
             .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
-        let StoreError::Sqlite(_) = error else {
-            return Err(error);
-        };
+        assert!(
+            matches!(error, StoreError::Sqlite(_)),
+            "expected a SQLite error, got {error:?}"
+        );
 
         assert_eq!(store.schema_version()?, schema::SCHEMA_VERSION);
         assert_eq!(
             table_names(&store.connection)?,
             BTreeSet::from(["targets".to_owned()])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_rejects_current_version_missing_fts_objects() -> Result<()> {
+        let mut store = migrated_store()?;
+        store.connection.execute_batch("DROP TABLE errors_fts;")?;
+
+        let result = store.migrate();
+        assert!(
+            result.is_err(),
+            "migrate should fail when current FTS objects are missing"
+        );
+        let error = result
+            .err()
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        assert!(
+            matches!(error, StoreError::Sqlite(_)),
+            "expected a SQLite error, got {error:?}"
         );
         Ok(())
     }
@@ -1628,14 +1660,18 @@ mod tests {
             );",
         )?;
 
-        let error = store
-            .migrate()
+        let result = store.migrate();
+        assert!(
+            result.is_err(),
+            "migrate should fail on a partial existing schema"
+        );
+        let error = result
             .err()
             .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
-
-        let StoreError::Sqlite(_) = error else {
-            return Err(error);
-        };
+        assert!(
+            matches!(error, StoreError::Sqlite(_)),
+            "expected a SQLite error, got {error:?}"
+        );
         assert_eq!(store.schema_version()?, 0);
 
         Ok(())

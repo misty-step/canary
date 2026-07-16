@@ -92,6 +92,44 @@ fn validate_schema_columns(connection: &Connection) -> rusqlite::Result<()> {
             }
         }
     }
+    validate_fts_objects(connection)?;
+    Ok(())
+}
+
+fn validate_fts_objects(connection: &Connection) -> rusqlite::Result<()> {
+    for (name, expected_type) in [
+        ("errors_fts", "table"),
+        ("errors_fts_config", "table"),
+        ("errors_fts_data", "table"),
+        ("errors_fts_docsize", "table"),
+        ("errors_fts_idx", "table"),
+        ("errors_fts_insert", "trigger"),
+        ("errors_fts_delete", "trigger"),
+        ("errors_fts_update", "trigger"),
+    ] {
+        let (actual_type, actual_table): (String, String) = connection.query_row(
+            "SELECT type, tbl_name FROM sqlite_schema WHERE name = ?1",
+            [name],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if actual_type != expected_type || (expected_type == "trigger" && actual_table != "errors")
+        {
+            return Err(rusqlite::Error::InvalidColumnName(format!(
+                "invalid FTS schema object: {name}"
+            )));
+        }
+    }
+
+    let fts_sql: String = connection.query_row(
+        "SELECT sql FROM sqlite_schema WHERE name = 'errors_fts'",
+        [],
+        |row| row.get(0),
+    )?;
+    if !fts_sql.to_ascii_lowercase().contains("using fts5") {
+        return Err(rusqlite::Error::InvalidColumnName(
+            "errors_fts is not an FTS5 virtual table".to_owned(),
+        ));
+    }
     Ok(())
 }
 
