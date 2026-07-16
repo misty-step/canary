@@ -8,6 +8,15 @@ use rusqlite::Connection;
 pub const SCHEMA_VERSION: u32 = 2026071400;
 
 pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
+    let user_version =
+        connection.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))?;
+    if user_version == SCHEMA_VERSION {
+        // Current databases must stay on the metadata-only path. In
+        // particular, do not replay data backfills on every boot.
+        validate_schema_columns(connection)?;
+        return Ok(());
+    }
+
     let transaction = connection.transaction()?;
     transaction.execute_batch(SCHEMA_SQL)?;
     add_bootstrap_ownership_columns(&transaction)?;
