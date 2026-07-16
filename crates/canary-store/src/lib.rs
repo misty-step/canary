@@ -1649,6 +1649,33 @@ mod tests {
     }
 
     #[test]
+    fn migrate_rejects_current_version_altered_fts_trigger() -> Result<()> {
+        let mut store = migrated_store()?;
+        store.connection.execute_batch(
+            "DROP TRIGGER errors_fts_insert;
+             CREATE TRIGGER errors_fts_insert
+             AFTER INSERT ON errors
+             BEGIN
+                 SELECT 1;
+             END;",
+        )?;
+
+        let result = store.migrate();
+        assert!(
+            result.is_err(),
+            "migrate should fail when an FTS trigger is altered"
+        );
+        let error = result
+            .err()
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        assert!(
+            matches!(error, StoreError::Sqlite(_)),
+            "expected a SQLite error, got {error:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn migrate_rejects_partial_existing_schema_without_stamping_version() -> Result<()> {
         let mut store = Store::open_in_memory()?;
         store.connection.execute_batch(

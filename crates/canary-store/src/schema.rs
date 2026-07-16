@@ -92,11 +92,18 @@ fn validate_schema_columns(connection: &Connection) -> rusqlite::Result<()> {
             }
         }
     }
-    validate_fts_objects(connection)?;
+    validate_fts_objects(connection, &reference)?;
     Ok(())
 }
 
-fn validate_fts_objects(connection: &Connection) -> rusqlite::Result<()> {
+fn validate_fts_objects(connection: &Connection, reference: &Connection) -> rusqlite::Result<()> {
+    const COMPARED_OBJECTS: [&str; 4] = [
+        "errors_fts",
+        "errors_fts_insert",
+        "errors_fts_delete",
+        "errors_fts_update",
+    ];
+
     for (name, expected_type) in [
         ("errors_fts", "table"),
         ("errors_fts_config", "table"),
@@ -107,30 +114,47 @@ fn validate_fts_objects(connection: &Connection) -> rusqlite::Result<()> {
         ("errors_fts_delete", "trigger"),
         ("errors_fts_update", "trigger"),
     ] {
-        let (actual_type, actual_table): (String, String) = connection.query_row(
-            "SELECT type, tbl_name FROM sqlite_schema WHERE name = ?1",
-            [name],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        if actual_type != expected_type || (expected_type == "trigger" && actual_table != "errors")
+        let (actual_type, actual_table, actual_sql): (String, String, String) = connection
+            .query_row(
+                "SELECT type, tbl_name, COALESCE(sql, '')
+                 FROM sqlite_schema
+                 WHERE name = ?1",
+                [name],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        let (reference_type, reference_table, reference_sql): (String, String, String) = reference
+            .query_row(
+                "SELECT type, tbl_name, COALESCE(sql, '')
+                 FROM sqlite_schema
+                 WHERE name = ?1",
+                [name],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+
+        if actual_type != expected_type
+            || reference_type != expected_type
+            || actual_table != reference_table
+            || (expected_type == "trigger" && actual_table != "errors")
         {
             return Err(rusqlite::Error::InvalidColumnName(format!(
                 "invalid FTS schema object: {name}"
             )));
         }
-    }
-
-    let fts_sql: String = connection.query_row(
-        "SELECT sql FROM sqlite_schema WHERE name = 'errors_fts'",
-        [],
-        |row| row.get(0),
-    )?;
-    if !fts_sql.to_ascii_lowercase().contains("using fts5") {
-        return Err(rusqlite::Error::InvalidColumnName(
-            "errors_fts is not an FTS5 virtual table".to_owned(),
-        ));
+        if COMPARED_OBJECTS.contains(&name)
+            && normalize_schema_sql(&actual_sql) != normalize_schema_sql(&reference_sql)
+        {
+            return Err(rusqlite::Error::InvalidColumnName(format!(
+                "invalid FTS schema definition: {name}"
+            )));
+        }
     }
     Ok(())
+}
+
+fn normalize_schema_sql(sql: &str) -> String {
+    sql.split_whitespace()
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 
 #[derive(Debug, PartialEq, Eq)]
