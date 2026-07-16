@@ -1325,6 +1325,7 @@ fn claim_error_to_sqlite(error: ClaimError) -> rusqlite::Error {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::str::FromStr;
+    use std::time::{Duration, Instant};
 
     use canary_core::{
         health::state_machine::HealthState,
@@ -1385,6 +1386,57 @@ mod tests {
         store.migrate()?;
         assert_eq!(store.schema_version()?, schema::SCHEMA_VERSION);
 
+        Ok(())
+    }
+    #[test]
+    fn migrate_current_schema_is_a_metadata_only_noop() -> Result<()> {
+        let mut store = migrated_store()?;
+        store.connection.execute_batch(
+            "WITH RECURSIVE rows(i) AS (
+                SELECT 1
+                UNION ALL
+                SELECT i + 1 FROM rows WHERE i < 100000
+            )
+            INSERT INTO annotations (
+                id, agent, action, created_at, subject_type, subject_id
+            )
+            SELECT printf('ANN-current-%06d', i), 'agent', 'triaged',
+                   '2026-05-28T20:00:00Z', 'incident', 'INC-missing'
+            FROM rows;",
+        )?;
+        store.connection.execute(
+            "INSERT INTO annotations (
+                id, agent, action, created_at, subject_type, subject_id
+             ) VALUES (
+                'ANN-current-null', 'agent', 'triaged',
+                '2026-05-28T20:00:00Z', 'incident', 'INC-missing'
+            )",
+            [],
+        )?;
+        store.connection.execute_batch(
+            "CREATE TRIGGER reject_current_schema_backfill
+             BEFORE UPDATE ON annotations
+             BEGIN
+                 SELECT RAISE(ABORT, 'current-schema migration attempted a data update');
+             END;",
+        )?;
+
+        let started = Instant::now();
+        store.migrate()?;
+
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "current-schema migration took too long: {elapsed:?}"
+        );
+        assert_eq!(
+            store.connection.query_row(
+                "SELECT service FROM annotations WHERE id = 'ANN-current-null'",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )?,
+            None
+        );
         Ok(())
     }
 
@@ -1483,6 +1535,7 @@ mod tests {
             .to_string()],
         )?;
 
+        store.connection.pragma_update(None, "user_version", 0)?;
         store.migrate()?;
 
         assert_eq!(
@@ -1501,6 +1554,7 @@ mod tests {
             )?,
             "desktop-worker"
         );
+
         for delivery_id in ["DLV-job-payload", "DLV-service-webhook"] {
             assert_eq!(
                 store.connection.query_row(
@@ -1512,6 +1566,112 @@ mod tests {
             );
         }
 
+        store.connection.execute(
+            "INSERT INTO annotations (
+                id, agent, action, created_at, subject_type, subject_id
+             ) VALUES (
+                'ANN-unresolved', 'agent', 'triaged',
+                '2026-05-28T20:00:00Z', 'unknown', 'unknown'
+            )",
+            [],
+        )?;
+        store.connection.execute_batch(
+            "CREATE TRIGGER reject_current_schema_backfill_annotations
+             BEFORE UPDATE ON annotations
+             BEGIN
+                 SELECT RAISE(ABORT, 'current-schema migration attempted an annotation update');
+             END;
+             CREATE TRIGGER reject_current_schema_backfill_deliveries
+             BEFORE UPDATE ON webhook_deliveries
+             BEGIN
+                 SELECT RAISE(ABORT, 'current-schema migration attempted a delivery update');
+             END;",
+        )?;
+        store.migrate()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_rejects_current_version_partial_schema_without_writes() -> Result<()> {
+        let mut store = Store::open_in_memory()?;
+        store.connection.execute_batch(
+            "CREATE TABLE targets (
+                id TEXT PRIMARY KEY,
+                url TEXT NOT NULL,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );",
+        )?;
+        store
+            .connection
+            .pragma_update(None, "user_version", schema::SCHEMA_VERSION)?;
+
+        let result = store.migrate();
+        assert!(
+            result.is_err(),
+            "migrate should fail on a current-version partial schema"
+        );
+        let error = result
+            .err()
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        assert!(
+            matches!(error, StoreError::Sqlite(_)),
+            "expected a SQLite error, got {error:?}"
+        );
+
+        assert_eq!(store.schema_version()?, schema::SCHEMA_VERSION);
+        assert_eq!(
+            table_names(&store.connection)?,
+            BTreeSet::from(["targets".to_owned()])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_rejects_current_version_missing_fts_objects() -> Result<()> {
+        let mut store = migrated_store()?;
+        store.connection.execute_batch("DROP TABLE errors_fts;")?;
+
+        let result = store.migrate();
+        assert!(
+            result.is_err(),
+            "migrate should fail when current FTS objects are missing"
+        );
+        let error = result
+            .err()
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        assert!(
+            matches!(error, StoreError::Sqlite(_)),
+            "expected a SQLite error, got {error:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_rejects_current_version_altered_fts_trigger() -> Result<()> {
+        let mut store = migrated_store()?;
+        store.connection.execute_batch(
+            "DROP TRIGGER errors_fts_insert;
+             CREATE TRIGGER errors_fts_insert
+             AFTER INSERT ON errors
+             BEGIN
+                 SELECT 1;
+             END;",
+        )?;
+
+        let result = store.migrate();
+        assert!(
+            result.is_err(),
+            "migrate should fail when an FTS trigger is altered"
+        );
+        let error = result
+            .err()
+            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        assert!(
+            matches!(error, StoreError::Sqlite(_)),
+            "expected a SQLite error, got {error:?}"
+        );
         Ok(())
     }
 
@@ -1527,14 +1687,18 @@ mod tests {
             );",
         )?;
 
-        let error = store
-            .migrate()
+        let result = store.migrate();
+        assert!(
+            result.is_err(),
+            "migrate should fail on a partial existing schema"
+        );
+        let error = result
             .err()
             .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
-
-        let StoreError::Sqlite(_) = error else {
-            return Err(error);
-        };
+        assert!(
+            matches!(error, StoreError::Sqlite(_)),
+            "expected a SQLite error, got {error:?}"
+        );
         assert_eq!(store.schema_version()?, 0);
 
         Ok(())

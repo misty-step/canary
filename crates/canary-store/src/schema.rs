@@ -8,6 +8,15 @@ use rusqlite::Connection;
 pub const SCHEMA_VERSION: u32 = 2026071400;
 
 pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
+    let user_version =
+        connection.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))?;
+    if user_version == SCHEMA_VERSION {
+        // Current databases must stay on the metadata-only path. In
+        // particular, do not replay data backfills on every boot.
+        validate_schema_columns(connection)?;
+        return Ok(());
+    }
+
     let transaction = connection.transaction()?;
     transaction.execute_batch(SCHEMA_SQL)?;
     add_bootstrap_ownership_columns(&transaction)?;
@@ -83,7 +92,69 @@ fn validate_schema_columns(connection: &Connection) -> rusqlite::Result<()> {
             }
         }
     }
+    validate_fts_objects(connection, &reference)?;
     Ok(())
+}
+
+fn validate_fts_objects(connection: &Connection, reference: &Connection) -> rusqlite::Result<()> {
+    const COMPARED_OBJECTS: [&str; 4] = [
+        "errors_fts",
+        "errors_fts_insert",
+        "errors_fts_delete",
+        "errors_fts_update",
+    ];
+
+    for (name, expected_type) in [
+        ("errors_fts", "table"),
+        ("errors_fts_config", "table"),
+        ("errors_fts_data", "table"),
+        ("errors_fts_docsize", "table"),
+        ("errors_fts_idx", "table"),
+        ("errors_fts_insert", "trigger"),
+        ("errors_fts_delete", "trigger"),
+        ("errors_fts_update", "trigger"),
+    ] {
+        let (actual_type, actual_table, actual_sql): (String, String, String) = connection
+            .query_row(
+                "SELECT type, tbl_name, COALESCE(sql, '')
+                 FROM sqlite_schema
+                 WHERE name = ?1",
+                [name],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        let (reference_type, reference_table, reference_sql): (String, String, String) = reference
+            .query_row(
+                "SELECT type, tbl_name, COALESCE(sql, '')
+                 FROM sqlite_schema
+                 WHERE name = ?1",
+                [name],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+
+        if actual_type != expected_type
+            || reference_type != expected_type
+            || actual_table != reference_table
+            || (expected_type == "trigger" && actual_table != "errors")
+        {
+            return Err(rusqlite::Error::InvalidColumnName(format!(
+                "invalid FTS schema object: {name}"
+            )));
+        }
+        if COMPARED_OBJECTS.contains(&name)
+            && normalize_schema_sql(&actual_sql) != normalize_schema_sql(&reference_sql)
+        {
+            return Err(rusqlite::Error::InvalidColumnName(format!(
+                "invalid FTS schema definition: {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_schema_sql(sql: &str) -> String {
+    sql.split_whitespace()
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 
 #[derive(Debug, PartialEq, Eq)]
