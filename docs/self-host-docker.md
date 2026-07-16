@@ -1,8 +1,10 @@
 # OCI Runtime Contract
 
-Canary is not yet distributed as a signed, pullable OCI release. This document
-defines how that image must behave once atomic publication and live signature
-verification are proved. The declarative artifact contract is in
+The Release workflow builds and keylessly signs the multi-platform image and
+portable release manifest, stages both signed files in a draft GitHub release,
+and publishes only after the uploads succeed. A successful release run is
+required before treating the artifact as pullable; this document defines how
+that published image must behave. The declarative artifact contract is in
 [`portable-runtime-contract.md`](portable-runtime-contract.md#release-artifact).
 
 After a conforming artifact exists, the deployer runs its digest with values satisfying

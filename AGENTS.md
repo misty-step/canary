@@ -79,15 +79,15 @@ Prefer these over re-deriving from the code base.
 | **canary-010 Ramp pattern** (blocked, XL, north-star) | Powder | Blocked ~3.5 months on nonexistent bitterblossom artifacts; unblock-or-kill proposal via canary-932 child 5. |
 | **canary-020 Adminifi HTTP surface verification** (blocked, S) | Powder | Upstream Adminifi HTTP surface stability. |
 | **canary-063 Triage contract hardening** (backlog, XL, P1) | Powder | Durable webhook cooldown, dispatch budgets, claim-gated delivery. |
-| **canary-064 Trustworthy release/upgrade** (backlog, L, P1) | Powder | Rescoped 2026-07-09: release restore → canary-931, declarative image contract → canary-934; live artifact publication remains open. |
+| **canary-064 Trustworthy release/upgrade** (backlog, L, P1) | Powder | Rescoped 2026-07-09: release restore → canary-931, declarative image contract → canary-934; publisher wiring landed, while live release/readback evidence remains operator-gated. |
 | **canary-065 Runtime hardening** (backlog, L, P1) | Powder | bcrypt child superseded by canary-930; proxy-header trust invariant and witness cadence truth. |
 | **canary-066 Consolidation and archaeology deletion** (backlog, XL, P2) | Powder | Worker lifecycle QUINT unification (webhook_delivery is the divergent fifth), oban_jobs rename (gated on prod DB restamp), ValidationErrors relocation / canary-ingest fold, fixture WAL ignore. |
 | Recurring footgun surface | Footguns section below + Rust store/runtime/schema modules | Every remediation here must cite the footgun list and extend it when new failure modes appear. |
 | **canary-930 Request-path concurrency** (ready, P0) | Powder | bcrypt-under-store-lock root cause (live-reproduced), /readyz spiral, mutex poisoning, monitor_overdue scan, oban_jobs growth. Consolidates the slow-API/500 cards. |
-| **canary-931 Release pipeline restore** (ready, P0) | Powder | Releaser App secrets missing (releases hard-down), zero GitHub releases, version truth, and API/CLI/MCP integration contract. |
+| **canary-931 Release pipeline restore** (ready, P0) | Powder | Release App path and version truth are wired; NPM publication remains operator-gated, while signed OCI publication is owned by canary-934. |
 | **canary-932 Coordination loop in anger** (ready, P0) | Powder | CLI/MCP read-half parity (incident get, timeline cursor, drill-downs, parity guard) + dogfood claims on real incidents. |
 | **canary-933 Gate proves live behavior** (ready, P1) | Powder | Latency floor, seeded-volume + concurrency rehearsal, post-deploy gate, Rust coverage ratchet, diff-scoped strict. Absorbs 914/972. |
-| **canary-934 Portable release and recovery** (claimed, P1) | Powder | Declarative OCI release manifest, generic S3-compatible recovery, data verification, and product/deployment boundary cleanup; live publication/signing acceptance remains open. |
+| **canary-934 Portable release and recovery** (claimed, P1) | Powder | Declarative OCI release manifest, generic S3-compatible recovery, data verification, and pre-release image/manifest signing workflow are wired; live publication/signature/pull and restore acceptance remain operator-gated. |
 | **canary-935 /ui first-class** (ready, P1) | Powder | Vendored fonts, graceful degradation, read contract, UI smoke, mobile-first. Folds 067/068/915 intent. |
 | **canary-936 Service-bound reads + redaction corpus** (ready, P0) | Powder | Unbound read keys read cross-service rich context; four-regex redaction. 048 successor; ADR-gated scope model. |
 
@@ -107,9 +107,11 @@ Canary reports its own errors through the Rust runtime direct-ingest path, no HT
 
 ## Portable release acceptance crib
 
-The repository does not currently publish or sign the declared OCI release.
-When an atomic publisher exists, live acceptance must exercise this sequence;
-the commands are not evidence that a pullable artifact exists today.
+The Release workflow uses one semantic-release decision engine: a dry-run
+plans the tag, then the full run creates a draft GitHub release, uploads the
+signed image manifest and bundle, and publishes only after both uploads
+succeed. After a successful run, live acceptance must exercise this sequence;
+local commands alone are not evidence that a pullable artifact exists.
 
 ```bash
 bin/release-manifest verify --file canary-release-manifest.json

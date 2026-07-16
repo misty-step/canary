@@ -32,11 +32,11 @@ cargo run -p canary-server
 No Docker is required for local development outside the Dagger gate. The repo
 includes the Rust service workspace and a private TypeScript source reference;
 supported application integrations use the HTTP API, CLI, and MCP surfaces.
-The declarative contract for a future portable OCI release and its runtime is
-in
+The declarative contract for the portable OCI release and its runtime is in
 [`docs/portable-runtime-contract.md`](docs/portable-runtime-contract.md).
-Canary does not yet publish or sign that artifact; live pull and signature
-verification remain unproved acceptance work.
+The Release workflow builds and keylessly signs the multi-platform image and
+release manifest, stages both signed files in a draft GitHub release, and
+publishes only after the uploads succeed.
 
 ### First run: capturing the bootstrap API key
 
@@ -618,15 +618,16 @@ schema (`priv/openapi/openapi.json`) for the authoritative contract.
 
 ## Portable OCI release contract
 
-Canary now declares the provider-neutral shape of a future multi-platform OCI
-artifact and signed release manifest. No release workflow currently builds,
-publishes, or signs that artifact: live pull, signature verification, and
-atomic publication are still open acceptance criteria.
+Canary declares the provider-neutral shape of a multi-platform OCI artifact
+and signed release manifest. The Release workflow uses one semantic-release
+decision engine, builds and keylessly signs the artifact, then stages the
+digest-pinned manifest and signature bundle in a draft GitHub release before
+publishing it.
 
-Once a release publisher can satisfy the contract atomically, acceptance must
-prove the manifest, signature bundle, digest-pinned image, classified runtime
-inputs, health, readiness, version, migration, application readback, and the
-generic S3-compatible restore check.
+After a successful release run, acceptance must prove the manifest, signature
+bundle, digest-pinned image, classified runtime inputs, health, readiness,
+version, migration, application readback, and the generic S3-compatible restore
+check.
 
 The exact commands and evidence schemas are in
 [`docs/portable-runtime-contract.md`](docs/portable-runtime-contract.md).
