@@ -1,3 +1,10 @@
+## [0.16.6](https://github.com/misty-step/canary/compare/v0.16.5...v0.16.6) (2026-07-16)
+
+
+### Bug Fixes
+
+* **store:** skip current-schema migration scans ([7f26eaf](https://github.com/misty-step/canary/commit/7f26eaf8f811fce31d9812a939e7725ee1c471f5))
+
 ## [0.16.5](https://github.com/misty-step/canary/compare/v0.16.4...v0.16.5) (2026-07-15)
 
 
