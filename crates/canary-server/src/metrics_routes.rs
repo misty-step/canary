@@ -27,17 +27,19 @@ pub(crate) async fn metrics(
         return problem_response(*problem);
     }
 
-    let store = match state.lock_store() {
-        Ok(store) => store,
-        Err(_) => return problem_response(internal_problem()),
+    let snapshot = match tokio::task::spawn_blocking(move || {
+        let reader = state.read_source()?;
+        reader.metrics_snapshot().map_err(|error| error.to_string())
+    })
+    .await
+    {
+        Ok(Ok(snapshot)) => snapshot,
+        Ok(Err(_)) | Err(_) => return problem_response(internal_problem()),
     };
 
-    match store.metrics_snapshot() {
-        Ok(snapshot) => response(
-            StatusCode::OK.as_u16(),
-            PROMETHEUS_CONTENT_TYPE,
-            Body::from(canary_core::metrics::render_prometheus(&snapshot)),
-        ),
-        Err(_) => problem_response(internal_problem()),
-    }
+    response(
+        StatusCode::OK.as_u16(),
+        PROMETHEUS_CONTENT_TYPE,
+        Body::from(canary_core::metrics::render_prometheus(&snapshot)),
+    )
 }

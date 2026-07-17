@@ -269,7 +269,7 @@ mod tests {
         body::{Body, to_bytes},
         http::{
             HeaderMap, HeaderValue, Method, Request, Response, StatusCode,
-            header::{CACHE_CONTROL, CONTENT_TYPE},
+            header::{CACHE_CONTROL, CONTENT_TYPE, RETRY_AFTER},
         },
     };
     use canary_core::{
@@ -295,6 +295,7 @@ mod tests {
         retention::RetentionPolicy,
         webhooks::{CircuitDecision, TransportResult, WebhookJob, WebhookRequest},
     };
+    use rusqlite::Connection;
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
@@ -907,6 +908,39 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn metrics_snapshot_completes_while_the_writer_lock_is_held() -> Result<(), Box<dyn Error>> {
+        let path = temp_db_path("metrics-read-pool");
+        let mut store = Store::open(&path)?;
+        store.migrate()?;
+        let read_pool = Arc::new(ReadPool::open(&path)?);
+        let state = IngestState::new(store, IngestConfig::default()).with_read_pool(read_pool);
+
+        let guard = state.lock_store().map_err(|_| "store lock poisoned")?;
+        let worker_state = state.clone();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let snapshot = worker_state
+                .read_source()
+                .and_then(|reader| reader.metrics_snapshot().map_err(|error| error.to_string()));
+            sent.send(snapshot)
+        });
+
+        let snapshot = received.recv_timeout(StdDuration::from_millis(500));
+        drop(guard);
+        worker
+            .join()
+            .map_err(|_| "metrics worker panicked")?
+            .map_err(|_| "metrics receiver dropped")?;
+        snapshot??;
+
+        fs::remove_file(&path)?;
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+
+        Ok(())
+    }
+
     /// `report_error_groups_scoped` and `active_incidents` deliberately stay
     /// off the read pool because they fuse a claim-expiry write into the
     /// read (see `read_pool.rs` and `read_source.rs`). This guards that the
@@ -1242,6 +1276,90 @@ mod tests {
             )
             .await?;
         assert_eq!(next.status(), StatusCode::OK);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_write_contention_returns_retryable_503_for_write_routes()
+    -> Result<(), Box<dyn Error>> {
+        let path = temp_db_path("write-contention");
+        let mut store = Store::open(&path)?;
+        store.migrate()?;
+        seed_api_key(&mut store, "KEY-admin", ADMIN_KEY, "admin", None)?;
+        seed_api_key(&mut store, "KEY-ingest", INGEST_KEY, "ingest-only", None)?;
+        seed_target(&mut store, "test-svc")?;
+        seed_monitor(&mut store, "desktop-active-timer")?;
+        let state = IngestState::new(store, IngestConfig::default());
+        let router = ingest_router(state.clone());
+
+        // Warm both auth-cache entries before taking the database write lock;
+        // the observed failures must come from the route writes themselves.
+        let warm_ingest = router
+            .clone()
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+        assert_eq!(warm_ingest.status(), StatusCode::CREATED);
+        let warm_admin = router
+            .clone()
+            .oneshot(read_request(ADMIN_KEY, "/metrics")?)
+            .await?;
+        assert_eq!(warm_admin.status(), StatusCode::OK);
+
+        let blocker = Connection::open(&path)?;
+        blocker.execute_batch("BEGIN IMMEDIATE")?;
+
+        let busy_ingest = router
+            .clone()
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+        assert_eq!(busy_ingest.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            busy_ingest.headers().get(RETRY_AFTER),
+            Some(&HeaderValue::from_static("5"))
+        );
+        assert_eq!(json_body(busy_ingest).await?["code"], "unavailable");
+
+        let busy_check_in = router
+            .clone()
+            .oneshot(check_in_request(INGEST_KEY, valid_check_in_body())?)
+            .await?;
+        assert_eq!(busy_check_in.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            busy_check_in.headers().get(RETRY_AFTER),
+            Some(&HeaderValue::from_static("5"))
+        );
+        assert_eq!(json_body(busy_check_in).await?["code"], "unavailable");
+
+        let busy_annotation = router
+            .clone()
+            .oneshot(json_request(
+                "POST",
+                "/api/v1/annotations",
+                ADMIN_KEY,
+                r#"{"subject_type":"target","subject_id":"TGT-test-svc","agent":"test","action":"busy"}"#,
+            )?)
+            .await?;
+        assert_eq!(busy_annotation.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            busy_annotation.headers().get(RETRY_AFTER),
+            Some(&HeaderValue::from_static("5"))
+        );
+        assert_eq!(json_body(busy_annotation).await?["code"], "unavailable");
+
+        blocker.execute_batch("ROLLBACK")?;
+        drop(blocker);
+        let retried = router
+            .clone()
+            .oneshot(error_request(INGEST_KEY, valid_error_body())?)
+            .await?;
+        assert_eq!(retried.status(), StatusCode::CREATED);
+
+        drop(router);
+        drop(state);
+        fs::remove_file(&path)?;
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
 
         Ok(())
     }

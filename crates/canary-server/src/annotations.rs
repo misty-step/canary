@@ -19,13 +19,17 @@ use canary_http::{
     request::{MAX_JSON_BODY_BYTES, decode_json_object},
 };
 use canary_ingest::{IngestEffect, ValidationErrors};
-use canary_store::{AnnotationError, AnnotationInsert, AnnotationPageOptions, VerifiedApiKey};
+use canary_store::{
+    AnnotationError, AnnotationInsert, AnnotationPageOptions, VerifiedApiKey, sqlite_error_is_busy,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::{
     IngestState, enforce_service_authority,
-    http_contract::{check_content_length, json_status_response, problem_response},
+    http_contract::{
+        check_content_length, json_status_response, problem_response, storage_busy_response,
+    },
     require_read_scope, require_responder_write_scope,
     server_time::current_rfc3339,
 };
@@ -272,6 +276,9 @@ fn create_annotation_request(
             Err(AnnotationError::InvalidLimit | AnnotationError::InvalidCursor) => {
                 return problem_response(internal_problem());
             }
+            Err(AnnotationError::Sqlite(error)) if sqlite_error_is_busy(&error) => {
+                return storage_busy_response();
+            }
             Err(AnnotationError::Sqlite(_)) => return problem_response(internal_problem()),
         };
         if let Some(service) = service.as_deref()
@@ -306,6 +313,9 @@ fn create_annotation_request(
             }
             Err(AnnotationError::InvalidLimit | AnnotationError::InvalidCursor) => {
                 return problem_response(internal_problem());
+            }
+            Err(AnnotationError::Sqlite(error)) if sqlite_error_is_busy(&error) => {
+                return storage_busy_response();
             }
             Err(AnnotationError::Sqlite(_)) => return problem_response(internal_problem()),
         };

@@ -9,11 +9,11 @@ use axum::{
     body::Body,
     http::{
         HeaderMap, HeaderValue, Response, StatusCode,
-        header::{CONTENT_LENGTH, CONTENT_TYPE},
+        header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER},
     },
 };
 use canary_http::{
-    problem_details::{ProblemDetails, payload_too_large_problem},
+    problem_details::{ProblemCode, ProblemDetails, payload_too_large_problem},
     public::PublicResponse,
     request::MAX_JSON_BODY_BYTES,
 };
@@ -64,10 +64,34 @@ where
 
 pub(crate) fn problem_response(problem: ProblemDetails) -> Response<Body> {
     let status = problem.status;
+    let retryable = problem.code == ProblemCode::Unavailable.as_str();
     match serde_json::to_vec(&problem) {
-        Ok(body) => response(status, PROBLEM_CONTENT_TYPE, Body::from(body)),
+        Ok(body) => {
+            let mut response = response(status, PROBLEM_CONTENT_TYPE, Body::from(body));
+            if retryable {
+                response
+                    .headers_mut()
+                    .insert(RETRY_AFTER, HeaderValue::from_static("5"));
+            }
+            response
+        }
         Err(_) => internal_server_error(),
     }
+}
+
+/// Build the retryable problem used when SQLite's single writer is busy.
+pub(crate) fn storage_busy_problem() -> ProblemDetails {
+    ProblemDetails::new(
+        StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+        ProblemCode::Unavailable,
+        "Persistent storage is temporarily busy. Retry the request.",
+        None,
+    )
+}
+
+/// Build the retryable response used when SQLite's single writer is busy.
+pub(crate) fn storage_busy_response() -> Response<Body> {
+    problem_response(storage_busy_problem())
 }
 
 pub(crate) fn query_param_is_array(raw_query: Option<&str>, param: &str) -> bool {

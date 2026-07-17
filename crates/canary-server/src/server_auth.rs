@@ -17,6 +17,7 @@ use canary_http::{
 use canary_store::{DurableRateLimitDecision, VerifiedApiKey};
 use serde_json::json;
 
+use crate::http_contract::storage_busy_problem;
 use crate::rate_limit::RateLimitDecision;
 use crate::server_time::current_unix_millis;
 use crate::{AuthFailIdentityConfig, IngestState};
@@ -326,20 +327,19 @@ fn enforce_rate_limit(
     let mut store = state
         .lock_store()
         .map_err(|_| Box::new(internal_problem()))?;
-    match store
-        .check_rate_limit(
-            rate_limit_kind_name(kind),
-            identity,
-            policy.limit,
-            policy.window_ms,
-            current_unix_millis(),
-        )
-        .map_err(|_| Box::new(internal_problem()))?
-    {
-        DurableRateLimitDecision::Allowed => Ok(()),
-        DurableRateLimitDecision::Limited {
+    match store.check_rate_limit(
+        rate_limit_kind_name(kind),
+        identity,
+        policy.limit,
+        policy.window_ms,
+        current_unix_millis(),
+    ) {
+        Ok(DurableRateLimitDecision::Allowed) => Ok(()),
+        Ok(DurableRateLimitDecision::Limited {
             retry_after_seconds,
-        } => Err(Box::new(rate_limited_problem(retry_after_seconds))),
+        }) => Err(Box::new(rate_limited_problem(retry_after_seconds))),
+        Err(error) if error.is_busy() => Err(Box::new(storage_busy_problem())),
+        Err(_) => Err(Box::new(internal_problem())),
     }
 }
 

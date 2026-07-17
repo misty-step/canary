@@ -49,8 +49,26 @@ All writes go through `canary_store::Store`. The production server shares one
 writable store behind a process-local lock so SQLite's single-writer constraint
 is explicit rather than hidden behind a pool.
 
+Read-model routes use a bounded pool of read-only WAL connections. The
+Prometheus `/metrics` snapshot runs on Tokio's blocking pool and is cancelled
+by a SQLite progress handler when its query budget expires; it does not hold
+the process-local writer lock while aggregating. Reads that intentionally
+expire claims remain on the writer because they mutate state.
+
+SQLite `BUSY` and `LOCKED` failures are a capacity signal, not an internal
+fault. Authenticated HTTP routes return RFC 9457 `503 unavailable` with
+`Retry-After: 5`; callers may retry after the current writer releases.
+
 Schema source lives in `crates/canary-store/src/schema.rs`. Custom string IDs
 use stable prefixes such as `ERR-`, `INC-`, `WHK-`, and `MON-`.
+
+The retention lifecycle deletes at most 1,000 rows per statement. It covers
+errors, service events, target checks, terminal webhook deliveries, monitor
+check-ins, annotations, resolved incident signals, terminal remediation
+claims, resolved incidents with no retained dependent history, and terminal
+Oban jobs. Active incidents, active claims, pending deliveries, and
+runnable jobs never match retention predicates. Each completed pass runs a
+bounded incremental vacuum that reclaims at most 1,000 free pages.
 
 ## Request Flow
 

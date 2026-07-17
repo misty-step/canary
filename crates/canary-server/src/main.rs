@@ -4,7 +4,7 @@ use std::{error::Error, path::PathBuf, process};
 
 use canary_http::public::CANARY_VERSION;
 use canary_server::{CanaryServer, ServerProcessConfig, keygen};
-use canary_store::{CURRENT_SCHEMA_VERSION, Store, verify_database};
+use canary_store::{CURRENT_SCHEMA_VERSION, Store, vacuum_database, verify_database};
 use serde_json::json;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -46,6 +46,7 @@ fn run_operator_command(args: &[String]) -> Option<Result<(), Box<dyn Error>>> {
         Some("version" | "--version" | "-V") => Some(run_version(&args[1..])),
         Some("verify-data") => Some(run_verify_data(&args[1..], false)),
         Some("migrate") => Some(run_verify_data(&args[1..], true)),
+        Some("vacuum-database") => Some(run_vacuum_database(&args[1..])),
         // Recovery path for issuing a scoped API key directly against the
         // SQLite store when the one-time bootstrap key has been lost.
         Some("mint-key") => Some(run_mint_key(&args[1..])),
@@ -79,6 +80,26 @@ fn run_verify_data(args: &[String], migrate: bool) -> Result<(), Box<dyn Error>>
     if !evidence.verified() {
         return Err("database verification failed".into());
     }
+    Ok(())
+}
+
+fn run_vacuum_database(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let database_path = parse_database_path(args)?;
+    let report = vacuum_database(&database_path)?;
+    println!(
+        "{}",
+        serde_json::to_string(&json!({
+            "schema": "canary.vacuum_database.v1",
+            "database": database_path,
+            "page_size": report.page_size,
+            "page_count_before": report.page_count_before,
+            "page_count_after": report.page_count_after,
+            "freelist_pages_before": report.freelist_pages_before,
+            "freelist_pages_after": report.freelist_pages_after,
+            "bytes_before": report.page_count_before.saturating_mul(report.page_size),
+            "bytes_after": report.page_count_after.saturating_mul(report.page_size),
+        }))?
+    );
     Ok(())
 }
 

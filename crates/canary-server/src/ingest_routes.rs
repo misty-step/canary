@@ -29,7 +29,9 @@ use crate::{
     HealthEventSource, IngestState,
     body_fields::{optional_string, required_string},
     enforce_service_authority,
-    http_contract::{check_content_length, json_status_response, problem_response},
+    http_contract::{
+        check_content_length, json_status_response, problem_response, storage_busy_response,
+    },
     require_ingest_scope,
     server_time::{current_rfc3339, current_unix_millis},
 };
@@ -101,6 +103,7 @@ pub(crate) async fn create_error(
         Err(IngestError::PayloadTooLarge(detail)) => {
             problem_response(payload_too_large_problem(detail))
         }
+        Err(IngestError::Store(error)) if error.is_busy() => storage_busy_response(),
         Err(IngestError::Store(_)) => problem_response(internal_problem()),
     }
 }
@@ -158,6 +161,7 @@ pub(crate) async fn create_check_in(
     ) {
         Ok(Some(snapshot)) => snapshot,
         Ok(None) => return problem_response(not_found_problem("Monitor not found.")),
+        Err(error) if error.is_busy() => return storage_busy_response(),
         Err(_) => return problem_response(internal_problem()),
     };
     if let Err(problem) = enforce_service_authority(&key, &snapshot.service) {
@@ -189,6 +193,7 @@ pub(crate) async fn create_check_in(
     let response_state = plan.commit.state.clone();
     let commit = match store.commit_monitor_check_in(plan.commit) {
         Ok(commit) => commit,
+        Err(error) if error.is_busy() => return storage_busy_response(),
         Err(_) => return problem_response(internal_problem()),
     };
     drop(store);

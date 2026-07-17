@@ -53,8 +53,9 @@ use canary_core::query::{ErrorDetail, ErrorsByClass};
 use rusqlite::{Connection, OpenFlags};
 
 use crate::{
-    ApiKeyRecord, ErrorSummaryItem, HealthMonitorStatus, HealthTargetStatus, QueryResult, Result,
-    ServiceSliSummary, StoreError, TargetCheckRead, TimelineQueryOptions, TimelineQueryResult,
+    ApiKeyRecord, ErrorSummaryItem, HealthMonitorStatus, HealthTargetStatus, MetricsSnapshot,
+    QueryResult, Result, ServiceSliSummary, StoreError, TargetCheckRead, TimelineQueryOptions,
+    TimelineQueryResult,
 };
 use crate::{RecentTransition, SearchResult};
 use crate::{api_keys, health, query, service_sli};
@@ -332,6 +333,11 @@ impl ReadConnection {
         options: &crate::ActiveClaimListOptions,
     ) -> crate::ClaimResult<canary_core::query::ActiveClaimsResponse> {
         crate::claims::list_active(&self.connection, options)
+    }
+
+    /// Gather a point-in-time Prometheus metrics snapshot.
+    pub fn metrics_snapshot(&self) -> Result<MetricsSnapshot> {
+        crate::metrics::snapshot(&self.connection)
     }
 }
 
