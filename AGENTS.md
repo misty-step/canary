@@ -141,6 +141,12 @@ original cannot be re-shown.
 - **Schema ownership.** `crates/canary-store/src/schema.rs` is the Rust schema
   source. `Store::migrate` must fail closed on partial existing schemas before
   stamping `user_version`.
+- **Derived FTS repair.** A current-version database can lose an FTS table or
+  trigger without changing `user_version`. `Store::migrate` must recreate the
+  missing derived objects and rebuild the whole external-content FTS index in
+  one transaction before strict validation, because a trigger gap may have
+  left searchable rows stale. Healthy schemas must not rebuild; altered FTS
+  definitions and non-derived drift still fail closed.
 - **Custom string IDs.** Stable prefixes (`ERR-`, `INC-`, `EVT-`, `WHK-`,
   `MON-`) are product contracts. Keep ID generation in `canary-core::ids`.
 - **State machines stay pure.** Health transitions live in
