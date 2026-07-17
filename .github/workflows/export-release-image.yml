@@ -1,0 +1,72 @@
+name: Export release image
+
+on:
+  workflow_dispatch:
+    inputs:
+      digest:
+        description: Signed multi-architecture release image digest
+        required: true
+        type: string
+      source_commit:
+        description: Expected full source commit from the signed release manifest
+        required: true
+        type: string
+
+concurrency:
+  group: export-release-image
+  cancel-in-progress: false
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    env:
+      OCI_REPOSITORY: ghcr.io/${{ github.repository_owner }}/canary
+      IMAGE_DIGEST: ${{ inputs.digest }}
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+    steps:
+      - name: Validate exact release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Verify and export linux/amd64 image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${OCI_REPOSITORY}@${IMAGE_DIGEST}"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/heads/master"
+          cosign verify \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$image" >/dev/null
+
+          docker pull --platform linux/amd64 "$image"
+          actual_source="$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+          test "$actual_source" = "$SOURCE_COMMIT"
+          docker tag "$image" "canary:recovery-${SOURCE_COMMIT}"
+          docker save --output "${RUNNER_TEMP}/canary-image.tar" "canary:recovery-${SOURCE_COMMIT}"
+
+      - name: Upload verified image
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: canary-image-${{ inputs.source_commit }}
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          path: ${{ runner.temp }}/canary-image.tar
