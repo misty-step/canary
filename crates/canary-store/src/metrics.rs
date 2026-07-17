@@ -1,13 +1,28 @@
 //! Store-backed metrics snapshot queries.
 
+use std::time::{Duration, Instant};
+
 use canary_core::metrics::{HealthStateMetric, LabeledCount, MetricsSnapshot};
 use rusqlite::Connection;
 
 use crate::{Result, health};
 
 const HEALTH_STATES: [&str; 6] = ["unknown", "up", "degraded", "down", "paused", "flapping"];
+const METRICS_QUERY_BUDGET: Duration = Duration::from_millis(250);
+const PROGRESS_CALLBACK_OPS: i32 = 1_000;
 
 pub(crate) fn snapshot(connection: &Connection) -> Result<MetricsSnapshot> {
+    let deadline = Instant::now() + METRICS_QUERY_BUDGET;
+    connection.progress_handler(
+        PROGRESS_CALLBACK_OPS,
+        Some(move || Instant::now() >= deadline),
+    );
+    let result = snapshot_with_budget(connection);
+    connection.progress_handler(0, None::<fn() -> bool>);
+    result
+}
+
+fn snapshot_with_budget(connection: &Connection) -> Result<MetricsSnapshot> {
     Ok(MetricsSnapshot {
         errors_total: count_errors(connection)?,
         webhook_queue_depth: webhook_queue_depth(connection)?,

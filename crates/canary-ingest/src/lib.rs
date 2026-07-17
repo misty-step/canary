@@ -498,7 +498,10 @@ mod tests {
             assert!(errors.contains_key("message"));
             assert!(!errors.contains_key("fingerprint"));
         }
-        assert_eq!(store.schema_version()?, canary_store_schema_version());
+        assert_eq!(
+            store.schema_version()?,
+            canary_store::CURRENT_SCHEMA_VERSION
+        );
 
         Ok(())
     }
@@ -711,9 +714,5 @@ mod tests {
             project_id: BOOTSTRAP_PROJECT_ID.to_owned(),
             now: now.to_owned(),
         }
-    }
-
-    const fn canary_store_schema_version() -> u32 {
-        2026071400
     }
 }

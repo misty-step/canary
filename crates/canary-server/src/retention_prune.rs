@@ -48,8 +48,22 @@ pub struct RetentionPruneLifecycleReport {
     pub service_events_deleted: u64,
     /// Deleted target-check rows.
     pub target_checks_deleted: u64,
+    /// Deleted terminal webhook delivery ledger rows.
+    pub webhook_deliveries_deleted: u64,
+    /// Deleted monitor check-ins.
+    pub monitor_check_ins_deleted: u64,
+    /// Deleted annotations.
+    pub annotations_deleted: u64,
+    /// Deleted resolved incident signals.
+    pub incident_signals_deleted: u64,
+    /// Deleted terminal remediation claims.
+    pub remediation_claims_deleted: u64,
+    /// Deleted resolved incidents.
+    pub incidents_deleted: u64,
     /// Deleted terminal (`completed`/`discarded`) webhook-delivery job rows.
     pub oban_jobs_deleted: u64,
+    /// Free database pages returned by the bounded incremental vacuum.
+    pub pages_reclaimed: u64,
     /// Store delete statements executed.
     pub batches: u64,
     /// True when shutdown interrupted the pass after a completed batch.
@@ -108,7 +122,7 @@ impl RetentionPruneLifecycle {
         }
         report.interrupted = self.prune_table(
             RetentionPruneTable::TargetChecks,
-            plan.check_cutoff,
+            plan.check_cutoff.clone(),
             |deleted| report.target_checks_deleted += deleted,
             &mut report.batches,
             &should_stop,
@@ -116,11 +130,69 @@ impl RetentionPruneLifecycle {
         if report.interrupted {
             return Ok(report);
         }
-        // Terminal webhook-delivery job rows share the error/service-event
-        // cutoff; only `completed`/`discarded` states ever match (see
-        // canary-store::retention::RetentionPruneTable::ObanJobsTerminal), so
-        // claimed (`executing`) or pending (`available`/`scheduled`) work is
-        // never pruned. Footgun: "Webhook delivery jobs" in AGENTS.md.
+        report.interrupted = self.prune_table(
+            RetentionPruneTable::WebhookDeliveriesTerminal,
+            plan.error_cutoff.clone(),
+            |deleted| report.webhook_deliveries_deleted += deleted,
+            &mut report.batches,
+            &should_stop,
+        )?;
+        if report.interrupted {
+            return Ok(report);
+        }
+        report.interrupted = self.prune_table(
+            RetentionPruneTable::MonitorCheckIns,
+            plan.check_cutoff,
+            |deleted| report.monitor_check_ins_deleted += deleted,
+            &mut report.batches,
+            &should_stop,
+        )?;
+        if report.interrupted {
+            return Ok(report);
+        }
+        report.interrupted = self.prune_table(
+            RetentionPruneTable::Annotations,
+            plan.error_cutoff.clone(),
+            |deleted| report.annotations_deleted += deleted,
+            &mut report.batches,
+            &should_stop,
+        )?;
+        if report.interrupted {
+            return Ok(report);
+        }
+        report.interrupted = self.prune_table(
+            RetentionPruneTable::IncidentSignalsResolved,
+            plan.error_cutoff.clone(),
+            |deleted| report.incident_signals_deleted += deleted,
+            &mut report.batches,
+            &should_stop,
+        )?;
+        if report.interrupted {
+            return Ok(report);
+        }
+        report.interrupted = self.prune_table(
+            RetentionPruneTable::RemediationClaimsTerminal,
+            plan.error_cutoff.clone(),
+            |deleted| report.remediation_claims_deleted += deleted,
+            &mut report.batches,
+            &should_stop,
+        )?;
+        if report.interrupted {
+            return Ok(report);
+        }
+        report.interrupted = self.prune_table(
+            RetentionPruneTable::IncidentsResolved,
+            plan.error_cutoff.clone(),
+            |deleted| report.incidents_deleted += deleted,
+            &mut report.batches,
+            &should_stop,
+        )?;
+        if report.interrupted {
+            return Ok(report);
+        }
+        // Terminal jobs share the error/service-event cutoff. Claimed
+        // (`executing`) or pending (`available`/`scheduled`) work never
+        // matches the store predicate.
         report.interrupted = self.prune_table(
             RetentionPruneTable::ObanJobsTerminal,
             plan.error_cutoff,
@@ -128,6 +200,16 @@ impl RetentionPruneLifecycle {
             &mut report.batches,
             &should_stop,
         )?;
+        if report.interrupted {
+            return Ok(report);
+        }
+        report.pages_reclaimed = {
+            let mut store = self.store.lock();
+            store
+                .reclaim_retention_storage()
+                .map_err(|error| error.to_string())?
+                .pages_reclaimed
+        };
 
         Ok(report)
     }
@@ -411,10 +493,13 @@ mod tests {
                 service_events_deleted: 1005,
                 target_checks_deleted: 0,
                 oban_jobs_deleted: 0,
-                batches: 6,
+                batches: 12,
+                pages_reclaimed: report.pages_reclaimed,
                 interrupted: false,
+                ..RetentionPruneLifecycleReport::default()
             }
         );
+        assert!(report.pages_reclaimed > 0);
 
         Ok(())
     }
@@ -495,6 +580,7 @@ mod tests {
                 oban_jobs_deleted: 0,
                 batches: 1,
                 interrupted: true,
+                ..RetentionPruneLifecycleReport::default()
             }
         );
 

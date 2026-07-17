@@ -103,6 +103,33 @@ evidence used by the recovery drill. A manifest sets
 explicit previous-image compatibility proof. Otherwise recovery requires a
 verified database restore; the deployer owns the decision and policy.
 
+## Storage maintenance
+
+The runtime retention worker prunes old rows in 1,000-row transactions and
+performs a bounded incremental vacuum after each pass. The default policy keeps
+errors, events, annotations, resolved incident history, terminal claims,
+terminal delivery history, and terminal jobs for 30 days; target checks and
+monitor check-ins use a 7-day window. Active incidents, active claims, pending
+deliveries, and runnable jobs are never eligible.
+
+Incremental vacuum prevents new free-page growth from remaining unbounded. It
+does not compact free pages left by deployments created before incremental
+vacuum was enabled. Reclaim that historical space with the image-owned offline
+command:
+
+```bash
+canary-server vacuum-database --database "$CANARY_DB_PATH"
+```
+
+Stop the Canary server and Litestream replication process before running the
+command against the mounted database. The command refuses a missing path,
+acquires an exclusive SQLite lock, enables incremental auto-vacuum, runs one
+full `VACUUM`, checkpoints the WAL, and emits a
+`canary.vacuum_database.v1` JSON receipt with before/after page and byte
+counts. Keep a verified backup and free disk capacity comparable to the
+database size, then restart the normal runtime and prove `/healthz`, `/readyz`,
+and replication status.
+
 ## Backup and restore
 
 Canary supports Litestream replication to generic S3-compatible object

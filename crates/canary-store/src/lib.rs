@@ -74,7 +74,7 @@ pub use rate_limits::DurableRateLimitDecision;
 pub use read_pool::{ReadConnection, ReadPool};
 pub use retention::{
     RetentionPrune, RetentionPruneBatch, RetentionPruneBatchReport, RetentionPruneReport,
-    RetentionPruneTable,
+    RetentionPruneTable, StorageReclaimReport, VacuumDatabaseReport, vacuum_database,
 };
 pub use service_sli::{
     MIN_TRAJECTORY_SAMPLES, ServiceSliSummary, ServiceSliTrajectory, TrajectoryStatus,
@@ -113,6 +113,29 @@ pub enum StoreError {
     /// A service-onboarding target conflicts with an existing target row.
     #[error("target conflict")]
     TargetConflict(TargetConflict),
+}
+
+impl StoreError {
+    /// Whether SQLite rejected the operation because another connection holds
+    /// a conflicting lock. Callers may safely translate this transient class
+    /// to a retryable response instead of reporting an internal fault.
+    pub fn is_busy(&self) -> bool {
+        matches!(self, Self::Sqlite(error) if sqlite_error_is_busy(error))
+    }
+}
+
+/// Whether a SQLite error represents `SQLITE_BUSY` or `SQLITE_LOCKED`.
+pub fn sqlite_error_is_busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked,
+                ..
+            },
+            _
+        )
+    )
 }
 
 /// Canary's single writable SQLite connection.
@@ -1265,6 +1288,11 @@ impl Store {
         retention::prune_batch(&self.connection, batch)
     }
 
+    /// Reclaim a bounded number of free pages after a retention pass.
+    pub fn reclaim_retention_storage(&mut self) -> Result<StorageReclaimReport> {
+        retention::incremental_vacuum(&self.connection)
+    }
+
     /// Count persisted errors.
     pub fn error_count(&self) -> Result<u64> {
         let count = self
@@ -1300,6 +1328,17 @@ impl Store {
     }
 
     fn from_connection(connection: Connection) -> Result<Self> {
+        let has_application_tables = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_schema
+                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+            )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !has_application_tables {
+            connection.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+        }
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -5106,6 +5145,7 @@ mod tests {
                 errors_deleted: 1005,
                 service_events_deleted: 1,
                 target_checks_deleted: 1,
+                ..RetentionPruneReport::default()
             }
         );
         assert_eq!(row_count(&store.connection, "errors")?, 1);
@@ -5298,6 +5338,212 @@ mod tests {
             }
         );
         assert_eq!(row_count(&store.connection, "oban_jobs")?, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn retention_prune_covers_unbounded_tables_without_deleting_live_state()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut store = migrated_store()?;
+        store.connection.execute_batch(
+            r#"
+            INSERT INTO webhook_deliveries (
+              delivery_id, webhook_id, event, status, delivered_at, created_at, updated_at
+            ) VALUES
+              ('DLV-old', 'WH-test', 'incident.updated', 'delivered',
+               '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z'),
+              ('DLV-recent', 'WH-test', 'incident.updated', 'delivered',
+               '2026-05-28T00:00:00Z', '2026-05-28T00:00:00Z', '2026-05-28T00:00:00Z'),
+              ('DLV-pending', 'WH-test', 'incident.updated', 'pending',
+               NULL, '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z');
+
+            INSERT INTO monitors (
+              id, name, service, mode, expected_every_ms, created_at
+            ) VALUES (
+              'MON-retention', 'retention', 'retention', 'check_in', 60000,
+              '2026-04-01T00:00:00Z'
+            );
+            INSERT INTO monitor_check_ins (
+              id, monitor_id, status, observed_at
+            ) VALUES
+              ('CHK-old', 'MON-retention', 'success', '2026-04-01T00:00:00Z'),
+              ('CHK-recent', 'MON-retention', 'success', '2026-05-28T00:00:00Z');
+
+            INSERT INTO incidents (
+              id, service, state, severity, opened_at, resolved_at
+            ) VALUES
+              ('INC-delete', 'retention', 'resolved', 'medium',
+               '2026-03-01T00:00:00Z', '2026-04-01T00:00:00Z'),
+              ('INC-protected', 'retention', 'resolved', 'medium',
+               '2026-03-01T00:00:00Z', '2026-04-01T00:00:00Z'),
+              ('INC-annotated', 'retention', 'resolved', 'medium',
+               '2026-03-01T00:00:00Z', '2026-04-01T00:00:00Z'),
+              ('INC-signaled', 'retention', 'resolved', 'medium',
+               '2026-03-01T00:00:00Z', '2026-04-01T00:00:00Z'),
+              ('INC-claimed', 'retention', 'resolved', 'medium',
+               '2026-03-01T00:00:00Z', '2026-04-01T00:00:00Z'),
+              ('INC-live', 'retention', 'investigating', 'medium',
+               '2026-03-01T00:00:00Z', NULL);
+            INSERT INTO incident_signals (
+              incident_id, signal_type, signal_ref, attached_at, resolved_at
+            ) VALUES
+              ('INC-protected', 'error_group', 'old-resolved',
+               '2026-03-01T00:00:00Z', '2026-04-01T00:00:00Z'),
+              ('INC-signaled', 'error_group', 'recent-resolved',
+               '2026-03-01T00:00:00Z', '2026-05-28T00:00:00Z'),
+              ('INC-live', 'error_group', 'live-unresolved',
+               '2026-03-01T00:00:00Z', NULL);
+
+            INSERT INTO annotations (
+              id, incident_id, agent, action, metadata, created_at, subject_type, subject_id
+            ) VALUES
+              ('ANN-old', 'INC-protected', 'retention', 'verified', '{}',
+               '2026-04-01T00:00:00Z', 'incident', 'INC-protected'),
+              ('ANN-recent', 'INC-protected', 'retention', 'verified', '{}',
+               '2026-05-28T00:00:00Z', 'incident', 'INC-protected'),
+              ('ANN-protect', 'INC-annotated', 'retention', 'verified', '{}',
+               '2026-05-28T00:00:00Z', 'incident', 'INC-annotated');
+
+            INSERT INTO remediation_claims (
+              id, subject_type, subject_id, owner, purpose, state,
+              idempotency_key, evidence_links, created_at, updated_at,
+              expires_at, completed_at
+            ) VALUES
+              ('CLM-terminal', 'incident', 'INC-delete', 'retention', 'done',
+               'verified', 'terminal', '[]', '2026-03-01T00:00:00Z',
+               '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z',
+               '2026-04-01T00:00:00Z'),
+              ('CLM-active', 'incident', 'INC-protected', 'retention', 'working',
+               'claimed', 'active', '[]', '2026-03-01T00:00:00Z',
+               '2026-04-01T00:00:00Z', '2027-04-01T00:00:00Z', NULL),
+              ('CLM-recent', 'incident', 'INC-claimed', 'retention', 'recent',
+               'verified', 'recent', '[]', '2026-03-01T00:00:00Z',
+               '2026-05-28T00:00:00Z', '2026-05-28T00:00:00Z',
+               '2026-05-28T00:00:00Z');
+            "#,
+        )?;
+
+        for (table, cutoff, expected_deleted) in [
+            (
+                RetentionPruneTable::WebhookDeliveriesTerminal,
+                "2026-05-01T00:00:00Z",
+                1,
+            ),
+            (
+                RetentionPruneTable::MonitorCheckIns,
+                "2026-05-22T00:00:00Z",
+                1,
+            ),
+            (RetentionPruneTable::Annotations, "2026-05-01T00:00:00Z", 1),
+            (
+                RetentionPruneTable::IncidentSignalsResolved,
+                "2026-05-01T00:00:00Z",
+                1,
+            ),
+            (
+                RetentionPruneTable::RemediationClaimsTerminal,
+                "2026-05-01T00:00:00Z",
+                1,
+            ),
+            (
+                RetentionPruneTable::IncidentsResolved,
+                "2026-05-01T00:00:00Z",
+                1,
+            ),
+        ] {
+            let report = store.prune_retention_batch(RetentionPruneBatch {
+                table,
+                cutoff: cutoff.to_owned(),
+            })?;
+            assert_eq!(report.deleted, expected_deleted, "{table:?}");
+            assert!(report.complete);
+        }
+
+        let exists = |table: &str, column: &str, id: &str| -> rusqlite::Result<bool> {
+            store.connection.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE {column} = ?1)"),
+                [id],
+                |row| row.get(0),
+            )
+        };
+        assert!(!exists("webhook_deliveries", "delivery_id", "DLV-old")?);
+        assert!(exists("webhook_deliveries", "delivery_id", "DLV-recent")?);
+        assert!(exists("webhook_deliveries", "delivery_id", "DLV-pending")?);
+        assert!(!exists("monitor_check_ins", "id", "CHK-old")?);
+        assert!(exists("monitor_check_ins", "id", "CHK-recent")?);
+        assert!(!exists("annotations", "id", "ANN-old")?);
+        assert!(exists("annotations", "id", "ANN-recent")?);
+        assert!(!exists("remediation_claims", "id", "CLM-terminal")?);
+        assert!(exists("remediation_claims", "id", "CLM-active")?);
+        assert!(!exists("incidents", "id", "INC-delete")?);
+        assert!(exists("incidents", "id", "INC-protected")?);
+        assert!(exists("incidents", "id", "INC-live")?);
+        assert!(exists("incidents", "id", "INC-annotated")?);
+        assert!(exists("incidents", "id", "INC-signaled")?);
+        assert!(exists("incidents", "id", "INC-claimed")?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn vacuum_database_reclaims_free_pages_and_keeps_incremental_mode()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "canary-store-vacuum-{}-{unique}.db",
+            std::process::id()
+        ));
+
+        {
+            let mut store = Store::open(&path)?;
+            store.migrate()?;
+            let auto_vacuum: u32 =
+                store
+                    .connection
+                    .pragma_query_value(None, "auto_vacuum", |row| row.get(0))?;
+            assert_eq!(auto_vacuum, 2, "new databases must use incremental vacuum");
+            store.connection.execute_batch(
+                r#"
+                WITH RECURSIVE sequence(value) AS (
+                  VALUES(1)
+                  UNION ALL
+                  SELECT value + 1 FROM sequence WHERE value < 4000
+                )
+                INSERT INTO service_events (
+                  id, service, event, entity_type, summary, payload, created_at
+                )
+                SELECT
+                  printf('EVT-vacuum-%d', value),
+                  'vacuum',
+                  'test.padding',
+                  'test',
+                  'vacuum test',
+                  json_object('padding', hex(zeroblob(1024))),
+                  '2026-04-01T00:00:00Z'
+                FROM sequence;
+                DELETE FROM service_events;
+                PRAGMA wal_checkpoint(TRUNCATE);
+                "#,
+            )?;
+        }
+
+        let report = vacuum_database(&path)?;
+        assert!(report.page_count_before > report.page_count_after);
+        assert!(report.freelist_pages_before > 0);
+        assert_eq!(report.freelist_pages_after, 0);
+
+        let connection = Connection::open(&path)?;
+        let auto_vacuum: u32 =
+            connection.pragma_query_value(None, "auto_vacuum", |row| row.get(0))?;
+        assert_eq!(auto_vacuum, 2);
+        drop(connection);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
 
         Ok(())
     }

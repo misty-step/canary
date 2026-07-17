@@ -25,8 +25,8 @@ use parking_lot::MutexGuard;
 use canary_core::query::{ActiveClaimsResponse, ErrorDetail, ErrorsByClass, TimelineResponse};
 use canary_store::{
     ActiveClaimListOptions, ApiKeyRecord, ClaimResult, ErrorSummaryItem, HealthMonitorStatus,
-    HealthTargetStatus, QueryResult, Result, Store, TargetCheckRead, TimelineQueryOptions,
-    TimelineQueryResult,
+    HealthTargetStatus, MetricsSnapshot, QueryResult, Result, Store, TargetCheckRead,
+    TimelineQueryOptions, TimelineQueryResult,
 };
 use canary_store::{RecentTransition, SearchResult, ServiceSliSummary};
 
@@ -230,6 +230,13 @@ impl ReadSource<'_> {
         match self {
             Self::Pool(conn) => conn.active_claims(options),
             Self::Writer(store) => store.active_claims(options),
+        }
+    }
+
+    pub(crate) fn metrics_snapshot(&self) -> Result<MetricsSnapshot> {
+        match self {
+            Self::Pool(conn) => conn.metrics_snapshot(),
+            Self::Writer(store) => store.metrics_snapshot(),
         }
     }
 }

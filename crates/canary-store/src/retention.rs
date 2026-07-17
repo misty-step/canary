@@ -1,6 +1,8 @@
 //! Retention prune persistence.
 
-use rusqlite::{Connection, params};
+use std::{path::Path, time::Duration};
+
+use rusqlite::{Connection, OpenFlags, params};
 
 use crate::Result;
 
@@ -15,6 +17,18 @@ pub enum RetentionPruneTable {
     ServiceEvents,
     /// Target check rows, keyed by `checked_at`.
     TargetChecks,
+    /// Terminal webhook delivery ledger rows.
+    WebhookDeliveriesTerminal,
+    /// Monitor check-ins, keyed by `observed_at`.
+    MonitorCheckIns,
+    /// Annotation audit rows, keyed by `created_at`.
+    Annotations,
+    /// Resolved incident signals, keyed by `resolved_at`.
+    IncidentSignalsResolved,
+    /// Terminal remediation claims.
+    RemediationClaimsTerminal,
+    /// Resolved incidents without an active remediation claim.
+    IncidentsResolved,
     /// Terminal (`completed`/`discarded`) webhook-delivery job rows, keyed by
     /// their terminal timestamp. Non-terminal rows (`available`, `scheduled`,
     /// `executing`) are never matched, so claimed work is never pruned.
@@ -39,6 +53,20 @@ pub struct RetentionPruneReport {
     pub service_events_deleted: u64,
     /// Deleted target-check rows.
     pub target_checks_deleted: u64,
+    /// Deleted terminal webhook delivery ledger rows.
+    pub webhook_deliveries_deleted: u64,
+    /// Deleted monitor check-ins.
+    pub monitor_check_ins_deleted: u64,
+    /// Deleted annotations.
+    pub annotations_deleted: u64,
+    /// Deleted resolved incident signals.
+    pub incident_signals_deleted: u64,
+    /// Deleted terminal remediation claims.
+    pub remediation_claims_deleted: u64,
+    /// Deleted resolved incidents.
+    pub incidents_deleted: u64,
+    /// Deleted terminal webhook delivery jobs.
+    pub oban_jobs_deleted: u64,
 }
 
 /// One bounded retention delete statement.
@@ -59,6 +87,32 @@ pub struct RetentionPruneBatchReport {
     pub complete: bool,
 }
 
+/// Page-level storage reclaimed by one bounded incremental vacuum.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StorageReclaimReport {
+    /// Pages on SQLite's freelist before the operation.
+    pub freelist_pages_before: u64,
+    /// Pages on SQLite's freelist after the operation.
+    pub freelist_pages_after: u64,
+    /// Pages returned to the filesystem.
+    pub pages_reclaimed: u64,
+}
+
+/// Evidence emitted by the offline full-vacuum operator command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VacuumDatabaseReport {
+    /// Database pages before compaction.
+    pub page_count_before: u64,
+    /// Database pages after compaction.
+    pub page_count_after: u64,
+    /// Free pages before compaction.
+    pub freelist_pages_before: u64,
+    /// Free pages after compaction.
+    pub freelist_pages_after: u64,
+    /// SQLite page size in bytes.
+    pub page_size: u64,
+}
+
 pub(crate) fn prune(
     connection: &mut Connection,
     prune: RetentionPrune,
@@ -74,6 +128,41 @@ pub(crate) fn prune(
             connection,
             RetentionPruneTable::TargetChecks,
             &prune.check_cutoff,
+        )?,
+        webhook_deliveries_deleted: prune_table(
+            connection,
+            RetentionPruneTable::WebhookDeliveriesTerminal,
+            &prune.error_cutoff,
+        )?,
+        monitor_check_ins_deleted: prune_table(
+            connection,
+            RetentionPruneTable::MonitorCheckIns,
+            &prune.check_cutoff,
+        )?,
+        annotations_deleted: prune_table(
+            connection,
+            RetentionPruneTable::Annotations,
+            &prune.error_cutoff,
+        )?,
+        incident_signals_deleted: prune_table(
+            connection,
+            RetentionPruneTable::IncidentSignalsResolved,
+            &prune.error_cutoff,
+        )?,
+        remediation_claims_deleted: prune_table(
+            connection,
+            RetentionPruneTable::RemediationClaimsTerminal,
+            &prune.error_cutoff,
+        )?,
+        incidents_deleted: prune_table(
+            connection,
+            RetentionPruneTable::IncidentsResolved,
+            &prune.error_cutoff,
+        )?,
+        oban_jobs_deleted: prune_table(
+            connection,
+            RetentionPruneTable::ObanJobsTerminal,
+            &prune.error_cutoff,
         )?,
     })
 }
@@ -97,6 +186,51 @@ pub(crate) fn prune_batch(
         deleted,
         complete: deleted < u64::from(BATCH_SIZE),
     })
+}
+
+/// Reclaim at most 1,000 free pages after a retention pass.
+pub(crate) fn incremental_vacuum(connection: &Connection) -> Result<StorageReclaimReport> {
+    let freelist_pages_before = pragma_u64(connection, "freelist_count")?;
+    connection.execute_batch("PRAGMA incremental_vacuum(1000)")?;
+    let freelist_pages_after = pragma_u64(connection, "freelist_count")?;
+    Ok(StorageReclaimReport {
+        freelist_pages_before,
+        freelist_pages_after,
+        pages_reclaimed: freelist_pages_before.saturating_sub(freelist_pages_after),
+    })
+}
+
+/// Compact one offline database and enable bounded incremental vacuuming for
+/// subsequent retention passes. The open flags refuse to create a database
+/// when the operator supplied the wrong path.
+pub fn vacuum_database(path: impl AsRef<Path>) -> Result<VacuumDatabaseReport> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    connection.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+    connection.execute_batch("BEGIN EXCLUSIVE; COMMIT")?;
+
+    let page_count_before = pragma_u64(&connection, "page_count")?;
+    let freelist_pages_before = pragma_u64(&connection, "freelist_count")?;
+    let page_size = pragma_u64(&connection, "page_size")?;
+
+    connection.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+    connection.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE)")?;
+
+    Ok(VacuumDatabaseReport {
+        page_count_before,
+        page_count_after: pragma_u64(&connection, "page_count")?,
+        freelist_pages_before,
+        freelist_pages_after: pragma_u64(&connection, "freelist_count")?,
+        page_size,
+    })
+}
+
+fn pragma_u64(connection: &Connection, pragma: &str) -> Result<u64> {
+    Ok(connection.pragma_query_value(None, pragma, |row| row.get(0))?)
 }
 
 fn prune_table(connection: &Connection, table: RetentionPruneTable, cutoff: &str) -> Result<u64> {
@@ -125,6 +259,49 @@ fn table_predicate(table: RetentionPruneTable) -> (&'static str, &'static str) {
         RetentionPruneTable::Errors => ("errors", "created_at < ?1"),
         RetentionPruneTable::ServiceEvents => ("service_events", "created_at < ?1"),
         RetentionPruneTable::TargetChecks => ("target_checks", "checked_at < ?1"),
+        RetentionPruneTable::WebhookDeliveriesTerminal => (
+            "webhook_deliveries",
+            "((status = 'delivered' AND delivered_at < ?1)
+              OR (status = 'discarded' AND discarded_at < ?1)
+              OR (status = 'suppressed' AND updated_at < ?1))",
+        ),
+        RetentionPruneTable::MonitorCheckIns => ("monitor_check_ins", "observed_at < ?1"),
+        RetentionPruneTable::Annotations => ("annotations", "created_at < ?1"),
+        RetentionPruneTable::IncidentSignalsResolved => (
+            "incident_signals",
+            "resolved_at IS NOT NULL AND resolved_at < ?1",
+        ),
+        RetentionPruneTable::RemediationClaimsTerminal => (
+            "remediation_claims",
+            "state IN ('verified', 'dismissed', 'expired', 'released')
+              AND COALESCE(completed_at, released_at, updated_at) < ?1",
+        ),
+        RetentionPruneTable::IncidentsResolved => (
+            "incidents",
+            "state = 'resolved'
+              AND resolved_at IS NOT NULL
+              AND resolved_at < ?1
+              AND NOT EXISTS (
+                  SELECT 1 FROM remediation_claims
+                  WHERE tenant_id = incidents.tenant_id
+                    AND project_id = incidents.project_id
+                    AND subject_type = 'incident'
+                    AND subject_id = incidents.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM annotations
+                  WHERE (
+                      incident_id = incidents.id
+                      OR (subject_type = 'incident' AND subject_id = incidents.id)
+                    )
+                    AND created_at >= ?1
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM incident_signals
+                  WHERE incident_id = incidents.id
+                    AND (resolved_at IS NULL OR resolved_at >= ?1)
+              )",
+        ),
         // Only terminal states are eligible. `available`/`scheduled`/`executing`
         // rows never match this predicate regardless of cutoff. `cancelled` is
         // a legacy Elixir-era state the Rust write path never produces, but

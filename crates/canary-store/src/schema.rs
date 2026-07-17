@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use rusqlite::Connection;
 
 /// Current Rust schema version.
-pub const SCHEMA_VERSION: u32 = 2026071400;
+pub const SCHEMA_VERSION: u32 = 2026071700;
+const PREVIOUS_SCHEMA_VERSION: u32 = 2026071400;
 
 pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     let user_version =
@@ -14,6 +15,16 @@ pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
         let transaction = connection.transaction()?;
         ensure_current_fts_objects(&transaction)?;
         validate_schema_columns(&transaction)?;
+        transaction.commit()?;
+        return Ok(());
+    }
+
+    if user_version == PREVIOUS_SCHEMA_VERSION {
+        let transaction = connection.transaction()?;
+        ensure_current_fts_objects(&transaction)?;
+        create_retention_cutoff_indexes(&transaction)?;
+        validate_schema_columns(&transaction)?;
+        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
         return Ok(());
     }
@@ -30,6 +41,7 @@ pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     scope_monitor_name_index(&transaction)?;
     scope_incident_open_service_index(&transaction)?;
     scope_oban_jobs_claim_index(&transaction)?;
+    create_retention_cutoff_indexes(&transaction)?;
     validate_schema_columns(&transaction)?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     transaction.commit()?;
@@ -288,7 +300,11 @@ fn index_columns(connection: &Connection, index_name: &str) -> rusqlite::Result<
     let escaped_index = index_name.replace('"', "\"\"");
     let mut statement = connection.prepare(&format!("PRAGMA index_info(\"{escaped_index}\")"))?;
     statement
-        .query_map([], |row| row.get::<_, String>(2))?
+        .query_map([], |row| {
+            Ok(row
+                .get::<_, Option<String>>(2)?
+                .unwrap_or_else(|| "<expression>".to_owned()))
+        })?
         .collect()
 }
 
@@ -363,6 +379,72 @@ fn scope_oban_jobs_claim_index(connection: &Connection) -> rusqlite::Result<()> 
         [],
     )?;
     Ok(())
+}
+
+/// Cutoff-leading and terminal-state indexes used by bounded retention batches.
+///
+/// These are isolated from historical column backfills so an install already
+/// at the immediately previous schema version can add only the new indexes
+/// instead of replaying every legacy migration.
+fn create_retention_cutoff_indexes(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS errors_created_at_index
+        ON errors(created_at);
+
+        CREATE INDEX IF NOT EXISTS target_checks_checked_at_index
+        ON target_checks(checked_at);
+
+        CREATE INDEX IF NOT EXISTS webhook_deliveries_delivered_at_index
+        ON webhook_deliveries(delivered_at)
+        WHERE status = 'delivered';
+
+        CREATE INDEX IF NOT EXISTS webhook_deliveries_discarded_at_index
+        ON webhook_deliveries(discarded_at)
+        WHERE status = 'discarded';
+
+        CREATE INDEX IF NOT EXISTS webhook_deliveries_suppressed_updated_at_index
+        ON webhook_deliveries(updated_at)
+        WHERE status = 'suppressed';
+
+        CREATE INDEX IF NOT EXISTS monitor_check_ins_observed_at_index
+        ON monitor_check_ins(observed_at);
+
+        CREATE INDEX IF NOT EXISTS annotations_created_at_index
+        ON annotations(created_at);
+
+        CREATE INDEX IF NOT EXISTS annotations_incident_id_created_at_index
+        ON annotations(incident_id, created_at);
+
+        CREATE INDEX IF NOT EXISTS incident_signals_resolved_at_index
+        ON incident_signals(resolved_at)
+        WHERE resolved_at IS NOT NULL;
+
+        CREATE INDEX IF NOT EXISTS incidents_resolved_at_index
+        ON incidents(resolved_at)
+        WHERE state = 'resolved' AND resolved_at IS NOT NULL;
+
+        CREATE INDEX IF NOT EXISTS remediation_claims_terminal_timestamp_index
+        ON remediation_claims(COALESCE(completed_at, released_at, updated_at))
+        WHERE state IN ('verified', 'dismissed', 'expired', 'released');
+
+        CREATE INDEX IF NOT EXISTS oban_jobs_completed_at_index
+        ON oban_jobs(completed_at)
+        WHERE state = 'completed';
+
+        CREATE INDEX IF NOT EXISTS oban_jobs_discarded_at_index
+        ON oban_jobs(discarded_at)
+        WHERE state = 'discarded';
+
+        CREATE INDEX IF NOT EXISTS oban_jobs_cancelled_at_index
+        ON oban_jobs(cancelled_at)
+        WHERE state = 'cancelled';
+
+        CREATE INDEX IF NOT EXISTS oban_jobs_active_queue_metrics_index
+        ON oban_jobs(queue, state)
+        WHERE state IN ('available', 'scheduled', 'executing');
+        "#,
+    )
 }
 
 fn backfill_service_scope_columns(connection: &Connection) -> rusqlite::Result<()> {
@@ -995,3 +1077,52 @@ CREATE TABLE IF NOT EXISTS monitor_check_ins (
 CREATE INDEX IF NOT EXISTS monitor_check_ins_monitor_id_observed_at_index
 ON monitor_check_ins(monitor_id, observed_at);
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrate_from_previous_schema_adds_retention_indexes() -> rusqlite::Result<()> {
+        let retention_indexes = [
+            "errors_created_at_index",
+            "target_checks_checked_at_index",
+            "webhook_deliveries_delivered_at_index",
+            "webhook_deliveries_discarded_at_index",
+            "webhook_deliveries_suppressed_updated_at_index",
+            "monitor_check_ins_observed_at_index",
+            "annotations_created_at_index",
+            "annotations_incident_id_created_at_index",
+            "incident_signals_resolved_at_index",
+            "incidents_resolved_at_index",
+            "remediation_claims_terminal_timestamp_index",
+            "oban_jobs_completed_at_index",
+            "oban_jobs_discarded_at_index",
+            "oban_jobs_cancelled_at_index",
+            "oban_jobs_active_queue_metrics_index",
+        ];
+        let mut connection = Connection::open_in_memory()?;
+        migrate(&mut connection)?;
+        for index in retention_indexes {
+            connection.execute(&format!("DROP INDEX {index}"), [])?;
+        }
+        connection.pragma_update(None, "user_version", PREVIOUS_SCHEMA_VERSION)?;
+
+        migrate(&mut connection)?;
+
+        let user_version: u32 =
+            connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        assert_eq!(user_version, SCHEMA_VERSION);
+        for index in retention_indexes {
+            let exists: bool = connection.query_row(
+                "SELECT EXISTS (
+                   SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = ?1
+                 )",
+                [index],
+                |row| row.get(0),
+            )?;
+            assert!(exists, "missing retention index {index}");
+        }
+        Ok(())
+    }
+}
