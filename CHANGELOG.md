@@ -1,3 +1,12 @@
+## [0.16.8](https://github.com/misty-step/canary/compare/v0.16.7...v0.16.8) (2026-07-17)
+
+
+### Bug Fixes
+
+* **store:** harden SQLite maintenance ([#280](https://github.com/misty-step/canary/issues/280)) ([043d19c](https://github.com/misty-step/canary/commit/043d19cec66caea104545e5a1dfc0fb8ff25edab))
+* **store:** repair missing current-schema FTS ([#277](https://github.com/misty-step/canary/issues/277)) ([cf2900e](https://github.com/misty-step/canary/commit/cf2900e6c96848662a96eba89c3ebddd3b75183d))
+* **store:** repair missing current-schema FTS ([#279](https://github.com/misty-step/canary/issues/279)) ([9a8529b](https://github.com/misty-step/canary/commit/9a8529b3a455f88e7ecb6c07b4ad01118cd261a3))
+
 ## [0.16.7](https://github.com/misty-step/canary/compare/v0.16.6...v0.16.7) (2026-07-17)
 
 
