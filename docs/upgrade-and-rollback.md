@@ -1,9 +1,11 @@
 # Upgrade and Rollback Contract
 
-Canary declares the required shape of immutable, signed OCI releases but does
-not yet publish them. Live pull, signature verification, and atomic publication
-remain unproved. Once a conforming artifact exists, the deployer owns
-promotion, placement, cutover, rollback policy, and recovery evidence.
+Canary declares the required shape of immutable, signed OCI releases. The
+Release workflow builds and signs those artifacts, stages the manifest and
+bundle in a draft GitHub release, and publishes only after both assets upload
+successfully. Live pull and signature verification remain operator evidence
+from a successful release run. Once a conforming artifact exists, the deployer
+owns promotion, placement, cutover, rollback policy, and recovery evidence.
 
 Before any future promotion:
 

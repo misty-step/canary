@@ -13,13 +13,22 @@ concurrency:
 
 jobs:
   release:
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master')
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'master')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     permissions:
       contents: write
       issues: write
       pull-requests: write
+      packages: write
+      id-token: write
+    env:
+      OCI_REPOSITORY: ghcr.io/${{ github.repository_owner }}/canary
     steps:
       - name: Checkout release source
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -35,10 +44,240 @@ jobs:
           app-id: ${{ secrets.LANDMARK_RELEASER_APP_ID }}
           private-key: ${{ secrets.LANDMARK_RELEASER_PRIVATE_KEY }}
 
-      - name: Run Landmark
-        uses: misty-step/landmark@v0
+      - name: Set up Node for release planning
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+
+      - name: Prepare semantic-release publisher
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_dir="${RUNNER_TEMP}/semantic-release"
+          landmark_ref=35d002b7a2bc80efc6d0f412b5adbc3f6a96eeab
+          mkdir -p "$install_dir"
+          curl --fail --silent --show-error --location \
+            "https://raw.githubusercontent.com/misty-step/landmark/${landmark_ref}/package.json" \
+            --output "${install_dir}/package.json"
+          curl --fail --silent --show-error --location \
+            "https://raw.githubusercontent.com/misty-step/landmark/${landmark_ref}/package-lock.json" \
+            --output "${install_dir}/package-lock.json"
+          (cd "$install_dir" && npm ci --no-fund --no-audit)
+
+          cat > .releaserc.json <<'JSON'
+          {
+            "branches": ["master"],
+            "tagFormat": "v${version}",
+            "plugins": [
+              [
+                "@semantic-release/commit-analyzer",
+                {
+                  "releaseRules": [
+                    { "breaking": true, "release": "minor" },
+                    { "type": "feat", "release": "patch" }
+                  ]
+                }
+              ],
+              "@semantic-release/release-notes-generator",
+              [
+                "@semantic-release/changelog",
+                { "changelogFile": "CHANGELOG.md" }
+              ],
+              [
+                "@semantic-release/git",
+                {
+                  "assets": ["CHANGELOG.md"],
+                  "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+                }
+              ],
+              [
+                "@semantic-release/github",
+                {
+                  "draftRelease": true,
+                  "assets": [
+                    {
+                      "path": "release-assets/canary-release-manifest.json",
+                      "name": "canary-release-manifest.json",
+                      "label": "Signed portable release manifest"
+                    },
+                    {
+                      "path": "release-assets/canary-release-manifest.bundle.json",
+                      "name": "canary-release-manifest.bundle.json",
+                      "label": "Signed portable release manifest bundle"
+                    }
+                  ]
+                }
+              ]
+            ]
+          }
+          JSON
+          remote_tags="$(git ls-remote --tags origin 'refs/tags/*')"
+          highest_version="$(
+            printf '%s\n' "$remote_tags" |
+              sed -nE 's#.*refs/tags/v?([0-9]+\.[0-9]+\.[0-9]+)(\^\{\})?$#\1#p' |
+              sort -V |
+              tail -n 1
+          )"
+          stability="stable"
+          if [[ -z "$highest_version" || "${highest_version%%.*}" == "0" ]]; then
+            stability="pre-stable"
+          fi
+          echo "::notice::semantic-release stability resolved to ${stability}"
+          if [[ "$stability" == "stable" ]]; then
+            stable_config="${RUNNER_TEMP}/releaserc-stable.json"
+            jq '(.plugins[0][1]) |= del(.releaseRules)' \
+              .releaserc.json >"$stable_config"
+            mv "$stable_config" .releaserc.json
+          fi
+
+      - name: Plan release with semantic-release
+        id: release-plan
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ steps.release-token.outputs.token }}
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+          SEMANTIC_RELEASE_BIN: ${{ runner.temp }}/semantic-release/node_modules/.bin/semantic-release
+        run: |
+          set -euo pipefail
+          log="${RUNNER_TEMP}/semantic-release-plan.log"
+          plan="${RUNNER_TEMP}/semantic-release-plan.json"
+          if ! NO_COLOR=1 "$SEMANTIC_RELEASE_BIN" --dry-run --no-ci >"$log" 2>&1; then
+            cat "$log"
+            exit 1
+          fi
+          cat "$log"
+          version="$(sed -nE 's/.*The next release version is ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' "$log" | tail -n 1)"
+          source_commit="$(git rev-parse HEAD)"
+          if [ -z "$version" ]; then
+            if ! grep -Fq "There are no relevant changes" "$log"; then
+              echo "::error::semantic-release dry-run did not produce a release version or a no-release result"
+              exit 1
+            fi
+            jq -n \
+              --arg source_commit "$source_commit" \
+              '{engine:"semantic-release", released:false, source_commit:$source_commit}' \
+              >"$plan"
+            echo "No release planned for ${source_commit}."
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          release_tag="v${version}"
+          [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          jq -n \
+            --arg release_tag "$release_tag" \
+            --arg version "$version" \
+            --arg source_commit "$source_commit" \
+            '{engine:"semantic-release", released:true, release_tag:$release_tag, version:$version, source_commit:$source_commit}' \
+            >"$plan"
+          printf 'released=true\nrelease_tag=%s\nversion=%s\nsource_commit=%s\nplan=%s\n' \
+            "$release_tag" "$version" "$source_commit" "$plan" >> "$GITHUB_OUTPUT"
+
+
+      - name: Log in to GHCR
+        if: steps.release-plan.outputs.released == 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Set up QEMU
+        if: steps.release-plan.outputs.released == 'true'
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: Set up Docker Buildx
+        if: steps.release-plan.outputs.released == 'true'
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build and push release image
+        if: steps.release-plan.outputs.released == 'true'
+        id: image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.OCI_REPOSITORY }}:${{ steps.release-plan.outputs.release_tag }}
+            ${{ env.OCI_REPOSITORY }}:git-${{ steps.release-plan.outputs.source_commit }}
+          build-args: |
+            CANARY_VERSION=${{ steps.release-plan.outputs.release_tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.release-plan.outputs.source_commit }}
+            org.opencontainers.image.version=${{ steps.release-plan.outputs.release_tag }}
+
+      - name: Install Cosign
+        if: steps.release-plan.outputs.released == 'true'
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Sign and verify release image
+        if: steps.release-plan.outputs.released == 'true'
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          SOURCE_COMMIT: ${{ steps.release-plan.outputs.source_commit }}
+          RELEASE_TAG: ${{ steps.release-plan.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="${OCI_REPOSITORY}@${IMAGE_DIGEST}"
+          cosign sign --yes "$image"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/heads/master"
+          cosign verify \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$image" >/dev/null
+
+          ./bin/release-manifest generate \
+            --version "$RELEASE_TAG" \
+            --commit "$SOURCE_COMMIT" \
+            --oci-repository "$OCI_REPOSITORY" \
+            --oci-digest "$IMAGE_DIGEST" \
+            --created-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --output "${RUNNER_TEMP}/canary-release-manifest.json"
+          ./bin/release-manifest verify \
+            --file "${RUNNER_TEMP}/canary-release-manifest.json"
+          cosign sign-blob \
+            --yes \
+            --bundle "${RUNNER_TEMP}/canary-release-manifest.bundle.json" \
+            "${RUNNER_TEMP}/canary-release-manifest.json"
+          cosign verify-blob \
+            --bundle "${RUNNER_TEMP}/canary-release-manifest.bundle.json" \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "${RUNNER_TEMP}/canary-release-manifest.json" >/dev/null
+
+      - name: Upload signed release evidence
+        if: steps.release-plan.outputs.released == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: canary-release-${{ steps.release-plan.outputs.release_tag }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/semantic-release-plan.json
+            ${{ runner.temp }}/canary-release-manifest.json
+            ${{ runner.temp }}/canary-release-manifest.bundle.json
+
+      - name: Stage signed release assets
+        if: steps.release-plan.outputs.released == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          cp "${RUNNER_TEMP}/canary-release-manifest.json" \
+            release-assets/canary-release-manifest.json
+          cp "${RUNNER_TEMP}/canary-release-manifest.bundle.json" \
+            release-assets/canary-release-manifest.bundle.json
+
+      - name: Publish GitHub release
+        if: steps.release-plan.outputs.released == 'true'
+        id: landmark
+        uses: misty-step/landmark@35d002b7a2bc80efc6d0f412b5adbc3f6a96eeab # v0
         with:
           mode: full
+          stability: "auto"
           # Short-lived installation token from the org's misty-step-releaser
           # GitHub App (misty-step-940), replacing the github.token stopgap
           # from #244: unlike GITHUB_TOKEN, App tokens still trigger
@@ -52,3 +291,40 @@ jobs:
           webhook-url: ${{ secrets.LANDMARK_WEBHOOK_URL }}
           webhook-secret: ${{ secrets.LANDMARK_WEBHOOK_SECRET }}
           product-description: "Canary is a self-hosted, agent-first production health ledger for errors, uptime, incidents, timelines, webhooks, and remediation claims."
+
+      - name: Verify Landmark release matches plan
+        if: steps.release-plan.outputs.released == 'true'
+        shell: bash
+        env:
+          EXPECTED_TAG: ${{ steps.release-plan.outputs.release_tag }}
+          ACTUAL_RELEASED: ${{ steps.landmark.outputs.released }}
+          ACTUAL_TAG: ${{ steps.landmark.outputs.release-tag }}
+        run: |
+          set -euo pipefail
+          test "$ACTUAL_RELEASED" = "true"
+          test "$ACTUAL_TAG" = "$EXPECTED_TAG"
+
+      - name: Verify release assets staged
+        if: steps.release-plan.outputs.released == 'true' && steps.landmark.outputs.released == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+          RELEASE_TAG: ${{ steps.release-plan.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --json isDraft,assets \
+            --jq '(.isDraft == true) and ([.assets[].name] | (index("canary-release-manifest.json") != null and index("canary-release-manifest.bundle.json") != null))' \
+            | grep -Fx true >/dev/null
+
+      - name: Publish verified GitHub release
+        if: steps.release-plan.outputs.released == 'true' && steps.landmark.outputs.released == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+          RELEASE_TAG: ${{ steps.release-plan.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh release edit "$RELEASE_TAG" --draft=false
+          gh release view "$RELEASE_TAG" --json isDraft,assets \
+            --jq '(.isDraft == false) and ([.assets[].name] | (index("canary-release-manifest.json") != null and index("canary-release-manifest.bundle.json") != null))' \
+            | grep -Fx true >/dev/null

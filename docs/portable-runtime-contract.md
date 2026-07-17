@@ -1,21 +1,33 @@
 # Portable Runtime Contract
 
-This is Canary's product-owned deployment boundary. It declares a future
-portable release as an immutable OCI image plus a signed
+This is Canary's product-owned deployment boundary. It declares a portable
+release as an immutable OCI image plus a signed
 `canary.release-manifest.v1` document. The product defines runtime behavior and
-verification commands. Each deployer
-chooses resource sizing, placement, networking, persistence, credentials,
-promotion, rollback, and recovery policy outside this repository.
+verification commands. Each deployer chooses resource sizing, placement,
+networking, persistence, credentials, promotion, rollback, and recovery policy
+outside this repository.
 
 ## Release artifact
 
-This section is a declarative acceptance contract. Canary's current release
-workflow does not build, publish, sign, or attach this artifact. A live pull and
-signature verification have not been proved. Publication must remain disabled
-until the artifact, manifest, and signatures can be produced before the stable
-GitHub release becomes visible.
+The Release workflow uses semantic-release's dry-run and full pass with one
+generated config so the build tag and published tag come from the same engine.
+It builds `linux/amd64` and `linux/arm64` images with the release version
+stamped into the image, pushes the digest to GHCR, and signs the image with
+keyless GitHub Actions OIDC. It verifies the image signature, generates and
+verifies the digest-pinned release manifest, and signs and verifies that bundle.
+The semantic-release GitHub plugin creates a draft release, uploads the
+manifest and bundle, and publishes the release only after both uploads succeed.
+The manifest's `source.commit` is the exact revision used to build the image.
+The release-only changelog commit, if created, is intentionally not the image
+source.
 
-Once an atomic publisher exists, acceptance uses the published tag to download
+The digest reference in the signed manifest is the release identity. Tags are
+discovery aliases only. `contracts/release-manifest.v1.schema.json` and
+`bin/release-manifest` are the machine-readable schema and fail-closed
+verifier. A successful release run is required before claiming a live artifact
+publication; the acceptance sequence below is the operator readback.
+
+After a successful release run, acceptance uses the published tag to download
 and verify its manifest before pulling the image:
 
 ```bash
