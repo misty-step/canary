@@ -1,3 +1,10 @@
+## [0.16.7](https://github.com/misty-step/canary/compare/v0.16.6...v0.16.7) (2026-07-17)
+
+
+### Features
+
+* **release:** publish signed portable artifacts ([f139759](https://github.com/misty-step/canary/commit/f1397591390f6991e014c9a92cc188d1d46a9c93))
+
 ## [0.16.6](https://github.com/misty-step/canary/compare/v0.16.5...v0.16.6) (2026-07-16)
 
 
