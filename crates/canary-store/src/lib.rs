@@ -1629,22 +1629,81 @@ mod tests {
     }
 
     #[test]
-    fn migrate_rejects_current_version_missing_fts_objects() -> Result<()> {
+    fn migrate_repairs_current_version_missing_fts_objects() -> Result<()> {
         let mut store = migrated_store()?;
+        store.connection.execute(
+            "INSERT INTO errors (
+                id, service, error_class, message, stack_trace, group_hash, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                "ERR-fts-repair",
+                "sploot",
+                "RuntimeError",
+                "boom before repair",
+                "stack before repair",
+                "group-fts-repair",
+                "2026-05-28T20:00:00Z"
+            ],
+        )?;
         store.connection.execute_batch("DROP TABLE errors_fts;")?;
 
-        let result = store.migrate();
-        assert!(
-            result.is_err(),
-            "migrate should fail when current FTS objects are missing"
+        store.migrate()?;
+
+        let count = store.connection.query_row(
+            "SELECT count(*) FROM errors_fts WHERE errors_fts MATCH 'repair'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        assert_eq!(count, 1);
+
+        store.migrate()?;
+        let repeat_count = store.connection.query_row(
+            "SELECT count(*) FROM errors_fts WHERE errors_fts MATCH 'repair'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        assert_eq!(repeat_count, 1);
+        assert_eq!(
+            trigger_names(&store.connection, "errors")?,
+            BTreeSet::from([
+                "errors_fts_delete".to_owned(),
+                "errors_fts_insert".to_owned(),
+                "errors_fts_update".to_owned(),
+            ])
         );
-        let error = result
-            .err()
-            .ok_or(StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
-        assert!(
-            matches!(error, StoreError::Sqlite(_)),
-            "expected a SQLite error, got {error:?}"
-        );
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_repairs_current_version_missing_fts_trigger() -> Result<()> {
+        let mut store = migrated_store()?;
+        store
+            .connection
+            .execute_batch("DROP TRIGGER errors_fts_insert;")?;
+        store.connection.execute(
+            "INSERT INTO errors (
+                id, service, error_class, message, stack_trace, group_hash, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                "ERR-fts-trigger-repair",
+                "sploot",
+                "RuntimeError",
+                "boom during trigger gap",
+                "stack during trigger gap",
+                "group-fts-trigger-repair",
+                "2026-05-28T20:00:00Z"
+            ],
+        )?;
+
+        store.migrate()?;
+
+        let count = store.connection.query_row(
+            "SELECT count(*) FROM errors_fts WHERE errors_fts MATCH 'gap'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        assert_eq!(count, 1);
+        assert!(trigger_names(&store.connection, "errors")?.contains("errors_fts_insert"));
         Ok(())
     }
 

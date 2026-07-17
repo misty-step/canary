@@ -11,14 +11,16 @@ pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     let user_version =
         connection.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))?;
     if user_version == SCHEMA_VERSION {
-        // Current databases must stay on the metadata-only path. In
-        // particular, do not replay data backfills on every boot.
-        validate_schema_columns(connection)?;
+        let transaction = connection.transaction()?;
+        ensure_current_fts_objects(&transaction)?;
+        validate_schema_columns(&transaction)?;
+        transaction.commit()?;
         return Ok(());
     }
 
     let transaction = connection.transaction()?;
     transaction.execute_batch(SCHEMA_SQL)?;
+    transaction.execute_batch(FTS_SCHEMA_SQL)?;
     add_bootstrap_ownership_columns(&transaction)?;
     add_api_key_unbound_grant_column(&transaction)?;
     scope_error_group_identity(&transaction)?;
@@ -56,9 +58,70 @@ const APP_TABLES: &[&str] = &[
     "rate_limit_buckets",
 ];
 
+const FTS_SCHEMA_SQL: &str = r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS errors_fts USING fts5(
+  service,
+  error_class,
+  message,
+  stack_trace,
+  content='errors',
+  content_rowid='rowid'
+);
+
+CREATE TRIGGER IF NOT EXISTS errors_fts_insert
+AFTER INSERT ON errors
+BEGIN
+  INSERT INTO errors_fts(rowid, service, error_class, message, stack_trace)
+  VALUES (new.rowid, new.service, new.error_class, new.message, new.stack_trace);
+END;
+
+CREATE TRIGGER IF NOT EXISTS errors_fts_delete
+AFTER DELETE ON errors
+BEGIN
+  INSERT INTO errors_fts(errors_fts, rowid, service, error_class, message, stack_trace)
+  VALUES ('delete', old.rowid, old.service, old.error_class, old.message, old.stack_trace);
+END;
+
+CREATE TRIGGER IF NOT EXISTS errors_fts_update
+AFTER UPDATE ON errors
+BEGIN
+  INSERT INTO errors_fts(errors_fts, rowid, service, error_class, message, stack_trace)
+  VALUES ('delete', old.rowid, old.service, old.error_class, old.message, old.stack_trace);
+
+  INSERT INTO errors_fts(rowid, service, error_class, message, stack_trace)
+  VALUES (new.rowid, new.service, new.error_class, new.message, new.stack_trace);
+END;
+"#;
+
+fn ensure_current_fts_objects(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+    let mut repair_needed = false;
+    for (name, object_type) in [
+        ("errors_fts", "table"),
+        ("errors_fts_insert", "trigger"),
+        ("errors_fts_delete", "trigger"),
+        ("errors_fts_update", "trigger"),
+    ] {
+        let present = transaction.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_schema
+                 WHERE type = ?1 AND name = ?2
+             )",
+            [object_type, name],
+            |row| row.get::<_, bool>(0),
+        )?;
+        repair_needed |= !present;
+    }
+    if repair_needed {
+        transaction.execute_batch(FTS_SCHEMA_SQL)?;
+        transaction.execute("INSERT INTO errors_fts(errors_fts) VALUES ('rebuild')", [])?;
+    }
+    Ok(())
+}
+
 fn validate_schema_columns(connection: &Connection) -> rusqlite::Result<()> {
     let reference = Connection::open_in_memory()?;
     reference.execute_batch(SCHEMA_SQL)?;
+    reference.execute_batch(FTS_SCHEMA_SQL)?;
     scope_monitor_name_index(&reference)?;
     scope_incident_open_service_index(&reference)?;
     for table in APP_TABLES {
@@ -742,39 +805,6 @@ ON incident_signals(incident_id);
 
 CREATE UNIQUE INDEX IF NOT EXISTS incident_signals_incident_id_signal_type_signal_ref_index
 ON incident_signals(incident_id, signal_type, signal_ref);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS errors_fts USING fts5(
-  service,
-  error_class,
-  message,
-  stack_trace,
-  content='errors',
-  content_rowid='rowid'
-);
-
-CREATE TRIGGER IF NOT EXISTS errors_fts_insert
-AFTER INSERT ON errors
-BEGIN
-  INSERT INTO errors_fts(rowid, service, error_class, message, stack_trace)
-  VALUES (new.rowid, new.service, new.error_class, new.message, new.stack_trace);
-END;
-
-CREATE TRIGGER IF NOT EXISTS errors_fts_delete
-AFTER DELETE ON errors
-BEGIN
-  INSERT INTO errors_fts(errors_fts, rowid, service, error_class, message, stack_trace)
-  VALUES ('delete', old.rowid, old.service, old.error_class, old.message, old.stack_trace);
-END;
-
-CREATE TRIGGER IF NOT EXISTS errors_fts_update
-AFTER UPDATE ON errors
-BEGIN
-  INSERT INTO errors_fts(errors_fts, rowid, service, error_class, message, stack_trace)
-  VALUES ('delete', old.rowid, old.service, old.error_class, old.message, old.stack_trace);
-
-  INSERT INTO errors_fts(rowid, service, error_class, message, stack_trace)
-  VALUES (new.rowid, new.service, new.error_class, new.message, new.stack_trace);
-END;
 
 CREATE TABLE IF NOT EXISTS service_events (
   id TEXT PRIMARY KEY,
