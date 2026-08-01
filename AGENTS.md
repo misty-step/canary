@@ -2,6 +2,9 @@
 
 Self-hosted observability substrate for AI agents (not humans). Rust + SQLite + Litestream → Fly Tigris. Fly app **`canary-obs`**. v1: single region, single org, one Docker image, one SQLite file. Read this before acting; read `CLAUDE.md` for load-bearing footguns.
 
+Read `VISION.md` before changing product boundaries, agent-consumer contracts,
+responder responsibilities, or the dashboard-vs-agent-surface posture.
+
 ## Stack & boundaries
 
 | Layer | Owns | Path |
