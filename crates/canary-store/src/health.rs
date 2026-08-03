@@ -990,14 +990,70 @@ fn health_monitors_where(
     Ok(rows)
 }
 
+fn resolve_deleted_health_signal(
+    transaction: &rusqlite::Transaction<'_>,
+    signal_ref: &str,
+    owner: (String, String, String),
+) -> Result<()> {
+    let (tenant_id, project_id, service) = owner;
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+    let _ = correlate_in_transaction(
+        transaction,
+        IncidentCorrelation {
+            tenant_id,
+            project_id,
+            signal_type: "health_transition".to_owned(),
+            signal_ref: signal_ref.to_owned(),
+            service,
+            incident_id: IncidentId::generate(),
+            event_id: EventId::generate(),
+            now,
+        },
+    )?;
+    Ok(())
+}
+
+fn delete_monitor_with_scope(
+    connection: &mut rusqlite::Connection,
+    monitor_id: &str,
+    owner_filter: Option<(&str, &str)>,
+) -> Result<bool> {
+    let transaction = connection.transaction()?;
+    let (tenant_id, project_id) = owner_filter
+        .map(|(tenant_id, project_id)| (Some(tenant_id), Some(project_id)))
+        .unwrap_or((None, None));
+    let owner = transaction
+        .query_row(
+            "DELETE FROM monitors
+             WHERE id = ?1
+               AND (?2 IS NULL OR (tenant_id = ?2 AND project_id = ?3))
+             RETURNING tenant_id, project_id, COALESCE(NULLIF(service, ''), name)",
+            params![monitor_id, tenant_id, project_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some(owner) = owner else {
+        transaction.commit()?;
+        return Ok(false);
+    };
+    resolve_deleted_health_signal(&transaction, monitor_id, owner)?;
+    transaction.commit()?;
+    Ok(true)
+}
+
 pub(crate) fn delete_monitor(
     connection: &mut rusqlite::Connection,
     monitor_id: &str,
 ) -> Result<bool> {
-    let transaction = connection.transaction()?;
-    let changed = transaction.execute("DELETE FROM monitors WHERE id = ?1", [monitor_id])?;
-    transaction.commit()?;
-    Ok(changed > 0)
+    delete_monitor_with_scope(connection, monitor_id, None)
 }
 
 pub(crate) fn delete_monitor_scoped(
@@ -1006,13 +1062,7 @@ pub(crate) fn delete_monitor_scoped(
     tenant_id: &str,
     project_id: &str,
 ) -> Result<bool> {
-    let transaction = connection.transaction()?;
-    let changed = transaction.execute(
-        "DELETE FROM monitors WHERE id = ?1 AND tenant_id = ?2 AND project_id = ?3",
-        params![monitor_id, tenant_id, project_id],
-    )?;
-    transaction.commit()?;
-    Ok(changed > 0)
+    delete_monitor_with_scope(connection, monitor_id, Some((tenant_id, project_id)))
 }
 
 pub(crate) fn insert_target(connection: &rusqlite::Connection, target: TargetInsert) -> Result<()> {
@@ -1329,21 +1379,50 @@ fn target_check_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TargetCheckRead
     })
 }
 
+fn delete_target_with_scope(
+    connection: &mut rusqlite::Connection,
+    target_id: &str,
+    owner_filter: Option<(&str, &str)>,
+) -> Result<bool> {
+    let transaction = connection.transaction()?;
+    let (tenant_id, project_id) = owner_filter
+        .map(|(tenant_id, project_id)| (Some(tenant_id), Some(project_id)))
+        .unwrap_or((None, None));
+    let owner = transaction
+        .query_row(
+            "DELETE FROM targets
+             WHERE id = ?1
+               AND (?2 IS NULL OR (tenant_id = ?2 AND project_id = ?3))
+             RETURNING tenant_id, project_id, COALESCE(NULLIF(service, ''), name)",
+            params![target_id, tenant_id, project_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some(owner) = owner else {
+        transaction.commit()?;
+        return Ok(false);
+    };
+    transaction.execute("DELETE FROM target_state WHERE target_id = ?1", [target_id])?;
+    transaction.execute(
+        "DELETE FROM target_checks WHERE target_id = ?1",
+        [target_id],
+    )?;
+    resolve_deleted_health_signal(&transaction, target_id, owner)?;
+    transaction.commit()?;
+    Ok(true)
+}
+
 pub(crate) fn delete_target(
     connection: &mut rusqlite::Connection,
     target_id: &str,
 ) -> Result<bool> {
-    let transaction = connection.transaction()?;
-    let changed = transaction.execute("DELETE FROM targets WHERE id = ?1", [target_id])?;
-    if changed > 0 {
-        transaction.execute("DELETE FROM target_state WHERE target_id = ?1", [target_id])?;
-        transaction.execute(
-            "DELETE FROM target_checks WHERE target_id = ?1",
-            [target_id],
-        )?;
-    }
-    transaction.commit()?;
-    Ok(changed > 0)
+    delete_target_with_scope(connection, target_id, None)
 }
 
 pub(crate) fn delete_target_scoped(
@@ -1352,20 +1431,7 @@ pub(crate) fn delete_target_scoped(
     tenant_id: &str,
     project_id: &str,
 ) -> Result<bool> {
-    let transaction = connection.transaction()?;
-    let changed = transaction.execute(
-        "DELETE FROM targets WHERE id = ?1 AND tenant_id = ?2 AND project_id = ?3",
-        params![target_id, tenant_id, project_id],
-    )?;
-    if changed > 0 {
-        transaction.execute("DELETE FROM target_state WHERE target_id = ?1", [target_id])?;
-        transaction.execute(
-            "DELETE FROM target_checks WHERE target_id = ?1",
-            [target_id],
-        )?;
-    }
-    transaction.commit()?;
-    Ok(changed > 0)
+    delete_target_with_scope(connection, target_id, Some((tenant_id, project_id)))
 }
 
 pub(crate) fn update_target_active(
