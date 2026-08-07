@@ -7076,6 +7076,175 @@ mod tests {
     }
 
     #[test]
+    fn deleting_down_targets_resolves_all_delete_paths() -> Result<()> {
+        let mut store = migrated_store()?;
+        for (id, incident, service, extra, scoped, expected_state, expected_event) in [
+            (
+                "TGT-delete-target-unscoped",
+                "INC-delete-target-unscoped",
+                "delete-target-unscoped",
+                None,
+                false,
+                "resolved",
+                "incident.resolved",
+            ),
+            (
+                "TGT-delete-target-scoped",
+                "INC-delete-target-scoped",
+                "delete-target-scoped",
+                Some("TGT-delete-target-other"),
+                true,
+                "investigating",
+                "incident.updated",
+            ),
+        ] {
+            seed_target_delete_fixture(&mut store, id, incident, service, extra)?;
+            let before = incident_events(&store, incident)?;
+            if scoped {
+                assert!(!store.delete_target_scoped(id, BOOTSTRAP_TENANT_ID, "PROJECT-wrong")?);
+                assert_eq!(incident_events(&store, incident)?, before);
+                assert!(!store.delete_target_scoped(id, "TENANT-wrong", BOOTSTRAP_PROJECT_ID)?);
+                assert_eq!(incident_events(&store, incident)?, before);
+                assert!(store.delete_target_scoped(
+                    id,
+                    BOOTSTRAP_TENANT_ID,
+                    BOOTSTRAP_PROJECT_ID
+                )?);
+            } else {
+                assert!(store.delete_target(id)?);
+            }
+            for (table, column) in [
+                ("targets", "id"),
+                ("target_state", "target_id"),
+                ("target_checks", "target_id"),
+            ] {
+                assert_eq!(count_for(&store, table, column, id)?, 0);
+            }
+            let row = incident_row(&store, incident)?;
+            assert_eq!(row.1, expected_state);
+            assert_eq!(row.3.is_some(), expected_state == "resolved");
+            assert_eq!(signal_count(&store, incident, "health_transition", id)?, 1);
+            assert_eq!(
+                active_signal_count(&store, incident)?,
+                if extra.is_some() { 1 } else { 0 }
+            );
+            let events = incident_events(&store, incident)?;
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].1, expected_event);
+            assert_eq!(events[0].2, service);
+            assert!(events[0].3.contains(incident));
+            let repeat = if scoped {
+                store.delete_target_scoped(id, BOOTSTRAP_TENANT_ID, BOOTSTRAP_PROJECT_ID)?
+            } else {
+                store.delete_target(id)?
+            };
+            assert!(!repeat);
+            assert_eq!(incident_events(&store, incident)?, events);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_down_monitors_resolves_all_delete_paths_with_name_fallback() -> Result<()> {
+        let mut store = migrated_store()?;
+        for (id, name, incident, scoped) in [
+            (
+                "MON-delete-monitor-unscoped",
+                "delete-monitor-unscoped",
+                "INC-delete-monitor-unscoped",
+                false,
+            ),
+            (
+                "MON-delete-monitor-scoped",
+                "delete-monitor-scoped",
+                "INC-delete-monitor-scoped",
+                true,
+            ),
+        ] {
+            seed_monitor_delete_fixture(&mut store, id, name, incident)?;
+            let before = incident_events(&store, incident)?;
+            if scoped {
+                assert!(!store.delete_monitor_scoped(id, BOOTSTRAP_TENANT_ID, "PROJECT-wrong")?);
+                assert_eq!(incident_events(&store, incident)?, before);
+                assert!(!store.delete_monitor_scoped(id, "TENANT-wrong", BOOTSTRAP_PROJECT_ID)?);
+                assert_eq!(incident_events(&store, incident)?, before);
+                assert!(store.delete_monitor_scoped(
+                    id,
+                    BOOTSTRAP_TENANT_ID,
+                    BOOTSTRAP_PROJECT_ID
+                )?);
+            } else {
+                assert!(store.delete_monitor(id)?);
+            }
+            for (table, column) in [("monitors", "id"), ("monitor_state", "monitor_id")] {
+                assert_eq!(count_for(&store, table, column, id)?, 0);
+            }
+            let row = incident_row(&store, incident)?;
+            assert_eq!(row.0, name);
+            assert_eq!(row.1, "resolved");
+            assert!(row.3.is_some());
+            assert_eq!(active_signal_count(&store, incident)?, 0);
+            let events = incident_events(&store, incident)?;
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].1, "incident.resolved");
+            assert_eq!(events[0].2, name);
+            assert!(events[0].3.contains(incident));
+            let repeat = if scoped {
+                store.delete_monitor_scoped(id, BOOTSTRAP_TENANT_ID, BOOTSTRAP_PROJECT_ID)?
+            } else {
+                store.delete_monitor(id)?
+            };
+            assert!(!repeat);
+            assert_eq!(incident_events(&store, incident)?, events);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn deleting_down_target_rolls_back_when_incident_event_insert_fails() -> Result<()> {
+        let mut store = migrated_store()?;
+        seed_target_delete_fixture(
+            &mut store,
+            "TGT-delete-target-rollback",
+            "INC-delete-target-rollback",
+            "delete-target-rollback",
+            None,
+        )?;
+        let before = incident_events(&store, "INC-delete-target-rollback")?;
+        store.connection.execute_batch(
+            "CREATE TRIGGER reject_incident_resolution
+             BEFORE INSERT ON service_events
+             WHEN NEW.event = 'incident.resolved'
+             BEGIN
+               SELECT RAISE(ABORT, 'incident resolution blocked');
+             END;",
+        )?;
+        assert!(store.delete_target("TGT-delete-target-rollback").is_err());
+        for (table, column) in [
+            ("targets", "id"),
+            ("target_state", "target_id"),
+            ("target_checks", "target_id"),
+        ] {
+            assert_eq!(
+                count_for(&store, table, column, "TGT-delete-target-rollback")?,
+                1
+            );
+        }
+        let row = incident_row(&store, "INC-delete-target-rollback")?;
+        assert_eq!(row.1, "investigating");
+        assert!(row.3.is_none());
+        assert_eq!(
+            active_signal_count(&store, "INC-delete-target-rollback")?,
+            1
+        );
+        assert_eq!(
+            incident_events(&store, "INC-delete-target-rollback")?,
+            before
+        );
+        Ok(())
+    }
+
+    #[test]
     fn target_health_transition_updates_state_timeline_and_incident_in_one_commit()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut store = migrated_store()?;
@@ -8226,6 +8395,124 @@ mod tests {
             active: true,
             created_at: "2026-05-28T19:00:00Z".to_owned(),
         })
+    }
+
+    const DELETE_AT: &str = "2026-05-28T20:00:00Z";
+
+    fn seed_target_delete_fixture(
+        store: &mut Store,
+        target_id: &str,
+        incident_id: &str,
+        service: &str,
+        extra_signal_ref: Option<&str>,
+    ) -> Result<()> {
+        store.insert_target(TargetInsert {
+            id: target_id.to_owned(),
+            url: format!("https://{target_id}.example.test/health"),
+            name: target_id.to_owned(),
+            service: service.to_owned(),
+            method: "GET".to_owned(),
+            headers: None,
+            interval_ms: 60_000,
+            timeout_ms: 10_000,
+            expected_status: "200".to_owned(),
+            body_contains: None,
+            degraded_after: 1,
+            down_after: 1,
+            up_after: 1,
+            active: true,
+            created_at: "2026-05-28T19:00:00Z".to_owned(),
+        })?;
+        store.connection.execute(
+            "INSERT INTO target_state (target_id, state, consecutive_failures)
+             VALUES (?1, 'down', 3)",
+            [target_id],
+        )?;
+        store.connection.execute(
+            "INSERT INTO target_checks (target_id, checked_at, result)
+             VALUES (?1, ?2, 'error')",
+            params![target_id, DELETE_AT],
+        )?;
+        insert_incident(store, incident_id, service, DELETE_AT)?;
+        insert_incident_signal(
+            store,
+            incident_id,
+            "health_transition",
+            target_id,
+            DELETE_AT,
+            None,
+        )?;
+        if let Some(extra) = extra_signal_ref {
+            store.connection.execute(
+                "INSERT INTO target_state (target_id, state) VALUES (?1, 'down')",
+                [extra],
+            )?;
+            insert_incident_signal(
+                store,
+                incident_id,
+                "health_transition",
+                extra,
+                DELETE_AT,
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn seed_monitor_delete_fixture(
+        store: &mut Store,
+        monitor_id: &str,
+        name: &str,
+        incident_id: &str,
+    ) -> Result<()> {
+        store.insert_monitor(MonitorInsert {
+            id: monitor_id.to_owned(),
+            name: name.to_owned(),
+            service: String::new(),
+            mode: "ttl".to_owned(),
+            expected_every_ms: 60_000,
+            grace_ms: 5_000,
+            created_at: "2026-05-28T19:00:00Z".to_owned(),
+        })?;
+        store.connection.execute(
+            "INSERT INTO monitor_state (monitor_id, state) VALUES (?1, 'down')",
+            [monitor_id],
+        )?;
+        insert_incident(store, incident_id, name, DELETE_AT)?;
+        insert_incident_signal(
+            store,
+            incident_id,
+            "health_transition",
+            monitor_id,
+            DELETE_AT,
+            None,
+        )?;
+        Ok(())
+    }
+
+    fn incident_events(
+        store: &Store,
+        incident_id: &str,
+    ) -> Result<Vec<(String, String, String, String)>> {
+        let mut statement = store.connection.prepare(
+            "SELECT id, event, service, payload
+             FROM service_events
+             WHERE entity_type = 'incident' AND entity_ref = ?1
+             ORDER BY rowid",
+        )?;
+        Ok(statement
+            .query_map([incident_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn count_for(store: &Store, table: &str, column: &str, id: &str) -> Result<i64> {
+        Ok(store.connection.query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1"),
+            [id],
+            |row| row.get(0),
+        )?)
     }
 
     fn claim_insert(
