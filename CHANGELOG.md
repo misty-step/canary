@@ -1,3 +1,10 @@
+## [0.16.9](https://github.com/misty-step/canary/compare/v0.16.8...v0.16.9) (2026-08-07)
+
+
+### Bug Fixes
+
+* **health:** resolve incidents on surface deletion ([5b863c4](https://github.com/misty-step/canary/commit/5b863c45364b49df197b405163b950365a87cc13))
+
 ## [0.16.8](https://github.com/misty-step/canary/compare/v0.16.7...v0.16.8) (2026-07-17)
 
 
