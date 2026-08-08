@@ -1,3 +1,10 @@
+## [0.16.10](https://github.com/misty-step/canary/compare/v0.16.9...v0.16.10) (2026-08-08)
+
+
+### Bug Fixes
+
+* **store:** delete orphaned cascade rows during migration ([cbcc866](https://github.com/misty-step/canary/commit/cbcc866b04fa125cebfd12b6091a1bc9a6fa34ce))
+
 ## [0.16.9](https://github.com/misty-step/canary/compare/v0.16.8...v0.16.9) (2026-08-07)
 
 
