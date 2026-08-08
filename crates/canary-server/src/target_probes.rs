@@ -21,6 +21,7 @@ use std::{
 
 use crate::egress::{host_without_ipv6_brackets, is_global_ip, resolve_destination_addrs};
 use crate::route_state::SharedStore;
+use crate::worker_retry::retry_delay;
 use canary_core::health::state_machine::{Counters, HealthState, Thresholds};
 use canary_store::{ActiveTargetProbeSchedule, TargetProbeSnapshot};
 use canary_workers::health::{
@@ -887,29 +888,39 @@ fn run_lifecycle_worker(
     control: Arc<LifecycleControl>,
     health: WorkerHealthHandle,
 ) {
+    let mut consecutive_failures: u32 = 0;
     while !control.is_stopping() {
         if !control.is_paused() {
             let now = current_rfc3339();
             match catch_unwind(AssertUnwindSafe(|| {
                 lifecycle.run_due_until(current_unix_millis(), || control.is_stopping())
             })) {
-                Ok(Ok(report)) => health.record_success_with_pressure(
-                    now,
-                    current_unix_millis(),
-                    WorkerPressureSnapshot {
-                        due_count: report.due as u64,
-                        in_flight_count: report.in_flight as u64,
-                        oldest_due_age_ms: report.oldest_due_age_ms,
-                        oldest_due_item: None,
-                        backoff_or_circuit_open: report.failed > 0
-                            || report.event_fanout_failed > 0,
-                    },
-                ),
-                Ok(Err(_)) => health.record_failure("runtime_error"),
-                Err(_) => health.record_failure("panic"),
+                Ok(Ok(report)) => {
+                    consecutive_failures = 0;
+                    health.record_success_with_pressure(
+                        now,
+                        current_unix_millis(),
+                        WorkerPressureSnapshot {
+                            due_count: report.due as u64,
+                            in_flight_count: report.in_flight as u64,
+                            oldest_due_age_ms: report.oldest_due_age_ms,
+                            oldest_due_item: None,
+                            backoff_or_circuit_open: report.failed > 0
+                                || report.event_fanout_failed > 0,
+                        },
+                    );
+                }
+                Ok(Err(_)) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    health.record_failure("runtime_error");
+                }
+                Err(_) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    health.record_failure("panic");
+                }
             }
         }
-        if control.wait(interval) {
+        if control.wait(retry_delay(interval, consecutive_failures)) {
             break;
         }
     }

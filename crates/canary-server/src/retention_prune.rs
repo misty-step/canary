@@ -22,6 +22,7 @@ use crate::{
     WorkerHealthHandle, WorkerName, WorkerPressureSnapshot,
     route_state::SharedStore,
     server_time::{current_unix_millis, current_utc, format_rfc3339},
+    worker_retry::retry_delay,
 };
 
 /// Configuration for the retention prune lifecycle worker.
@@ -412,37 +413,43 @@ fn run_lifecycle_worker(
     control: Arc<LifecycleControl>,
     health: WorkerHealthHandle,
 ) {
+    let mut consecutive_failures: u32 = 0;
     while !control.is_stopping() {
         if !control.is_paused() {
             let now = current_utc();
             match catch_unwind(AssertUnwindSafe(|| {
                 lifecycle.run_due_until(now, || control.is_stopping())
             })) {
-                Ok(Ok(report)) => health.record_success_with_pressure(
-                    format_rfc3339(now),
-                    current_unix_millis(),
-                    WorkerPressureSnapshot {
-                        due_count: report.errors_deleted
-                            + report.service_events_deleted
-                            + report.target_checks_deleted
-                            + report.oban_jobs_deleted,
-                        in_flight_count: 0,
-                        oldest_due_age_ms: None,
-                        oldest_due_item: None,
-                        backoff_or_circuit_open: report.interrupted,
-                    },
-                ),
+                Ok(Ok(report)) => {
+                    consecutive_failures = 0;
+                    health.record_success_with_pressure(
+                        format_rfc3339(now),
+                        current_unix_millis(),
+                        WorkerPressureSnapshot {
+                            due_count: report.errors_deleted
+                                + report.service_events_deleted
+                                + report.target_checks_deleted
+                                + report.oban_jobs_deleted,
+                            in_flight_count: 0,
+                            oldest_due_age_ms: None,
+                            oldest_due_item: None,
+                            backoff_or_circuit_open: report.interrupted,
+                        },
+                    );
+                }
                 Ok(Err(_)) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
                     control.record_failure();
                     health.record_failure("runtime_error");
                 }
                 Err(_) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
                     control.record_failure();
                     health.record_failure("panic");
                 }
             }
         }
-        if control.wait(interval) {
+        if control.wait(retry_delay(interval, consecutive_failures)) {
             break;
         }
     }
@@ -616,6 +623,48 @@ mod tests {
         assert!(snapshot.failure_count >= 1);
         assert_eq!(snapshot.last_error_class.as_deref(), Some("runtime_error"));
 
+        worker.join()?;
+
+        Ok(())
+    }
+
+    /// Regression for canary-993: a worker whose steady-state tick is long must
+    /// not defer its next attempt by a full tick after a failed pass.
+    ///
+    /// The tick here is an hour, so reaching a second failure at all proves the
+    /// loop waited on the bounded retry path instead of the steady-state tick.
+    #[test]
+    fn worker_retries_a_failed_pass_without_waiting_a_full_tick() -> Result<(), Box<dyn Error>> {
+        let mut store = Store::open_in_memory()?;
+        store.migrate()?;
+        let tick = StdDuration::from_secs(60 * 60);
+        let worker = RetentionPruneLifecycleWorker::spawn(
+            RetentionPruneLifecycle::new(
+                Arc::new(parking_lot::Mutex::new(store)),
+                RetentionPolicy {
+                    error_retention_days: -1,
+                    check_retention_days: 7,
+                },
+            ),
+            RetentionPruneLifecycleConfig {
+                tick_interval: tick,
+            },
+        )?;
+
+        let started = Instant::now();
+        let deadline = started + StdDuration::from_secs(20);
+        while worker.failure_count() < 2 {
+            if Instant::now() >= deadline {
+                return Err("worker never retried the failed pass".into());
+            }
+            thread::sleep(StdDuration::from_millis(20));
+        }
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < tick,
+            "retry waited the full steady-state tick: {elapsed:?}"
+        );
         worker.join()?;
 
         Ok(())

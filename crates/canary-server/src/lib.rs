@@ -56,6 +56,7 @@ mod webhook_delivery;
 mod webhook_delivery_routes;
 mod webhooks;
 mod worker_health;
+mod worker_retry;
 
 use admin_keys::{create_api_key, list_api_keys, revoke_api_key};
 use admin_monitors::{create_monitor, delete_monitor, list_monitors};
