@@ -192,6 +192,30 @@ original cannot be re-shown.
   boundary/exception rows together. Validated probe plans remain opaque to
   callers, and the concrete transport rechecks public plans before connecting;
   otherwise a forged pinned address bypasses the shared resolver.
+- **Cascade only fires with `foreign_keys` on.** Every declared foreign key in
+  `crates/canary-store/src/schema.rs` uses `ON DELETE CASCADE`, but SQLite
+  cascades only when `PRAGMA foreign_keys` is on for the connection performing
+  the delete, so a parent deleted without enforcement leaves unreachable
+  children. `verification::verify_database` counts them through
+  `pragma_foreign_key_check`, and `canary-server migrate` exits non-zero on any
+  count, which fails the recovery evidence a deployer needs before promoting
+  (2026-08-08: 1 orphaned `monitor_state` and 4 orphaned `monitor_check_ins`
+  rows). `schema::delete_orphaned_cascade_rows` clears the residue before the
+  version stamp; use `NOT EXISTS`, never `NOT IN`, so a NULL parent id cannot
+  suppress the predicate, and guard nullable `annotations.incident_id` so
+  deliberately unlinked rows survive.
+- **A worker with no successful pass fails readiness.** `readyz_response`
+  accepts worker health `Ok` or `Pressured`, so `Pressured` keeps serving, but
+  `Stopped`, `Failing`, or `Stale` returns 503 — and production ingress then
+  drops its only upstream while `/healthz` still answers 200, hiding a total
+  outage. `health_status` reports no success since process start as `Stale`, or
+  as `Failing` once three consecutive failures land, because the failure count is
+  checked first. Recovery needs a successful pass, not a restart: the worker
+  loops and retries after its interval, which for `retention_prune` and
+  `tls_scan` defaults to 24h, so readiness can stay down that long while an
+  operator restart is merely the fast path (2026-08-08: `retention_prune` lost a
+  lock race against a post-migration 759 MB WAL checkpoint). Never repoint the
+  ingress probe at `/healthz` to mask this; repair the worker (canary-993).
 
 This list is load-bearing — every remediation in the Known-debt map above must cite it and extend it when new failure modes appear.
 </content>
