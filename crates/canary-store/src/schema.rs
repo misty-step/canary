@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use rusqlite::Connection;
 
 /// Current Rust schema version.
-pub const SCHEMA_VERSION: u32 = 2026071700;
-const PREVIOUS_SCHEMA_VERSION: u32 = 2026071400;
+pub const SCHEMA_VERSION: u32 = 2026080800;
+const PREVIOUS_SCHEMA_VERSION: u32 = 2026071700;
 
 pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     let user_version =
@@ -23,6 +23,7 @@ pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
         let transaction = connection.transaction()?;
         ensure_current_fts_objects(&transaction)?;
         create_retention_cutoff_indexes(&transaction)?;
+        delete_orphaned_cascade_rows(&transaction)?;
         validate_schema_columns(&transaction)?;
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
@@ -42,6 +43,7 @@ pub(crate) fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     scope_incident_open_service_index(&transaction)?;
     scope_oban_jobs_claim_index(&transaction)?;
     create_retention_cutoff_indexes(&transaction)?;
+    delete_orphaned_cascade_rows(&transaction)?;
     validate_schema_columns(&transaction)?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     transaction.commit()?;
@@ -443,6 +445,41 @@ fn create_retention_cutoff_indexes(connection: &Connection) -> rusqlite::Result<
         CREATE INDEX IF NOT EXISTS oban_jobs_active_queue_metrics_index
         ON oban_jobs(queue, state)
         WHERE state IN ('available', 'scheduled', 'executing');
+        "#,
+    )
+}
+
+/// Delete child rows whose cascade parent no longer exists.
+///
+/// Every foreign key in `SCHEMA_SQL` declares `ON DELETE CASCADE`, so a child row
+/// without its parent is unreachable residue, not data. SQLite only cascades when
+/// `PRAGMA foreign_keys` is on for the connection performing the delete, so writers
+/// that deleted a parent without enforcement left these rows behind. Data
+/// verification counts them as foreign key violations and fails closed, so the
+/// residue must be removed before the version stamp.
+fn delete_orphaned_cascade_rows(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        r#"
+        DELETE FROM monitor_state
+        WHERE NOT EXISTS (
+          SELECT 1 FROM monitors WHERE monitors.id = monitor_state.monitor_id
+        );
+
+        DELETE FROM monitor_check_ins
+        WHERE NOT EXISTS (
+          SELECT 1 FROM monitors WHERE monitors.id = monitor_check_ins.monitor_id
+        );
+
+        DELETE FROM incident_signals
+        WHERE NOT EXISTS (
+          SELECT 1 FROM incidents WHERE incidents.id = incident_signals.incident_id
+        );
+
+        DELETE FROM annotations
+        WHERE incident_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM incidents WHERE incidents.id = annotations.incident_id
+          );
         "#,
     )
 }
@@ -1123,6 +1160,80 @@ mod tests {
             )?;
             assert!(exists, "missing retention index {index}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_from_previous_schema_deletes_orphaned_cascade_rows() -> rusqlite::Result<()> {
+        let mut connection = Connection::open_in_memory()?;
+        migrate(&mut connection)?;
+
+        // Reproduce how historical writers planted orphans: a parent delete that ran
+        // without `PRAGMA foreign_keys`, so SQLite never cascaded to the children.
+        connection.pragma_update(None, "foreign_keys", "OFF")?;
+        connection.execute_batch(
+            r#"
+            INSERT INTO monitors (id, name, service, mode, expected_every_ms, created_at)
+            VALUES ('MON-live', 'live', 'svc', 'ttl', 60000, '2026-01-01T00:00:00Z');
+
+            INSERT INTO monitor_state (monitor_id) VALUES ('MON-live'), ('MON-gone');
+
+            INSERT INTO monitor_check_ins (id, monitor_id, status, observed_at)
+            VALUES ('CHK-live', 'MON-live', 'ok', '2026-01-01T00:00:00Z'),
+                   ('CHK-orphan', 'MON-gone', 'ok', '2026-01-01T00:00:00Z');
+
+            INSERT INTO incidents (id, service, opened_at)
+            VALUES ('INC-live', 'svc', '2026-01-01T00:00:00Z');
+
+            INSERT INTO incident_signals (incident_id, signal_type, signal_ref, attached_at)
+            VALUES ('INC-live', 'error', 'ERR-1', '2026-01-01T00:00:00Z'),
+                   ('INC-gone', 'error', 'ERR-2', '2026-01-01T00:00:00Z');
+
+            INSERT INTO annotations (id, incident_id, agent, action, created_at)
+            VALUES ('ANN-live', 'INC-live', 'agent', 'note', '2026-01-01T00:00:00Z'),
+                   ('ANN-orphan', 'INC-gone', 'agent', 'note', '2026-01-01T00:00:00Z'),
+                   ('ANN-unlinked', NULL, 'agent', 'note', '2026-01-01T00:00:00Z');
+            "#,
+        )?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        connection.pragma_update(None, "user_version", PREVIOUS_SCHEMA_VERSION)?;
+
+        migrate(&mut connection)?;
+
+        let user_version: u32 =
+            connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        assert_eq!(user_version, SCHEMA_VERSION);
+
+        let violations: u32 =
+            connection.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })?;
+        assert_eq!(violations, 0, "orphaned cascade rows remained");
+
+        // Rows whose parent exists, and the unlinked annotation, must survive.
+        let surviving = |sql: &str| -> rusqlite::Result<Vec<String>> {
+            let mut statement = connection.prepare(sql)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        };
+        assert_eq!(
+            surviving("SELECT monitor_id FROM monitor_state ORDER BY monitor_id")?,
+            vec!["MON-live"]
+        );
+        assert_eq!(
+            surviving("SELECT id FROM monitor_check_ins ORDER BY id")?,
+            vec!["CHK-live"]
+        );
+        assert_eq!(
+            surviving("SELECT signal_ref FROM incident_signals ORDER BY signal_ref")?,
+            vec!["ERR-1"]
+        );
+        assert_eq!(
+            surviving("SELECT id FROM annotations ORDER BY id")?,
+            vec!["ANN-live", "ANN-unlinked"]
+        );
         Ok(())
     }
 }
