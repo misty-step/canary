@@ -1,3 +1,10 @@
+## [0.16.11](https://github.com/misty-step/canary/compare/v0.16.10...v0.16.11) (2026-08-09)
+
+
+### Bug Fixes
+
+* **runtime:** retry a failed worker pass without waiting a full tick ([19f71f4](https://github.com/misty-step/canary/commit/19f71f473e4c3c94d7ccf5fd522ce4adc64bec3e))
+
 ## [0.16.10](https://github.com/misty-step/canary/compare/v0.16.9...v0.16.10) (2026-08-08)
 
 
