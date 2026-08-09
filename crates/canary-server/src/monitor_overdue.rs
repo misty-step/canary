@@ -27,6 +27,7 @@ use crate::{
     WorkerPressureSnapshot,
     route_state::SharedStore,
     server_time::{current_rfc3339, current_unix_millis},
+    worker_retry::retry_delay,
 };
 
 /// Persisted result of one overdue monitor transition.
@@ -392,36 +393,42 @@ fn run_lifecycle_worker(
     control: Arc<LifecycleControl>,
     health: WorkerHealthHandle,
 ) {
+    let mut consecutive_failures: u32 = 0;
     while !control.is_stopping() {
         if !control.is_paused() {
             let now = current_rfc3339();
             match catch_unwind(AssertUnwindSafe(|| {
                 lifecycle.run_due(now.clone(), current_unix_millis())
             })) {
-                Ok(Ok(report)) => health.record_success_with_pressure(
-                    now,
-                    current_unix_millis(),
-                    WorkerPressureSnapshot {
-                        due_count: report.loaded as u64,
-                        in_flight_count: 0,
-                        oldest_due_age_ms: report.oldest_due_age_ms,
-                        oldest_due_item: report.oldest_due_item,
-                        backoff_or_circuit_open: report.failed > 0
-                            || report.event_fanout_failed > 0
-                            || report.interrupted,
-                    },
-                ),
+                Ok(Ok(report)) => {
+                    consecutive_failures = 0;
+                    health.record_success_with_pressure(
+                        now,
+                        current_unix_millis(),
+                        WorkerPressureSnapshot {
+                            due_count: report.loaded as u64,
+                            in_flight_count: 0,
+                            oldest_due_age_ms: report.oldest_due_age_ms,
+                            oldest_due_item: report.oldest_due_item,
+                            backoff_or_circuit_open: report.failed > 0
+                                || report.event_fanout_failed > 0
+                                || report.interrupted,
+                        },
+                    );
+                }
                 Ok(Err(_)) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
                     control.record_failure();
                     health.record_failure("runtime_error");
                 }
                 Err(_) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
                     control.record_failure();
                     health.record_failure("panic");
                 }
             }
         }
-        if control.wait(interval) {
+        if control.wait(retry_delay(interval, consecutive_failures)) {
             break;
         }
     }

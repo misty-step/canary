@@ -210,16 +210,18 @@ original cannot be re-shown.
   drops its only upstream while `/healthz` still answers 200, hiding a total
   outage. `health_status` reports no success since process start as `Stale`, or
   as `Failing` once three consecutive failures land, because the failure count is
-  checked first. Recovery needs a successful pass, not a restart: the worker
-  loops and retries after its interval, which for `retention_prune` and
-  `tls_scan` defaults to 24h, so readiness can stay down that long while an
-  operator restart is merely the fast path. On 2026-08-08 `retention_prune`
-  failed its boot pass with `/readyz` reporting only
-  `last_error_class=runtime_error`, because Litestream log volume evicts server
-  tracing; Litestream's own coincident 759 MB truncate checkpoint and
-  `SQLITE_BUSY` are a likely trigger, not a proven one, so do not scope the
-  repair to lock contention. Never repoint the ingress probe at `/healthz` to
-  mask this; repair the worker (canary-993).
+  checked first. Recovery needs a successful pass, not a restart. Keep
+  `worker_retry::retry_delay` shared: before canary-993 each loop waited its own
+  tick after a failed pass, so `retention_prune` and `tls_scan` deferred
+  recovery for 24h. On 2026-08-08 `retention_prune` failed its boot pass with
+  `/readyz` reporting only `last_error_class=runtime_error`, because Litestream
+  log volume evicts server tracing; Litestream's own coincident 759 MB truncate
+  checkpoint and `SQLITE_BUSY` are a likely trigger, not a proven one. Ingress
+  stayed down until an operator restarted the service. Never repoint the ingress
+  probe at `/healthz` to mask a stale worker. A maintenance failure still fails
+  readiness closed, which `docs/canary-witness.md` and
+  `docs/architecture/worker-lifecycle-readiness-2026-06-12.md` define as the
+  contract; changing it needs a superseding decision record.
 
 This list is load-bearing — every remediation in the Known-debt map above must cite it and extend it when new failure modes appear.
 </content>

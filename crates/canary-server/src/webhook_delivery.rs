@@ -30,6 +30,7 @@ use crate::{
     webhooks::{
         WebhookEventAuthority, WebhookTransport, delivery_insert, endpoint_from_subscription,
     },
+    worker_retry::retry_delay,
 };
 
 const WEBHOOK_EXECUTION_LEASE_SECONDS: u64 = 60;
@@ -549,28 +550,38 @@ fn run_drain_worker(
     stop: Arc<DrainStop>,
     health: WorkerHealthHandle,
 ) {
+    let mut consecutive_failures: u32 = 0;
     while !stop.is_requested() {
         let now = current_rfc3339();
         match catch_unwind(AssertUnwindSafe(|| drain.drain_due(&now))) {
-            Ok(Ok(report)) => health.record_success_with_pressure(
-                now,
-                current_unix_millis(),
-                WorkerPressureSnapshot {
-                    due_count: u64::from(report.due_count),
-                    in_flight_count: u64::from(report.in_flight_count),
-                    oldest_due_age_ms: report.oldest_due_age_ms,
-                    oldest_due_item: None,
-                    backoff_or_circuit_open: report.retried > 0
-                        || report.discarded > 0
-                        || report.circuit_open_suppressed > 0
-                        || report.recovery_retried > 0
-                        || report.recovery_discarded > 0,
-                },
-            ),
-            Ok(Err(_)) => health.record_failure("runtime_error"),
-            Err(_) => health.record_failure("panic"),
+            Ok(Ok(report)) => {
+                consecutive_failures = 0;
+                health.record_success_with_pressure(
+                    now,
+                    current_unix_millis(),
+                    WorkerPressureSnapshot {
+                        due_count: u64::from(report.due_count),
+                        in_flight_count: u64::from(report.in_flight_count),
+                        oldest_due_age_ms: report.oldest_due_age_ms,
+                        oldest_due_item: None,
+                        backoff_or_circuit_open: report.retried > 0
+                            || report.discarded > 0
+                            || report.circuit_open_suppressed > 0
+                            || report.recovery_retried > 0
+                            || report.recovery_discarded > 0,
+                    },
+                );
+            }
+            Ok(Err(_)) => {
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                health.record_failure("runtime_error");
+            }
+            Err(_) => {
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                health.record_failure("panic");
+            }
         }
-        if stop.wait(interval) {
+        if stop.wait(retry_delay(interval, consecutive_failures)) {
             break;
         }
     }
