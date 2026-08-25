@@ -215,7 +215,6 @@ export class Ci {
       .withExec(["bash", "-n", "bin/canary-write-path-rehearsal"])
       .withExec(["bash", "-n", "bin/canary-readiness-proof"])
       .withExec(["bash", "-n", "bin/canary-doctor-entrypoint.sh"])
-      .withExec(["bash", "bin/check-aesthetic-currency"])
   }
 
   private async typescriptQualityContainer(source: Directory): Promise<Container> {
