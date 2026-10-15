@@ -1,0 +1,8 @@
+{
+  "repo": "misty-step/canary",
+  "source_commit": "19f71f473e4c3c94d7ccf5fd522ce4adc64bec3e",
+  "source_folder": "site",
+  "project_prefix": "canary",
+  "before_url": "https://misty-step.github.io/canary/",
+  "build_kind": "static"
+}
